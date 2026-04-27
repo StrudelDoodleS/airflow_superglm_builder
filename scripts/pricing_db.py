@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from pricing_pipeline import db as shared_db
+from pricing_pipeline.config import Settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,32 +23,22 @@ def load_env() -> None:
         load_dotenv()
 
 
-def get_engine() -> Engine:
+def _settings_from_env() -> Settings:
     load_env()
+    return Settings.from_env(os.environ)
 
-    server = os.getenv("MSSQL_SERVER", "localhost,1433")
-    database = os.getenv("MSSQL_DATABASE", "PricingLab")
-    user = os.getenv("MSSQL_USER", "sa")
-    password = os.getenv("MSSQL_PASSWORD", "YourStrong(!)Password123")
-    driver = os.getenv("MSSQL_DRIVER", "ODBC Driver 18 for SQL Server")
-    encrypt = os.getenv("MSSQL_ENCRYPT", "no")
-    trust_cert = os.getenv("MSSQL_TRUST_SERVER_CERT", "yes")
 
-    odbc = (
-        f"DRIVER={{{driver}}};"
-        f"SERVER={server};"
-        f"DATABASE={database};"
-        f"UID={user};"
-        f"PWD={password};"
-        f"Encrypt={encrypt};"
-        f"TrustServerCertificate={trust_cert};"
+def build_sqlalchemy_url(*, database: str | None = None) -> str:
+    settings = _settings_from_env()
+    return shared_db.build_sqlalchemy_url(
+        settings,
+        database=database or settings.pricing_database,
     )
 
-    return create_engine(
-        f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}",
-        fast_executemany=True,
-        future=True,
-    )
+
+def get_engine(*, database: str | None = None) -> Engine:
+    settings = _settings_from_env()
+    return shared_db.get_engine(settings, database=database)
 
 
 def split_sql_server_batches(sql_text: str) -> list[str]:
