@@ -1,0 +1,11 @@
+apache-airflow-providers-microsoft-mssql
+git+https://github.com/StrudelDoodleS/superglm.git
+mlflow
+numpy
+openpyxl
+pandas
+pyodbc
+python-dotenv
+PyYAML
+scikit-learn
+sqlalchemy
