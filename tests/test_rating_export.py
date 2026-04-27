@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import pickle
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pricing_pipeline import lineage, pipeline, rating_export, rating_package
 from pricing_pipeline.config import Settings
 from scripts import load_staging_to_rating_package
 from scripts import load_superglm_excel_to_staging
+from scripts import smoke_check
 
 
 def raw_training_frame() -> pd.DataFrame:
@@ -126,6 +132,50 @@ def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_pa
         ((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})
     ]
     assert mlflow_calls == [(str(output_path), "rating_tables")]
+
+
+def test_export_rating_tables_requires_superglm_rating_export_support(
+    monkeypatch, tmp_path: Path
+):
+    mlflow_calls = []
+    fake_mlflow = SimpleNamespace(
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
+            (path, artifact_path)
+        )
+    )
+    monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
+
+    output_path = tmp_path / "nested" / "rating_tables.xlsx"
+
+    with pytest.raises(RuntimeError) as exc:
+        rating_export.export_rating_tables(
+            object(),
+            pd.DataFrame({"x": [1]}),
+            np.array([0.0]),
+            np.array([1.0]),
+            output_path,
+        )
+
+    message = str(exc.value)
+    assert "SuperGLM" in message
+    assert "export_rating_tables" in message
+    assert "PR #109" in message
+    assert "rating table export support" in message
+    assert not output_path.parent.exists()
+    assert mlflow_calls == []
+
+
+def test_smoke_check_reports_missing_rating_export_without_failing(capsys):
+    class OldSuperGLM:
+        pass
+
+    exit_code = smoke_check.check_superglm_rating_export(OldSuperGLM)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "smoke_check=rating_export_unavailable" in captured.out
+    assert "PR #109" in captured.out
+    assert "export_rating_tables" in captured.out
 
 
 class FakeFrame:
@@ -322,7 +372,12 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
     assert len(events) == 2
     sql = events[1][1]
     params = events[1][2]
-    assert "INSERT INTO pricing.MODEL_RUN" in sql
+    assert "MERGE pricing.MODEL_RUN" in sql
+    assert "WHEN MATCHED THEN" in sql
+    assert "WHEN NOT MATCHED THEN" in sql
+    assert "tgt.dag_id = src.dag_id" in sql
+    assert "tgt.airflow_run_id = src.airflow_run_id" in sql
+    assert "tgt.model_name = src.model_name" in sql
     assert "SYSUTCDATETIME()" in sql
     assert ":dag_id" in sql
     assert params == {
@@ -338,6 +393,62 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "run_status": "SUCCESS",
         "created_by": "airflow",
     }
+
+
+def test_pipeline_imports_with_split_airflow_package_and_pricing_scripts_paths(
+    tmp_path: Path,
+):
+    airflow_root = tmp_path / "airflow"
+    pricing_root = tmp_path / "pricing"
+    airflow_root.mkdir()
+    scripts_dir = pricing_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    marker_path = tmp_path / "script_imports.txt"
+    (scripts_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    shutil.copytree(
+        Path("pricing_pipeline"),
+        airflow_root / "pricing_pipeline",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    (scripts_dir / "load_superglm_excel_to_staging.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['STUB_IMPORT_MARKER']).open('a', encoding='utf-8') as f:\n"
+        "    f.write('stage\\n')\n"
+        "def stage_rating_export(*args, **kwargs):\n    return None\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / "load_staging_to_rating_package.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['STUB_IMPORT_MARKER']).open('a', encoding='utf-8') as f:\n"
+        "    f.write('publish\\n')\n"
+        "def publish_rating_package(*args, **kwargs):\n    return 123\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(airflow_root)
+    env["PRICING_PROJECT_ROOT"] = str(pricing_root)
+    env["STUB_IMPORT_MARKER"] = str(marker_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pricing_pipeline.pipeline; print('pipeline_import=ok')",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "pipeline_import=ok" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+    assert marker_path.read_text(encoding="utf-8").splitlines() == ["publish", "stage"]
 
 
 class FakePipelineModel:

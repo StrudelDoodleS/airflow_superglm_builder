@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+from importlib import import_module
+import os
+import sys
 from pathlib import Path
 
-from scripts.load_staging_to_rating_package import publish_rating_package as _publish
-from scripts.load_superglm_excel_to_staging import stage_rating_export as _stage
+
+def _ensure_scripts_path() -> None:
+    candidates = []
+    project_root = os.environ.get("PRICING_PROJECT_ROOT")
+    if project_root:
+        candidates.append(Path(project_root))
+    candidates.extend(
+        [
+            Path("/opt/pricing"),
+            Path(__file__).resolve().parents[1],
+        ]
+    )
+
+    valid_candidates = [
+        candidate for candidate in candidates if (candidate / "scripts").is_dir()
+    ]
+    for candidate in reversed(valid_candidates):
+        if (candidate / "scripts").is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
+_ensure_scripts_path()
+
+_publish = import_module(
+    "scripts.load_staging_to_rating_package"
+).publish_rating_package
+_stage = import_module("scripts.load_superglm_excel_to_staging").stage_rating_export
 
 
 def stage_rating_export(
