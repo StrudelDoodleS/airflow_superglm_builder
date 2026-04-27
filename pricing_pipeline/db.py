@@ -8,15 +8,22 @@ from sqlalchemy.engine import Engine
 from pricing_pipeline.config import Settings
 
 
+def _format_odbc_value(value: str, *, always_brace: bool = False) -> str:
+    needs_braces = always_brace or any(char in value for char in ";{}")
+    if not needs_braces:
+        return value
+    return "{" + value.replace("}", "}}") + "}"
+
+
 def build_odbc_connect_string(settings: Settings, *, database: str) -> str:
     return (
-        f"DRIVER={{{settings.mssql_driver}}};"
-        f"SERVER={settings.mssql_server};"
-        f"DATABASE={database};"
-        f"UID={settings.mssql_user};"
-        f"PWD={settings.mssql_password};"
-        f"Encrypt={settings.mssql_encrypt};"
-        f"TrustServerCertificate={settings.mssql_trust_server_cert};"
+        f"DRIVER={_format_odbc_value(settings.mssql_driver, always_brace=True)};"
+        f"SERVER={_format_odbc_value(settings.mssql_server)};"
+        f"DATABASE={_format_odbc_value(database)};"
+        f"UID={_format_odbc_value(settings.mssql_user)};"
+        f"PWD={_format_odbc_value(settings.mssql_password)};"
+        f"Encrypt={_format_odbc_value(settings.mssql_encrypt)};"
+        f"TrustServerCertificate={_format_odbc_value(settings.mssql_trust_server_cert)};"
     )
 
 

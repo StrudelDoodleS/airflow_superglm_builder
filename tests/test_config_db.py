@@ -28,6 +28,29 @@ def test_odbc_connection_string_targets_database():
     assert "PWD=secret" in odbc
 
 
+def test_odbc_connection_string_brace_escapes_password_delimiters():
+    semicolon_settings = Settings.from_env({"MSSQL_PASSWORD": "sec;ret"})
+    semicolon_odbc = build_odbc_connect_string(
+        semicolon_settings, database=semicolon_settings.pricing_database
+    )
+    assert "PWD={sec;ret};" in semicolon_odbc
+
+    brace_settings = Settings.from_env({"MSSQL_PASSWORD": "sec}ret"})
+    brace_odbc = build_odbc_connect_string(
+        brace_settings, database=brace_settings.pricing_database
+    )
+    assert "PWD={sec}}ret};" in brace_odbc
+
+
+def test_odbc_connection_string_prevents_password_attribute_injection():
+    settings = Settings.from_env({"MSSQL_PASSWORD": "sec;Encrypt=yes"})
+
+    odbc = build_odbc_connect_string(settings, database=settings.pricing_database)
+
+    assert "PWD={sec;Encrypt=yes};" in odbc
+    assert ";Encrypt=yes;" not in odbc
+
+
 def test_ensure_database_uses_autocommit_connection_when_creating(monkeypatch):
     class FakeScalarResult:
         def __init__(self, value):
