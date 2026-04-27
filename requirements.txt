@@ -1,5 +1,5 @@
 apache-airflow-providers-microsoft-mssql
-git+https://github.com/StrudelDoodleS/superglm.git
+superglm @ git+https://github.com/StrudelDoodleS/superglm.git@592891b6e405fdfa90e35ff39a16b8ebd5eb84f6
 mlflow
 numpy
 openpyxl

@@ -46,7 +46,7 @@ class PickleableFakeModel:
             {
                 "X": X.copy(),
                 "y": y.copy(),
-                "sample_weight": sample_weight.copy(),
+                "sample_weight": None if sample_weight is None else sample_weight.copy(),
                 "offset": offset.copy(),
             }
         )
@@ -181,9 +181,7 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
     fit_call = fit_calls[0]
     assert list(fit_call["X"].columns) == training.FEATURE_COLUMNS
     np.testing.assert_array_equal(fit_call["y"], raw["ClaimNb"].to_numpy(dtype=float))
-    np.testing.assert_array_equal(
-        fit_call["sample_weight"], raw["Exposure"].to_numpy(dtype=float)
-    )
+    assert fit_call["sample_weight"] is None
     np.testing.assert_allclose(fit_call["offset"], np.log(raw["Exposure"]))
 
 

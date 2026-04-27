@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -187,3 +188,24 @@ def test_airflow_image_uses_python_314_base():
 def test_compose_does_not_use_env_file_required_false():
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert "required: false" not in compose_text
+
+
+def test_env_example_does_not_ship_invalid_fernet_placeholder():
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+
+    assert "FERNET_KEY=airflow_fernet_key_change_me" not in env_example
+    assert "FERNET_KEY=" in env_example
+    assert "Fernet.generate_key()" in env_example
+
+
+def test_superglm_runtime_dependency_is_pinned_to_commit():
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    pinned_ref = (
+        r"superglm @ git\+https://github\.com/StrudelDoodleS/superglm\.git@"
+        r"[0-9a-f]{40}"
+    )
+
+    assert re.search(pinned_ref, requirements)
+    assert re.search(pinned_ref, pyproject)
+    assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements

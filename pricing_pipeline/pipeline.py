@@ -73,7 +73,7 @@ def run_training_export_publish(
         mlflow.log_param("row_count", len(X))
         mlflow.log_param("feature_columns", ",".join(FEATURE_COLUMNS))
 
-        fitted_model = model.fit_reml(X, y, sample_weight=exposure, offset=offset)
+        fitted_model = model.fit_reml(X, y, offset=offset)
         if fitted_model is None:
             fitted_model = model
 
