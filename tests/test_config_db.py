@@ -1,3 +1,4 @@
+from pricing_pipeline import db
 from pricing_pipeline.config import Settings
 from pricing_pipeline.db import build_odbc_connect_string
 
@@ -25,3 +26,62 @@ def test_odbc_connection_string_targets_database():
     assert "SERVER=localhost,1433" in odbc
     assert "DATABASE=PricingLab" in odbc
     assert "PWD=secret" in odbc
+
+
+def test_ensure_database_uses_autocommit_connection_when_creating(monkeypatch):
+    class FakeScalarResult:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar(self):
+            return self.value
+
+    class FakeConnection:
+        def __init__(self):
+            self.execution_options_calls = []
+            self.executed = []
+
+        def execution_options(self, **options):
+            self.execution_options_calls.append(options)
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            self.executed.append((sql, params))
+            if sql.startswith("SELECT 1 FROM sys.databases"):
+                return FakeScalarResult(None)
+            return FakeScalarResult(None)
+
+    class FakeEngine:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def begin(self):
+            raise AssertionError(
+                "ensure_database must not create databases in a transaction"
+            )
+
+        def connect(self):
+            return self.connection
+
+    engine = FakeEngine()
+    monkeypatch.setattr(db, "get_engine", lambda settings, *, database: engine)
+
+    db.ensure_database(Settings.from_env({}), "Pricing]Lab")
+
+    assert engine.connection.execution_options_calls == [
+        {"isolation_level": "AUTOCOMMIT"}
+    ]
+    assert engine.connection.executed == [
+        (
+            "SELECT 1 FROM sys.databases WHERE name = :database",
+            {"database": "Pricing]Lab"},
+        ),
+        ("CREATE DATABASE [Pricing]]Lab]", None),
+    ]

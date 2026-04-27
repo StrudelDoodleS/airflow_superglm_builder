@@ -36,7 +36,7 @@ def get_engine(settings: Settings, *, database: str | None = None) -> Engine:
 def ensure_database(settings: Settings, database: str) -> None:
     master = get_engine(settings, database="master")
     escaped = database.replace("]", "]]")
-    with master.begin() as con:
+    with master.connect().execution_options(isolation_level="AUTOCOMMIT") as con:
         exists = con.execute(
             text("SELECT 1 FROM sys.databases WHERE name = :database"),
             {"database": database},
