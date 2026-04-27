@@ -4,50 +4,33 @@ This is a tiny Flyway-like runner for local testing. In production, use Flyway i
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from sqlalchemy import text
-
-from pricing_db import ROOT, get_engine, run_sql_file
+from pricing_db import ROOT, get_engine
 
 MIGRATIONS_DIR = ROOT / "db" / "migrations"
 
 
+def _ensure_repo_root_on_path() -> None:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+
 def main() -> None:
+    _ensure_repo_root_on_path()
+    from pricing_pipeline.migrations import apply_migrations, migration_files
+
     engine = get_engine()
 
-    with engine.begin() as con:
-        con.execute(text("""
-        IF OBJECT_ID('dbo.SCHEMA_MIGRATION', 'U') IS NULL
-        CREATE TABLE dbo.SCHEMA_MIGRATION (
-            version_file NVARCHAR(256) NOT NULL PRIMARY KEY,
-            applied_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME()
-        );
-        """))
-
-    files = sorted(MIGRATIONS_DIR.glob("V*.sql"))
+    files = migration_files(MIGRATIONS_DIR)
     if not files:
         raise RuntimeError(f"No migration files found in {MIGRATIONS_DIR}")
 
+    applied = set(apply_migrations(engine, MIGRATIONS_DIR))
     for path in files:
-        with engine.begin() as con:
-            already = con.execute(
-                text("SELECT 1 FROM dbo.SCHEMA_MIGRATION WHERE version_file = :name"),
-                {"name": path.name},
-            ).scalar()
-
-        if already:
-            print(f"skip {path.name}")
-            continue
-
-        print(f"apply {path.name}")
-        run_sql_file(engine, path)
-
-        with engine.begin() as con:
-            con.execute(
-                text("INSERT INTO dbo.SCHEMA_MIGRATION(version_file) VALUES (:name)"),
-                {"name": path.name},
-            )
+        verb = "apply" if path.name in applied else "skip"
+        print(f"{verb} {path.name}")
 
     print("done")
 
