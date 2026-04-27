@@ -24,7 +24,9 @@ def test_compose_uses_airflow_321_services():
         "postgres",
         "redis",
         "flower",
+        "state-init",
         "mssql",
+        "mssql-init",
         "mlflow",
     ]:
         assert name in services
@@ -47,14 +49,64 @@ def test_mssql_password_default_is_consistent_across_runtime_services():
     )
 
 
-def test_airflow_init_prepares_project_state_directories():
+def test_state_init_prepares_project_state_directories():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    airflow_init = compose["services"]["airflow-init"]
-    command = "\n".join(str(part) for part in airflow_init["command"])
+    services = compose["services"]
+    state_init = services["state-init"]
+    command = "\n".join(str(part) for part in state_init["command"])
 
-    assert "${AIRFLOW_PROJ_DIR:-.}:/sources" in airflow_init["volumes"]
+    assert "${AIRFLOW_PROJ_DIR:-.}:/sources" in state_init["volumes"]
     for state_path in STATE_PATHS:
         assert state_path in command
+    assert services["mssql"]["depends_on"]["state-init"] == {
+        "condition": "service_completed_successfully"
+    }
+    assert "airflow-init" not in services["mssql"].get("depends_on", {})
+
+
+def test_state_mounts_follow_airflow_project_dir():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/rating_exports:/opt/pricing/state/rating_exports"
+        in compose["x-airflow-common"]["volumes"]
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/mssql/data:/var/opt/mssql"
+        in services["mssql"]["volumes"]
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/mlflow/artifacts:/mlflow/artifacts"
+        in services["mlflow"]["volumes"]
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/cloudbeaver/workspace:/opt/cloudbeaver/workspace"
+        in services["cloudbeaver"]["volumes"]
+    )
+
+    rendered_volumes = str(compose["x-airflow-common"]["volumes"])
+    rendered_volumes += str(services["mssql"]["volumes"])
+    rendered_volumes += str(services["mlflow"]["volumes"])
+    rendered_volumes += str(services["cloudbeaver"]["volumes"])
+    assert "./state/" not in rendered_volumes
+
+
+def test_mssql_init_creates_pricing_and_mlflow_databases():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    mssql_init = services["mssql-init"]
+    init_command = "\n".join(str(part) for part in mssql_init["command"])
+    mlflow_backend = services["mlflow"]["environment"]["MLFLOW_BACKEND_STORE_URI"]
+
+    assert "MLflowTracking" in mlflow_backend
+    assert "/master?" not in mlflow_backend
+    assert "PricingLab" in init_command
+    assert "MLflowTracking" in init_command
+    assert mssql_init["depends_on"]["mssql"] == {"condition": "service_healthy"}
+    assert services["mlflow"]["depends_on"]["mssql-init"] == {
+        "condition": "service_completed_successfully"
+    }
 
 
 def test_airflow_image_uses_python_314_base():

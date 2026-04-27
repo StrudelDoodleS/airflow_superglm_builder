@@ -57,7 +57,7 @@ x-airflow-common:
     - ./pricing_pipeline:/opt/airflow/pricing_pipeline
     - ./db:/opt/pricing/db
     - ./scripts:/opt/pricing/scripts
-    - ./state/rating_exports:/opt/pricing/state/rating_exports
+    - ${AIRFLOW_PROJ_DIR:-.}/state/rating_exports:/opt/pricing/state/rating_exports
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -67,6 +67,24 @@ x-airflow-common:
       condition: service_healthy
 
 services:
+  state-init:
+    image: alpine:3.20
+    environment:
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+    user: "0:0"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        mkdir -p /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cloudbeaver/workspace
+        chown -R "$${AIRFLOW_UID}:0" /sources/state/mlflow/artifacts /sources/state/rating_exports
+        chown -R "10001:0" /sources/state/mssql/data
+        chmod -R ug+rwX /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports
+        chmod -R a+rwX /sources/state/cloudbeaver/workspace
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
   postgres:
     image: postgres:16
     environment:
@@ -229,8 +247,6 @@ services:
         echo "Creating missing opt dirs if missing:"
         echo
         mkdir -v -p /opt/airflow/{logs,dags,plugins,config}
-        mkdir -v -p /sources/{logs,dags,plugins,config}
-        mkdir -v -p /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cloudbeaver/workspace
         echo
         echo "Airflow version:"
         /entrypoint airflow version
@@ -254,16 +270,14 @@ services:
         echo "Change ownership of files in shared volumes to $${AIRFLOW_UID}:0"
         echo
         chown -v -R "$${AIRFLOW_UID}:0" /opt/airflow/{logs,dags,plugins,config}
-        chown -v -R "$${AIRFLOW_UID}:0" /sources/{logs,dags,plugins,config}
-        chown -v -R "$${AIRFLOW_UID}:0" /sources/state/mlflow/artifacts /sources/state/rating_exports
-        chown -v -R "10001:0" /sources/state/mssql/data
-        chmod -v -R ug+rwX /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports
-        chmod -v -R a+rwX /sources/state/cloudbeaver/workspace
         echo
         echo "Files in shared volumes:"
         echo
         ls -la /opt/airflow/{logs,dags,plugins,config}
-        ls -la /sources/state /sources/state/mssql /sources/state/mlflow /sources/state/cloudbeaver
+    depends_on:
+      <<: *airflow-common-depends-on
+      state-init:
+        condition: service_completed_successfully
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
@@ -272,16 +286,6 @@ services:
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
       _PIP_ADDITIONAL_REQUIREMENTS: ''
     user: "0:0"
-    volumes:
-      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-      - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-      - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
-      - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-      - ./pricing_pipeline:/opt/airflow/pricing_pipeline
-      - ./db:/opt/pricing/db
-      - ./scripts:/opt/pricing/scripts
-      - ./state/rating_exports:/opt/pricing/state/rating_exports
-      - ${AIRFLOW_PROJ_DIR:-.}:/sources
 
   airflow-cli:
     <<: *airflow-common
@@ -325,7 +329,7 @@ services:
     ports:
       - "1433:1433"
     volumes:
-      - ./state/mssql/data:/var/opt/mssql
+      - ${AIRFLOW_PROJ_DIR:-.}/state/mssql/data:/var/opt/mssql
     healthcheck:
       test: ["CMD-SHELL", '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$${MSSQL_SA_PASSWORD}" -C -Q "SELECT 1" || exit 1']
       interval: 10s
@@ -334,8 +338,23 @@ services:
       start_period: 30s
     restart: always
     depends_on:
-      airflow-init:
+      state-init:
         condition: service_completed_successfully
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_PASSWORD:-YourStrong(!)Password123}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P "$${MSSQL_SA_PASSWORD}" -C -Q "IF DB_ID(N'PricingLab') IS NULL CREATE DATABASE [PricingLab]; IF DB_ID(N'MLflowTracking') IS NULL CREATE DATABASE [MLflowTracking];"
+    depends_on:
+      mssql:
+        condition: service_healthy
 
   mlflow:
     image: ${AIRFLOW_IMAGE_NAME:-airflow-superglm:3.2.1-python3.14}
@@ -347,14 +366,16 @@ services:
       - -c
       - mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" --default-artifact-root /mlflow/artifacts
     environment:
-      MLFLOW_BACKEND_STORE_URI: "mssql+pyodbc://sa:${MSSQL_PASSWORD:-YourStrong(!)Password123}@mssql:1433/master?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+      MLFLOW_BACKEND_STORE_URI: "mssql+pyodbc://sa:${MSSQL_PASSWORD:-YourStrong(!)Password123}@mssql:1433/MLflowTracking?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
     ports:
       - "5000:5000"
     volumes:
-      - ./state/mlflow/artifacts:/mlflow/artifacts
+      - ${AIRFLOW_PROJ_DIR:-.}/state/mlflow/artifacts:/mlflow/artifacts
     depends_on:
-      mssql:
-        condition: service_healthy
+      state-init:
+        condition: service_completed_successfully
+      mssql-init:
+        condition: service_completed_successfully
     restart: always
 
   cloudbeaver:
@@ -364,8 +385,10 @@ services:
     ports:
       - "8978:8978"
     volumes:
-      - ./state/cloudbeaver/workspace:/opt/cloudbeaver/workspace
+      - ${AIRFLOW_PROJ_DIR:-.}/state/cloudbeaver/workspace:/opt/cloudbeaver/workspace
     depends_on:
+      state-init:
+        condition: service_completed_successfully
       mssql:
         condition: service_healthy
     restart: unless-stopped
