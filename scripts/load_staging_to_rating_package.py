@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
 from sqlalchemy import text
 
-from pricing_db import get_engine
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pricing_db import get_engine  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,10 +23,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    engine = get_engine()
-
+def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
     with engine.begin() as con:
         meta = con.execute(text("""
             SELECT
@@ -379,8 +382,35 @@ def main() -> None:
                 "updated_by": args.created_by,
             })
 
+        args.package_version = package_version
+
+    return int(rate_package_id)
+
+
+def publish_rating_package(
+    engine,
+    *,
+    export_id: str,
+    pointer_name: str | None,
+    created_by: str = "python",
+    package_status: str = "DRAFT",
+) -> int:
+    args = argparse.Namespace(
+        export_id=export_id,
+        created_by=created_by,
+        package_status=package_status,
+        set_pointer=pointer_name,
+    )
+    return load_staging_to_rating_package(engine, args)
+
+
+def main() -> None:
+    args = parse_args()
+    engine = get_engine()
+    rate_package_id = load_staging_to_rating_package(engine, args)
+
     print(f"rate_package_id={rate_package_id}")
-    print(f"package_version={package_version}")
+    print(f"package_version={args.package_version}")
     if args.set_pointer:
         print(f"pointer={args.set_pointer}")
 

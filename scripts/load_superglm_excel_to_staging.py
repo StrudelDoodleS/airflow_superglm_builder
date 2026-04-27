@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,11 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from pricing_db import get_engine
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pricing_db import get_engine  # noqa: E402
 
 INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
@@ -248,20 +253,92 @@ def build_staging_frames(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.Dat
     return export_df, rate_df, level_df
 
 
+def insert_staging_frames(
+    engine,
+    args: argparse.Namespace,
+    export_df: pd.DataFrame,
+    rate_df: pd.DataFrame,
+    level_df: pd.DataFrame,
+) -> None:
+    with engine.begin() as con:
+        if args.replace:
+            con.execute(
+                text("DELETE FROM pricing.STG_CELL_LEVEL WHERE export_id = :export_id"),
+                {"export_id": args.export_id},
+            )
+            con.execute(
+                text("DELETE FROM pricing.STG_RATE_CELL WHERE export_id = :export_id"),
+                {"export_id": args.export_id},
+            )
+            con.execute(
+                text("DELETE FROM pricing.STG_RATING_EXPORT WHERE export_id = :export_id"),
+                {"export_id": args.export_id},
+            )
+
+        export_df.to_sql(
+            "STG_RATING_EXPORT",
+            con,
+            schema="pricing",
+            if_exists="append",
+            index=False,
+        )
+        rate_df.to_sql(
+            "STG_RATE_CELL",
+            con,
+            schema="pricing",
+            if_exists="append",
+            index=False,
+            chunksize=5000,
+        )
+        level_df.to_sql(
+            "STG_CELL_LEVEL",
+            con,
+            schema="pricing",
+            if_exists="append",
+            index=False,
+            chunksize=5000,
+        )
+
+
+def stage_rating_export(
+    engine,
+    *,
+    workbook_path: Path,
+    export_id: str,
+    model_name: str,
+    model_version: str | None,
+    effective_from: str,
+    effective_to: str | None = None,
+    created_by: str = "python",
+    replace: bool = False,
+) -> None:
+    args = argparse.Namespace(
+        xlsx=workbook_path,
+        sheet="Rating Tables",
+        export_id=export_id,
+        model_name=model_name,
+        model_version=model_version,
+        effective_from=effective_from,
+        effective_to=effective_to,
+        base_rate=None,
+        base_rate_cell="C2",
+        term_row=5,
+        header_row=7,
+        data_start_row=8,
+        term_type_map_json="{}",
+        interaction_features_json="{}",
+        created_by=created_by,
+        replace=replace,
+    )
+    export_df, rate_df, level_df = build_staging_frames(args)
+    insert_staging_frames(engine, args, export_df, rate_df, level_df)
+
+
 def main() -> None:
     args = parse_args()
     engine = get_engine()
     export_df, rate_df, level_df = build_staging_frames(args)
-
-    if args.replace:
-        with engine.begin() as con:
-            con.execute(text("DELETE FROM pricing.STG_CELL_LEVEL WHERE export_id = :export_id"), {"export_id": args.export_id})
-            con.execute(text("DELETE FROM pricing.STG_RATE_CELL WHERE export_id = :export_id"), {"export_id": args.export_id})
-            con.execute(text("DELETE FROM pricing.STG_RATING_EXPORT WHERE export_id = :export_id"), {"export_id": args.export_id})
-
-    export_df.to_sql("STG_RATING_EXPORT", engine, schema="pricing", if_exists="append", index=False)
-    rate_df.to_sql("STG_RATE_CELL", engine, schema="pricing", if_exists="append", index=False, chunksize=5000)
-    level_df.to_sql("STG_CELL_LEVEL", engine, schema="pricing", if_exists="append", index=False, chunksize=5000)
+    insert_staging_frames(engine, args, export_df, rate_df, level_df)
 
     print(f"export_id={args.export_id}")
     print(f"terms={rate_df['term_name'].nunique()}")
