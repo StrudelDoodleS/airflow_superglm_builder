@@ -24,6 +24,7 @@ FREMTPL_COLUMNS = [
     "Density",
     "Region",
 ]
+FREMTPL_TRUNCATE_SQL = "TRUNCATE TABLE pricing.FREMTPL_RAW"
 
 
 def fetch_fremtpl() -> pd.DataFrame:
@@ -80,13 +81,14 @@ def bulk_insert_fremtpl_raw(
     frame: pd.DataFrame,
     *,
     chunksize: int = 10000,
+    replace: bool = False,
 ) -> int:
     if chunksize < 1:
         raise ValueError("chunksize must be greater than zero")
 
     prepared = prepare_fremtpl_raw_frame(frame)
     rows = fremtpl_insert_rows(prepared)
-    if not rows:
+    if not rows and not replace:
         return 0
 
     columns = ", ".join(FREMTPL_COLUMNS)
@@ -97,6 +99,8 @@ def bulk_insert_fremtpl_raw(
     cursor = None
     try:
         cursor = connection.cursor()
+        if replace:
+            cursor.execute(FREMTPL_TRUNCATE_SQL)
         if hasattr(cursor, "fast_executemany"):
             cursor.fast_executemany = True
         for chunk in _chunk_rows(rows, chunksize):
@@ -120,8 +124,6 @@ def load_fremtpl_raw(engine: Engine, *, replace: bool = False) -> int:
         )
         if existing_count and not replace:
             return existing_count
-        if replace:
-            con.execute(text("TRUNCATE TABLE pricing.FREMTPL_RAW"))
 
     frame = prepare_fremtpl_raw_frame(fetch_fremtpl())
-    return bulk_insert_fremtpl_raw(engine, frame)
+    return bulk_insert_fremtpl_raw(engine, frame, replace=replace)

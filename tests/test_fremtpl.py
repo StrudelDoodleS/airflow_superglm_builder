@@ -123,16 +123,25 @@ class FakeBegin:
 
 
 class FakeCursor:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, events=None):
         self.fast_executemany = False
+        self.execute_calls = []
         self.executemany_calls = []
         self.fail = fail
         self.closed = False
+        self.events = events
+
+    def execute(self, sql):
+        self.execute_calls.append(sql)
+        if self.events is not None:
+            self.events.append("truncate")
 
     def executemany(self, sql, rows):
         if self.fail:
             raise RuntimeError("executemany failed")
         self.executemany_calls.append((sql, list(rows)))
+        if self.events is not None:
+            self.events.append("executemany")
 
     def close(self):
         self.closed = True
@@ -189,6 +198,7 @@ def test_bulk_insert_fremtpl_raw_uses_raw_connection_chunks_commits_and_closes()
 
     assert inserted == 3
     assert cursor.fast_executemany is True
+    assert cursor.execute_calls == []
     assert len(cursor.executemany_calls) == 2
     assert [len(rows) for _, rows in cursor.executemany_calls] == [2, 1]
     sql = cursor.executemany_calls[0][0]
@@ -200,6 +210,37 @@ def test_bulk_insert_fremtpl_raw_uses_raw_connection_chunks_commits_and_closes()
     )
     assert raw_connection.commits == 1
     assert raw_connection.rollbacks == 0
+    assert cursor.closed is True
+    assert raw_connection.closed is True
+
+
+def test_bulk_insert_fremtpl_raw_replace_truncates_and_inserts_in_one_transaction():
+    cursor = FakeCursor()
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(raw_connection=raw_connection)
+
+    inserted = bulk_insert_fremtpl_raw(engine, fremtpl_frame(), replace=True)
+
+    assert inserted == 1
+    assert cursor.execute_calls == ["TRUNCATE TABLE pricing.FREMTPL_RAW"]
+    assert len(cursor.executemany_calls) == 1
+    assert raw_connection.commits == 1
+    assert raw_connection.rollbacks == 0
+    assert cursor.closed is True
+    assert raw_connection.closed is True
+
+
+def test_bulk_insert_fremtpl_raw_replace_rolls_back_truncate_with_insert_failure():
+    cursor = FakeCursor(fail=True)
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(raw_connection=raw_connection)
+
+    with pytest.raises(RuntimeError, match="executemany failed"):
+        bulk_insert_fremtpl_raw(engine, fremtpl_frame(), replace=True)
+
+    assert cursor.execute_calls == ["TRUNCATE TABLE pricing.FREMTPL_RAW"]
+    assert raw_connection.commits == 0
+    assert raw_connection.rollbacks == 1
     assert cursor.closed is True
     assert raw_connection.closed is True
 
@@ -234,28 +275,24 @@ def test_load_fremtpl_raw_returns_existing_count_without_fetching(monkeypatch):
     ]
 
 
-def test_load_fremtpl_raw_truncates_and_reloads_when_replace_is_true(monkeypatch):
-    engine = FakeEngine(existing_count=7)
-    captured = {}
+def test_load_fremtpl_raw_fetches_and_prepares_before_replace_truncate(monkeypatch):
+    events = []
+    cursor = FakeCursor(events=events)
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(existing_count=7, raw_connection=raw_connection)
     source = fremtpl_frame(IDpol=["1"], ClaimNb=["0"])
 
-    monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
+    def fake_fetch_fremtpl():
+        events.append("fetch")
+        return source
 
-    def fake_bulk_insert(engine_arg, frame, *, chunksize=10000):
-        captured["engine"] = engine_arg
-        captured["frame"] = frame
-        captured["chunksize"] = chunksize
-        return len(frame)
-
-    monkeypatch.setattr(fremtpl, "bulk_insert_fremtpl_raw", fake_bulk_insert)
-
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", fake_fetch_fremtpl)
     rows = load_fremtpl_raw(engine, replace=True)
 
     assert rows == 1
     assert engine.begin_connection.statements == [
         ("SELECT COUNT_BIG(*) FROM pricing.FREMTPL_RAW", None),
-        ("TRUNCATE TABLE pricing.FREMTPL_RAW", None),
     ]
-    assert captured["engine"] is engine
-    assert list(captured["frame"].columns) == FREMTPL_COLUMNS
-    assert str(captured["frame"]["IDpol"].dtype) == "int64"
+    assert events == ["fetch", "truncate", "executemany"]
+    assert cursor.execute_calls == ["TRUNCATE TABLE pricing.FREMTPL_RAW"]
+    assert raw_connection.commits == 1
