@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline import db as shared_db
-from pricing_pipeline.config import Settings
-
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pricing_pipeline import db as shared_db  # noqa: E402
+from pricing_pipeline.config import Settings  # noqa: E402
+
 
 
 def load_env() -> None:

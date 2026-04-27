@@ -1,9 +1,39 @@
 import os
+import subprocess
+import sys
 from urllib.parse import unquote_plus
 
 import scripts.pricing_db as script_db
 from pricing_pipeline import db as shared_db
 from pricing_pipeline.config import Settings
+
+
+def _run_script_help(script: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    return subprocess.run(
+        [sys.executable, script, "--help"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+
+def test_load_fremtpl_raw_script_help_runs_without_pythonpath():
+    result = _run_script_help("scripts/load_fremtpl_raw.py")
+
+    assert result.returncode == 0
+    assert "--replace" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_pricing_db_direct_script_imports_resolve_package_without_pythonpath():
+    result = _run_script_help("scripts/inspect_rating_package.py")
+
+    assert result.returncode == 0
+    assert "--pointer" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_script_get_engine_delegates_to_shared_pricing_db_helper(monkeypatch):
