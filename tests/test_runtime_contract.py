@@ -109,6 +109,28 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
     }
 
 
+def test_mlflow_serves_artifacts_through_http_proxy():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    mlflow_command = "\n".join(
+        str(part) for part in compose["services"]["mlflow"]["command"]
+    )
+
+    assert "--serve-artifacts" in mlflow_command
+    assert "--artifacts-destination /mlflow/artifacts" in mlflow_command
+    assert "--default-artifact-root /mlflow/artifacts" not in mlflow_command
+
+
+def test_sql_database_names_can_be_overridden_from_environment():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    init_command = "\n".join(str(part) for part in services["mssql-init"]["command"])
+    mlflow_backend = services["mlflow"]["environment"]["MLFLOW_BACKEND_STORE_URI"]
+
+    assert "${MSSQL_DATABASE:-PricingLab}" in init_command
+    assert "${MLFLOW_DATABASE:-MLflowTracking}" in init_command
+    assert "${MLFLOW_DATABASE:-MLflowTracking}" in mlflow_backend
+
+
 def test_airflow_image_uses_python_314_base():
     dockerfile = Path("airflow/Dockerfile").read_text(encoding="utf-8")
     assert "apache/airflow:3.2.1-python3.14" in dockerfile
