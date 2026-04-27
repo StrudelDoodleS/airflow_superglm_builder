@@ -10,3 +10,4 @@ state/
 airflow/logs/
 airflow/config/
 airflow/plugins/
+.worktrees/
