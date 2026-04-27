@@ -1,0 +1,24 @@
+[project]
+name = "airflow-superglm-builder"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+  "apache-airflow-providers-microsoft-mssql",
+  "mlflow",
+  "numpy",
+  "openpyxl",
+  "pandas",
+  "pyodbc",
+  "python-dotenv",
+  "scikit-learn",
+  "sqlalchemy",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
