@@ -43,7 +43,7 @@ def test_mssql_password_default_is_consistent_across_runtime_services():
 
     assert common_env["MSSQL_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
     assert mssql_env["MSSQL_SA_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
-    assert MSSQL_PASSWORD_DEFAULT in mlflow_env["MLFLOW_BACKEND_STORE_URI"]
+    assert mlflow_env["MSSQL_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
     assert "AirflowSuperGLM!2026" not in Path("docker-compose.yml").read_text(
         encoding="utf-8"
     )
@@ -97,10 +97,9 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
     services = compose["services"]
     mssql_init = services["mssql-init"]
     init_command = "\n".join(str(part) for part in mssql_init["command"])
-    mlflow_backend = services["mlflow"]["environment"]["MLFLOW_BACKEND_STORE_URI"]
+    mlflow_env = services["mlflow"]["environment"]
 
-    assert "MLflowTracking" in mlflow_backend
-    assert "/master?" not in mlflow_backend
+    assert mlflow_env["MLFLOW_DATABASE"] == "${MLFLOW_DATABASE:-MLflowTracking}"
     assert "PricingLab" in init_command
     assert "MLflowTracking" in init_command
     assert mssql_init["depends_on"]["mssql"] == {"condition": "service_healthy"}
@@ -124,11 +123,38 @@ def test_sql_database_names_can_be_overridden_from_environment():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
     init_command = "\n".join(str(part) for part in services["mssql-init"]["command"])
-    mlflow_backend = services["mlflow"]["environment"]["MLFLOW_BACKEND_STORE_URI"]
 
     assert "${MSSQL_DATABASE:-PricingLab}" in init_command
     assert "${MLFLOW_DATABASE:-MLflowTracking}" in init_command
-    assert "${MLFLOW_DATABASE:-MLflowTracking}" in mlflow_backend
+    assert services["mlflow"]["environment"]["MLFLOW_DATABASE"] == (
+        "${MLFLOW_DATABASE:-MLflowTracking}"
+    )
+
+
+def test_mlflow_backend_uri_is_built_with_encoded_odbc_connection():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    mlflow = compose["services"]["mlflow"]
+    mlflow_command = "\n".join(str(part) for part in mlflow["command"])
+    mlflow_env_text = str(mlflow["environment"])
+
+    assert "MLFLOW_BACKEND_STORE_URI" not in mlflow["environment"]
+    assert "sa:${MSSQL_PASSWORD" not in compose_text
+    assert "mssql+pyodbc://sa:${MSSQL_PASSWORD" not in mlflow_env_text
+    assert "quote_plus" in mlflow_command or "odbc_connect" in mlflow_command
+    assert "odbc_connect=" in mlflow_command
+
+
+def test_airflow_common_env_propagates_runtime_overrides():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    common_env = compose["x-airflow-common"]["environment"]
+
+    assert common_env["MLFLOW_TRACKING_URI"] == (
+        "${MLFLOW_TRACKING_URI:-http://mlflow:5000}"
+    )
+    assert common_env["RATING_EXPORT_ROOT"] == (
+        "${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}"
+    )
 
 
 def test_airflow_image_uses_python_314_base():
