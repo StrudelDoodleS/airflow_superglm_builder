@@ -6,6 +6,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 logs/
+config/
+plugins/
 state/
 airflow/logs/
 airflow/config/
