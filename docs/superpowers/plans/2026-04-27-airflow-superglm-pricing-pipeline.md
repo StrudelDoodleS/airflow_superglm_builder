@@ -571,10 +571,13 @@ def test_compose_uses_airflow_321_services():
         "airflow-triggerer",
         "postgres",
         "redis",
+        "flower",
         "mssql",
         "mlflow",
     ]:
         assert name in services
+    assert services["flower"]["profiles"] == ["flower"]
+    assert "redis://:@redis:6379/0" in str(compose["x-airflow-common"]["environment"])
 
 
 def test_airflow_image_uses_python_314_base():
@@ -631,7 +634,7 @@ COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 ```
 
-Create `docker-compose.yml` by downloading the official Airflow 3.2.1 CeleryExecutor file and applying the project additions in the same edit:
+Create `docker-compose.yml` by downloading the official Airflow 3.2.1 CeleryExecutor file and applying the project additions in the same edit. Keep the official Redis broker and optional Flower profile; do not replace Redis with RabbitMQ for the first build.
 
 ```bash
 rtk curl -Lf https://airflow.apache.org/docs/apache-airflow/3.2.1/docker-compose.yaml -o docker-compose.yml
@@ -712,6 +715,18 @@ Add these mounts to `x-airflow-common.volumes`:
       - ./pricing_pipeline:/opt/airflow/pricing_pipeline
       - ./db:/opt/pricing/db
       - ./state/rating_exports:/opt/pricing/state/rating_exports
+```
+
+Keep the official optional Flower service with:
+
+```yaml
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    profiles:
+      - flower
+    ports:
+      - "5555:5555"
 ```
 
 Create `scripts/smoke_check.py`:
@@ -1901,7 +1916,9 @@ Append to `README.md`:
 2. Run `./scripts/run_local_pipeline.sh`.
 3. Open Airflow at <http://localhost:8080>.
 4. Open MLflow at <http://localhost:5000>.
-5. Inspect SQL Server with CloudBeaver or another SQL client.
+5. Optionally start Flower with `docker compose --profile flower up -d flower`
+   and open it at <http://localhost:5555>.
+6. Inspect SQL Server with CloudBeaver or another SQL client.
 
 Durable local files are stored under `state/`, including MLflow artifacts and
 rating table workbooks. Do not run `docker compose down -v` unless you intend to
