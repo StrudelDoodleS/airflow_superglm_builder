@@ -5,7 +5,6 @@ This is a tiny Flyway-like runner for local testing. In production, use Flyway i
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from pricing_db import ROOT, get_engine
 
