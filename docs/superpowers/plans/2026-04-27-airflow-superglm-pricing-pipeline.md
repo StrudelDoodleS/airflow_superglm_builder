@@ -782,7 +782,12 @@ Create `tests/test_fremtpl.py`:
 import pandas as pd
 import pytest
 
-from pricing_pipeline.fremtpl import FREMTPL_COLUMNS, prepare_fremtpl_raw_frame, validate_fremtpl_raw
+from pricing_pipeline.fremtpl import (
+    FREMTPL_COLUMNS,
+    fremtpl_insert_rows,
+    prepare_fremtpl_raw_frame,
+    validate_fremtpl_raw,
+)
 
 
 def test_prepare_fremtpl_raw_preserves_expected_columns():
@@ -810,6 +815,29 @@ def test_prepare_fremtpl_raw_preserves_expected_columns():
 def test_validate_fremtpl_raw_rejects_missing_columns():
     with pytest.raises(ValueError, match="missing columns"):
         validate_fremtpl_raw(pd.DataFrame({"IDpol": [1]}))
+
+
+def test_fremtpl_insert_rows_preserves_order_and_converts_missing_to_none():
+    frame = pd.DataFrame(
+        {
+            "IDpol": [1],
+            "ClaimNb": [0],
+            "Exposure": [0.5],
+            "Area": [None],
+            "VehPower": [6],
+            "VehAge": [3],
+            "DrivAge": [45],
+            "BonusMalus": [50],
+            "VehBrand": ["B1"],
+            "VehGas": ["Regular"],
+            "Density": [float("nan")],
+            "Region": ["R1"],
+        }
+    )
+    rows = fremtpl_insert_rows(prepare_fremtpl_raw_frame(frame))
+    assert rows == [
+        (1, 0, 0.5, None, 6, 3, 45, 50, "B1", "Regular", None, "R1")
+    ]
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -828,6 +856,8 @@ Create `pricing_pipeline/fremtpl.py`:
 
 ```python
 from __future__ import annotations
+
+from typing import Any
 
 import pandas as pd
 from sklearn.datasets import fetch_openml
@@ -870,6 +900,38 @@ def prepare_fremtpl_raw_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _db_value(value: Any) -> Any:
+    return None if pd.isna(value) else value
+
+
+def fremtpl_insert_rows(frame: pd.DataFrame) -> list[tuple[Any, ...]]:
+    return [
+        tuple(_db_value(value) for value in row)
+        for row in frame.loc[:, FREMTPL_COLUMNS].itertuples(index=False, name=None)
+    ]
+
+
+def bulk_insert_fremtpl_raw(engine: Engine, frame: pd.DataFrame) -> int:
+    rows = fremtpl_insert_rows(frame)
+    if not rows:
+        return 0
+    placeholders = ", ".join(["?"] * len(FREMTPL_COLUMNS))
+    columns = ", ".join(FREMTPL_COLUMNS)
+    sql = f"INSERT INTO pricing.FREMTPL_RAW ({columns}) VALUES ({placeholders})"
+    connection = engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.fast_executemany = True
+        cursor.executemany(sql, rows)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return len(rows)
+
+
 def load_fremtpl_raw(engine: Engine, *, replace: bool = False) -> int:
     frame = prepare_fremtpl_raw_frame(fetch_fremtpl())
     with engine.begin() as con:
@@ -878,15 +940,7 @@ def load_fremtpl_raw(engine: Engine, *, replace: bool = False) -> int:
             return int(existing)
         if replace:
             con.execute(text("TRUNCATE TABLE pricing.FREMTPL_RAW"))
-    frame.to_sql(
-        "FREMTPL_RAW",
-        engine,
-        schema="pricing",
-        if_exists="append",
-        index=False,
-        chunksize=20000,
-    )
-    return int(len(frame))
+    return bulk_insert_fremtpl_raw(engine, frame)
 ```
 
 Create `scripts/load_fremtpl_raw.py`:
@@ -939,6 +993,10 @@ rtk git commit -m "feat: add freMTPL raw loader"
 ---
 
 ### Task 6: Dataset Manifest From Raw Table
+
+This task persists row-level CV indices. `pricing.DATASET_ROW_KEY.row_ordinal`
+is the deterministic dataset index, `cv_fold_no` is the assigned fold for that
+row, and `pricing.CV_SPLIT` records which folds are train/test for each split.
 
 **Files:**
 - Create: `pricing_pipeline/manifest.py`
