@@ -100,12 +100,17 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
     mlflow_env = services["mlflow"]["environment"]
 
     assert mlflow_env["MLFLOW_DATABASE"] == "${MLFLOW_DATABASE:-MLflowTracking}"
-    assert "PricingLab" in init_command
-    assert "MLflowTracking" in init_command
+    assert mssql_init["environment"]["MSSQL_DATABASE"] == "${MSSQL_DATABASE:-PricingLab}"
+    assert mssql_init["environment"]["MLFLOW_DATABASE"] == "${MLFLOW_DATABASE:-MLflowTracking}"
     assert mssql_init["depends_on"]["mssql"] == {"condition": "service_healthy"}
     assert services["mlflow"]["depends_on"]["mssql-init"] == {
         "condition": "service_completed_successfully"
     }
+    assert "pricing_pipeline.db" in init_command
+    assert "ensure_database" in init_command
+    assert "settings.pricing_database" in init_command
+    assert "settings.mlflow_database" in init_command
+    assert "CREATE DATABASE [" not in init_command
 
 
 def test_mlflow_serves_artifacts_through_http_proxy():
@@ -122,10 +127,13 @@ def test_mlflow_serves_artifacts_through_http_proxy():
 def test_sql_database_names_can_be_overridden_from_environment():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
-    init_command = "\n".join(str(part) for part in services["mssql-init"]["command"])
 
-    assert "${MSSQL_DATABASE:-PricingLab}" in init_command
-    assert "${MLFLOW_DATABASE:-MLflowTracking}" in init_command
+    assert services["mssql-init"]["environment"]["MSSQL_DATABASE"] == (
+        "${MSSQL_DATABASE:-PricingLab}"
+    )
+    assert services["mssql-init"]["environment"]["MLFLOW_DATABASE"] == (
+        "${MLFLOW_DATABASE:-MLflowTracking}"
+    )
     assert services["mlflow"]["environment"]["MLFLOW_DATABASE"] == (
         "${MLFLOW_DATABASE:-MLflowTracking}"
     )
@@ -141,8 +149,20 @@ def test_mlflow_backend_uri_is_built_with_encoded_odbc_connection():
     assert "MLFLOW_BACKEND_STORE_URI" not in mlflow["environment"]
     assert "sa:${MSSQL_PASSWORD" not in compose_text
     assert "mssql+pyodbc://sa:${MSSQL_PASSWORD" not in mlflow_env_text
-    assert "quote_plus" in mlflow_command or "odbc_connect" in mlflow_command
-    assert "odbc_connect=" in mlflow_command
+    assert "pricing_pipeline.db" in mlflow_command
+    assert "build_sqlalchemy_url" in mlflow_command
+    assert "PWD=" not in mlflow_command
+    assert "Encrypt=" not in mlflow_command
+
+
+def test_mlflow_and_mssql_init_can_import_pricing_pipeline_helpers():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    for name in ["mlflow", "mssql-init"]:
+        service = services[name]
+        assert "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline" in service["volumes"]
+        assert service["environment"]["PYTHONPATH"] == "/opt/airflow"
 
 
 def test_airflow_common_env_propagates_runtime_overrides():

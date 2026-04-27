@@ -344,19 +344,40 @@ services:
         condition: service_completed_successfully
 
   mssql-init:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: ${AIRFLOW_IMAGE_NAME:-airflow-superglm:3.2.1-python3.14}
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
     environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: ${MSSQL_PASSWORD:-YourStrong(!)Password123}
+      MSSQL_SERVER: ${MSSQL_SERVER:-mssql,1433}
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-PricingLab}
+      MLFLOW_DATABASE: ${MLFLOW_DATABASE:-MLflowTracking}
+      MSSQL_USER: ${MSSQL_USER:-sa}
+      MSSQL_PASSWORD: ${MSSQL_PASSWORD:-YourStrong(!)Password123}
+      MSSQL_DRIVER: ${MSSQL_DRIVER:-ODBC Driver 18 for SQL Server}
+      MSSQL_ENCRYPT: ${MSSQL_ENCRYPT:-no}
+      MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
+      PYTHONPATH: /opt/airflow
     entrypoint: /bin/bash
     command:
       - -c
       - |
         set -e
-        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P "$${MSSQL_SA_PASSWORD}" -C -Q "IF DB_ID(N'${MSSQL_DATABASE:-PricingLab}') IS NULL CREATE DATABASE [${MSSQL_DATABASE:-PricingLab}]; IF DB_ID(N'${MLFLOW_DATABASE:-MLflowTracking}') IS NULL CREATE DATABASE [${MLFLOW_DATABASE:-MLflowTracking}];"
+        python - <<'PY'
+        import os
+
+        from pricing_pipeline.config import Settings
+        from pricing_pipeline.db import ensure_database
+
+        settings = Settings.from_env(os.environ)
+        ensure_database(settings, settings.pricing_database)
+        ensure_database(settings, settings.mlflow_database)
+        PY
     depends_on:
       mssql:
         condition: service_healthy
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
 
   mlflow:
     image: ${AIRFLOW_IMAGE_NAME:-airflow-superglm:3.2.1-python3.14}
@@ -370,20 +391,12 @@ services:
         set -e
         export MLFLOW_BACKEND_STORE_URI="$$(python - <<'PY'
         import os
-        from urllib.parse import quote_plus
 
-        connection = ";".join(
-            [
-                f"DRIVER={{{os.environ['MSSQL_DRIVER']}}}",
-                f"SERVER={os.environ['MSSQL_SERVER']}",
-                f"DATABASE={os.environ['MLFLOW_DATABASE']}",
-                f"UID={os.environ['MSSQL_USER']}",
-                f"PWD={os.environ['MSSQL_PASSWORD']}",
-                f"Encrypt={os.environ['MSSQL_ENCRYPT']}",
-                f"TrustServerCertificate={os.environ['MSSQL_TRUST_SERVER_CERT']}",
-            ]
-        )
-        print("mssql+pyodbc:///?odbc_connect=" + quote_plus(connection))
+        from pricing_pipeline.config import Settings
+        from pricing_pipeline.db import build_sqlalchemy_url
+
+        settings = Settings.from_env(os.environ)
+        print(build_sqlalchemy_url(settings, database=settings.mlflow_database))
         PY
         )"
         exec mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" --serve-artifacts --artifacts-destination /mlflow/artifacts
@@ -395,9 +408,11 @@ services:
       MSSQL_DRIVER: ${MSSQL_DRIVER:-ODBC Driver 18 for SQL Server}
       MSSQL_ENCRYPT: ${MSSQL_ENCRYPT:-no}
       MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
+      PYTHONPATH: /opt/airflow
     ports:
       - "5000:5000"
     volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
       - ${AIRFLOW_PROJ_DIR:-.}/state/mlflow/artifacts:/mlflow/artifacts
     depends_on:
       state-init:
