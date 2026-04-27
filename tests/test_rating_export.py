@@ -54,6 +54,17 @@ def test_build_rating_export_path_uses_model_and_date(tmp_path: Path):
     )
 
 
+def test_build_rating_export_path_accepts_positional_call_shape(tmp_path: Path):
+    path = rating_export.build_rating_export_path(
+        tmp_path, "MTPL_FREQ", "2026-04-27", "mtpl_freq__run1"
+    )
+
+    assert (
+        path
+        == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
+    )
+
+
 class FakeExportModel:
     def __init__(self):
         self.calls = []
@@ -83,6 +94,31 @@ def test_export_rating_tables_creates_parent_calls_model_and_logs_mlflow(
     result = rating_export.export_rating_tables(
         model, X, y, exposure, output_path=output_path
     )
+
+    assert result == output_path
+    assert output_path.read_bytes() == b"workbook"
+    assert model.calls == [
+        ((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})
+    ]
+    assert mlflow_calls == [(str(output_path), "rating_tables")]
+
+
+def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_path: Path):
+    model = FakeExportModel()
+    mlflow_calls = []
+    fake_mlflow = SimpleNamespace(
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
+            (path, artifact_path)
+        )
+    )
+    monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
+
+    output_path = tmp_path / "nested" / "rating_tables.xlsx"
+    X = pd.DataFrame({"x": [1, 2]})
+    y = np.array([0.0, 1.0])
+    exposure = np.array([0.5, 2.0])
+
+    result = rating_export.export_rating_tables(model, X, y, exposure, output_path)
 
     assert result == output_path
     assert output_path.read_bytes() == b"workbook"

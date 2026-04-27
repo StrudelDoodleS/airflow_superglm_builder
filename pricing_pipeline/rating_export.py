@@ -23,7 +23,6 @@ def build_export_id(model_name: str, run_id: str) -> str:
 
 def build_rating_export_path(
     root: Path,
-    *,
     model_name: str,
     logical_date: str,
     export_id: str,
@@ -31,7 +30,7 @@ def build_rating_export_path(
     return root / model_name / logical_date / export_id / "rating_tables.xlsx"
 
 
-def export_rating_tables(model, X, y, exposure, *, output_path: Path) -> Path:
+def export_rating_tables(model, X, y, exposure, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     model.export_rating_tables(output_path, X, y, sample_weight=exposure, n_bins=150)
     mlflow.log_artifact(str(output_path), artifact_path="rating_tables")
