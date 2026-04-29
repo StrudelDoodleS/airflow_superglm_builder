@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.pricing_db import get_engine  # noqa: E402
+from pricing_pipeline.model_registry import ensure_pricing_model  # noqa: E402
 
 INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
@@ -40,6 +41,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sheet", default="Rating Tables")
     p.add_argument("--export-id", required=True)
     p.add_argument("--model-name", required=True)
+    p.add_argument("--model-label", default=None)
+    p.add_argument("--target-name", default="ClaimNb")
+    p.add_argument("--model-type", default="superglm_poisson")
+    p.add_argument("--model-status", default="ACTIVE")
     p.add_argument("--model-version", default=None)
     p.add_argument("--effective-from", required=True)
     p.add_argument("--effective-to", default=None)
@@ -107,7 +112,8 @@ def find_blocks(raw: pd.DataFrame, term_row: int, header_row: int) -> list[dict[
         if not term_name or not h0 or not h1 or not h2:
             continue
         headers = [h0.lower(), h1.lower(), h2.lower()]
-        if "level" in headers[0] and "relativity" in headers[1] and "weight" in headers[2]:
+        level_header = "level" in headers[0] or clean_identifier(h0) == clean_identifier(term_name)
+        if level_header and "relativity" in headers[1] and "weight" in headers[2]:
             blocks.append({
                 "term_name": clean_identifier(term_name),
                 "level_col": c,
@@ -261,31 +267,48 @@ def insert_staging_frames(
     level_df: pd.DataFrame,
 ) -> None:
     with engine.begin() as con:
+        model_id = ensure_pricing_model(
+            con,
+            model_key=args.model_name,
+            model_label=args.model_label,
+            target_name=args.target_name,
+            model_type=args.model_type,
+            model_status=args.model_status,
+            created_by=args.created_by,
+        )
+
         if args.replace:
             con.execute(
-                text("DELETE FROM pricing.STG_CELL_LEVEL WHERE export_id = :export_id"),
+                text("DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id"),
                 {"export_id": args.export_id},
             )
             con.execute(
-                text("DELETE FROM pricing.STG_RATE_CELL WHERE export_id = :export_id"),
+                text("DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id"),
                 {"export_id": args.export_id},
             )
             con.execute(
-                text("DELETE FROM pricing.STG_RATING_EXPORT WHERE export_id = :export_id"),
+                text("DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"),
                 {"export_id": args.export_id},
             )
 
         export_df.to_sql(
             "STG_RATING_EXPORT",
             con,
-            schema="pricing",
+            schema="pricing_stg",
             if_exists="append",
             index=False,
+        )
+        con.execute(
+            text(
+                "UPDATE pricing_stg.STG_RATING_EXPORT "
+                "SET model_id = :model_id WHERE export_id = :export_id"
+            ),
+            {"export_id": args.export_id, "model_id": model_id},
         )
         rate_df.to_sql(
             "STG_RATE_CELL",
             con,
-            schema="pricing",
+            schema="pricing_stg",
             if_exists="append",
             index=False,
             chunksize=5000,
@@ -293,7 +316,7 @@ def insert_staging_frames(
         level_df.to_sql(
             "STG_CELL_LEVEL",
             con,
-            schema="pricing",
+            schema="pricing_stg",
             if_exists="append",
             index=False,
             chunksize=5000,
@@ -308,6 +331,8 @@ def stage_rating_export(
     model_name: str,
     model_version: str | None,
     effective_from: str,
+    target_name: str = "ClaimNb",
+    model_type: str = "superglm_poisson",
     effective_to: str | None = None,
     created_by: str = "python",
     replace: bool = False,
@@ -317,6 +342,10 @@ def stage_rating_export(
         sheet="Rating Tables",
         export_id=export_id,
         model_name=model_name,
+        model_label=None,
+        target_name=target_name,
+        model_type=model_type,
+        model_status="ACTIVE",
         model_version=model_version,
         effective_from=effective_from,
         effective_to=effective_to,

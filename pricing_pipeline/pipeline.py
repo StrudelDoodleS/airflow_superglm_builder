@@ -29,13 +29,25 @@ except ModuleNotFoundError:
 from pricing_pipeline.config import Settings
 from pricing_pipeline.lineage import record_model_run
 from pricing_pipeline.mlflow_tracking import configure_mlflow
+from pricing_pipeline.model_registry import ensure_pricing_model
 from pricing_pipeline.rating_export import (
     build_export_id,
     build_rating_export_path,
     export_rating_tables,
 )
 from pricing_pipeline.rating_package import publish_rating_package, stage_rating_export
-from pricing_pipeline.training import FEATURE_COLUMNS, TRAINING_SQL, build_model, build_training_frame
+from pricing_pipeline.training import (
+    FEATURE_COLUMNS,
+    TRAINING_SQL,
+    build_model,
+    build_training_frame,
+    fit_reml_with_diagnostics,
+)
+
+
+MODEL_KEY = "MTPL_FREQ"
+MODEL_TARGET = "ClaimNb"
+MODEL_TYPE = "superglm_poisson"
 
 
 def run_training_export_publish(
@@ -49,7 +61,14 @@ def run_training_export_publish(
     created_by: str = "airflow",
 ) -> dict[str, str]:
     configure_mlflow(settings.mlflow_tracking_uri)
-    model_name = "MTPL_FREQ"
+    model_name = MODEL_KEY
+    model_id = ensure_pricing_model(
+        engine,
+        model_key=model_name,
+        target_name=MODEL_TARGET,
+        model_type=MODEL_TYPE,
+        created_by=created_by,
+    )
     model_version = logical_date.replace("-", "")
     export_id = build_export_id(model_name, airflow_run_id)
     workbook_path = build_rating_export_path(
@@ -65,17 +84,24 @@ def run_training_export_publish(
     mlflow.set_experiment("pricing-mtpl-frequency")
     with mlflow.start_run() as run:
         model = build_model()
+        workbook_path.parent.mkdir(parents=True, exist_ok=True)
         mlflow.log_param("model_name", model_name)
+        mlflow.log_param("model_id", model_id)
         mlflow.log_param("model_version", model_version)
         mlflow.log_param("manifest_id", manifest_id)
-        mlflow.log_param("target", "ClaimNb")
+        mlflow.log_param("target", MODEL_TARGET)
         mlflow.log_param("offset", "log(Exposure)")
         mlflow.log_param("row_count", len(X))
         mlflow.log_param("feature_columns", ",".join(FEATURE_COLUMNS))
 
-        fitted_model = model.fit_reml(X, y, offset=offset)
-        if fitted_model is None:
-            fitted_model = model
+        fitted_model = fit_reml_with_diagnostics(
+            model,
+            X,
+            y,
+            offset=offset,
+            diagnostics_path=workbook_path.parent / "superglm_fit.log",
+            mlflow_client=mlflow,
+        )
 
         deviance = getattr(getattr(fitted_model, "result", None), "deviance", None)
         if deviance is not None:
@@ -95,6 +121,8 @@ def run_training_export_publish(
             export_id=export_id,
             model_name=model_name,
             model_version=model_version,
+            target_name=MODEL_TARGET,
+            model_type=MODEL_TYPE,
             effective_from=logical_date,
             created_by=created_by,
             replace=True,
@@ -113,6 +141,7 @@ def run_training_export_publish(
             mlflow_run_id=run.info.run_id,
             manifest_id=manifest_id,
             export_id=export_id,
+            model_id=model_id,
             model_name=model_name,
             model_version=model_version,
             rate_package_id=rate_package_id,

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
+import platform
+import sys
 import uuid
 from datetime import date
+from importlib import metadata
 
 import numpy as np
 import pandas as pd
@@ -15,24 +19,29 @@ from sqlalchemy.engine import Engine
 FREMTPL_DATASET_NAME = "freMTPL2freq"
 FREMTPL_SOURCE_SYSTEM = "openml_41214"
 FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
-TRUNCATE_STAGING_SQL = "TRUNCATE TABLE pricing.STG_DATASET_ROW_KEY"
-INSERT_ROW_KEYS_SQL = """
-INSERT INTO pricing.DATASET_ROW_KEY (
-    manifest_id,
-    row_key_hash,
-    source_pk_text,
-    row_ordinal,
-    cv_fold_no
-)
-SELECT
-    manifest_id,
-    HASHBYTES('SHA2_256', source_pk_text),
-    source_pk_text,
-    row_ordinal,
-    cv_fold_no
-FROM pricing.STG_DATASET_ROW_KEY
-WHERE manifest_id = :manifest_id;
-"""
+
+
+def _package_version(package_name: str) -> str | None:
+    try:
+        return metadata.version(package_name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def runtime_dependency_metadata() -> str:
+    payload = {
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "implementation": platform.python_implementation(),
+        "machine": platform.machine(),
+        "packages": {
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "sklearn": _package_version("scikit-learn"),
+            "superglm": _package_version("superglm"),
+        },
+    }
+    return json.dumps(payload, sort_keys=True)
 
 
 def new_manifest_id(dataset_name: str) -> str:
@@ -59,45 +68,83 @@ def build_column_metadata(frame: pd.DataFrame, *, manifest_id: str) -> pd.DataFr
     return column_df
 
 
-def build_row_keys(
+def compute_row_order_sha256(frame: pd.DataFrame, *, pk_column: str) -> str:
+    digest = hashlib.sha256()
+    for value in frame[pk_column].astype(str):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def split_set_id_for_manifest(
+    manifest_id: str,
+    *,
+    n_splits: int,
+    random_state: int,
+) -> str:
+    return f"{manifest_id}__kfold_{n_splits}_seed_{random_state}"
+
+
+def build_cv_split_set(
     frame: pd.DataFrame,
     *,
     manifest_id: str,
     n_splits: int,
     random_state: int,
+    created_by: str = "airflow",
 ) -> pd.DataFrame:
-    fold_no = np.empty(len(frame), dtype=np.int16)
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    for split_no, (_, test_idx) in enumerate(kf.split(frame), start=1):
-        fold_no[test_idx] = split_no
-
     return pd.DataFrame(
-        {
-            "manifest_id": manifest_id,
-            "source_pk_text": "IDpol=" + frame["IDpol"].astype(str),
-            "row_ordinal": np.arange(1, len(frame) + 1, dtype=np.int64),
-            "cv_fold_no": fold_no.astype(np.int32),
-        }
+        [
+            {
+                "split_set_id": split_set_id_for_manifest(
+                    manifest_id,
+                    n_splits=n_splits,
+                    random_state=random_state,
+                ),
+                "manifest_id": manifest_id,
+                "split_mode": "REPLAYABLE",
+                "splitter_class": "sklearn.model_selection.KFold",
+                "splitter_params_json": json.dumps(
+                    {
+                        "n_splits": n_splits,
+                        "shuffle": True,
+                        "random_state": random_state,
+                    },
+                    sort_keys=True,
+                ),
+                "row_order_sha256": compute_row_order_sha256(frame, pk_column="IDpol"),
+                "row_count": int(len(frame)),
+                "fold_count": n_splits,
+                "groups_column": None,
+                "stratify_column": None,
+                "artifact_uri": None,
+                "artifact_sha256": None,
+                "runtime_metadata_json": runtime_dependency_metadata(),
+                "created_by": created_by,
+            }
+        ]
     )
 
 
-def build_cv_splits(manifest_id: str, *, n_splits: int) -> pd.DataFrame:
-    split_numbers = np.arange(1, n_splits + 1, dtype=np.int32)
-    cv_split_df = pd.DataFrame(
-        {
-            "manifest_id": manifest_id,
-            "split_no": split_numbers,
-            "test_fold_no": split_numbers,
-        }
-    )
-    cv_split_df["train_folds_json"] = cv_split_df["test_fold_no"].map(
-        lambda test_fold: json.dumps(
-            [fold for fold in range(1, n_splits + 1) if fold != test_fold]
+def build_cv_folds(
+    frame: pd.DataFrame,
+    *,
+    split_set_id: str,
+    n_splits: int,
+    random_state: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, int | str]] = []
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    for fold_no, (train_idx, test_idx) in enumerate(kf.split(frame), start=1):
+        rows.append(
+            {
+                "split_set_id": split_set_id,
+                "fold_no": fold_no,
+                "n_train": int(len(train_idx)),
+                "n_test": int(len(test_idx)),
+            }
         )
-    )
-    return cv_split_df[
-        ["manifest_id", "split_no", "train_folds_json", "test_fold_no"]
-    ]
+    return pd.DataFrame(rows)
 
 
 def create_fremtpl_manifest(
@@ -126,14 +173,20 @@ def create_fremtpl_manifest(
         ]
     )
     column_df = build_column_metadata(frame, manifest_id=manifest_id)
-    row_key_df = build_row_keys(
+    split_set_df = build_cv_split_set(
         frame,
         manifest_id=manifest_id,
         n_splits=n_splits,
         random_state=random_state,
+        created_by=created_by,
     )
-    cv_split_df = build_cv_splits(manifest_id, n_splits=n_splits)
-
+    split_set_id = split_set_df.loc[0, "split_set_id"]
+    cv_fold_df = build_cv_folds(
+        frame,
+        split_set_id=split_set_id,
+        n_splits=n_splits,
+        random_state=random_state,
+    )
     with engine.begin() as con:
         manifest_df.to_sql(
             "DATASET_MANIFEST",
@@ -150,18 +203,15 @@ def create_fremtpl_manifest(
             index=False,
             chunksize=5000,
         )
-        con.execute(text(TRUNCATE_STAGING_SQL))
-        row_key_df.to_sql(
-            "STG_DATASET_ROW_KEY",
+        split_set_df.to_sql(
+            "CV_SPLIT_SET",
             con,
             schema="pricing",
             if_exists="append",
             index=False,
-            chunksize=20000,
         )
-        con.execute(text(INSERT_ROW_KEYS_SQL), {"manifest_id": manifest_id})
-        cv_split_df.to_sql(
-            "CV_SPLIT",
+        cv_fold_df.to_sql(
+            "CV_FOLD",
             con,
             schema="pricing",
             if_exists="append",

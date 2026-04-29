@@ -6,6 +6,7 @@ IF OBJECT_ID('pricing.PRICING_RATE_PACKAGE', 'U') IS NULL
 CREATE TABLE pricing.PRICING_RATE_PACKAGE (
     rate_package_id        BIGINT IDENTITY(1,1) PRIMARY KEY,
     parent_rate_package_id BIGINT NULL,
+    model_id               BIGINT NULL,
     model_name             NVARCHAR(128) NOT NULL,
     model_version          NVARCHAR(64) NULL,
     package_version        INT NOT NULL,
@@ -25,6 +26,7 @@ GO
 IF OBJECT_ID('pricing.PRICING_PACKAGE_POINTER', 'U') IS NULL
 CREATE TABLE pricing.PRICING_PACKAGE_POINTER (
     pointer_name      NVARCHAR(128) PRIMARY KEY,
+    model_id          BIGINT NULL,
     rate_package_id   BIGINT NOT NULL,
     updated_ts        DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
     updated_by        NVARCHAR(128) NOT NULL,
@@ -48,6 +50,7 @@ GO
 IF OBJECT_ID('pricing.PRICING_FEATURE_LEVEL_SET', 'U') IS NULL
 CREATE TABLE pricing.PRICING_FEATURE_LEVEL_SET (
     level_set_id        BIGINT IDENTITY(1,1) PRIMARY KEY,
+    model_id            BIGINT NULL,
     feature_id          BIGINT NOT NULL,
     level_set_name      NVARCHAR(128) NOT NULL,
     level_set_type      NVARCHAR(64) NOT NULL,

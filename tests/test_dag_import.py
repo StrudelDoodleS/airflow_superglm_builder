@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -53,3 +54,6 @@ def test_pricing_superglm_pipeline_dag_imports_without_airflow(monkeypatch):
     spec.loader.exec_module(module)
 
     assert hasattr(module, "pricing_superglm_pipeline")
+    assert module._context_date_iso(
+        {"dag_run": types.SimpleNamespace(run_after=datetime(2026, 4, 27, tzinfo=UTC))}
+    ) == "2026-04-27"

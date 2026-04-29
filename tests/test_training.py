@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,13 @@ class PickleableFakeModel:
             }
         )
         return self
+
+
+class LoggingFakeModel(PickleableFakeModel):
+    def fit_reml(self, X, y, sample_weight=None, offset=None):
+        logging.info("superglm iteration=0 deviance=18.25")
+        logging.info("superglm iteration=1 deviance=12.5")
+        return super().fit_reml(X, y, sample_weight=sample_weight, offset=offset)
 
 
 def test_build_training_frame_filters_exposure_derives_log_density_and_offset():
@@ -129,6 +137,9 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
             mlflow_calls.append(("start_run_exit", exc_type))
             return False
 
+    def fake_log_metric(key, value, **kwargs):
+        mlflow_calls.append(("log_metric", key, value, kwargs))
+
     fake_mlflow = SimpleNamespace(
         set_experiment=lambda experiment: mlflow_calls.append(
             ("set_experiment", experiment)
@@ -138,7 +149,7 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
         log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
             ("log_artifact", path, artifact_path)
         ),
-        log_metric=lambda key, value: mlflow_calls.append(("log_metric", key, value)),
+        log_metric=fake_log_metric,
     )
 
     def fake_read_sql_query(sql, engine):
@@ -175,7 +186,12 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
         str(model_dir / "superglm_model.pkl"),
         "model",
     ) in mlflow_calls
-    assert ("log_metric", "deviance", 12.5) in mlflow_calls
+    assert (
+        "log_artifact",
+        str(model_dir / "superglm_fit.log"),
+        "training_diagnostics",
+    ) in mlflow_calls
+    assert ("log_metric", "deviance", 12.5, {}) in mlflow_calls
 
     assert len(fit_calls) == 1
     fit_call = fit_calls[0]
@@ -183,6 +199,61 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
     np.testing.assert_array_equal(fit_call["y"], raw["ClaimNb"].to_numpy(dtype=float))
     assert fit_call["sample_weight"] is None
     np.testing.assert_allclose(fit_call["offset"], np.log(raw["Exposure"]))
+
+
+def test_train_superglm_logs_superglm_fit_diagnostics_to_mlflow(
+    monkeypatch, tmp_path
+):
+    raw = raw_training_frame(Exposure=[0.5, 1.0, 2.0])
+    fit_calls = []
+    mlflow_calls = []
+
+    class FakeRun:
+        info = SimpleNamespace(run_id="run-123")
+
+    class FakeStartRun:
+        def __enter__(self):
+            return FakeRun()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_log_metric(key, value, **kwargs):
+        mlflow_calls.append(("log_metric", key, value, kwargs))
+
+    fake_mlflow = SimpleNamespace(
+        set_experiment=lambda experiment: None,
+        start_run=lambda: FakeStartRun(),
+        log_param=lambda key, value: None,
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
+            ("log_artifact", path, artifact_path)
+        ),
+        log_metric=fake_log_metric,
+    )
+
+    monkeypatch.setattr(training.pd, "read_sql_query", lambda sql, engine: raw)
+    monkeypatch.setattr(training, "build_model", lambda: LoggingFakeModel(fit_calls))
+    monkeypatch.setattr(training, "mlflow", fake_mlflow)
+
+    model_dir = tmp_path / "model"
+    training.train_superglm(
+        object(),
+        model_dir=model_dir,
+        mlflow_experiment="pricing-mtpl-frequency",
+    )
+
+    fit_log = model_dir / "superglm_fit.log"
+    assert fit_log.exists()
+    log_text = fit_log.read_text(encoding="utf-8")
+    assert "superglm iteration=0 deviance=18.25" in log_text
+    assert "superglm iteration=1 deviance=12.5" in log_text
+    assert (
+        "log_artifact",
+        str(fit_log),
+        "training_diagnostics",
+    ) in mlflow_calls
+    assert ("log_metric", "fit_iteration_deviance", 18.25, {"step": 0}) in mlflow_calls
+    assert ("log_metric", "fit_iteration_deviance", 12.5, {"step": 1}) in mlflow_calls
 
 
 def test_train_superglm_script_help_runs_without_pythonpath():

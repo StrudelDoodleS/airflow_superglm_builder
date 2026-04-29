@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
+import logging
 import pickle
+import re
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +48,10 @@ FEATURE_COLUMNS = [
 FEATURE_SOURCE_COLUMNS = [column for column in FEATURE_COLUMNS if column != "LogDensity"]
 REQUIRED_RAW_COLUMNS = ["ClaimNb", "Exposure", "Density", *FEATURE_SOURCE_COLUMNS]
 TRAINING_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
+_DEVIANCE_LOG_PATTERN = re.compile(
+    r"(?i)(?:iter(?:ation)?\s*[=: ]+\s*(?P<iteration>\d+).*?)?"
+    r"\bdeviance\b\s*[=: ]+\s*(?P<deviance>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+)
 
 
 def build_training_frame(
@@ -85,6 +92,63 @@ def build_model() -> SuperGLM:
     )
 
 
+def parse_deviance_log_metrics(log_text: str) -> list[tuple[int, float]]:
+    metrics: list[tuple[int, float]] = []
+    for match in _DEVIANCE_LOG_PATTERN.finditer(log_text):
+        iteration = match.group("iteration")
+        step = int(iteration) if iteration is not None else len(metrics)
+        metrics.append((step, float(match.group("deviance"))))
+    return metrics
+
+
+def fit_reml_with_diagnostics(
+    model,
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    offset: np.ndarray,
+    diagnostics_path: Path,
+    mlflow_client=mlflow,
+    sample_weight: np.ndarray | None = None,
+):
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    log_buffer = io.StringIO()
+    handler = logging.StreamHandler(log_buffer)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+    root_logger = logging.getLogger()
+    previous_root_level = root_logger.level
+    root_logger.addHandler(handler)
+    if root_logger.getEffectiveLevel() > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+
+    fit_kwargs = {"offset": offset}
+    if sample_weight is not None:
+        fit_kwargs["sample_weight"] = sample_weight
+
+    try:
+        fitted_model = model.fit_reml(X, y, **fit_kwargs)
+    finally:
+        handler.flush()
+        root_logger.removeHandler(handler)
+        root_logger.setLevel(previous_root_level)
+
+    if fitted_model is None:
+        fitted_model = model
+
+    log_text = log_buffer.getvalue()
+    if not log_text:
+        log_text = "No Python logging records were captured during superglm fit_reml.\n"
+    diagnostics_path.write_text(log_text, encoding="utf-8")
+    mlflow_client.log_artifact(str(diagnostics_path), artifact_path="training_diagnostics")
+
+    for step, deviance in parse_deviance_log_metrics(log_text):
+        mlflow_client.log_metric("fit_iteration_deviance", deviance, step=step)
+
+    return fitted_model
+
+
 def train_superglm(
     engine,
     *,
@@ -97,17 +161,22 @@ def train_superglm(
     mlflow.set_experiment(mlflow_experiment)
     with mlflow.start_run() as run:
         model = build_model()
+        model_dir.mkdir(parents=True, exist_ok=True)
         mlflow.log_param("family", getattr(model, "family", "poisson"))
         mlflow.log_param("target", "ClaimNb")
         mlflow.log_param("offset", "log(Exposure)")
         mlflow.log_param("row_count", len(X))
         mlflow.log_param("feature_columns", ",".join(FEATURE_COLUMNS))
 
-        fitted_model = model.fit_reml(X, y, offset=offset)
-        if fitted_model is None:
-            fitted_model = model
+        fitted_model = fit_reml_with_diagnostics(
+            model,
+            X,
+            y,
+            offset=offset,
+            diagnostics_path=model_dir / "superglm_fit.log",
+            mlflow_client=mlflow,
+        )
 
-        model_dir.mkdir(parents=True, exist_ok=True)
         model_path = model_dir / "superglm_model.pkl"
         with model_path.open("wb") as f:
             pickle.dump(fitted_model, f)

@@ -22,6 +22,7 @@ GO
 IF OBJECT_ID('pricing.MODEL_RUN', 'U') IS NULL
 CREATE TABLE pricing.MODEL_RUN (
     model_run_id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    model_id BIGINT NULL,
     dag_id NVARCHAR(250) NOT NULL,
     airflow_run_id NVARCHAR(250) NOT NULL,
     mlflow_experiment_id NVARCHAR(128) NULL,

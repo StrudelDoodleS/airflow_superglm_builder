@@ -9,10 +9,11 @@ import pandas as pd
 from pricing_pipeline import manifest
 from pricing_pipeline.manifest import (
     build_column_metadata,
-    build_cv_splits,
-    build_row_keys,
+    build_cv_split_set,
+    compute_row_order_sha256,
     create_fremtpl_manifest,
     new_manifest_id,
+    runtime_dependency_metadata,
 )
 
 
@@ -70,51 +71,64 @@ def test_build_column_metadata_marks_roles_and_counts_columns():
     assert area["distinct_count"] == 3
 
 
-def test_build_row_keys_uses_idpol_current_order_and_deterministic_folds():
+def test_compute_row_order_sha256_depends_on_ordered_primary_keys():
+    first = pd.DataFrame({"IDpol": [10, 20, 30]})
+    same = pd.DataFrame({"IDpol": [10, 20, 30]})
+    reordered = pd.DataFrame({"IDpol": [20, 10, 30]})
+
+    assert compute_row_order_sha256(first, pk_column="IDpol") == compute_row_order_sha256(
+        same,
+        pk_column="IDpol",
+    )
+    assert compute_row_order_sha256(first, pk_column="IDpol") != compute_row_order_sha256(
+        reordered,
+        pk_column="IDpol",
+    )
+
+
+def test_build_cv_split_set_records_replayable_splitter_metadata():
     frame = manifest_frame()
 
-    row_keys = build_row_keys(
+    split_set = build_cv_split_set(
         frame,
         manifest_id="manifest_1",
-        n_splits=3,
+        n_splits=5,
         random_state=42,
     )
 
-    assert list(row_keys.columns) == [
-        "manifest_id",
-        "source_pk_text",
-        "row_ordinal",
-        "cv_fold_no",
+    assert split_set.to_dict("records") == [
+        {
+            "split_set_id": "manifest_1__kfold_5_seed_42",
+            "manifest_id": "manifest_1",
+            "split_mode": "REPLAYABLE",
+            "splitter_class": "sklearn.model_selection.KFold",
+            "splitter_params_json": json.dumps(
+                {"n_splits": 5, "shuffle": True, "random_state": 42},
+                sort_keys=True,
+            ),
+            "row_order_sha256": compute_row_order_sha256(frame, pk_column="IDpol"),
+            "row_count": 5,
+            "fold_count": 5,
+            "groups_column": None,
+            "stratify_column": None,
+            "artifact_uri": None,
+            "artifact_sha256": None,
+            "runtime_metadata_json": runtime_dependency_metadata(),
+            "created_by": "airflow",
+        }
     ]
-    assert row_keys["manifest_id"].tolist() == ["manifest_1"] * len(frame)
-    assert row_keys["source_pk_text"].tolist() == [
-        "IDpol=10",
-        "IDpol=20",
-        "IDpol=30",
-        "IDpol=40",
-        "IDpol=50",
-    ]
-    assert row_keys["row_ordinal"].tolist() == [1, 2, 3, 4, 5]
-    assert row_keys["cv_fold_no"].tolist() == [2, 1, 2, 3, 1]
 
 
-def test_build_cv_splits_records_train_folds_json_and_test_fold():
-    splits = build_cv_splits("manifest_1", n_splits=4)
+def test_runtime_dependency_metadata_records_python_platform_and_core_versions():
+    metadata_json = runtime_dependency_metadata()
+    metadata = json.loads(metadata_json)
 
-    assert list(splits.columns) == [
-        "manifest_id",
-        "split_no",
-        "train_folds_json",
-        "test_fold_no",
-    ]
-    assert splits["split_no"].tolist() == [1, 2, 3, 4]
-    assert splits["test_fold_no"].tolist() == [1, 2, 3, 4]
-    assert [json.loads(value) for value in splits["train_folds_json"]] == [
-        [2, 3, 4],
-        [1, 3, 4],
-        [1, 2, 4],
-        [1, 2, 3],
-    ]
+    assert metadata["python_version"].startswith(f"{sys.version_info.major}.")
+    assert metadata["platform"]
+    assert metadata["packages"]["numpy"]
+    assert metadata["packages"]["pandas"]
+    assert metadata["packages"]["sklearn"]
+    assert "superglm" in metadata["packages"]
 
 
 class FakeBeginConnection:
@@ -148,9 +162,7 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
-def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
-    monkeypatch,
-):
+def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(monkeypatch):
     engine = FakeEngine()
     raw_frame = pd.DataFrame(
         {
@@ -199,17 +211,15 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
     assert engine.events == [
         "to_sql:DATASET_MANIFEST",
         "to_sql:DATASET_COLUMN",
-        "execute:TRUNCATE",
-        "to_sql:STG_DATASET_ROW_KEY",
-        "execute:INSERT",
-        "to_sql:CV_SPLIT",
+        "to_sql:CV_SPLIT_SET",
+        "to_sql:CV_FOLD",
     ]
 
     assert [(call["name"], call["schema"], call["if_exists"], call["index"]) for call in to_sql_calls] == [
         ("DATASET_MANIFEST", "pricing", "append", False),
         ("DATASET_COLUMN", "pricing", "append", False),
-        ("STG_DATASET_ROW_KEY", "pricing", "append", False),
-        ("CV_SPLIT", "pricing", "append", False),
+        ("CV_SPLIT_SET", "pricing", "append", False),
+        ("CV_FOLD", "pricing", "append", False),
     ]
     assert all(call["con"] is engine.connection for call in to_sql_calls)
 
@@ -224,31 +234,68 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
     assert manifest_row["weight_column"] == "Exposure"
     assert manifest_row["created_by"] == "unit-test"
 
-    staged_keys = to_sql_calls[2]["frame"]
-    assert staged_keys["source_pk_text"].tolist() == [
-        "IDpol=1",
-        "IDpol=2",
-        "IDpol=3",
+    split_set = to_sql_calls[2]["frame"].iloc[0]
+    assert split_set["split_set_id"] == "manifest_1__kfold_3_seed_123"
+    folds = to_sql_calls[3]["frame"]
+    assert folds["fold_no"].tolist() == [1, 2, 3]
+    assert folds["n_train"].tolist() == [2, 2, 2]
+    assert folds["n_test"].tolist() == [1, 1, 1]
+    assert engine.connection.executed == []
+
+
+def test_create_fremtpl_manifest_defaults_to_metadata_only_cv_split_set(monkeypatch):
+    engine = FakeEngine()
+    raw_frame = pd.DataFrame(
+        {
+            "IDpol": [1, 2, 3],
+            "ClaimNb": [0, 1, 0],
+            "Exposure": [0.5, 1.0, 0.25],
+            "Area": ["A", "B", "C"],
+        }
+    )
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append({"name": name, "frame": self.copy()})
+        engine.events.append(f"to_sql:{name}")
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    created = create_fremtpl_manifest(
+        engine,
+        manifest_id="manifest_2",
+        n_splits=3,
+        random_state=123,
+        created_by="unit-test",
+    )
+
+    assert created == "manifest_2"
+    assert engine.events == [
+        "to_sql:DATASET_MANIFEST",
+        "to_sql:DATASET_COLUMN",
+        "to_sql:CV_SPLIT_SET",
+        "to_sql:CV_FOLD",
     ]
-    assert staged_keys["row_ordinal"].tolist() == [1, 2, 3]
-    assert staged_keys["cv_fold_no"].tolist() == [1, 2, 3]
-
-    truncate_sql, truncate_params = engine.connection.executed[0]
-    assert truncate_sql == "TRUNCATE TABLE pricing.STG_DATASET_ROW_KEY"
-    assert truncate_params is None
-
-    insert_sql, insert_params = engine.connection.executed[1]
-    assert "HASHBYTES('SHA2_256', source_pk_text)" in insert_sql
-    assert "WHERE manifest_id = :manifest_id" in insert_sql
-    assert insert_params == {"manifest_id": "manifest_1"}
-
-    cv_splits = to_sql_calls[3]["frame"]
-    assert cv_splits["test_fold_no"].tolist() == [1, 2, 3]
-    assert [json.loads(value) for value in cv_splits["train_folds_json"]] == [
-        [2, 3],
-        [1, 3],
-        [1, 2],
+    assert [call["name"] for call in to_sql_calls] == [
+        "DATASET_MANIFEST",
+        "DATASET_COLUMN",
+        "CV_SPLIT_SET",
+        "CV_FOLD",
     ]
+    assert engine.connection.executed == []
+
+    split_set = to_sql_calls[2]["frame"].iloc[0]
+    assert split_set["split_set_id"] == "manifest_2__kfold_3_seed_123"
+    assert split_set["row_count"] == 3
+    assert split_set["fold_count"] == 3
+    assert split_set["split_mode"] == "REPLAYABLE"
+    assert json.loads(split_set["runtime_metadata_json"])["packages"]["sklearn"]
 
 
 def test_load_fremtpl_manifest_script_help_runs_without_pythonpath():

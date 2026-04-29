@@ -7,6 +7,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 export AIRFLOW_PROJ_DIR="${AIRFLOW_PROJ_DIR:-${PROJECT_ROOT}}"
+DAG_ID="${DAG_ID:-pricing_superglm_pipeline}"
 
 mkdir -p \
   "${AIRFLOW_PROJ_DIR}/state/mssql/data" \
@@ -30,6 +31,21 @@ docker compose up -d --wait \
   airflow-triggerer
 
 docker compose run --rm airflow-apiserver python /opt/pricing/scripts/smoke_check.py
+docker compose exec -T airflow-apiserver python /opt/pricing/scripts/cleanup_airflow_examples.py
 
-docker compose exec -T airflow-apiserver airflow dags unpause pricing_superglm_pipeline
-docker compose exec -T airflow-apiserver airflow dags trigger pricing_superglm_pipeline
+for attempt in {1..30}; do
+  if docker compose exec -T airflow-apiserver airflow dags list | grep -qE "^${DAG_ID}[[:space:]]"; then
+    break
+  fi
+
+  if [[ "${attempt}" == "30" ]]; then
+    docker compose exec -T airflow-apiserver airflow dags list-import-errors || true
+    echo "DAG ${DAG_ID} was not available after waiting for the Airflow DAG processor." >&2
+    exit 1
+  fi
+
+  sleep 2
+done
+
+docker compose exec -T airflow-apiserver airflow dags unpause "${DAG_ID}"
+docker compose exec -T airflow-apiserver airflow dags trigger "${DAG_ID}"

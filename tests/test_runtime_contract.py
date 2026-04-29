@@ -9,6 +9,8 @@ STATE_PATHS = [
     "/sources/state/mssql/data",
     "/sources/state/mlflow/artifacts",
     "/sources/state/rating_exports",
+    "/sources/state/cv_splits",
+    "/sources/state/db_diagrams",
     "/sources/state/cloudbeaver/workspace",
 ]
 
@@ -29,6 +31,8 @@ def test_compose_uses_airflow_321_services():
         "mssql",
         "mssql-init",
         "mlflow",
+        "db-diagram-generator",
+        "db-diagrams",
     ]:
         assert name in services
     assert services["flower"]["profiles"] == ["flower"]
@@ -74,6 +78,10 @@ def test_state_mounts_follow_airflow_project_dir():
         in compose["x-airflow-common"]["volumes"]
     )
     assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/cv_splits:/opt/pricing/state/cv_splits"
+        in compose["x-airflow-common"]["volumes"]
+    )
+    assert (
         "${AIRFLOW_PROJ_DIR:-.}/state/mssql/data:/var/opt/mssql"
         in services["mssql"]["volumes"]
     )
@@ -85,11 +93,21 @@ def test_state_mounts_follow_airflow_project_dir():
         "${AIRFLOW_PROJ_DIR:-.}/state/cloudbeaver/workspace:/opt/cloudbeaver/workspace"
         in services["cloudbeaver"]["volumes"]
     )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/db_diagrams:/opt/pricing/state/db_diagrams"
+        in services["db-diagram-generator"]["volumes"]
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/state/db_diagrams:/usr/share/nginx/html:ro"
+        in services["db-diagrams"]["volumes"]
+    )
 
     rendered_volumes = str(compose["x-airflow-common"]["volumes"])
     rendered_volumes += str(services["mssql"]["volumes"])
     rendered_volumes += str(services["mlflow"]["volumes"])
     rendered_volumes += str(services["cloudbeaver"]["volumes"])
+    rendered_volumes += str(services["db-diagram-generator"]["volumes"])
+    rendered_volumes += str(services["db-diagrams"]["volumes"])
     assert "./state/" not in rendered_volumes
 
 
@@ -116,12 +134,15 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
 
 def test_mlflow_serves_artifacts_through_http_proxy():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    mlflow_command = "\n".join(
-        str(part) for part in compose["services"]["mlflow"]["command"]
-    )
+    mlflow = compose["services"]["mlflow"]
+    mlflow_command = "\n".join(str(part) for part in mlflow["command"])
 
     assert "--serve-artifacts" in mlflow_command
     assert "--artifacts-destination /mlflow/artifacts" in mlflow_command
+    assert "--allowed-hosts \"$${MLFLOW_ALLOWED_HOSTS}\"" in mlflow_command
+    assert mlflow["environment"]["MLFLOW_ALLOWED_HOSTS"] == (
+        "${MLFLOW_ALLOWED_HOSTS:-localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,mlflow,mlflow:5000}"
+    )
     assert "--default-artifact-root /mlflow/artifacts" not in mlflow_command
 
 
@@ -166,6 +187,39 @@ def test_mlflow_and_mssql_init_can_import_pricing_pipeline_helpers():
         assert service["environment"]["PYTHONPATH"] == "/opt/airflow"
 
 
+def test_db_diagram_profile_generates_and_serves_static_erds():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    generator = services["db-diagram-generator"]
+    server = services["db-diagrams"]
+    generator_command = "\n".join(str(part) for part in generator["command"])
+
+    assert generator["profiles"] == ["diagrams"]
+    assert server["profiles"] == ["diagrams"]
+    assert "generate_db_diagrams.py" in generator_command
+    assert "--schemas pricing" in generator_command
+    assert server["ports"] == ["8088:80"]
+    assert server["depends_on"]["state-init"] == {"condition": "service_completed_successfully"}
+    assert generator["depends_on"]["mssql"] == {"condition": "service_healthy"}
+
+
+def test_airflow_services_can_import_project_package_and_hide_examples():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    common_env = compose["x-airflow-common"]["environment"]
+    run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
+    cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert common_env["PYTHONPATH"] == "/opt/airflow"
+    assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
+    assert "cleanup_airflow_examples.py" in run_script
+    assert "airflow dags list-import-errors" in run_script
+    assert "airflow dags trigger \"${DAG_ID}\"" in run_script
+    assert "bundle_name" in cleanup_script
+    assert "example_dags" in cleanup_script
+
+
 def test_airflow_common_env_propagates_runtime_overrides():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     common_env = compose["x-airflow-common"]["environment"]
@@ -176,6 +230,15 @@ def test_airflow_common_env_propagates_runtime_overrides():
     assert common_env["RATING_EXPORT_ROOT"] == (
         "${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}"
     )
+
+
+def test_readme_documents_db_diagram_commands():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "Database Diagrams" in readme
+    assert "docker compose --profile diagrams run --rm db-diagram-generator" in readme
+    assert "docker compose --profile diagrams up -d db-diagrams" in readme
+    assert "http://localhost:8088" in readme
 
 
 def test_airflow_image_uses_python_314_base():
@@ -209,3 +272,29 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert re.search(pinned_ref, requirements)
     assert re.search(pinned_ref, pyproject)
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
+
+
+def test_rating_package_loader_publishes_model_scoped_deployment_history():
+    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "model_id" in loader
+    assert "PRICING_MODEL_DEPLOYMENT" in loader
+    assert "effective_to_ts = SYSUTCDATETIME()" in loader
+    assert "deployment_slot" in loader
+    assert "PRICING_PACKAGE_POINTER" in loader
+    assert "pointer_name = src.pointer_name" in loader
+    assert "model_id = src.model_id" in loader
+
+
+def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
+    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ORDER BY" in loader
+    assert "ls.level_set_id" in loader
+    assert "s.order_index" in loader
+    assert "s.lower_bound" in loader
+    assert "s.upper_bound" in loader

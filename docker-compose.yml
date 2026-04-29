@@ -35,11 +35,12 @@ x-airflow-common:
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    PYTHONPATH: /opt/airflow
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     MSSQL_SERVER: ${MSSQL_SERVER:-mssql,1433}
@@ -60,6 +61,7 @@ x-airflow-common:
     - ./db:/opt/pricing/db
     - ./scripts:/opt/pricing/scripts
     - ${AIRFLOW_PROJ_DIR:-.}/state/rating_exports:/opt/pricing/state/rating_exports
+    - ${AIRFLOW_PROJ_DIR:-.}/state/cv_splits:/opt/pricing/state/cv_splits
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -79,10 +81,10 @@ services:
       - -c
       - |
         set -e
-        mkdir -p /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cloudbeaver/workspace
-        chown -R "$${AIRFLOW_UID}:0" /sources/state/mlflow/artifacts /sources/state/rating_exports
+        mkdir -p /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cv_splits /sources/state/db_diagrams /sources/state/cloudbeaver/workspace
+        chown -R "$${AIRFLOW_UID}:0" /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cv_splits /sources/state/db_diagrams
         chown -R "10001:0" /sources/state/mssql/data
-        chmod -R ug+rwX /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports
+        chmod -R ug+rwX /sources/state/mssql/data /sources/state/mlflow/artifacts /sources/state/rating_exports /sources/state/cv_splits /sources/state/db_diagrams
         chmod -R a+rwX /sources/state/cloudbeaver/workspace
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}:/sources
@@ -357,6 +359,8 @@ services:
       MSSQL_DRIVER: ${MSSQL_DRIVER:-ODBC Driver 18 for SQL Server}
       MSSQL_ENCRYPT: ${MSSQL_ENCRYPT:-no}
       MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
+      DIAGRAM_INCLUDE_STAGING: ${DIAGRAM_INCLUDE_STAGING:-}
+      DIAGRAM_INCLUDE_ROW_KEYS: ${DIAGRAM_INCLUDE_ROW_KEYS:-}
       PYTHONPATH: /opt/airflow
     entrypoint: /bin/bash
     command:
@@ -399,10 +403,11 @@ services:
         print(build_sqlalchemy_url(settings, database=settings.mlflow_database))
         PY
         )"
-        exec mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" --serve-artifacts --artifacts-destination /mlflow/artifacts
+        exec mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri "$${MLFLOW_BACKEND_STORE_URI}" --serve-artifacts --artifacts-destination /mlflow/artifacts --allowed-hosts "$${MLFLOW_ALLOWED_HOSTS}"
     environment:
       MSSQL_SERVER: ${MSSQL_SERVER:-mssql,1433}
       MLFLOW_DATABASE: ${MLFLOW_DATABASE:-MLflowTracking}
+      MLFLOW_ALLOWED_HOSTS: ${MLFLOW_ALLOWED_HOSTS:-localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,mlflow,mlflow:5000}
       MSSQL_USER: ${MSSQL_USER:-sa}
       MSSQL_PASSWORD: ${MSSQL_PASSWORD:-YourStrong(!)Password123}
       MSSQL_DRIVER: ${MSSQL_DRIVER:-ODBC Driver 18 for SQL Server}
@@ -425,6 +430,10 @@ services:
     image: dbeaver/cloudbeaver:latest
     profiles:
       - sql-ui
+    environment:
+      CLOUDBEAVER_APP_ANONYMOUS_ACCESS_ENABLED: "true"
+      CLOUDBEAVER_APP_GRANT_CONNECTIONS_ACCESS_TO_ANONYMOUS_TEAM: "true"
+      CLOUDBEAVER_APP_SUPPORTS_CUSTOM_CONNECTIONS: "true"
     ports:
       - "8978:8978"
     volumes:
@@ -434,6 +443,60 @@ services:
         condition: service_completed_successfully
       mssql:
         condition: service_healthy
+    restart: unless-stopped
+
+  db-diagram-generator:
+    image: ${AIRFLOW_IMAGE_NAME:-airflow-superglm:3.2.1-python3.14}
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    profiles:
+      - diagrams
+    environment:
+      MSSQL_SERVER: ${MSSQL_SERVER:-mssql,1433}
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-PricingLab}
+      MSSQL_USER: ${MSSQL_USER:-sa}
+      MSSQL_PASSWORD: ${MSSQL_PASSWORD:-YourStrong(!)Password123}
+      MSSQL_DRIVER: ${MSSQL_DRIVER:-ODBC Driver 18 for SQL Server}
+      MSSQL_ENCRYPT: ${MSSQL_ENCRYPT:-no}
+      MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
+      PYTHONPATH: /opt/airflow
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        extra_args=()
+        if [[ "$${DIAGRAM_INCLUDE_STAGING}" == "1" ]]; then
+          extra_args+=(--include-staging)
+        fi
+        if [[ "$${DIAGRAM_INCLUDE_ROW_KEYS}" == "1" ]]; then
+          extra_args+=(--include-row-keys)
+        fi
+        python /opt/pricing/scripts/generate_db_diagrams.py --schemas pricing --output-dir /opt/pricing/state/db_diagrams "$${extra_args[@]}"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
+      - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/pricing/scripts
+      - ${AIRFLOW_PROJ_DIR:-.}/state/db_diagrams:/opt/pricing/state/db_diagrams
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+      mssql:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+
+  db-diagrams:
+    image: nginx:1.27-alpine
+    profiles:
+      - diagrams
+    ports:
+      - "8088:80"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/state/db_diagrams:/usr/share/nginx/html:ro
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

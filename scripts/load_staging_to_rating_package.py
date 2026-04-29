@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.pricing_db import get_engine  # noqa: E402
+from pricing_pipeline.model_registry import ensure_pricing_model  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,24 +29,41 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         meta = con.execute(text("""
             SELECT
                 export_id,
+                model_id,
                 model_name,
                 model_version,
                 base_rate,
                 effective_from_date,
                 effective_to_date
-            FROM pricing.STG_RATING_EXPORT
+            FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """), {"export_id": args.export_id}).mappings().one()
+
+        model_id = meta["model_id"]
+        if model_id is None:
+            model_id = ensure_pricing_model(
+                con,
+                model_key=meta["model_name"],
+                target_name="ClaimNb",
+                model_type="superglm_poisson",
+                created_by=args.created_by,
+            )
+            con.execute(text("""
+                UPDATE pricing_stg.STG_RATING_EXPORT
+                SET model_id = :model_id
+                WHERE export_id = :export_id
+            """), {"model_id": model_id, "export_id": args.export_id})
 
         package_version = con.execute(text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
             FROM pricing.PRICING_RATE_PACKAGE
-            WHERE model_name = :model_name
-        """), {"model_name": meta["model_name"]}).scalar_one()
+            WHERE model_id = :model_id
+        """), {"model_id": model_id}).scalar_one()
 
         rate_package_id = con.execute(text("""
             INSERT INTO pricing.PRICING_RATE_PACKAGE (
                 parent_rate_package_id,
+                model_id,
                 model_name,
                 model_version,
                 package_version,
@@ -58,6 +76,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             OUTPUT INSERTED.rate_package_id
             VALUES (
                 NULL,
+                :model_id,
                 :model_name,
                 :model_version,
                 :package_version,
@@ -68,6 +87,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :created_by
             )
         """), {
+            "model_id": model_id,
             "model_name": meta["model_name"],
             "model_version": meta["model_version"],
             "package_version": package_version,
@@ -89,7 +109,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 s.feature_name,
                 s.feature_value_type,
                 CASE WHEN s.level_set_type IN ('NUMERIC_BAND', 'SPLINE_GRID_1D') THEN 1 ELSE 0 END
-            FROM pricing.STG_CELL_LEVEL s
+            FROM pricing_stg.STG_CELL_LEVEL s
             WHERE s.export_id = :export_id
               AND NOT EXISTS (
                   SELECT 1
@@ -102,6 +122,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         con.execute(text("""
             INSERT INTO pricing.PRICING_FEATURE_LEVEL_SET (
                 feature_id,
+                model_id,
                 level_set_name,
                 level_set_type,
                 binning_strategy,
@@ -109,6 +130,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             )
             SELECT DISTINCT
                 f.feature_id,
+                :model_id,
                 s.level_set_name,
                 s.level_set_type,
                 CASE
@@ -117,17 +139,18 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     ELSE 'EXPLICIT_LEVELS'
                 END,
                 NULL
-            FROM pricing.STG_CELL_LEVEL s
+            FROM pricing_stg.STG_CELL_LEVEL s
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_name = s.feature_name
             WHERE s.export_id = :export_id
               AND NOT EXISTS (
                   SELECT 1
                   FROM pricing.PRICING_FEATURE_LEVEL_SET ls
-                  WHERE ls.feature_id = f.feature_id
+                  WHERE ls.model_id = :model_id
+                    AND ls.feature_id = f.feature_id
                     AND ls.level_set_name = s.level_set_name
               );
-        """), {"export_id": args.export_id})
+        """), {"export_id": args.export_id, "model_id": model_id})
 
         # Levels
         con.execute(text("""
@@ -152,11 +175,12 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 s.representative_value,
                 s.is_missing,
                 s.is_other
-            FROM pricing.STG_CELL_LEVEL s
+            FROM pricing_stg.STG_CELL_LEVEL s
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_name = s.feature_name
             JOIN pricing.PRICING_FEATURE_LEVEL_SET ls
-              ON ls.feature_id = f.feature_id
+              ON ls.model_id = :model_id
+             AND ls.feature_id = f.feature_id
              AND ls.level_set_name = s.level_set_name
             WHERE s.export_id = :export_id
               AND NOT EXISTS (
@@ -164,8 +188,14 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   FROM pricing.PRICING_FEATURE_LEVEL fl
                   WHERE fl.level_set_id = ls.level_set_id
                     AND fl.level_code = s.level_code
-              );
-        """), {"export_id": args.export_id})
+              )
+            ORDER BY
+                ls.level_set_id,
+                s.order_index,
+                s.lower_bound,
+                s.upper_bound,
+                s.level_code;
+        """), {"export_id": args.export_id, "model_id": model_id})
 
         # Terms
         con.execute(text("""
@@ -180,7 +210,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 c.term_name,
                 c.term_type,
                 c.sequence_no
-            FROM pricing.STG_RATE_CELL c
+            FROM pricing_stg.STG_RATE_CELL c
             WHERE c.export_id = :export_id;
         """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
 
@@ -199,8 +229,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 f.feature_id,
                 ls.level_set_id,
                 s.feature_name
-            FROM pricing.STG_CELL_LEVEL s
-            JOIN pricing.STG_RATE_CELL c
+            FROM pricing_stg.STG_CELL_LEVEL s
+            JOIN pricing_stg.STG_RATE_CELL c
               ON c.export_id = s.export_id
              AND c.row_id = s.row_id
             JOIN pricing.PRICING_TERM t
@@ -209,10 +239,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_name = s.feature_name
             JOIN pricing.PRICING_FEATURE_LEVEL_SET ls
-              ON ls.feature_id = f.feature_id
+              ON ls.model_id = :model_id
+             AND ls.feature_id = f.feature_id
              AND ls.level_set_name = s.level_set_name
             WHERE s.export_id = :export_id;
-        """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
+        """), {
+            "export_id": args.export_id,
+            "rate_package_id": rate_package_id,
+            "model_id": model_id,
+        })
 
         # Cells
         con.execute(text("""
@@ -237,7 +272,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 c.record_count,
                 c.is_reference,
                 c.is_default
-            FROM pricing.STG_RATE_CELL c
+            FROM pricing_stg.STG_RATE_CELL c
             JOIN pricing.PRICING_TERM t
               ON t.rate_package_id = :rate_package_id
              AND t.term_name = c.term_name
@@ -255,8 +290,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 rc.cell_id,
                 s.position_no,
                 fl.feature_level_id
-            FROM pricing.STG_CELL_LEVEL s
-            JOIN pricing.STG_RATE_CELL c
+            FROM pricing_stg.STG_CELL_LEVEL s
+            JOIN pricing_stg.STG_RATE_CELL c
               ON c.export_id = s.export_id
              AND c.row_id = s.row_id
             JOIN pricing.PRICING_TERM t
@@ -268,13 +303,18 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_name = s.feature_name
             JOIN pricing.PRICING_FEATURE_LEVEL_SET ls
-              ON ls.feature_id = f.feature_id
+              ON ls.model_id = :model_id
+             AND ls.feature_id = f.feature_id
              AND ls.level_set_name = s.level_set_name
             JOIN pricing.PRICING_FEATURE_LEVEL fl
               ON fl.level_set_id = ls.level_set_id
              AND fl.level_code = s.level_code
             WHERE s.export_id = :export_id;
-        """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
+        """), {
+            "export_id": args.export_id,
+            "rate_package_id": rate_package_id,
+            "model_id": model_id,
+        })
 
         # Minimal compile step: flat rate cells
         con.execute(text("""
@@ -323,6 +363,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 term_name,
                 feature_name,
                 level_code,
+                sort_order,
                 lower_bound,
                 upper_bound,
                 representative_value,
@@ -336,6 +377,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 t.term_name,
                 f.feature_name,
                 fl.level_code,
+                COALESCE(fl.order_index, 0),
                 fl.lower_bound,
                 fl.upper_bound,
                 fl.representative_value,
@@ -355,7 +397,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
               ON f.feature_id = ls.feature_id
             WHERE t.rate_package_id = :rate_package_id
               AND t.term_type IN ('DISCRETIZED_SPLINE_1D', 'NUMERIC_BANDED_1D')
-              AND rc.is_deleted = 0;
+              AND rc.is_deleted = 0
+            ORDER BY
+                t.sequence_no,
+                COALESCE(fl.order_index, 0),
+                fl.lower_bound,
+                fl.upper_bound,
+                fl.level_code;
         """), {"rate_package_id": rate_package_id})
 
         if args.set_pointer:
@@ -363,23 +411,55 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 MERGE pricing.PRICING_PACKAGE_POINTER AS tgt
                 USING (
                     SELECT
+                        :model_id AS model_id,
                         :pointer_name AS pointer_name,
                         :rate_package_id AS rate_package_id,
                         :updated_by AS updated_by
                 ) AS src
-                ON tgt.pointer_name = src.pointer_name
+                ON tgt.model_id = src.model_id
+                   AND tgt.pointer_name = src.pointer_name
                 WHEN MATCHED THEN
                     UPDATE SET
                         rate_package_id = src.rate_package_id,
                         updated_ts = SYSUTCDATETIME(),
                         updated_by = src.updated_by
                 WHEN NOT MATCHED THEN
-                    INSERT (pointer_name, rate_package_id, updated_by)
-                    VALUES (src.pointer_name, src.rate_package_id, src.updated_by);
+                    INSERT (model_id, pointer_name, rate_package_id, updated_by)
+                    VALUES (src.model_id, src.pointer_name, src.rate_package_id, src.updated_by);
             """), {
+                "model_id": model_id,
                 "pointer_name": args.set_pointer,
                 "rate_package_id": rate_package_id,
                 "updated_by": args.created_by,
+            })
+            con.execute(text("""
+                UPDATE pricing.PRICING_MODEL_DEPLOYMENT
+                SET effective_to_ts = SYSUTCDATETIME()
+                WHERE model_id = :model_id
+                  AND deployment_slot = :deployment_slot
+                  AND effective_to_ts IS NULL;
+            """), {
+                "model_id": model_id,
+                "deployment_slot": args.set_pointer,
+            })
+            con.execute(text("""
+                INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT (
+                    model_id,
+                    rate_package_id,
+                    deployment_slot,
+                    deployed_by
+                )
+                VALUES (
+                    :model_id,
+                    :rate_package_id,
+                    :deployment_slot,
+                    :deployed_by
+                );
+            """), {
+                "model_id": model_id,
+                "rate_package_id": rate_package_id,
+                "deployment_slot": args.set_pointer,
+                "deployed_by": args.created_by,
             })
 
         args.package_version = package_version

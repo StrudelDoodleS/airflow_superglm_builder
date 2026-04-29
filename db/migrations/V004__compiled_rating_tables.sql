@@ -39,6 +39,7 @@ CREATE TABLE pricing.PRICING_COMPILED_1D_RATE_BAND (
     term_name             NVARCHAR(128) NOT NULL,
     feature_name          NVARCHAR(128) NOT NULL,
     level_code            NVARCHAR(128) NOT NULL,
+    sort_order            INT NOT NULL,
     lower_bound           FLOAT NULL,
     upper_bound           FLOAT NULL,
     representative_value  FLOAT NULL,
@@ -46,7 +47,7 @@ CREATE TABLE pricing.PRICING_COMPILED_1D_RATE_BAND (
     log_coefficient       DECIMAL(19,12) NOT NULL,
 
     CONSTRAINT PK_COMPILED_1D_RATE_BAND
-        PRIMARY KEY (rate_package_id, term_id, feature_level_id),
+        PRIMARY KEY CLUSTERED (rate_package_id, term_id, sort_order, feature_level_id),
 
     CONSTRAINT FK_COMPILED_1D_RATE_BAND_PACKAGE
         FOREIGN KEY (rate_package_id)

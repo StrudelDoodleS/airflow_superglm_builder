@@ -12,6 +12,7 @@ def record_model_run(
     mlflow_run_id: str,
     manifest_id: str,
     export_id: str,
+    model_id: int,
     model_name: str,
     model_version: str,
     rate_package_id: int | None,
@@ -25,6 +26,7 @@ def record_model_run(
         "mlflow_run_id": mlflow_run_id,
         "manifest_id": manifest_id,
         "export_id": export_id,
+        "model_id": model_id,
         "model_name": model_name,
         "model_version": model_version,
         "rate_package_id": rate_package_id,
@@ -41,16 +43,19 @@ def record_model_run(
                     SELECT
                         :dag_id AS dag_id,
                         :airflow_run_id AS airflow_run_id,
+                        :model_id AS model_id,
                         :model_name AS model_name
                 ) AS src
                 ON tgt.dag_id = src.dag_id
                    AND tgt.airflow_run_id = src.airflow_run_id
-                   AND tgt.model_name = src.model_name
+                   AND tgt.model_id = src.model_id
                 WHEN MATCHED THEN
                     UPDATE SET
                         mlflow_run_id = :mlflow_run_id,
                         manifest_id = :manifest_id,
                         export_id = :export_id,
+                        model_id = :model_id,
+                        model_name = :model_name,
                         model_version = :model_version,
                         rate_package_id = :rate_package_id,
                         rating_workbook_path = :rating_workbook_path,
@@ -64,6 +69,7 @@ def record_model_run(
                         mlflow_run_id,
                         manifest_id,
                         export_id,
+                        model_id,
                         model_name,
                         model_version,
                         rate_package_id,
@@ -78,6 +84,7 @@ def record_model_run(
                         :mlflow_run_id,
                         :manifest_id,
                         :export_id,
+                        :model_id,
                         :model_name,
                         :model_version,
                         :rate_package_id,

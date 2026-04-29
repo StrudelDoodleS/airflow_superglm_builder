@@ -2,9 +2,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'pricing')
     EXEC('CREATE SCHEMA pricing');
 GO
 
-IF OBJECT_ID('pricing.STG_RATING_EXPORT', 'U') IS NULL
-CREATE TABLE pricing.STG_RATING_EXPORT (
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'pricing_stg')
+    EXEC('CREATE SCHEMA pricing_stg');
+GO
+
+IF OBJECT_ID('pricing_stg.STG_RATING_EXPORT', 'U') IS NULL
+CREATE TABLE pricing_stg.STG_RATING_EXPORT (
     export_id             NVARCHAR(128) NOT NULL PRIMARY KEY,
+    model_id              BIGINT NULL,
     model_name            NVARCHAR(128) NOT NULL,
     model_version         NVARCHAR(64) NULL,
     base_rate             DECIMAL(19,6) NOT NULL,
@@ -16,8 +21,8 @@ CREATE TABLE pricing.STG_RATING_EXPORT (
 );
 GO
 
-IF OBJECT_ID('pricing.STG_RATE_CELL', 'U') IS NULL
-CREATE TABLE pricing.STG_RATE_CELL (
+IF OBJECT_ID('pricing_stg.STG_RATE_CELL', 'U') IS NULL
+CREATE TABLE pricing_stg.STG_RATE_CELL (
     export_id          NVARCHAR(128) NOT NULL,
     row_id             INT NOT NULL,
     term_name          NVARCHAR(128) NOT NULL,
@@ -36,12 +41,12 @@ CREATE TABLE pricing.STG_RATE_CELL (
 
     CONSTRAINT FK_STG_RATE_CELL_EXPORT
         FOREIGN KEY (export_id)
-        REFERENCES pricing.STG_RATING_EXPORT(export_id)
+        REFERENCES pricing_stg.STG_RATING_EXPORT(export_id)
 );
 GO
 
-IF OBJECT_ID('pricing.STG_CELL_LEVEL', 'U') IS NULL
-CREATE TABLE pricing.STG_CELL_LEVEL (
+IF OBJECT_ID('pricing_stg.STG_CELL_LEVEL', 'U') IS NULL
+CREATE TABLE pricing_stg.STG_CELL_LEVEL (
     export_id              NVARCHAR(128) NOT NULL,
     row_id                 INT NOT NULL,
     position_no            SMALLINT NOT NULL,
@@ -63,6 +68,6 @@ CREATE TABLE pricing.STG_CELL_LEVEL (
 
     CONSTRAINT FK_STG_CELL_LEVEL_CELL
         FOREIGN KEY (export_id, row_id)
-        REFERENCES pricing.STG_RATE_CELL(export_id, row_id)
+        REFERENCES pricing_stg.STG_RATE_CELL(export_id, row_id)
 );
 GO

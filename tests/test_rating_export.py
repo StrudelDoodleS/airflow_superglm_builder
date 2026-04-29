@@ -14,6 +14,7 @@ import pytest
 
 from pricing_pipeline import lineage, pipeline, rating_export, rating_package
 from pricing_pipeline.config import Settings
+from pricing_pipeline.model_registry import ensure_pricing_model
 from scripts import load_staging_to_rating_package
 from scripts import load_superglm_excel_to_staging
 from scripts import smoke_check
@@ -218,6 +219,57 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
+class FakeScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
+
+
+class FakeModelRegistryConnection(FakeBeginConnection):
+    def execute(self, statement, params=None):
+        self.events.append(("execute", str(statement), params))
+        if "SELECT model_id" in str(statement):
+            return FakeScalarResult(17)
+        return FakeScalarResult(None)
+
+
+class FakeModelRegistryEngine(FakeEngine):
+    def __init__(self, events: list[tuple]):
+        self.events = events
+        self.connection = FakeModelRegistryConnection(events)
+
+
+def test_ensure_pricing_model_merges_by_model_key_and_returns_model_id():
+    events = []
+    con = FakeModelRegistryConnection(events)
+
+    model_id = ensure_pricing_model(
+        con,
+        model_key="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        created_by="airflow",
+    )
+
+    assert model_id == 17
+    merge_sql = events[0][1]
+    select_sql = events[1][1]
+    assert "MERGE pricing.PRICING_MODEL WITH (HOLDLOCK)" in merge_sql
+    assert "ON tgt.model_key = src.model_key" in merge_sql
+    assert "model_status" in merge_sql
+    assert "SELECT model_id" in select_sql
+    assert events[0][2] == {
+        "model_key": "MTPL_FREQ",
+        "model_label": None,
+        "target_name": "ClaimNb",
+        "model_type": "superglm_poisson",
+        "model_status": "ACTIVE",
+        "created_by": "airflow",
+    }
+
+
 def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     monkeypatch, tmp_path: Path
 ):
@@ -237,7 +289,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         "build_staging_frames",
         fake_build_staging_frames,
     )
-    engine = FakeEngine(events)
+    engine = FakeModelRegistryEngine(events)
     workbook_path = tmp_path / "rating_tables.xlsx"
 
     load_superglm_excel_to_staging.stage_rating_export(
@@ -257,6 +309,9 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     assert args.sheet == "Rating Tables"
     assert args.export_id == "export-1"
     assert args.model_name == "MTPL_FREQ"
+    assert args.target_name == "ClaimNb"
+    assert args.model_type == "superglm_poisson"
+    assert args.model_status == "ACTIVE"
     assert args.model_version == "20260427"
     assert args.effective_from == "2026-04-27"
     assert args.effective_to is None
@@ -265,14 +320,18 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
 
     delete_sql = [event[1] for event in events if event[0] == "execute"]
     assert delete_sql == [
-        "DELETE FROM pricing.STG_CELL_LEVEL WHERE export_id = :export_id",
-        "DELETE FROM pricing.STG_RATE_CELL WHERE export_id = :export_id",
-        "DELETE FROM pricing.STG_RATING_EXPORT WHERE export_id = :export_id",
+        "\n                MERGE pricing.PRICING_MODEL WITH (HOLDLOCK) AS tgt\n                USING (\n                    SELECT\n                        :model_key AS model_key,\n                        :model_label AS model_label,\n                        :target_name AS target_name,\n                        :model_type AS model_type,\n                        :model_status AS model_status,\n                        :created_by AS created_by\n                ) AS src\n                ON tgt.model_key = src.model_key\n                WHEN MATCHED THEN\n                    UPDATE SET\n                        model_label = COALESCE(src.model_label, tgt.model_label),\n                        target_name = src.target_name,\n                        model_type = src.model_type,\n                        model_status = src.model_status\n                WHEN NOT MATCHED THEN\n                    INSERT (\n                        model_key,\n                        model_label,\n                        target_name,\n                        model_type,\n                        model_status,\n                        created_by\n                    )\n                    VALUES (\n                        src.model_key,\n                        src.model_label,\n                        src.target_name,\n                        src.model_type,\n                        src.model_status,\n                        src.created_by\n                    );\n                ",
+        "\n                SELECT model_id\n                FROM pricing.PRICING_MODEL\n                WHERE model_key = :model_key\n                ",
+        "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
+        "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id WHERE export_id = :export_id",
     ]
-    assert [event[2] for event in events if event[0] == "execute"] == [
+    assert [event[2] for event in events if event[0] == "execute"][-4:] == [
         {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
+        {"export_id": "export-1", "model_id": 17},
     ]
     assert [event[:4] for event in events if event[0] == "to_sql"] == [
         ("to_sql", "export", "STG_RATING_EXPORT", engine.connection),
@@ -285,6 +344,51 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         5000,
     ]
     assert events[0] == ("begin",)
+
+
+def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_path: Path):
+    raw = pd.DataFrame([[None] * 6 for _ in range(10)])
+    raw.iat[1, 2] = 0.123
+    raw.iat[4, 0] = "VehAge"
+    raw.iat[4, 3] = "DrivAge"
+    raw.iloc[6, 0:3] = ["VehAge", "Relativity", "Weight"]
+    raw.iloc[6, 3:6] = ["DrivAge", "Relativity", "Weight"]
+    raw.iloc[7, 0:3] = ["[0, 1)", 1.2, 10.0]
+    raw.iloc[8, 0:3] = ["[1, 2)", 0.9, 20.0]
+    raw.iloc[7, 3:6] = ["[18, 20)", 1.1, 30.0]
+
+    monkeypatch.setattr(
+        load_superglm_excel_to_staging.pd,
+        "read_excel",
+        lambda *args, **kwargs: raw,
+    )
+
+    args = SimpleNamespace(
+        xlsx=tmp_path / "rating_tables.xlsx",
+        sheet="Rating Tables",
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        effective_to=None,
+        base_rate=None,
+        base_rate_cell="C2",
+        term_row=5,
+        header_row=7,
+        data_start_row=8,
+        term_type_map_json="{}",
+        interaction_features_json="{}",
+        created_by="airflow",
+    )
+
+    export_df, rate_df, level_df = load_superglm_excel_to_staging.build_staging_frames(
+        args
+    )
+
+    assert export_df.loc[0, "base_rate"] == 0.123
+    assert rate_df["term_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
+    assert rate_df["multiplier"].tolist() == [1.2, 0.9, 1.1]
+    assert level_df["feature_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
 
 
 def test_publish_rating_package_wrapper_passes_args_and_returns_package_id(monkeypatch):
@@ -361,6 +465,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         mlflow_run_id="mlflow-1",
         manifest_id="manifest-1",
         export_id="export-1",
+        model_id=17,
         model_name="MTPL_FREQ",
         model_version="20260427",
         rate_package_id=42,
@@ -377,7 +482,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
     assert "WHEN NOT MATCHED THEN" in sql
     assert "tgt.dag_id = src.dag_id" in sql
     assert "tgt.airflow_run_id = src.airflow_run_id" in sql
-    assert "tgt.model_name = src.model_name" in sql
+    assert "tgt.model_id = src.model_id" in sql
     assert "SYSUTCDATETIME()" in sql
     assert ":dag_id" in sql
     assert params == {
@@ -386,6 +491,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "mlflow_run_id": "mlflow-1",
         "manifest_id": "manifest-1",
         "export_id": "export-1",
+        "model_id": 17,
         "model_name": "MTPL_FREQ",
         "model_version": "20260427",
         "rate_package_id": 42,
@@ -489,6 +595,9 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             calls.append(("start_run_exit", exc_type))
             return False
 
+    def fake_log_metric(key, value, **kwargs):
+        calls.append(("log_metric", key, value, kwargs))
+
     fake_mlflow = SimpleNamespace(
         set_experiment=lambda experiment: calls.append(("set_experiment", experiment)),
         start_run=lambda: FakeStartRun(),
@@ -496,7 +605,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         log_artifact=lambda path, artifact_path=None: calls.append(
             ("log_artifact", path, artifact_path)
         ),
-        log_metric=lambda key, value: calls.append(("log_metric", key, value)),
+        log_metric=fake_log_metric,
     )
 
     def fake_read_sql_query(sql, engine):
@@ -522,6 +631,12 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
 
     monkeypatch.setattr(pipeline, "configure_mlflow", lambda uri: calls.append(("configure_mlflow", uri)))
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_pricing_model",
+        lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
+        or 17,
+    )
     monkeypatch.setattr(pipeline, "build_model", lambda: model)
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
@@ -569,15 +684,31 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "rating_workbook_path": str(workbook_path),
     }
     assert ("configure_mlflow", "http://mlflow.local") in calls
+    assert (
+        "ensure_pricing_model",
+        engine,
+        {
+            "model_key": "MTPL_FREQ",
+            "target_name": "ClaimNb",
+            "model_type": "superglm_poisson",
+            "created_by": "airflow",
+        },
+    ) in calls
     assert ("read_sql_query", "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol", engine) in calls
     assert ("set_experiment", "pricing-mtpl-frequency") in calls
     assert ("log_param", "model_name", "MTPL_FREQ") in calls
+    assert ("log_param", "model_id", 17) in calls
     assert ("log_param", "model_version", "20260427") in calls
     assert ("log_param", "manifest_id", "manifest-1") in calls
     assert ("log_param", "target", "ClaimNb") in calls
     assert ("log_param", "offset", "log(Exposure)") in calls
-    assert ("log_metric", "deviance", 7.25) in calls
+    assert ("log_metric", "deviance", 7.25, {}) in calls
     assert ("log_artifact", str(model_path), "model") in calls
+    assert (
+        "log_artifact",
+        str(workbook_path.parent / "superglm_fit.log"),
+        "training_diagnostics",
+    ) in calls
     assert dumped == [(model, model_path)]
 
     assert len(model.fit_calls) == 1
@@ -599,6 +730,8 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "export_id": export_id,
             "model_name": "MTPL_FREQ",
             "model_version": "20260427",
+            "target_name": "ClaimNb",
+            "model_type": "superglm_poisson",
             "effective_from": "2026-04-27",
             "created_by": "airflow",
             "replace": True,
@@ -627,6 +760,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "mlflow_run_id": "mlflow-run-1",
             "manifest_id": "manifest-1",
             "export_id": export_id,
+            "model_id": 17,
             "model_name": "MTPL_FREQ",
             "model_version": "20260427",
             "rate_package_id": 123,
