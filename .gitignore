@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .codex
+.dags_root_owned_backup_*/
 logs/
 config/
 plugins/

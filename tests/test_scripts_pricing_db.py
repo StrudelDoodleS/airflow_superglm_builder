@@ -1,8 +1,10 @@
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from urllib.parse import unquote_plus
 
+import scripts.load_fremtpl_raw as load_fremtpl_raw_script
 import scripts.pricing_db as script_db
 from pricing_pipeline import db as shared_db
 from pricing_pipeline.config import Settings
@@ -70,6 +72,23 @@ def test_script_get_engine_delegates_to_shared_pricing_db_helper(monkeypatch):
     assert captured["env"] is os.environ
     assert captured["settings"].pricing_database == "ScriptPricing"
     assert captured["database"] is None
+
+
+def test_load_fremtpl_raw_script_uses_pricing_db_engine_loader(monkeypatch, capsys):
+    sentinel_engine = object()
+    calls = []
+    monkeypatch.setattr(load_fremtpl_raw_script, "parse_args", lambda: SimpleNamespace(replace=True))
+    monkeypatch.setattr(load_fremtpl_raw_script, "get_engine", lambda: sentinel_engine)
+    monkeypatch.setattr(
+        load_fremtpl_raw_script,
+        "load_fremtpl_raw",
+        lambda engine, *, replace: calls.append((engine, replace)) or 12,
+    )
+
+    load_fremtpl_raw_script.main()
+
+    assert calls == [(sentinel_engine, True)]
+    assert "fremtpl_raw_rows=12" in capsys.readouterr().out
 
 
 def test_script_build_sqlalchemy_url_uses_shared_password_escaping(monkeypatch):

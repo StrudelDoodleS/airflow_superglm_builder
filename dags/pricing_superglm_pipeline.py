@@ -14,7 +14,18 @@ from pricing_pipeline.migrations import apply_migrations
 from pricing_pipeline.pipeline import run_training_export_publish
 
 
-MIGRATIONS_DIR = Path("/opt/pricing/db/migrations")
+_REPO_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
+_DOCKER_MIGRATIONS_DIR = Path("/opt/pricing/db/migrations")
+MIGRATIONS_DIR = Path(
+    os.environ.get(
+        "PRICING_MIGRATIONS_DIR",
+        str(
+            _DOCKER_MIGRATIONS_DIR
+            if _DOCKER_MIGRATIONS_DIR.exists()
+            else _REPO_MIGRATIONS_DIR
+        ),
+    )
+)
 FREMTPL_DATASET_NAME = "freMTPL2freq"
 
 
@@ -45,7 +56,8 @@ def _pricing_superglm_pipeline():
     @task
     def apply_pricing_migrations() -> list[str]:
         settings = _settings()
-        ensure_database(settings, settings.pricing_database)
+        if not settings.skip_database_create:
+            ensure_database(settings, settings.pricing_database)
         return apply_migrations(get_engine(settings), MIGRATIONS_DIR)
 
     @task

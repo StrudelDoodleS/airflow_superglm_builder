@@ -72,6 +72,85 @@ That script builds the image, starts the services, cleans stale Airflow example
 DAG metadata, waits for `pricing_superglm_pipeline` to be visible, and triggers
 the DAG.
 
+## No-Docker Work Quickstart
+
+Use this path when Docker is blocked but local Python processes are allowed. It
+runs Airflow and MLflow on the host, writes durable artifacts under `state/`,
+and targets an external SQL Server or Azure SQL database through ODBC.
+
+Prerequisites:
+
+- Python 3.14 and `uv`.
+- Microsoft ODBC Driver 18 for SQL Server.
+- Network access to the hosted SQL Server.
+- A target database that already exists, unless your login is allowed to create
+  databases.
+
+1. Bootstrap local folders and dependencies:
+
+   ```bash
+   scripts/bootstrap_no_docker.sh
+   ```
+
+   If `.env` does not exist, this copies `.env.nodocker.example` to `.env`.
+
+2. Edit `.env` for the work SQL Server:
+
+   ```env
+   MSSQL_SERVER=<server-name>.database.windows.net,1433
+   MSSQL_DATABASE=PricingLab_UAT
+   MSSQL_USER=pricing_pipeline_writer
+   MSSQL_PASSWORD=<from-secret-store>
+   MSSQL_ENCRYPT=yes
+   MSSQL_TRUST_SERVER_CERT=no
+   PRICING_SKIP_DATABASE_CREATE=true
+   ```
+
+   Keep `PRICING_SKIP_DATABASE_CREATE=true` when the DBA has already created the
+   database and your pipeline login should only manage objects inside it.
+
+3. Start MLflow in one terminal:
+
+   ```bash
+   uv run python scripts/start_mlflow_local.py
+   ```
+
+   By default, MLflow metadata is stored in `state/mlflow/mlflow.db` and
+   artifacts are stored in `state/mlflow/artifacts`.
+
+4. Start Airflow in another terminal:
+
+   ```bash
+   uv run python scripts/start_airflow_local.py
+   ```
+
+   This runs `airflow standalone` with `AIRFLOW_HOME=state/airflow`, the repo
+   `dags/` folder, example DAGs disabled, and repo-local rating exports.
+
+5. Apply migrations and load raw freMTPL data once:
+
+   ```bash
+   uv run python scripts/apply_sql_migrations.py
+   uv run python scripts/load_fremtpl_raw.py --replace
+   ```
+
+6. Trigger `pricing_superglm_pipeline` from the Airflow UI, or run it directly
+   without Airflow:
+
+   ```bash
+   uv run python scripts/run_pipeline_no_airflow.py
+   ```
+
+   The direct runner uses the same SQL migrations, freMTPL loader, manifest/CV
+   metadata, MLflow logging, rating export, and SQL publish code as the DAG.
+
+For a work deployment, CloudBeaver is not required and should normally not be
+started. Changing from local testing to a work SQL Server is just an `.env`
+change as long as the authentication mode is SQL username/password. If the
+work server requires Microsoft Entra token authentication, add a pyodbc token
+connection path in `pricing_pipeline/db.py` and keep the rest of the pipeline
+unchanged.
+
 ## Optional Local Tools
 
 These are for local inspection only. They are not required for the training or
@@ -265,7 +344,10 @@ Regenerate the site whenever migrations or table relationships change.
 
 Durable local project files live under `state/`:
 
+- `state/airflow`: host-process Airflow home for the no-Docker workflow.
 - `state/mssql/data`: SQL Server database files.
+- `state/mlflow/mlflow.db`: host-process MLflow SQLite metadata store for the
+  no-Docker workflow.
 - `state/mlflow/artifacts`: MLflow model and run artifacts.
 - `state/rating_exports`: rating export workbooks and normalized rating
   packages produced by the pipeline.

@@ -4,11 +4,18 @@ This is a tiny Flyway-like runner for local testing. In production, use Flyway i
 """
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
-from pricing_db import ROOT, get_engine
+from scripts.pricing_db import ROOT, get_engine, load_env
 
-MIGRATIONS_DIR = ROOT / "db" / "migrations"
+
+def _migrations_dir() -> Path:
+    path = Path(os.environ.get("PRICING_MIGRATIONS_DIR", ROOT / "db" / "migrations"))
+    if path.is_absolute():
+        return path
+    return ROOT / path
 
 
 def _ensure_repo_root_on_path() -> None:
@@ -20,13 +27,15 @@ def main() -> None:
     _ensure_repo_root_on_path()
     from pricing_pipeline.migrations import apply_migrations, migration_files
 
+    load_env()
     engine = get_engine()
+    migrations_dir = _migrations_dir()
 
-    files = migration_files(MIGRATIONS_DIR)
+    files = migration_files(migrations_dir)
     if not files:
-        raise RuntimeError(f"No migration files found in {MIGRATIONS_DIR}")
+        raise RuntimeError(f"No migration files found in {migrations_dir}")
 
-    applied = set(apply_migrations(engine, MIGRATIONS_DIR))
+    applied = set(apply_migrations(engine, migrations_dir))
     for path in files:
         verb = "apply" if path.name in applied else "skip"
         print(f"{verb} {path.name}")

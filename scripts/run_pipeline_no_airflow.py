@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pricing_db import get_engine, load_env  # noqa: E402
+from pricing_pipeline.config import Settings  # noqa: E402
+from pricing_pipeline.db import ensure_database  # noqa: E402
+from pricing_pipeline.fremtpl import load_fremtpl_raw  # noqa: E402
+from pricing_pipeline.manifest import (  # noqa: E402
+    FREMTPL_DATASET_NAME,
+    create_fremtpl_manifest,
+    new_manifest_id,
+)
+from pricing_pipeline.migrations import apply_migrations  # noqa: E402
+from pricing_pipeline.pipeline import run_training_export_publish  # noqa: E402
+
+
+def _migrations_dir() -> Path:
+    path = Path(os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"))
+    if path.is_absolute():
+        return path
+    return ROOT / path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the pricing pipeline directly from the host without Airflow or Docker."
+    )
+    parser.add_argument(
+        "--ensure-database",
+        action="store_true",
+        help="Create the target database if it does not exist.",
+    )
+    parser.add_argument(
+        "--skip-migrations",
+        action="store_true",
+        help="Do not apply SQL migrations before the run.",
+    )
+    parser.add_argument(
+        "--skip-raw-load",
+        action="store_true",
+        help="Do not fetch/load freMTPL raw data before creating the manifest.",
+    )
+    parser.add_argument(
+        "--replace-raw",
+        action="store_true",
+        help="Truncate and reload pricing.FREMTPL_RAW before training.",
+    )
+    parser.add_argument("--manifest-id", default=None)
+    parser.add_argument("--n-splits", type=int, default=5)
+    parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--dag-id", default="no_docker_local")
+    parser.add_argument("--airflow-run-id", default=None)
+    parser.add_argument("--logical-date", default=None)
+    parser.add_argument("--created-by", default="no_docker")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    os.chdir(ROOT)
+    load_env()
+    settings = Settings.from_env(os.environ)
+
+    if args.ensure_database:
+        if settings.skip_database_create:
+            print("skip_database_create=true; not creating database")
+        else:
+            ensure_database(settings, settings.pricing_database)
+
+    engine = get_engine()
+
+    if not args.skip_migrations:
+        applied = apply_migrations(engine, _migrations_dir())
+        print(f"migrations_applied={len(applied)}")
+
+    if not args.skip_raw_load:
+        raw_rows = load_fremtpl_raw(engine, replace=args.replace_raw)
+        print(f"fremtpl_raw_rows={raw_rows}")
+
+    manifest_id = args.manifest_id or new_manifest_id(FREMTPL_DATASET_NAME)
+    created_manifest_id = create_fremtpl_manifest(
+        engine,
+        manifest_id=manifest_id,
+        n_splits=args.n_splits,
+        random_state=args.random_state,
+        created_by=args.created_by,
+    )
+    logical_date = args.logical_date or datetime.now(UTC).date().isoformat()
+    airflow_run_id = args.airflow_run_id or f"manual__{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    result = run_training_export_publish(
+        engine,
+        settings=settings,
+        manifest_id=created_manifest_id,
+        dag_id=args.dag_id,
+        airflow_run_id=airflow_run_id,
+        logical_date=logical_date,
+        created_by=args.created_by,
+    )
+    print(json.dumps({"manifest_id": created_manifest_id, **result}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

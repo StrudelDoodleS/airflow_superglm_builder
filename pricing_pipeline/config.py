@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import Mapping
 
 
+def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     mssql_server: str = "mssql,1433"
@@ -17,6 +24,7 @@ class Settings:
     mssql_trust_server_cert: str = "yes"
     mlflow_tracking_uri: str = "http://mlflow:5000"
     rating_export_root: Path = Path("/opt/pricing/state/rating_exports")
+    skip_database_create: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -34,5 +42,10 @@ class Settings:
             mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI", cls.mlflow_tracking_uri),
             rating_export_root=Path(
                 env.get("RATING_EXPORT_ROOT", str(cls.rating_export_root))
+            ),
+            skip_database_create=_env_bool(
+                env,
+                "PRICING_SKIP_DATABASE_CREATE",
+                cls.skip_database_create,
             ),
         )

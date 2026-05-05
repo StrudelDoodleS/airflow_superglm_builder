@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+from pricing_pipeline.config import Settings
+
+
+def test_no_docker_env_example_targets_host_processes_and_external_sql():
+    env_example = Path(".env.nodocker.example")
+
+    assert env_example.exists()
+    text = env_example.read_text(encoding="utf-8")
+
+    assert "MSSQL_SERVER=<server-name>.database.windows.net,1433" in text
+    assert "PRICING_SKIP_DATABASE_CREATE=true" in text
+    assert "MLFLOW_TRACKING_URI=http://127.0.0.1:5000" in text
+    assert "RATING_EXPORT_ROOT=state/rating_exports" in text
+    assert "mssql,1433" not in text
+    assert "/opt/pricing" not in text
+
+
+def test_no_docker_scripts_exist_without_compose_dependency():
+    for script in [
+        Path("scripts/bootstrap_no_docker.sh"),
+        Path("scripts/start_airflow_local.py"),
+        Path("scripts/start_mlflow_local.py"),
+        Path("scripts/run_pipeline_no_airflow.py"),
+    ]:
+        assert script.exists(), f"{script} is missing"
+        text = script.read_text(encoding="utf-8")
+        assert "docker compose" not in text.lower()
+
+
+def test_settings_can_skip_database_creation_for_hosted_targets():
+    settings = Settings.from_env({"PRICING_SKIP_DATABASE_CREATE": "true"})
+
+    assert settings.skip_database_create is True
+
+
+def test_dag_migrations_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
+    monkeypatch.setenv("PRICING_MIGRATIONS_DIR", str(tmp_path))
+
+    airflow_module = types.ModuleType("airflow")
+    airflow_sdk_module = types.ModuleType("airflow.sdk")
+
+    class FakeTaskOutput:
+        def __rshift__(self, other):
+            return other
+
+    def dag(**dag_kwargs):
+        def decorator(func):
+            def factory(*args, **kwargs):
+                func(*args, **kwargs)
+                return types.SimpleNamespace(dag_id=dag_kwargs["dag_id"])
+
+            return factory
+
+        return decorator
+
+    def task(func):
+        def task_factory(*args, **kwargs):
+            return FakeTaskOutput()
+
+        return task_factory
+
+    airflow_sdk_module.dag = dag
+    airflow_sdk_module.get_current_context = lambda: {}
+    airflow_sdk_module.task = task
+    airflow_module.sdk = airflow_sdk_module
+    monkeypatch.setitem(sys.modules, "airflow", airflow_module)
+    monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
+
+    dag_path = Path("dags/pricing_superglm_pipeline.py").resolve()
+    spec = importlib.util.spec_from_file_location("pricing_superglm_pipeline_override", dag_path)
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.MIGRATIONS_DIR == tmp_path
+
+
+def test_no_airflow_runner_help_runs_without_pythonpath():
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/run_pipeline_no_airflow.py", "--help"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--ensure-database" in result.stdout
+    assert "--skip-raw-load" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr

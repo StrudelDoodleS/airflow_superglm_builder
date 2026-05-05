@@ -4,9 +4,12 @@ from pathlib import Path
 README_CONTRACT_STRINGS = [
     "state/",
     "docker compose down -v",
+    "No-Docker Work Quickstart",
     "Airflow 3.2.1",
     "MLflow",
     "scripts/run_local_pipeline.sh",
+    "scripts/start_airflow_local.py",
+    "scripts/start_mlflow_local.py",
 ]
 
 

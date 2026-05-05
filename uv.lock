@@ -109,6 +109,7 @@ name = "airflow-superglm-builder"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "apache-airflow" },
     { name = "apache-airflow-providers-microsoft-mssql" },
     { name = "mlflow" },
     { name = "numpy" },
@@ -123,6 +124,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "apache-airflow", specifier = "==3.2.1" },
     { name = "apache-airflow-providers-microsoft-mssql" },
     { name = "mlflow" },
     { name = "numpy" },

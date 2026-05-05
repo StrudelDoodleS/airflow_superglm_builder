@@ -248,6 +248,14 @@ def test_airflow_image_uses_python_314_base():
     assert '"apache-airflow==${AIRFLOW_VERSION}"' in dockerfile
 
 
+def test_host_python_dependencies_pin_airflow_321():
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+
+    assert '"apache-airflow==3.2.1"' in pyproject
+    assert "apache-airflow==3.2.1" in requirements
+
+
 def test_compose_does_not_use_env_file_required_false():
     compose_text = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert "required: false" not in compose_text
