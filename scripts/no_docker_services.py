@@ -75,6 +75,11 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
             description="Seed simulated pricing model/package history.",
             argv=[python_executable, "scripts/seed_demo_model_variants.py"],
         ),
+        "cloudbeaver": ServiceCommand(
+            name="cloudbeaver",
+            description="Start CloudBeaver SQL UI; Docker-backed local-only option.",
+            argv=["docker", "compose", "--profile", "sql-ui", "up", "-d", "cloudbeaver"],
+        ),
     }
 
 

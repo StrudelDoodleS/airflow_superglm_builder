@@ -9,6 +9,7 @@ README_CONTRACT_STRINGS = [
     "MLflow",
     "scripts/run_local_pipeline.sh",
     "scripts/no_docker_services.py",
+    "scripts/start_no_docker_stack.sh",
     "scripts/start_airflow_local.py",
     "scripts/start_mlflow_local.py",
 ]

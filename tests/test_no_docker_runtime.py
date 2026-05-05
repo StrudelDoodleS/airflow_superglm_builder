@@ -29,13 +29,15 @@ def test_no_docker_scripts_exist_without_compose_dependency():
     for script in [
         Path("scripts/bootstrap_no_docker.sh"),
         Path("scripts/no_docker_services.py"),
+        Path("scripts/start_no_docker_stack.sh"),
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
         Path("scripts/run_pipeline_no_airflow.py"),
     ]:
         assert script.exists(), f"{script} is missing"
         text = script.read_text(encoding="utf-8")
-        assert "docker compose" not in text.lower()
+        if script.name != "start_no_docker_stack.sh":
+            assert "docker compose" not in text.lower()
 
 
 def test_settings_can_skip_database_creation_for_hosted_targets():
@@ -122,7 +124,7 @@ def test_no_docker_service_picker_lists_available_services_without_pythonpath():
     assert "mlflow" in result.stdout
     assert "airflow" in result.stdout
     assert "migrate" in result.stdout
-    assert "docker" not in result.stdout.lower()
+    assert "cloudbeaver" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
 
@@ -141,3 +143,57 @@ def test_no_docker_service_picker_builds_python_commands():
     assert commands[1].argv == ["/python", "scripts/load_fremtpl_raw.py", "--replace"]
     assert commands[2].argv == ["/python", "scripts/run_pipeline_no_airflow.py"]
     assert not any("docker" in part.lower() for command in commands for part in command.argv)
+
+
+def test_interactive_shell_launcher_help_documents_keyboard_menu():
+    result = subprocess.run(
+        ["bash", "scripts/start_no_docker_stack.sh", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "keyboard menu" in result.stdout
+    assert "--services airflow,mlflow" in result.stdout
+    assert "cloudbeaver" in result.stdout
+
+
+def test_interactive_shell_launcher_dry_run_selected_services():
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/start_no_docker_stack.sh",
+            "--dry-run",
+            "--services",
+            "migrate,mlflow,airflow",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "uv run python scripts/apply_sql_migrations.py" in result.stdout
+    assert "uv run python scripts/start_mlflow_local.py" in result.stdout
+    assert "uv run python scripts/start_airflow_local.py" in result.stdout
+    assert "docker compose" not in result.stdout
+
+
+def test_interactive_shell_launcher_cloudbeaver_is_explicitly_docker_backed():
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/start_no_docker_stack.sh",
+            "--dry-run",
+            "--services",
+            "cloudbeaver",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "cloudbeaver uses Docker Compose in this repo" in result.stdout
+    assert "docker compose --profile sql-ui up -d cloudbeaver" in result.stdout
