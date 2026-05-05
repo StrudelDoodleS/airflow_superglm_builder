@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -29,6 +30,7 @@ def test_no_docker_scripts_exist_without_compose_dependency():
     for script in [
         Path("scripts/bootstrap_no_docker.sh"),
         Path("scripts/no_docker_services.py"),
+        Path("scripts/start_no_docker_runtime.sh"),
         Path("scripts/start_no_docker_stack.sh"),
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
@@ -36,7 +38,7 @@ def test_no_docker_scripts_exist_without_compose_dependency():
     ]:
         assert script.exists(), f"{script} is missing"
         text = script.read_text(encoding="utf-8")
-        if script.name != "start_no_docker_stack.sh":
+        if script.name not in {"no_docker_services.py", "start_no_docker_stack.sh"}:
             assert "docker compose" not in text.lower()
 
 
@@ -145,6 +147,17 @@ def test_no_docker_service_picker_builds_python_commands():
     assert not any("docker" in part.lower() for command in commands for part in command.argv)
 
 
+def test_no_docker_tui_menu_marks_cursor_and_selected_services():
+    lines = no_docker_services.menu_lines(
+        {"airflow", "mlflow"},
+        cursor_index=1,
+    )
+
+    assert lines[0] == "No-Docker local launcher"
+    assert "> [x] 2. mlflow" in "\n".join(lines)
+    assert "Space toggles, Enter runs, q quits." in lines[1]
+
+
 def test_interactive_shell_launcher_help_documents_keyboard_menu():
     result = subprocess.run(
         ["bash", "scripts/start_no_docker_stack.sh", "--help"],
@@ -154,9 +167,9 @@ def test_interactive_shell_launcher_help_documents_keyboard_menu():
     )
 
     assert result.returncode == 0
-    assert "keyboard menu" in result.stdout
+    assert "TUI menu" in result.stdout
     assert "--services airflow,mlflow" in result.stdout
-    assert "cloudbeaver" in result.stdout
+    assert "--services SERVICES" in result.stdout
 
 
 def test_interactive_shell_launcher_dry_run_selected_services():
@@ -174,10 +187,50 @@ def test_interactive_shell_launcher_dry_run_selected_services():
     )
 
     assert result.returncode == 0
-    assert "uv run python scripts/apply_sql_migrations.py" in result.stdout
-    assert "uv run python scripts/start_mlflow_local.py" in result.stdout
-    assert "uv run python scripts/start_airflow_local.py" in result.stdout
+    assert "scripts/apply_sql_migrations.py" in result.stdout
+    assert "scripts/start_mlflow_local.py" in result.stdout
+    assert "scripts/start_airflow_local.py" in result.stdout
     assert "docker compose" not in result.stdout
+
+
+def test_interactive_shell_launcher_runs_when_called_with_zsh():
+    if shutil.which("zsh") is None:
+        return
+
+    result = subprocess.run(
+        [
+            "zsh",
+            "scripts/start_no_docker_stack.sh",
+            "--dry-run",
+            "--services",
+            "migrate",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "scripts/apply_sql_migrations.py" in result.stdout
+    assert "no coprocess" not in result.stderr
+
+
+def test_start_no_docker_runtime_alias_invokes_launcher():
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/start_no_docker_runtime.sh",
+            "--dry-run",
+            "--services",
+            "migrate",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "scripts/apply_sql_migrations.py" in result.stdout
 
 
 def test_interactive_shell_launcher_cloudbeaver_is_explicitly_docker_backed():

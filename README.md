@@ -127,13 +127,18 @@ Prerequisites:
    This runs `airflow standalone` with `AIRFLOW_HOME=state/airflow`, the repo
    `dags/` folder, example DAGs disabled, and repo-local rating exports.
 
-   You can also use the interactive shell launcher. It opens a keyboard menu
-   where Airflow is selected by default and optional local tools can be toggled
-   on before starting:
+   You can also use the interactive shell launcher. It opens an in-place TUI
+   menu where Airflow is selected by default and optional local tools can be
+   toggled on before starting:
 
    ```bash
    scripts/start_no_docker_stack.sh
    ```
+
+   `scripts/start_no_docker_runtime.sh` is an alias for the same launcher.
+   Both shell wrappers are intentionally tiny and delegate the menu to Python,
+   so they work from normal zsh or Bash terminals while inheriting your current
+   environment.
 
    The same launcher can be scripted without the menu:
 
