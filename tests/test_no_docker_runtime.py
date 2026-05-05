@@ -8,6 +8,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from pricing_pipeline.config import Settings
 from scripts import no_docker_services
 
@@ -231,6 +233,43 @@ def test_start_no_docker_runtime_alias_invokes_launcher():
 
     assert result.returncode == 0
     assert "scripts/apply_sql_migrations.py" in result.stdout
+
+
+def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_path):
+    from scripts import start_airflow_local
+
+    def fake_load_env():
+        monkeypatch.setenv("RATING_EXPORT_ROOT", "/opt/pricing/state/rating_exports")
+        monkeypatch.setenv("PRICING_MIGRATIONS_DIR", "/opt/pricing/db/migrations")
+        monkeypatch.setenv("PRICING_PROJECT_ROOT", "/opt/pricing")
+
+    captured_exec: dict[str, object] = {}
+
+    def fake_execv(executable: str, command: list[str]) -> None:
+        captured_exec["executable"] = executable
+        captured_exec["command"] = command
+        raise SystemExit(0)
+
+    monkeypatch.setattr(start_airflow_local, "ROOT", tmp_path)
+    monkeypatch.setattr(start_airflow_local, "load_env", fake_load_env)
+    monkeypatch.setattr(start_airflow_local.os, "chdir", lambda path: None)
+    monkeypatch.setattr(
+        start_airflow_local,
+        "parse_args",
+        lambda: types.SimpleNamespace(airflow_args=["version"]),
+    )
+    monkeypatch.setattr(start_airflow_local.shutil, "which", lambda name: "/usr/bin/airflow")
+    monkeypatch.setattr(start_airflow_local.os, "execv", fake_execv)
+
+    with pytest.raises(SystemExit) as exit_info:
+        start_airflow_local.main()
+
+    assert exit_info.value.code == 0
+    assert Path(os.environ["RATING_EXPORT_ROOT"]) == tmp_path / "state/rating_exports"
+    assert Path(os.environ["PRICING_MIGRATIONS_DIR"]) == tmp_path / "db/migrations"
+    assert Path(os.environ["PRICING_PROJECT_ROOT"]) == tmp_path
+    assert (tmp_path / "state/rating_exports").is_dir()
+    assert captured_exec["command"] == ["/usr/bin/airflow", "version"]
 
 
 def test_interactive_shell_launcher_cloudbeaver_is_explicitly_docker_backed():

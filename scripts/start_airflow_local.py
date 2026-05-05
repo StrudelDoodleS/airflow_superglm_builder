@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+DOCKER_PROJECT_ROOT = Path("/opt/pricing")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -15,6 +16,10 @@ from scripts.pricing_db import load_env  # noqa: E402
 
 def _repo_path(value: str | Path) -> Path:
     path = Path(value)
+    try:
+        path = ROOT / path.relative_to(DOCKER_PROJECT_ROOT)
+    except ValueError:
+        pass
     if path.is_absolute():
         return path
     return ROOT / path
