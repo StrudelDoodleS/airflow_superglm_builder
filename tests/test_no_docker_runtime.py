@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 from pricing_pipeline.config import Settings
+from scripts import no_docker_services
 
 
 def test_no_docker_env_example_targets_host_processes_and_external_sql():
@@ -27,6 +28,7 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
 def test_no_docker_scripts_exist_without_compose_dependency():
     for script in [
         Path("scripts/bootstrap_no_docker.sh"),
+        Path("scripts/no_docker_services.py"),
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
         Path("scripts/run_pipeline_no_airflow.py"),
@@ -102,3 +104,40 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     assert "--ensure-database" in result.stdout
     assert "--skip-raw-load" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_no_docker_service_picker_lists_available_services_without_pythonpath():
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/no_docker_services.py", "list"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "mlflow" in result.stdout
+    assert "airflow" in result.stdout
+    assert "migrate" in result.stdout
+    assert "docker" not in result.stdout.lower()
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_no_docker_service_picker_builds_python_commands():
+    commands = no_docker_services.selected_commands(
+        ["migrate", "load-raw-replace", "pipeline"],
+        python_executable="/python",
+    )
+
+    assert [command.name for command in commands] == [
+        "migrate",
+        "load-raw-replace",
+        "pipeline",
+    ]
+    assert commands[0].argv == ["/python", "scripts/apply_sql_migrations.py"]
+    assert commands[1].argv == ["/python", "scripts/load_fremtpl_raw.py", "--replace"]
+    assert commands[2].argv == ["/python", "scripts/run_pipeline_no_airflow.py"]
+    assert not any("docker" in part.lower() for command in commands for part in command.argv)

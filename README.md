@@ -127,6 +127,23 @@ Prerequisites:
    This runs `airflow standalone` with `AIRFLOW_HOME=state/airflow`, the repo
    `dags/` folder, example DAGs disabled, and repo-local rating exports.
 
+   You can also use the picker script to see and run the same host-process
+   services/tasks:
+
+   ```bash
+   uv run python scripts/no_docker_services.py list
+   uv run python scripts/no_docker_services.py run mlflow
+   uv run python scripts/no_docker_services.py run airflow
+   ```
+
+   For one-shot setup tasks, select only the pieces you want:
+
+   ```bash
+   uv run python scripts/no_docker_services.py run migrate load-raw
+   uv run python scripts/no_docker_services.py run migrate load-raw-replace pipeline
+   uv run python scripts/no_docker_services.py run diagrams
+   ```
+
 5. Apply migrations and load raw freMTPL data once:
 
    ```bash

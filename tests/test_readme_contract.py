@@ -8,6 +8,7 @@ README_CONTRACT_STRINGS = [
     "Airflow 3.2.1",
     "MLflow",
     "scripts/run_local_pipeline.sh",
+    "scripts/no_docker_services.py",
     "scripts/start_airflow_local.py",
     "scripts/start_mlflow_local.py",
 ]
