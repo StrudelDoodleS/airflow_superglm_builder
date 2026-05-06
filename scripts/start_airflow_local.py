@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -31,6 +32,37 @@ def _prepend_pythonpath(path: Path) -> None:
     if existing:
         parts.append(existing)
     os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+
+
+def _simple_auth_usernames(users: str) -> list[str]:
+    usernames = []
+    for user_definition in users.split(","):
+        username = user_definition.strip().split(":", maxsplit=1)[0]
+        if username:
+            usernames.append(username)
+    return usernames
+
+
+def _configure_simple_auth(airflow_home: Path) -> tuple[str, str]:
+    users = os.environ.setdefault("AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS", "admin:admin")
+    usernames = _simple_auth_usernames(users)
+    password = os.environ.get("AIRFLOW_LOCAL_PASSWORD", "admin")
+    password_file = _repo_path(
+        os.environ.get(
+            "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE",
+            airflow_home / "simple_auth_manager_passwords.json",
+        )
+    )
+
+    os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"] = str(password_file)
+    password_file.parent.mkdir(parents=True, exist_ok=True)
+    if not password_file.exists():
+        password_file.write_text(
+            json.dumps({username: password for username in usernames}) + "\n",
+            encoding="utf-8",
+        )
+
+    return (usernames[0] if usernames else "admin"), password
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +99,7 @@ def main() -> None:
     os.environ["PRICING_PROJECT_ROOT"] = str(project_root)
     os.environ["PRICING_MIGRATIONS_DIR"] = str(migrations_dir)
     os.environ["RATING_EXPORT_ROOT"] = str(rating_export_root)
+    airflow_username, airflow_password = _configure_simple_auth(airflow_home)
     _prepend_pythonpath(ROOT)
 
     airflow_executable = shutil.which("airflow")
@@ -76,6 +109,7 @@ def main() -> None:
     command = [airflow_executable, *(args.airflow_args or ["standalone"])]
     print(f"airflow_home={airflow_home}", flush=True)
     print(f"airflow_dags_folder={dags_folder}", flush=True)
+    print(f"airflow_login={airflow_username} / {airflow_password}", flush=True)
     os.execv(airflow_executable, command)
 
 

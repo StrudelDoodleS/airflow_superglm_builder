@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import importlib.util
 import os
 import shutil
@@ -12,6 +13,21 @@ import pytest
 
 from pricing_pipeline.config import Settings
 from scripts import no_docker_services
+
+LOCAL_AIRFLOW_ENV_KEYS = [
+    "AIRFLOW_HOME",
+    "AIRFLOW__CORE__DAGS_FOLDER",
+    "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS",
+    "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE",
+    "PRICING_MIGRATIONS_DIR",
+    "PRICING_PROJECT_ROOT",
+    "RATING_EXPORT_ROOT",
+]
+
+
+def clear_local_airflow_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in LOCAL_AIRFLOW_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_no_docker_env_example_targets_host_processes_and_external_sql():
@@ -238,6 +254,8 @@ def test_start_no_docker_runtime_alias_invokes_launcher():
 def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_path):
     from scripts import start_airflow_local
 
+    clear_local_airflow_env(monkeypatch)
+
     def fake_load_env():
         monkeypatch.setenv("RATING_EXPORT_ROOT", "/opt/pricing/state/rating_exports")
         monkeypatch.setenv("PRICING_MIGRATIONS_DIR", "/opt/pricing/db/migrations")
@@ -269,6 +287,40 @@ def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_pa
     assert Path(os.environ["PRICING_MIGRATIONS_DIR"]) == tmp_path / "db/migrations"
     assert Path(os.environ["PRICING_PROJECT_ROOT"]) == tmp_path
     assert (tmp_path / "state/rating_exports").is_dir()
+    assert captured_exec["command"] == ["/usr/bin/airflow", "version"]
+
+
+def test_local_airflow_configures_predictable_simple_auth(monkeypatch, tmp_path):
+    from scripts import start_airflow_local
+
+    clear_local_airflow_env(monkeypatch)
+
+    captured_exec: dict[str, object] = {}
+
+    def fake_execv(executable: str, command: list[str]) -> None:
+        captured_exec["executable"] = executable
+        captured_exec["command"] = command
+        raise SystemExit(0)
+
+    monkeypatch.setattr(start_airflow_local, "ROOT", tmp_path)
+    monkeypatch.setattr(start_airflow_local, "load_env", lambda: None)
+    monkeypatch.setattr(start_airflow_local.os, "chdir", lambda path: None)
+    monkeypatch.setattr(
+        start_airflow_local,
+        "parse_args",
+        lambda: types.SimpleNamespace(airflow_args=["version"]),
+    )
+    monkeypatch.setattr(start_airflow_local.shutil, "which", lambda name: "/usr/bin/airflow")
+    monkeypatch.setattr(start_airflow_local.os, "execv", fake_execv)
+
+    with pytest.raises(SystemExit) as exit_info:
+        start_airflow_local.main()
+
+    password_file = tmp_path / "state/airflow/simple_auth_manager_passwords.json"
+    assert exit_info.value.code == 0
+    assert os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS"] == "admin:admin"
+    assert Path(os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"]) == password_file
+    assert json.loads(password_file.read_text(encoding="utf-8")) == {"admin": "admin"}
     assert captured_exec["command"] == ["/usr/bin/airflow", "version"]
 
 

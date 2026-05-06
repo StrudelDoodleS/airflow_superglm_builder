@@ -126,6 +126,9 @@ Prerequisites:
 
    This runs `airflow standalone` with `AIRFLOW_HOME=state/airflow`, the repo
    `dags/` folder, example DAGs disabled, and repo-local rating exports.
+   The local Airflow UI login defaults to `admin` / `admin`; set
+   `AIRFLOW_LOCAL_PASSWORD` before starting if you want a different local
+   password.
 
    You can also use the interactive shell launcher. It opens an in-place TUI
    menu where Airflow is selected by default and optional local tools can be
