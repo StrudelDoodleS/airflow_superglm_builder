@@ -131,8 +131,7 @@ Prerequisites:
    password.
 
    You can also use the interactive shell launcher. It opens a persistent TUI
-   runtime manager where local services and one-shot tasks can be started and
-   stopped without leaving the screen:
+   runtime manager grouped into Services, Pipeline Tasks, and Utilities:
 
    ```bash
    scripts/start_no_docker_stack.sh
@@ -148,6 +147,13 @@ Prerequisites:
    shell wrappers are intentionally tiny and delegate the runtime manager to
    Python, so they work from normal zsh or Bash terminals while inheriting your
    current environment.
+
+   The TUI groups are:
+
+   - Services: `airflow`, `mlflow`, and local-only Docker-backed `cloudbeaver`.
+   - Pipeline Tasks: migrations, freMTPL raw load/reload, direct pipeline run,
+     and demo model seeding.
+   - Utilities: bootstrap and ERD generation.
 
    The same launcher can be scripted without the menu:
 
@@ -370,6 +376,13 @@ Open http://localhost:8088 after generation. The generated files live in
 - `index.html`: searchable self-contained diagram site.
 - `schema.mmd`: Mermaid ER source for copying into docs.
 - `metadata.json`: table, column, and foreign-key metadata snapshot.
+
+For third-party ERD tools, use `docs/pricing_useful_tables_ddl.sql`. It is a
+scratch/reference SQL Server DDL for the useful persisted `pricing` tables
+only: raw source, dataset/CV lineage, model runs, rate packages, deployment
+history, normalized rating tables, and compiled outputs. It deliberately
+excludes `pricing_stg`, old `STG_*` tables, `DATASET_ROW_KEY`, and old
+row-per-policy CV split tables.
 
 The default diagram focuses on the persisted pricing model. Import staging
 tables live in the separate `pricing_stg` schema so they do not clutter the

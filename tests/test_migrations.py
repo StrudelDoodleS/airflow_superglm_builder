@@ -132,3 +132,42 @@ def test_clean_pricing_schema_migration_moves_staging_and_drops_obsolete_tables(
     assert "DROP TABLE pricing.STG_DATASET_ROW_KEY" in migration
     assert "DROP TABLE pricing.CV_SPLIT" in migration
     assert "DROP TABLE pricing.DATASET_ROW_KEY" in migration
+
+
+def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
+    ddl = Path("docs/pricing_useful_tables_ddl.sql").read_text(encoding="utf-8")
+
+    useful_tables = [
+        "FREMTPL_RAW",
+        "DATASET_MANIFEST",
+        "DATASET_COLUMN",
+        "PRICING_MODEL",
+        "MODEL_RUN",
+        "CV_SPLIT_SET",
+        "CV_FOLD",
+        "CV_FOLD_METRIC",
+        "PRICING_RATE_PACKAGE",
+        "PRICING_MODEL_DEPLOYMENT",
+        "PRICING_PACKAGE_POINTER",
+        "PRICING_TERM",
+        "PRICING_RATE_CELL",
+        "PRICING_TERM_FEATURE",
+        "PRICING_FEATURE",
+        "PRICING_FEATURE_LEVEL_SET",
+        "PRICING_FEATURE_LEVEL",
+        "PRICING_RATE_CELL_LEVEL",
+        "PRICING_COMPILED_RATE_CELL",
+        "PRICING_COMPILED_1D_RATE_BAND",
+    ]
+
+    for table in useful_tables:
+        assert f"CREATE TABLE pricing.{table}" in ddl
+
+    assert "pricing_stg" not in ddl
+    assert "STG_" not in ddl
+    assert "DATASET_ROW_KEY" not in ddl
+    assert "CREATE TABLE pricing.CV_SPLIT (" not in ddl
+    assert "CONSTRAINT FK_MODEL_RUN_MODEL" in ddl
+    assert "CONSTRAINT FK_MODEL_RUN_MANIFEST" in ddl
+    assert "CONSTRAINT FK_RATE_PACKAGE_MODEL" in ddl
+    assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl

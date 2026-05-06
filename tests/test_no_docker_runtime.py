@@ -270,6 +270,47 @@ def test_runtime_manager_screen_lines_show_status_and_logs(tmp_path):
     assert "line 2" in text
 
 
+def test_runtime_screen_groups_services_tasks_and_utilities():
+    manager = no_docker_services.RuntimeManager(
+        list(no_docker_services.service_catalog(python_executable="/python").values())
+    )
+
+    lines = no_docker_services.runtime_screen_lines(
+        manager,
+        cursor_index=0,
+        show_logs=False,
+    )
+    text = "\n".join(lines)
+
+    assert "Services" in text
+    assert "Pipeline Tasks" in text
+    assert "Utilities" in text
+    assert text.index("Services") < text.index("airflow")
+    assert text.index("Services") < text.index("cloudbeaver")
+    assert text.index("Pipeline Tasks") < text.index("migrate")
+    assert text.index("Pipeline Tasks") < text.index("seed-demo")
+    assert text.index("Utilities") < text.index("bootstrap")
+    assert text.index("Utilities") < text.index("diagrams")
+
+
+def test_runtime_screen_selected_row_index_skips_section_headers():
+    manager = no_docker_services.RuntimeManager(
+        list(no_docker_services.service_catalog(python_executable="/python").values())
+    )
+
+    row_index = no_docker_services.selected_runtime_row_index(
+        manager,
+        cursor_index=3,
+    )
+    lines = no_docker_services.runtime_screen_lines(
+        manager,
+        cursor_index=3,
+        show_logs=False,
+    )
+
+    assert lines[row_index].startswith("> migrate")
+
+
 def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
     command = no_docker_services.ServiceCommand(
         name="airflow",
@@ -478,4 +519,4 @@ def test_interactive_shell_launcher_cloudbeaver_is_explicitly_docker_backed():
 
     assert result.returncode == 0
     assert "cloudbeaver uses Docker Compose in this repo" in result.stdout
-    assert "docker compose --profile sql-ui up -d cloudbeaver" in result.stdout
+    assert "docker compose --profile sql-ui up cloudbeaver" in result.stdout

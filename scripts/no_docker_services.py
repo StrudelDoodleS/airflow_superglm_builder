@@ -18,6 +18,7 @@ class ServiceCommand:
     name: str
     description: str
     argv: list[str]
+    category: str = "pipeline-task"
     long_running: bool = False
 
 
@@ -30,46 +31,71 @@ class RuntimeRecord:
 
 
 RUNTIME_LOG_DIR = ROOT / "state/runtime/logs"
+RUNTIME_CATEGORIES = (
+    ("service", "Services"),
+    ("pipeline-task", "Pipeline Tasks"),
+    ("utility", "Utilities"),
+)
 
 
 def service_catalog(*, python_executable: str = sys.executable) -> dict[str, ServiceCommand]:
     return {
-        "bootstrap": ServiceCommand(
-            name="bootstrap",
-            description="Create local state folders and install Python dependencies.",
-            argv=["bash", "scripts/bootstrap_no_docker.sh"],
+        "airflow": ServiceCommand(
+            name="airflow",
+            description="Start local Airflow standalone.",
+            argv=[python_executable, "scripts/start_airflow_local.py"],
+            category="service",
+            long_running=True,
         ),
         "mlflow": ServiceCommand(
             name="mlflow",
             description="Start the local MLflow tracking server.",
             argv=[python_executable, "scripts/start_mlflow_local.py"],
+            category="service",
             long_running=True,
         ),
-        "airflow": ServiceCommand(
-            name="airflow",
-            description="Start local Airflow standalone.",
-            argv=[python_executable, "scripts/start_airflow_local.py"],
+        "cloudbeaver": ServiceCommand(
+            name="cloudbeaver",
+            description="Start CloudBeaver SQL UI; Docker-backed local-only option.",
+            argv=["docker", "compose", "--profile", "sql-ui", "up", "cloudbeaver"],
+            category="service",
             long_running=True,
         ),
         "migrate": ServiceCommand(
             name="migrate",
             description="Apply SQL migrations to the configured pricing database.",
             argv=[python_executable, "scripts/apply_sql_migrations.py"],
+            category="pipeline-task",
         ),
         "load-raw": ServiceCommand(
             name="load-raw",
             description="Load freMTPL raw data if the table is empty.",
             argv=[python_executable, "scripts/load_fremtpl_raw.py"],
+            category="pipeline-task",
         ),
         "load-raw-replace": ServiceCommand(
             name="load-raw-replace",
             description="Truncate and reload freMTPL raw data.",
             argv=[python_executable, "scripts/load_fremtpl_raw.py", "--replace"],
+            category="pipeline-task",
         ),
         "pipeline": ServiceCommand(
             name="pipeline",
             description="Run the full pricing pipeline directly, without Airflow.",
             argv=[python_executable, "scripts/run_pipeline_no_airflow.py"],
+            category="pipeline-task",
+        ),
+        "seed-demo": ServiceCommand(
+            name="seed-demo",
+            description="Seed simulated pricing model/package history.",
+            argv=[python_executable, "scripts/seed_demo_model_variants.py"],
+            category="pipeline-task",
+        ),
+        "bootstrap": ServiceCommand(
+            name="bootstrap",
+            description="Create local state folders and install Python dependencies.",
+            argv=["bash", "scripts/bootstrap_no_docker.sh"],
+            category="utility",
         ),
         "diagrams": ServiceCommand(
             name="diagrams",
@@ -82,16 +108,7 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
                 "--output-dir",
                 "state/db_diagrams",
             ],
-        ),
-        "seed-demo": ServiceCommand(
-            name="seed-demo",
-            description="Seed simulated pricing model/package history.",
-            argv=[python_executable, "scripts/seed_demo_model_variants.py"],
-        ),
-        "cloudbeaver": ServiceCommand(
-            name="cloudbeaver",
-            description="Start CloudBeaver SQL UI; Docker-backed local-only option.",
-            argv=["docker", "compose", "--profile", "sql-ui", "up", "-d", "cloudbeaver"],
+            category="utility",
         ),
     }
 
@@ -116,9 +133,15 @@ def parse_services_csv(services_csv: str) -> list[str]:
 
 
 def list_services() -> None:
-    for command in service_catalog().values():
-        kind = "long-running" if command.long_running else "one-shot"
-        print(f"{command.name:<16} {kind:<13} {command.description}")
+    catalog = service_catalog()
+    for category, label in RUNTIME_CATEGORIES:
+        commands = [command for command in catalog.values() if command.category == category]
+        if not commands:
+            continue
+        print(label)
+        for command in commands:
+            kind = _command_kind(command)
+            print(f"  {command.name:<16} {kind:<13} {command.description}")
 
 
 class RuntimeManager:
@@ -274,19 +297,48 @@ def runtime_screen_lines(
         "Enter/Space start/stop/run | r restart | l logs | x stop all | q quit",
         "",
     ]
-    for index, name in enumerate(manager.names()):
-        record = manager.records[name]
-        cursor = ">" if index == cursor_index else " "
-        kind = "service" if record.command.long_running else "task"
-        lines.append(
-            f"{cursor} {name:<16} [{record.status:<9}] {kind:<7} {record.command.description}"
-        )
+    selected_name = manager.names()[cursor_index] if manager.names() else None
+    for category, label in RUNTIME_CATEGORIES:
+        category_names = [
+            name for name in manager.names() if manager.records[name].command.category == category
+        ]
+        if not category_names:
+            continue
+        lines.append(label)
+        for name in category_names:
+            record = manager.records[name]
+            cursor = ">" if name == selected_name else " "
+            kind = _command_kind(record.command)
+            lines.append(
+                f"{cursor} {name:<16} [{record.status:<9}] {kind:<7} {record.command.description}"
+            )
+        lines.append("")
+    if lines[-1] == "":
+        lines.pop()
 
     if show_logs and manager.names():
-        selected = manager.names()[cursor_index]
+        selected = selected_name or manager.names()[0]
         lines.extend(["", f"Logs: {manager.log_path(selected)}", "-" * 72])
         lines.extend(manager.tail_log(selected))
     return lines
+
+
+def selected_runtime_row_index(manager: RuntimeManager, *, cursor_index: int) -> int:
+    selected_name = manager.names()[cursor_index]
+    for index, line in enumerate(
+        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=False)
+    ):
+        if line.startswith(f"> {selected_name:<16}"):
+            return index
+    return 0
+
+
+def _command_kind(command: ServiceCommand) -> str:
+    if command.category == "service":
+        return "service"
+    if command.category == "utility":
+        return "utility"
+    return "task"
 
 
 def _draw_runtime_screen(
@@ -298,12 +350,13 @@ def _draw_runtime_screen(
 ) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
+    selected_row = selected_runtime_row_index(manager, cursor_index=cursor_index)
     for row, line in enumerate(
         runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=show_logs)
     ):
         if row >= height - 1:
             break
-        attributes = curses.A_REVERSE if row == cursor_index + 3 else curses.A_NORMAL
+        attributes = curses.A_REVERSE if row == selected_row else curses.A_NORMAL
         stdscr.addnstr(row, 0, line, max(width - 1, 0), attributes)
     stdscr.refresh()
 
@@ -363,12 +416,7 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
 
 def _run_one_shot(commands: list[ServiceCommand], *, dry_run: bool) -> None:
     for command in commands:
-        if command.name == "cloudbeaver":
-            print(
-                "cloudbeaver uses Docker Compose in this repo; "
-                "skip it on Docker-blocked machines.",
-                flush=True,
-            )
+        _print_command_warning(command)
         print(f"==> {command.name}: {' '.join(command.argv)}", flush=True)
         if not dry_run:
             subprocess.run(command.argv, cwd=ROOT, check=True)
@@ -378,6 +426,7 @@ def _run_long_running(commands: list[ServiceCommand], *, dry_run: bool) -> None:
     processes: list[subprocess.Popen] = []
     try:
         for command in commands:
+            _print_command_warning(command)
             print(f"==> {command.name}: {' '.join(command.argv)}", flush=True)
             if not dry_run:
                 processes.append(subprocess.Popen(command.argv, cwd=ROOT))
@@ -410,6 +459,15 @@ def run_services(names: list[str], *, dry_run: bool = False) -> None:
     long_running = [command for command in commands if command.long_running]
     _run_one_shot(one_shot, dry_run=dry_run)
     _run_long_running(long_running, dry_run=dry_run)
+
+
+def _print_command_warning(command: ServiceCommand) -> None:
+    if command.name == "cloudbeaver":
+        print(
+            "cloudbeaver uses Docker Compose in this repo; "
+            "skip it on Docker-blocked machines.",
+            flush=True,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
