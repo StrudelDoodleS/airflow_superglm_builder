@@ -165,15 +165,132 @@ def test_no_docker_service_picker_builds_python_commands():
     assert not any("docker" in part.lower() for command in commands for part in command.argv)
 
 
-def test_no_docker_tui_menu_marks_cursor_and_selected_services():
-    lines = no_docker_services.menu_lines(
-        {"airflow", "mlflow"},
-        cursor_index=1,
+def test_runtime_manager_starts_and_stops_long_running_service(tmp_path):
+    command = no_docker_services.ServiceCommand(
+        name="airflow",
+        description="Start Airflow",
+        argv=["python", "airflow.py"],
+        long_running=True,
+    )
+    created_processes: list[FakeProcess] = []
+
+    def fake_popen(argv, **kwargs):
+        process = FakeProcess(argv=argv, kwargs=kwargs)
+        created_processes.append(process)
+        return process
+
+    manager = no_docker_services.RuntimeManager(
+        [command],
+        log_dir=tmp_path,
+        popen_factory=fake_popen,
     )
 
-    assert lines[0] == "No-Docker local launcher"
-    assert "> [x] 2. mlflow" in "\n".join(lines)
-    assert "Space toggles, Enter runs, q quits." in lines[1]
+    manager.toggle("airflow")
+
+    assert manager.status("airflow") == "running"
+    assert created_processes[0].argv == ["python", "airflow.py"]
+    assert Path(created_processes[0].kwargs["stdout"].name) == tmp_path / "airflow.log"
+
+    manager.toggle("airflow")
+
+    assert created_processes[0].terminated is True
+    assert manager.status("airflow") == "stopped"
+
+
+def test_runtime_manager_runs_one_shot_service_to_log(tmp_path):
+    command = no_docker_services.ServiceCommand(
+        name="migrate",
+        description="Apply migrations",
+        argv=["python", "migrate.py"],
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        stdout = kwargs["stdout"]
+        stdout.write("migration ok\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    manager = no_docker_services.RuntimeManager(
+        [command],
+        log_dir=tmp_path,
+        run_factory=fake_run,
+    )
+
+    manager.toggle("migrate")
+
+    assert manager.status("migrate") == "succeeded"
+    assert calls[0][0] == ["python", "migrate.py"]
+    assert (tmp_path / "migrate.log").read_text(encoding="utf-8").endswith("migration ok\n")
+
+
+def test_runtime_manager_marks_missing_command_as_failed(tmp_path):
+    command = no_docker_services.ServiceCommand(
+        name="cloudbeaver",
+        description="Start CloudBeaver",
+        argv=["docker", "compose"],
+    )
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError("docker")
+
+    manager = no_docker_services.RuntimeManager(
+        [command],
+        log_dir=tmp_path,
+        run_factory=fake_run,
+    )
+
+    manager.toggle("cloudbeaver")
+
+    assert manager.status("cloudbeaver") == "failed"
+    assert "docker" in (tmp_path / "cloudbeaver.log").read_text(encoding="utf-8")
+
+
+def test_runtime_manager_screen_lines_show_status_and_logs(tmp_path):
+    command = no_docker_services.ServiceCommand(
+        name="mlflow",
+        description="Start MLflow",
+        argv=["python", "mlflow.py"],
+        long_running=True,
+    )
+    log_file = tmp_path / "mlflow.log"
+    log_file.write_text("line 1\nline 2\n", encoding="utf-8")
+    manager = no_docker_services.RuntimeManager([command], log_dir=tmp_path)
+
+    lines = no_docker_services.runtime_screen_lines(
+        manager,
+        cursor_index=0,
+        show_logs=True,
+    )
+
+    text = "\n".join(lines)
+    assert "> mlflow" in text
+    assert "[stopped" in text
+    assert "Enter/Space start/stop" in text
+    assert "line 2" in text
+
+
+class FakeProcess:
+    def __init__(self, argv, kwargs):
+        self.argv = argv
+        self.kwargs = kwargs
+        self.terminated = False
+        self.killed = False
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 
 def test_interactive_shell_launcher_help_documents_keyboard_menu():
@@ -185,7 +302,7 @@ def test_interactive_shell_launcher_help_documents_keyboard_menu():
     )
 
     assert result.returncode == 0
-    assert "TUI menu" in result.stdout
+    assert "persistent runtime TUI" in result.stdout
     assert "--services airflow,mlflow" in result.stdout
     assert "--services SERVICES" in result.stdout
 

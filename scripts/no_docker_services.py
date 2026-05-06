@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,15 @@ class ServiceCommand:
     long_running: bool = False
 
 
-DEFAULT_SELECTED = frozenset({"airflow"})
+@dataclass
+class RuntimeRecord:
+    command: ServiceCommand
+    process: Any | None = None
+    status: str = "stopped"
+    return_code: int | None = None
+
+
+RUNTIME_LOG_DIR = ROOT / "state/runtime/logs"
 
 
 def service_catalog(*, python_executable: str = sys.executable) -> dict[str, ServiceCommand]:
@@ -87,10 +96,6 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
     }
 
 
-def service_names() -> list[str]:
-    return list(service_catalog())
-
-
 def selected_commands(
     names: list[str],
     *,
@@ -116,39 +121,186 @@ def list_services() -> None:
         print(f"{command.name:<16} {kind:<13} {command.description}")
 
 
-def menu_lines(
-    selected: set[str],
+class RuntimeManager:
+    def __init__(
+        self,
+        commands: list[ServiceCommand],
+        *,
+        log_dir: Path = RUNTIME_LOG_DIR,
+        popen_factory=subprocess.Popen,
+        run_factory=subprocess.run,
+    ) -> None:
+        self.commands = commands
+        self.records = {command.name: RuntimeRecord(command=command) for command in commands}
+        self.log_dir = log_dir
+        self.popen_factory = popen_factory
+        self.run_factory = run_factory
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def names(self) -> list[str]:
+        return [command.name for command in self.commands]
+
+    def log_path(self, name: str) -> Path:
+        return self.log_dir / f"{name}.log"
+
+    def status(self, name: str) -> str:
+        self.poll()
+        return self.records[name].status
+
+    def toggle(self, name: str) -> None:
+        record = self.records[name]
+        if record.command.long_running:
+            if self.status(name) == "running":
+                self.stop(name)
+            else:
+                self.start(name)
+            return
+        self.run_one_shot(name)
+
+    def restart(self, name: str) -> None:
+        record = self.records[name]
+        if not record.command.long_running:
+            self.run_one_shot(name)
+            return
+        if self.status(name) == "running":
+            self.stop(name)
+        self.start(name)
+
+    def start(self, name: str) -> None:
+        record = self.records[name]
+        if self.status(name) == "running":
+            return
+        log_path = self.log_path(name)
+        with log_path.open("a", encoding="utf-8") as log_file:
+            self._write_header(log_file, record.command)
+            try:
+                process = self.popen_factory(
+                    record.command.argv,
+                    cwd=ROOT,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            except OSError as exc:
+                log_file.write(f"failed to start: {exc}\n")
+                record.process = None
+                record.status = "failed"
+                record.return_code = None
+                return
+        record.process = process
+        record.status = "running"
+        record.return_code = None
+
+    def stop(self, name: str) -> None:
+        record = self.records[name]
+        process = record.process
+        if process is None:
+            record.status = "stopped"
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        record.process = None
+        record.status = "stopped"
+        record.return_code = process.poll()
+
+    def stop_all(self) -> None:
+        for name in self.names():
+            if self.records[name].command.long_running:
+                self.stop(name)
+
+    def run_one_shot(self, name: str) -> None:
+        record = self.records[name]
+        log_path = self.log_path(name)
+        record.status = "running"
+        with log_path.open("a", encoding="utf-8") as log_file:
+            self._write_header(log_file, record.command)
+            try:
+                completed = self.run_factory(
+                    record.command.argv,
+                    cwd=ROOT,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                log_file.write(f"failed to run: {exc}\n")
+                record.return_code = None
+                record.status = "failed"
+                return
+        record.return_code = completed.returncode
+        record.status = "succeeded" if completed.returncode == 0 else "failed"
+
+    def poll(self) -> None:
+        for record in self.records.values():
+            process = record.process
+            if process is None:
+                continue
+            return_code = process.poll()
+            if return_code is None:
+                record.status = "running"
+                continue
+            record.process = None
+            record.return_code = return_code
+            record.status = "succeeded" if return_code == 0 else "failed"
+
+    def tail_log(self, name: str, *, max_lines: int = 18) -> list[str]:
+        path = self.log_path(name)
+        if not path.exists():
+            return ["no logs yet"]
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
+
+    @staticmethod
+    def _write_header(log_file, command: ServiceCommand) -> None:
+        log_file.write("\n")
+        log_file.write(f"==> {command.name}: {' '.join(command.argv)}\n")
+        log_file.flush()
+
+
+def runtime_screen_lines(
+    manager: RuntimeManager,
     *,
     cursor_index: int,
+    show_logs: bool,
 ) -> list[str]:
-    names = service_names()
+    manager.poll()
     lines = [
-        "No-Docker local launcher",
-        "Space toggles, Enter runs, q quits.",
+        "No-Docker runtime manager",
+        "Enter/Space start/stop/run | r restart | l logs | x stop all | q quit",
         "",
     ]
-    catalog = service_catalog()
-    for index, name in enumerate(names):
+    for index, name in enumerate(manager.names()):
+        record = manager.records[name]
         cursor = ">" if index == cursor_index else " "
-        marker = "x" if name in selected else " "
-        command = catalog[name]
-        kind = "long-running" if command.long_running else "one-shot"
+        kind = "service" if record.command.long_running else "task"
         lines.append(
-            f"{cursor} [{marker}] {index + 1}. {name:<16} {kind:<13} {command.description}"
+            f"{cursor} {name:<16} [{record.status:<9}] {kind:<7} {record.command.description}"
         )
-    lines.extend(
-        [
-            "",
-            "CloudBeaver is Docker Compose backed in this repo; leave it off on Docker-blocked work machines.",
-        ]
-    )
+
+    if show_logs and manager.names():
+        selected = manager.names()[cursor_index]
+        lines.extend(["", f"Logs: {manager.log_path(selected)}", "-" * 72])
+        lines.extend(manager.tail_log(selected))
     return lines
 
 
-def _draw_menu(stdscr, selected: set[str], cursor_index: int) -> None:
+def _draw_runtime_screen(
+    stdscr,
+    manager: RuntimeManager,
+    *,
+    cursor_index: int,
+    show_logs: bool,
+) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    for row, line in enumerate(menu_lines(selected, cursor_index=cursor_index)):
+    for row, line in enumerate(
+        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=show_logs)
+    ):
         if row >= height - 1:
             break
         attributes = curses.A_REVERSE if row == cursor_index + 3 else curses.A_NORMAL
@@ -156,48 +308,55 @@ def _draw_menu(stdscr, selected: set[str], cursor_index: int) -> None:
     stdscr.refresh()
 
 
-def choose_services_tui(initial_selected: set[str] | None = None) -> list[str]:
-    names = service_names()
-    selected = set(initial_selected or DEFAULT_SELECTED)
+def run_runtime_tui() -> None:
+    manager = RuntimeManager(list(service_catalog().values()))
 
-    def _menu(stdscr) -> list[str]:
+    def _runtime(stdscr) -> None:
         cursor_index = 0
+        show_logs = True
         try:
             curses.curs_set(0)
         except curses.error:
             pass
         stdscr.keypad(True)
+        stdscr.timeout(500)
 
         while True:
-            _draw_menu(stdscr, selected, cursor_index)
+            names = manager.names()
+            _draw_runtime_screen(
+                stdscr,
+                manager,
+                cursor_index=cursor_index,
+                show_logs=show_logs,
+            )
             key = stdscr.getch()
+            if key == -1:
+                continue
             if key in (ord("q"), ord("Q"), 27):
-                return []
-            if key in (ord("r"), ord("R"), 10, 13, curses.KEY_ENTER):
-                return [name for name in names if name in selected]
+                manager.stop_all()
+                return
             if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                 cursor_index = (cursor_index + 1) % len(names)
                 continue
             if key in (curses.KEY_UP, ord("k"), ord("K")):
                 cursor_index = (cursor_index - 1) % len(names)
                 continue
-            if key == ord(" "):
-                name = names[cursor_index]
-                if name in selected:
-                    selected.remove(name)
-                else:
-                    selected.add(name)
+            if key in (ord("l"), ord("L")):
+                show_logs = not show_logs
                 continue
-            if ord("1") <= key <= ord("9"):
-                index = key - ord("1")
-                if index < len(names):
-                    name = names[index]
-                    if name in selected:
-                        selected.remove(name)
-                    else:
-                        selected.add(name)
+            if key in (ord("x"), ord("X")):
+                manager.stop_all()
+                continue
+            if key in (ord("r"), ord("R")):
+                manager.restart(names[cursor_index])
+                continue
+            if key in (ord(" "), 10, 13, curses.KEY_ENTER):
+                manager.toggle(names[cursor_index])
 
-    return curses.wrapper(_menu)
+    try:
+        curses.wrapper(_runtime)
+    finally:
+        manager.stop_all()
 
 
 def _run_one_shot(commands: list[ServiceCommand], *, dry_run: bool) -> None:
@@ -258,7 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list", help="Show available local services and tasks.")
-    menu_parser = subparsers.add_parser("menu", help="Open the interactive TUI menu.")
+    menu_parser = subparsers.add_parser("menu", help="Open the persistent runtime TUI.")
     menu_parser.add_argument("--dry-run", action="store_true")
 
     run_parser = subparsers.add_parser("run", help="Run selected local services/tasks.")
@@ -272,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     launcher_parser = subparsers.add_parser(
         "launcher",
         help="Shell-wrapper entrypoint with optional --services CSV.",
-        description="Open the TUI menu when --services is omitted.",
+        description="Open the persistent runtime TUI when --services is omitted.",
         epilog="Example: scripts/start_no_docker_stack.sh --services airflow,mlflow",
     )
     launcher_parser.add_argument("--dry-run", action="store_true")
@@ -290,9 +449,10 @@ def main() -> None:
         list_services()
         return
     if args.command == "menu":
-        services = choose_services_tui()
-        if services:
-            run_services(services, dry_run=args.dry_run)
+        if args.dry_run:
+            print("dry-run runtime TUI: no processes started")
+            return
+        run_runtime_tui()
         return
     if args.command == "run":
         run_services(args.services, dry_run=args.dry_run)
@@ -301,9 +461,10 @@ def main() -> None:
         if args.services:
             run_services(parse_services_csv(args.services), dry_run=args.dry_run)
             return
-        services = choose_services_tui()
-        if services:
-            run_services(services, dry_run=args.dry_run)
+        if args.dry_run:
+            print("dry-run runtime TUI: no processes started")
+            return
+        run_runtime_tui()
         return
     raise SystemExit(f"Unsupported command: {args.command}")
 
