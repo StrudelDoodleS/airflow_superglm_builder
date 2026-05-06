@@ -1,6 +1,9 @@
+CREATE SCHEMA raw;
+CREATE SCHEMA mlops;
 CREATE SCHEMA pricing;
+CREATE SCHEMA pricing_runtime;
 
-CREATE TABLE pricing.FREMTPL_RAW (
+CREATE TABLE raw.FREMTPL_RAW (
     IDpol BIGINT NOT NULL,
     ClaimNb INT NOT NULL,
     Exposure FLOAT NOT NULL,
@@ -18,9 +21,11 @@ CREATE TABLE pricing.FREMTPL_RAW (
         PRIMARY KEY (IDpol)
 );
 
-CREATE TABLE pricing.DATASET_MANIFEST (
+CREATE TABLE mlops.DATASET_MANIFEST (
     manifest_id NVARCHAR(128) NOT NULL,
     dataset_name NVARCHAR(128) NOT NULL,
+    source_schema NVARCHAR(128) NULL,
+    source_table NVARCHAR(128) NULL,
     source_system NVARCHAR(128) NULL,
     data_as_of_date DATE NOT NULL,
     row_count BIGINT NOT NULL,
@@ -34,7 +39,7 @@ CREATE TABLE pricing.DATASET_MANIFEST (
         PRIMARY KEY (manifest_id)
 );
 
-CREATE TABLE pricing.DATASET_COLUMN (
+CREATE TABLE mlops.DATASET_COLUMN (
     manifest_id NVARCHAR(128) NOT NULL,
     ordinal_no INT NOT NULL,
     column_name NVARCHAR(128) NOT NULL,
@@ -48,10 +53,10 @@ CREATE TABLE pricing.DATASET_COLUMN (
 
     CONSTRAINT FK_DATASET_COLUMN_MANIFEST
         FOREIGN KEY (manifest_id)
-        REFERENCES pricing.DATASET_MANIFEST(manifest_id)
+        REFERENCES mlops.DATASET_MANIFEST(manifest_id)
 );
 
-CREATE TABLE pricing.PRICING_MODEL (
+CREATE TABLE pricing.MODEL (
     model_id BIGINT IDENTITY(1,1) NOT NULL,
     model_key NVARCHAR(128) NOT NULL,
     model_label NVARCHAR(256) NULL,
@@ -62,55 +67,24 @@ CREATE TABLE pricing.PRICING_MODEL (
     created_by NVARCHAR(128) NOT NULL,
     retired_ts DATETIME2(3) NULL,
 
-    CONSTRAINT PK_PRICING_MODEL
+    CONSTRAINT PK_MODEL
         PRIMARY KEY (model_id),
 
-    CONSTRAINT UQ_PRICING_MODEL_KEY
+    CONSTRAINT UQ_MODEL_KEY
         UNIQUE (model_key),
 
-    CONSTRAINT CK_PRICING_MODEL_STATUS
+    CONSTRAINT CK_MODEL_STATUS
         CHECK (model_status IN ('ACTIVE', 'RETIRED', 'DISABLED'))
 );
 
-CREATE TABLE pricing.PRICING_RATE_PACKAGE (
-    rate_package_id BIGINT IDENTITY(1,1) NOT NULL,
-    parent_rate_package_id BIGINT NULL,
-    model_id BIGINT NULL,
-    model_name NVARCHAR(128) NOT NULL,
-    model_version NVARCHAR(64) NULL,
-    package_version INT NOT NULL,
-    base_rate DECIMAL(19,6) NOT NULL,
-    effective_from_date DATE NOT NULL,
-    effective_to_date DATE NULL,
-    package_status NVARCHAR(32) NOT NULL,
-    created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
-    created_by NVARCHAR(128) NOT NULL,
-
-    CONSTRAINT PK_PRICING_RATE_PACKAGE
-        PRIMARY KEY (rate_package_id),
-
-    CONSTRAINT FK_RATE_PACKAGE_PARENT
-        FOREIGN KEY (parent_rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id),
-
-    CONSTRAINT FK_RATE_PACKAGE_MODEL
-        FOREIGN KEY (model_id)
-        REFERENCES pricing.PRICING_MODEL(model_id)
-);
-
-CREATE TABLE pricing.MODEL_RUN (
+CREATE TABLE mlops.MODEL_RUN (
     model_run_id BIGINT IDENTITY(1,1) NOT NULL,
     model_id BIGINT NULL,
     dag_id NVARCHAR(250) NOT NULL,
     airflow_run_id NVARCHAR(250) NOT NULL,
     mlflow_experiment_id NVARCHAR(128) NULL,
     mlflow_run_id NVARCHAR(128) NULL,
-    manifest_id NVARCHAR(128) NULL,
-    export_id NVARCHAR(128) NULL,
-    model_name NVARCHAR(128) NOT NULL,
     model_version NVARCHAR(64) NULL,
-    rate_package_id BIGINT NULL,
-    rating_workbook_path NVARCHAR(1024) NULL,
     run_status NVARCHAR(32) NOT NULL,
     started_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
     completed_ts DATETIME2(3) NULL,
@@ -121,75 +95,17 @@ CREATE TABLE pricing.MODEL_RUN (
 
     CONSTRAINT FK_MODEL_RUN_MODEL
         FOREIGN KEY (model_id)
-        REFERENCES pricing.PRICING_MODEL(model_id),
+        REFERENCES pricing.MODEL(model_id),
 
-    CONSTRAINT FK_MODEL_RUN_MANIFEST
-        FOREIGN KEY (manifest_id)
-        REFERENCES pricing.DATASET_MANIFEST(manifest_id),
-
-    CONSTRAINT FK_MODEL_RUN_PACKAGE
-        FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id)
+    CONSTRAINT CK_MODEL_RUN_STATUS
+        CHECK (run_status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED'))
 );
 
-CREATE UNIQUE INDEX UX_MODEL_RUN_AIRFLOW
-ON pricing.MODEL_RUN(dag_id, airflow_run_id, model_name);
-
-CREATE UNIQUE INDEX UX_MODEL_RUN_AIRFLOW_MODEL_ID
-ON pricing.MODEL_RUN(dag_id, airflow_run_id, model_id)
+CREATE UNIQUE INDEX UX_MODEL_RUN_AIRFLOW_MODEL
+ON mlops.MODEL_RUN(dag_id, airflow_run_id, model_id)
 WHERE model_id IS NOT NULL;
 
-CREATE TABLE pricing.PRICING_MODEL_DEPLOYMENT (
-    deployment_id BIGINT IDENTITY(1,1) NOT NULL,
-    model_id BIGINT NOT NULL,
-    rate_package_id BIGINT NOT NULL,
-    deployment_slot NVARCHAR(64) NOT NULL,
-    effective_from_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
-    effective_to_ts DATETIME2(3) NULL,
-    deployed_by NVARCHAR(128) NOT NULL,
-    deployment_note NVARCHAR(512) NULL,
-    created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
-
-    CONSTRAINT PK_PRICING_MODEL_DEPLOYMENT
-        PRIMARY KEY (deployment_id),
-
-    CONSTRAINT FK_MODEL_DEPLOYMENT_MODEL
-        FOREIGN KEY (model_id)
-        REFERENCES pricing.PRICING_MODEL(model_id),
-
-    CONSTRAINT FK_MODEL_DEPLOYMENT_PACKAGE
-        FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id),
-
-    CONSTRAINT CK_MODEL_DEPLOYMENT_EFFECTIVE_DATES
-        CHECK (effective_to_ts IS NULL OR effective_to_ts > effective_from_ts)
-);
-
-CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT
-ON pricing.PRICING_MODEL_DEPLOYMENT(model_id, deployment_slot)
-WHERE effective_to_ts IS NULL;
-
-CREATE TABLE pricing.PRICING_PACKAGE_POINTER (
-    pointer_name NVARCHAR(128) NOT NULL,
-    model_id BIGINT NULL,
-    rate_package_id BIGINT NOT NULL,
-    updated_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
-    updated_by NVARCHAR(128) NOT NULL,
-
-    CONSTRAINT FK_PACKAGE_POINTER_MODEL
-        FOREIGN KEY (model_id)
-        REFERENCES pricing.PRICING_MODEL(model_id),
-
-    CONSTRAINT FK_PACKAGE_POINTER_PACKAGE
-        FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id)
-);
-
-CREATE UNIQUE INDEX UX_PACKAGE_POINTER_MODEL_SLOT
-ON pricing.PRICING_PACKAGE_POINTER(model_id, pointer_name)
-WHERE model_id IS NOT NULL;
-
-CREATE TABLE pricing.CV_SPLIT_SET (
+CREATE TABLE mlops.CV_SPLIT_SET (
     split_set_id NVARCHAR(128) NOT NULL,
     manifest_id NVARCHAR(128) NOT NULL,
     split_mode NVARCHAR(32) NOT NULL,
@@ -211,13 +127,13 @@ CREATE TABLE pricing.CV_SPLIT_SET (
 
     CONSTRAINT FK_CV_SPLIT_SET_MANIFEST
         FOREIGN KEY (manifest_id)
-        REFERENCES pricing.DATASET_MANIFEST(manifest_id),
+        REFERENCES mlops.DATASET_MANIFEST(manifest_id),
 
     CONSTRAINT CK_CV_SPLIT_SET_MODE
         CHECK (split_mode IN ('REPLAYABLE', 'MATERIALIZED'))
 );
 
-CREATE TABLE pricing.CV_FOLD (
+CREATE TABLE mlops.CV_FOLD (
     split_set_id NVARCHAR(128) NOT NULL,
     fold_no INT NOT NULL,
     n_train BIGINT NOT NULL,
@@ -228,10 +144,77 @@ CREATE TABLE pricing.CV_FOLD (
 
     CONSTRAINT FK_CV_FOLD_SPLIT_SET
         FOREIGN KEY (split_set_id)
-        REFERENCES pricing.CV_SPLIT_SET(split_set_id)
+        REFERENCES mlops.CV_SPLIT_SET(split_set_id)
 );
 
-CREATE TABLE pricing.CV_FOLD_METRIC (
+CREATE TABLE mlops.CV_SPLIT_ROW (
+    split_set_id NVARCHAR(128) NOT NULL,
+    row_ordinal BIGINT NOT NULL,
+    row_key_text NVARCHAR(900) NULL,
+    row_key_digest VARBINARY(32) NOT NULL,
+    test_fold_no INT NOT NULL,
+
+    CONSTRAINT PK_CV_SPLIT_ROW
+        PRIMARY KEY (split_set_id, row_ordinal),
+
+    CONSTRAINT FK_CV_SPLIT_ROW_SPLIT_SET
+        FOREIGN KEY (split_set_id)
+        REFERENCES mlops.CV_SPLIT_SET(split_set_id),
+
+    CONSTRAINT FK_CV_SPLIT_ROW_FOLD
+        FOREIGN KEY (split_set_id, test_fold_no)
+        REFERENCES mlops.CV_FOLD(split_set_id, fold_no)
+);
+
+CREATE TABLE mlops.MODEL_RUN_DATASET (
+    model_run_id BIGINT NOT NULL,
+    manifest_id NVARCHAR(128) NOT NULL,
+    dataset_role NVARCHAR(64) NOT NULL,
+
+    CONSTRAINT PK_MODEL_RUN_DATASET
+        PRIMARY KEY (model_run_id, manifest_id, dataset_role),
+
+    CONSTRAINT FK_MODEL_RUN_DATASET_RUN
+        FOREIGN KEY (model_run_id)
+        REFERENCES mlops.MODEL_RUN(model_run_id),
+
+    CONSTRAINT FK_MODEL_RUN_DATASET_MANIFEST
+        FOREIGN KEY (manifest_id)
+        REFERENCES mlops.DATASET_MANIFEST(manifest_id)
+);
+
+CREATE TABLE mlops.MODEL_RUN_SPLIT_SET (
+    model_run_id BIGINT NOT NULL,
+    split_set_id NVARCHAR(128) NOT NULL,
+    split_role NVARCHAR(64) NOT NULL,
+
+    CONSTRAINT PK_MODEL_RUN_SPLIT_SET
+        PRIMARY KEY (model_run_id, split_set_id, split_role),
+
+    CONSTRAINT FK_MODEL_RUN_SPLIT_SET_RUN
+        FOREIGN KEY (model_run_id)
+        REFERENCES mlops.MODEL_RUN(model_run_id),
+
+    CONSTRAINT FK_MODEL_RUN_SPLIT_SET_SPLIT_SET
+        FOREIGN KEY (split_set_id)
+        REFERENCES mlops.CV_SPLIT_SET(split_set_id)
+);
+
+CREATE TABLE mlops.MODEL_RUN_METRIC (
+    model_run_id BIGINT NOT NULL,
+    metric_name NVARCHAR(128) NOT NULL,
+    metric_value FLOAT NOT NULL,
+    metric_scope NVARCHAR(64) NULL,
+
+    CONSTRAINT PK_MODEL_RUN_METRIC
+        PRIMARY KEY (model_run_id, metric_name),
+
+    CONSTRAINT FK_MODEL_RUN_METRIC_RUN
+        FOREIGN KEY (model_run_id)
+        REFERENCES mlops.MODEL_RUN(model_run_id)
+);
+
+CREATE TABLE mlops.CV_FOLD_METRIC (
     model_run_id BIGINT NOT NULL,
     split_set_id NVARCHAR(128) NOT NULL,
     fold_no INT NOT NULL,
@@ -243,28 +226,64 @@ CREATE TABLE pricing.CV_FOLD_METRIC (
 
     CONSTRAINT FK_CV_FOLD_METRIC_MODEL_RUN
         FOREIGN KEY (model_run_id)
-        REFERENCES pricing.MODEL_RUN(model_run_id),
+        REFERENCES mlops.MODEL_RUN(model_run_id),
 
     CONSTRAINT FK_CV_FOLD_METRIC_FOLD
         FOREIGN KEY (split_set_id, fold_no)
-        REFERENCES pricing.CV_FOLD(split_set_id, fold_no)
+        REFERENCES mlops.CV_FOLD(split_set_id, fold_no)
 );
 
-CREATE TABLE pricing.PRICING_FEATURE (
+CREATE TABLE pricing.RATE_PACKAGE (
+    rate_package_id BIGINT IDENTITY(1,1) NOT NULL,
+    parent_rate_package_id BIGINT NULL,
+    model_id BIGINT NOT NULL,
+    model_run_id BIGINT NULL,
+    model_version NVARCHAR(64) NULL,
+    package_version INT NOT NULL,
+    base_rate DECIMAL(19,6) NOT NULL,
+    effective_from_date DATE NOT NULL,
+    effective_to_date DATE NULL,
+    package_status NVARCHAR(32) NOT NULL,
+    created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    created_by NVARCHAR(128) NOT NULL,
+
+    CONSTRAINT PK_RATE_PACKAGE
+        PRIMARY KEY (rate_package_id),
+
+    CONSTRAINT FK_RATE_PACKAGE_PARENT
+        FOREIGN KEY (parent_rate_package_id)
+        REFERENCES pricing.RATE_PACKAGE(rate_package_id),
+
+    CONSTRAINT FK_RATE_PACKAGE_MODEL
+        FOREIGN KEY (model_id)
+        REFERENCES pricing.MODEL(model_id),
+
+    CONSTRAINT FK_RATE_PACKAGE_MODEL_RUN
+        FOREIGN KEY (model_run_id)
+        REFERENCES mlops.MODEL_RUN(model_run_id),
+
+    CONSTRAINT CK_RATE_PACKAGE_STATUS
+        CHECK (package_status IN ('DRAFT', 'PUBLISHED', 'RETIRED'))
+);
+
+CREATE UNIQUE INDEX UX_RATE_PACKAGE_MODEL_VERSION
+ON pricing.RATE_PACKAGE(model_id, package_version);
+
+CREATE TABLE pricing.FEATURE (
     feature_id BIGINT IDENTITY(1,1) NOT NULL,
     feature_name NVARCHAR(128) NOT NULL,
     feature_value_type NVARCHAR(32) NOT NULL,
     is_ordered BIT NOT NULL DEFAULT 0,
     active_flag BIT NOT NULL DEFAULT 1,
 
-    CONSTRAINT PK_PRICING_FEATURE
+    CONSTRAINT PK_FEATURE
         PRIMARY KEY (feature_id),
 
-    CONSTRAINT UQ_PRICING_FEATURE_NAME
+    CONSTRAINT UQ_FEATURE_NAME
         UNIQUE (feature_name)
 );
 
-CREATE TABLE pricing.PRICING_FEATURE_LEVEL_SET (
+CREATE TABLE pricing.FEATURE_LEVEL_SET (
     level_set_id BIGINT IDENTITY(1,1) NOT NULL,
     model_id BIGINT NULL,
     feature_id BIGINT NOT NULL,
@@ -274,22 +293,22 @@ CREATE TABLE pricing.PRICING_FEATURE_LEVEL_SET (
     grid_width FLOAT NULL,
     created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
 
-    CONSTRAINT PK_PRICING_FEATURE_LEVEL_SET
+    CONSTRAINT PK_FEATURE_LEVEL_SET
         PRIMARY KEY (level_set_id),
 
-    CONSTRAINT FK_LEVEL_SET_MODEL
+    CONSTRAINT FK_FEATURE_LEVEL_SET_MODEL
         FOREIGN KEY (model_id)
-        REFERENCES pricing.PRICING_MODEL(model_id),
+        REFERENCES pricing.MODEL(model_id),
 
-    CONSTRAINT FK_LEVEL_SET_FEATURE
+    CONSTRAINT FK_FEATURE_LEVEL_SET_FEATURE
         FOREIGN KEY (feature_id)
-        REFERENCES pricing.PRICING_FEATURE(feature_id)
+        REFERENCES pricing.FEATURE(feature_id)
 );
 
 CREATE UNIQUE INDEX UX_LEVEL_SET_MODEL_FEATURE_NAME
-ON pricing.PRICING_FEATURE_LEVEL_SET(model_id, feature_id, level_set_name);
+ON pricing.FEATURE_LEVEL_SET(model_id, feature_id, level_set_name);
 
-CREATE TABLE pricing.PRICING_FEATURE_LEVEL (
+CREATE TABLE pricing.FEATURE_LEVEL (
     feature_level_id BIGINT IDENTITY(1,1) NOT NULL,
     level_set_id BIGINT NOT NULL,
     level_code NVARCHAR(128) NOT NULL,
@@ -301,18 +320,18 @@ CREATE TABLE pricing.PRICING_FEATURE_LEVEL (
     is_missing BIT NOT NULL DEFAULT 0,
     is_other BIT NOT NULL DEFAULT 0,
 
-    CONSTRAINT PK_PRICING_FEATURE_LEVEL
+    CONSTRAINT PK_FEATURE_LEVEL
         PRIMARY KEY (feature_level_id),
 
     CONSTRAINT FK_FEATURE_LEVEL_SET
         FOREIGN KEY (level_set_id)
-        REFERENCES pricing.PRICING_FEATURE_LEVEL_SET(level_set_id),
+        REFERENCES pricing.FEATURE_LEVEL_SET(level_set_id),
 
     CONSTRAINT UQ_FEATURE_LEVEL
         UNIQUE (level_set_id, level_code)
 );
 
-CREATE TABLE pricing.PRICING_TERM (
+CREATE TABLE pricing.TERM (
     term_id BIGINT IDENTITY(1,1) NOT NULL,
     rate_package_id BIGINT NOT NULL,
     term_name NVARCHAR(128) NOT NULL,
@@ -322,18 +341,18 @@ CREATE TABLE pricing.PRICING_TERM (
     default_log_coefficient DECIMAL(19,12) NOT NULL DEFAULT 0.0,
     active_flag BIT NOT NULL DEFAULT 1,
 
-    CONSTRAINT PK_PRICING_TERM
+    CONSTRAINT PK_TERM
         PRIMARY KEY (term_id),
 
     CONSTRAINT FK_TERM_PACKAGE
         FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id),
+        REFERENCES pricing.RATE_PACKAGE(rate_package_id),
 
     CONSTRAINT UQ_TERM_PACKAGE_NAME
         UNIQUE (rate_package_id, term_name)
 );
 
-CREATE TABLE pricing.PRICING_TERM_FEATURE (
+CREATE TABLE pricing.TERM_FEATURE (
     term_id BIGINT NOT NULL,
     position_no SMALLINT NOT NULL,
     feature_id BIGINT NOT NULL,
@@ -345,18 +364,18 @@ CREATE TABLE pricing.PRICING_TERM_FEATURE (
 
     CONSTRAINT FK_TERM_FEATURE_TERM
         FOREIGN KEY (term_id)
-        REFERENCES pricing.PRICING_TERM(term_id),
+        REFERENCES pricing.TERM(term_id),
 
     CONSTRAINT FK_TERM_FEATURE_FEATURE
         FOREIGN KEY (feature_id)
-        REFERENCES pricing.PRICING_FEATURE(feature_id),
+        REFERENCES pricing.FEATURE(feature_id),
 
     CONSTRAINT FK_TERM_FEATURE_LEVEL_SET
         FOREIGN KEY (level_set_id)
-        REFERENCES pricing.PRICING_FEATURE_LEVEL_SET(level_set_id)
+        REFERENCES pricing.FEATURE_LEVEL_SET(level_set_id)
 );
 
-CREATE TABLE pricing.PRICING_RATE_CELL (
+CREATE TABLE pricing.RATE_CELL (
     cell_id BIGINT IDENTITY(1,1) NOT NULL,
     term_id BIGINT NOT NULL,
     cell_key_text NVARCHAR(900) NOT NULL,
@@ -369,18 +388,18 @@ CREATE TABLE pricing.PRICING_RATE_CELL (
     is_default BIT NOT NULL DEFAULT 0,
     is_deleted BIT NOT NULL DEFAULT 0,
 
-    CONSTRAINT PK_PRICING_RATE_CELL
+    CONSTRAINT PK_RATE_CELL
         PRIMARY KEY (cell_id),
 
     CONSTRAINT FK_RATE_CELL_TERM
         FOREIGN KEY (term_id)
-        REFERENCES pricing.PRICING_TERM(term_id),
+        REFERENCES pricing.TERM(term_id),
 
     CONSTRAINT UQ_RATE_CELL
         UNIQUE (term_id, cell_key_digest)
 );
 
-CREATE TABLE pricing.PRICING_RATE_CELL_LEVEL (
+CREATE TABLE pricing.RATE_CELL_LEVEL (
     cell_id BIGINT NOT NULL,
     position_no SMALLINT NOT NULL,
     feature_level_id BIGINT NOT NULL,
@@ -390,66 +409,141 @@ CREATE TABLE pricing.PRICING_RATE_CELL_LEVEL (
 
     CONSTRAINT FK_RATE_CELL_LEVEL_CELL
         FOREIGN KEY (cell_id)
-        REFERENCES pricing.PRICING_RATE_CELL(cell_id),
+        REFERENCES pricing.RATE_CELL(cell_id),
 
     CONSTRAINT FK_RATE_CELL_LEVEL_LEVEL
         FOREIGN KEY (feature_level_id)
-        REFERENCES pricing.PRICING_FEATURE_LEVEL(feature_level_id)
+        REFERENCES pricing.FEATURE_LEVEL(feature_level_id)
 );
 
-CREATE TABLE pricing.PRICING_COMPILED_RATE_CELL (
+CREATE TABLE pricing.MODEL_DEPLOYMENT (
+    deployment_id BIGINT IDENTITY(1,1) NOT NULL,
+    model_id BIGINT NOT NULL,
     rate_package_id BIGINT NOT NULL,
-    term_id BIGINT NOT NULL,
-    cell_key_digest VARBINARY(32) NOT NULL,
-    term_name NVARCHAR(128) NOT NULL,
-    term_type NVARCHAR(64) NOT NULL,
-    sequence_no INT NOT NULL,
-    cell_key_text NVARCHAR(900) NOT NULL,
-    multiplier DECIMAL(19,10) NOT NULL,
-    log_coefficient DECIMAL(19,12) NOT NULL,
-    exposure_weight DECIMAL(19,4) NULL,
-    record_count BIGINT NULL,
-    is_default BIT NOT NULL,
-    is_reference BIT NOT NULL,
+    deployment_slot NVARCHAR(64) NOT NULL,
+    effective_from_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    effective_to_ts DATETIME2(3) NULL,
+    deployed_by NVARCHAR(128) NOT NULL,
+    deployment_note NVARCHAR(512) NULL,
+    created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
 
-    CONSTRAINT PK_COMPILED_RATE_CELL
-        PRIMARY KEY (rate_package_id, term_id, cell_key_digest),
+    CONSTRAINT PK_MODEL_DEPLOYMENT
+        PRIMARY KEY (deployment_id),
 
-    CONSTRAINT FK_COMPILED_RATE_CELL_PACKAGE
+    CONSTRAINT FK_MODEL_DEPLOYMENT_MODEL
+        FOREIGN KEY (model_id)
+        REFERENCES pricing.MODEL(model_id),
+
+    CONSTRAINT FK_MODEL_DEPLOYMENT_PACKAGE
         FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id),
+        REFERENCES pricing.RATE_PACKAGE(rate_package_id),
 
-    CONSTRAINT FK_COMPILED_RATE_CELL_TERM
-        FOREIGN KEY (term_id)
-        REFERENCES pricing.PRICING_TERM(term_id)
+    CONSTRAINT CK_MODEL_DEPLOYMENT_EFFECTIVE_DATES
+        CHECK (effective_to_ts IS NULL OR effective_to_ts > effective_from_ts)
 );
 
-CREATE TABLE pricing.PRICING_COMPILED_1D_RATE_BAND (
-    rate_package_id BIGINT NOT NULL,
-    term_id BIGINT NOT NULL,
-    feature_level_id BIGINT NOT NULL,
-    term_name NVARCHAR(128) NOT NULL,
-    feature_name NVARCHAR(128) NOT NULL,
-    level_code NVARCHAR(128) NOT NULL,
-    sort_order INT NOT NULL,
-    lower_bound FLOAT NULL,
-    upper_bound FLOAT NULL,
-    representative_value FLOAT NULL,
-    multiplier DECIMAL(19,10) NOT NULL,
-    log_coefficient DECIMAL(19,12) NOT NULL,
+CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT
+ON pricing.MODEL_DEPLOYMENT(model_id, deployment_slot)
+WHERE effective_to_ts IS NULL;
 
-    CONSTRAINT PK_COMPILED_1D_RATE_BAND
-        PRIMARY KEY CLUSTERED (rate_package_id, term_id, sort_order, feature_level_id),
+CREATE OR ALTER VIEW pricing.V_CURRENT_RATE_PACKAGE AS
+SELECT
+    d.deployment_id,
+    d.deployment_slot,
+    d.model_id,
+    m.model_key,
+    m.model_label,
+    d.rate_package_id,
+    p.package_version,
+    p.model_version,
+    p.base_rate,
+    p.package_status,
+    p.effective_from_date,
+    p.effective_to_date,
+    d.effective_from_ts AS deployed_from_ts,
+    d.deployed_by
+FROM pricing.MODEL_DEPLOYMENT AS d
+JOIN pricing.RATE_PACKAGE AS p
+    ON p.rate_package_id = d.rate_package_id
+   AND p.model_id = d.model_id
+JOIN pricing.MODEL AS m
+    ON m.model_id = d.model_id
+WHERE d.effective_to_ts IS NULL;
 
-    CONSTRAINT FK_COMPILED_1D_RATE_BAND_PACKAGE
-        FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id),
+CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_RATE_CELL AS
+SELECT
+    p.rate_package_id,
+    t.term_id,
+    c.cell_id,
+    t.term_name,
+    t.term_type,
+    t.sequence_no,
+    c.cell_key_text,
+    c.multiplier,
+    c.log_coefficient,
+    c.exposure_weight,
+    c.record_count,
+    c.is_default,
+    c.is_reference
+FROM pricing.RATE_PACKAGE AS p
+JOIN pricing.TERM AS t
+    ON t.rate_package_id = p.rate_package_id
+JOIN pricing.RATE_CELL AS c
+    ON c.term_id = t.term_id
+WHERE c.is_deleted = 0;
 
-    CONSTRAINT FK_COMPILED_1D_RATE_BAND_TERM
-        FOREIGN KEY (term_id)
-        REFERENCES pricing.PRICING_TERM(term_id),
+CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_RATE_CELL_LEVEL AS
+SELECT
+    p.rate_package_id,
+    t.term_id,
+    c.cell_id,
+    rcl.position_no,
+    f.feature_id,
+    fl.feature_level_id,
+    f.feature_name,
+    fl.level_code,
+    fl.level_label
+FROM pricing.RATE_PACKAGE AS p
+JOIN pricing.TERM AS t
+    ON t.rate_package_id = p.rate_package_id
+JOIN pricing.RATE_CELL AS c
+    ON c.term_id = t.term_id
+JOIN pricing.RATE_CELL_LEVEL AS rcl
+    ON rcl.cell_id = c.cell_id
+JOIN pricing.FEATURE_LEVEL AS fl
+    ON fl.feature_level_id = rcl.feature_level_id
+JOIN pricing.FEATURE_LEVEL_SET AS fls
+    ON fls.level_set_id = fl.level_set_id
+JOIN pricing.FEATURE AS f
+    ON f.feature_id = fls.feature_id
+WHERE c.is_deleted = 0;
 
-    CONSTRAINT FK_COMPILED_1D_RATE_BAND_LEVEL
-        FOREIGN KEY (feature_level_id)
-        REFERENCES pricing.PRICING_FEATURE_LEVEL(feature_level_id)
-);
+CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_1D_RATE_BAND AS
+SELECT
+    p.rate_package_id,
+    t.term_id,
+    fl.feature_level_id,
+    t.term_name,
+    f.feature_name,
+    fl.level_code,
+    fl.order_index AS sort_order,
+    fl.lower_bound,
+    fl.upper_bound,
+    fl.representative_value,
+    c.multiplier,
+    c.log_coefficient
+FROM pricing.RATE_PACKAGE AS p
+JOIN pricing.TERM AS t
+    ON t.rate_package_id = p.rate_package_id
+JOIN pricing.RATE_CELL AS c
+    ON c.term_id = t.term_id
+JOIN pricing.RATE_CELL_LEVEL AS rcl
+    ON rcl.cell_id = c.cell_id
+JOIN pricing.FEATURE_LEVEL AS fl
+    ON fl.feature_level_id = rcl.feature_level_id
+JOIN pricing.FEATURE_LEVEL_SET AS fls
+    ON fls.level_set_id = fl.level_set_id
+JOIN pricing.FEATURE AS f
+    ON f.feature_id = fls.feature_id
+WHERE c.is_deleted = 0
+  AND t.term_type IN ('GLM_1D', 'SPLINE_1D', 'DISCRETIZED_SPLINE_1D');

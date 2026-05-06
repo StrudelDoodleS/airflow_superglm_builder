@@ -138,39 +138,44 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
     ddl = Path("docs/pricing_useful_tables_ddl.sql").read_text(encoding="utf-8")
 
     useful_tables = [
-        "FREMTPL_RAW",
-        "DATASET_MANIFEST",
-        "DATASET_COLUMN",
-        "PRICING_MODEL",
-        "MODEL_RUN",
-        "CV_SPLIT_SET",
-        "CV_FOLD",
-        "CV_FOLD_METRIC",
-        "PRICING_RATE_PACKAGE",
-        "PRICING_MODEL_DEPLOYMENT",
-        "PRICING_PACKAGE_POINTER",
-        "PRICING_TERM",
-        "PRICING_RATE_CELL",
-        "PRICING_TERM_FEATURE",
-        "PRICING_FEATURE",
-        "PRICING_FEATURE_LEVEL_SET",
-        "PRICING_FEATURE_LEVEL",
-        "PRICING_RATE_CELL_LEVEL",
-        "PRICING_COMPILED_RATE_CELL",
-        "PRICING_COMPILED_1D_RATE_BAND",
+        "raw.FREMTPL_RAW",
+        "mlops.DATASET_MANIFEST",
+        "mlops.DATASET_COLUMN",
+        "mlops.CV_SPLIT_SET",
+        "mlops.CV_FOLD",
+        "mlops.CV_SPLIT_ROW",
+        "mlops.MODEL_RUN",
+        "mlops.MODEL_RUN_DATASET",
+        "mlops.MODEL_RUN_SPLIT_SET",
+        "mlops.MODEL_RUN_METRIC",
+        "mlops.CV_FOLD_METRIC",
+        "pricing.MODEL",
+        "pricing.RATE_PACKAGE",
+        "pricing.FEATURE",
+        "pricing.FEATURE_LEVEL_SET",
+        "pricing.FEATURE_LEVEL",
+        "pricing.TERM",
+        "pricing.TERM_FEATURE",
+        "pricing.RATE_CELL",
+        "pricing.RATE_CELL_LEVEL",
+        "pricing.MODEL_DEPLOYMENT",
+        "pricing_runtime.V_COMPILED_RATE_CELL",
+        "pricing_runtime.V_COMPILED_RATE_CELL_LEVEL",
+        "pricing_runtime.V_COMPILED_1D_RATE_BAND",
     ]
 
     for table in useful_tables:
         assert f"CREATE TABLE {table}" in ddl
 
     assert "pricing_stg" not in ddl
-    assert "pricing." not in ddl
     assert "STG_" not in ddl
     assert "DATASET_ROW_KEY" not in ddl
-    assert "CREATE TABLE CV_SPLIT (" not in ddl
-    assert "FOREIGN KEY (model_id) REFERENCES PRICING_MODEL(model_id)" in ddl
-    assert "FOREIGN KEY (manifest_id) REFERENCES DATASET_MANIFEST(manifest_id)" in ddl
-    assert "FOREIGN KEY (rate_package_id) REFERENCES PRICING_RATE_PACKAGE(rate_package_id)" in ddl
+    assert "PRICING_PACKAGE_POINTER" not in ddl
+    assert "CREATE TABLE pricing.PACKAGE_POINTER" not in ddl
+    assert "CREATE TABLE mlops.CV_SPLIT (" not in ddl
+    assert "FOREIGN KEY (model_id) REFERENCES pricing.MODEL(model_id)" in ddl
+    assert "FOREIGN KEY (manifest_id) REFERENCES mlops.DATASET_MANIFEST(manifest_id)" in ddl
+    assert "FOREIGN KEY (rate_package_id) REFERENCES pricing.RATE_PACKAGE(rate_package_id)" in ddl
 
 
 def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
@@ -185,7 +190,8 @@ def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
     assert "CREATE UNIQUE INDEX" not in ddl
     assert "CHECK (" not in ddl
     assert "\nWHERE " not in ddl
-    assert "CREATE TABLE PRICING_MODEL (" in ddl
+    assert "CREATE TABLE pricing.MODEL (" in ddl
+    assert "CREATE TABLE pricing_runtime.V_COMPILED_RATE_CELL (" in ddl
     assert "NVARCHAR(MAX)" in ddl
     assert "DATETIME2(3)" in ddl
     assert "IDENTITY(1,1)" in ddl
@@ -194,14 +200,24 @@ def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
 def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_indexes():
     ddl = Path("docs/pricing_useful_tables_full_ddl.sql").read_text(encoding="utf-8")
 
+    assert "CREATE SCHEMA raw;" in ddl
+    assert "CREATE SCHEMA mlops;" in ddl
     assert "CREATE SCHEMA pricing;" in ddl
-    assert "CREATE TABLE pricing.PRICING_MODEL (" in ddl
-    assert "CONSTRAINT PK_PRICING_MODEL" in ddl
+    assert "CREATE SCHEMA pricing_runtime;" in ddl
+    assert "CREATE TABLE pricing.MODEL (" in ddl
+    assert "CREATE TABLE mlops.MODEL_RUN_DATASET (" in ddl
+    assert "CREATE TABLE mlops.MODEL_RUN_SPLIT_SET (" in ddl
+    assert "CREATE TABLE mlops.MODEL_RUN_METRIC (" in ddl
+    assert "CREATE TABLE mlops.CV_SPLIT_ROW (" in ddl
+    assert "CREATE OR ALTER VIEW pricing.V_CURRENT_RATE_PACKAGE" in ddl
+    assert "CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_RATE_CELL" in ddl
+    assert "CONSTRAINT PK_MODEL" in ddl
     assert "CONSTRAINT FK_MODEL_RUN_MODEL" in ddl
-    assert "CONSTRAINT CK_PRICING_MODEL_STATUS" in ddl
+    assert "CONSTRAINT CK_MODEL_STATUS" in ddl
     assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl
     assert "WHERE effective_to_ts IS NULL" in ddl
-    assert "CREATE UNIQUE INDEX UX_PACKAGE_POINTER_MODEL_SLOT" in ddl
+    assert "PACKAGE_POINTER" not in ddl
+    assert "PRICING_PACKAGE_POINTER" not in ddl
     assert "pricing_stg" not in ddl
     assert "STG_" not in ddl
     assert "DATASET_ROW_KEY" not in ddl

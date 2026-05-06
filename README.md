@@ -378,14 +378,18 @@ Open http://localhost:8088 after generation. The generated files live in
 - `metadata.json`: table, column, and foreign-key metadata snapshot.
 
 For strict third-party ERD importers, use `docs/pricing_useful_tables_ddl.sql`.
-It uses simple SQL Server table syntax with unnamed primary and foreign keys.
+It uses simple SQL Server table syntax with unnamed primary and foreign keys,
+split across `raw`, `mlops`, `pricing`, and `pricing_runtime`. The three
+`pricing_runtime.V_*` objects are represented as table-shaped objects there so
+strict ERD tools can draw them.
+
 For the richer SQL Server reference, use
-`docs/pricing_useful_tables_full_ddl.sql`; it keeps schema-qualified names,
-named constraints, checks, unique constraints, and filtered unique indexes.
-Both files cover the useful persisted pricing tables only: raw source,
-dataset/CV lineage, model runs, rate packages, deployment history, normalized
-rating tables, and compiled outputs. They deliberately exclude `pricing_stg`,
-old `STG_*` tables, `DATASET_ROW_KEY`, and old row-per-policy CV split tables.
+`docs/pricing_useful_tables_full_ddl.sql`; it keeps schema creation,
+schema-qualified names, named constraints, checks, unique constraints, filtered
+unique indexes, and actual view definitions. The current package pointer is now
+`pricing.V_CURRENT_RATE_PACKAGE`, derived from `pricing.MODEL_DEPLOYMENT`, so
+there is no package pointer table. Both files deliberately exclude
+`pricing_stg`, old `STG_*` tables, and `DATASET_ROW_KEY`.
 
 The default diagram focuses on the persisted pricing model. Import staging
 tables live in the separate `pricing_stg` schema so they do not clutter the
