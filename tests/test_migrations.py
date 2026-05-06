@@ -161,16 +161,16 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
     ]
 
     for table in useful_tables:
-        assert f"CREATE TABLE pricing.{table}" in ddl
+        assert f"CREATE TABLE {table}" in ddl
 
     assert "pricing_stg" not in ddl
+    assert "pricing." not in ddl
     assert "STG_" not in ddl
     assert "DATASET_ROW_KEY" not in ddl
-    assert "CREATE TABLE pricing.CV_SPLIT (" not in ddl
-    assert "CONSTRAINT FK_MODEL_RUN_MODEL" in ddl
-    assert "CONSTRAINT FK_MODEL_RUN_MANIFEST" in ddl
-    assert "CONSTRAINT FK_RATE_PACKAGE_MODEL" in ddl
-    assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl
+    assert "CREATE TABLE CV_SPLIT (" not in ddl
+    assert "FOREIGN KEY (model_id) REFERENCES PRICING_MODEL(model_id)" in ddl
+    assert "FOREIGN KEY (manifest_id) REFERENCES DATASET_MANIFEST(manifest_id)" in ddl
+    assert "FOREIGN KEY (rate_package_id) REFERENCES PRICING_RATE_PACKAGE(rate_package_id)" in ddl
 
 
 def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
@@ -180,9 +180,12 @@ def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
     assert "IF NOT EXISTS" not in ddl
     assert "EXEC(" not in ddl
     assert "CREATE TABLE IF NOT EXISTS" not in ddl
-    assert "CREATE SCHEMA pricing;" in ddl
-    assert "CREATE TABLE pricing.PRICING_MODEL (" in ddl
+    assert "CREATE SCHEMA" not in ddl
+    assert "CONSTRAINT " not in ddl
+    assert "CREATE UNIQUE INDEX" not in ddl
+    assert "CHECK (" not in ddl
+    assert "\nWHERE " not in ddl
+    assert "CREATE TABLE PRICING_MODEL (" in ddl
     assert "NVARCHAR(MAX)" in ddl
     assert "DATETIME2(3)" in ddl
     assert "IDENTITY(1,1)" in ddl
-    assert "WHERE effective_to_ts IS NULL" in ddl
