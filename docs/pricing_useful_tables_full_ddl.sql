@@ -93,6 +93,9 @@ CREATE TABLE mlops.MODEL_RUN (
     CONSTRAINT PK_MODEL_RUN
         PRIMARY KEY (model_run_id),
 
+    CONSTRAINT UQ_MODEL_RUN_MODEL_RUN
+        UNIQUE (model_id, model_run_id),
+
     CONSTRAINT FK_MODEL_RUN_MODEL
         FOREIGN KEY (model_id)
         REFERENCES pricing.MODEL(model_id),
@@ -124,6 +127,9 @@ CREATE TABLE mlops.CV_SPLIT_SET (
 
     CONSTRAINT PK_CV_SPLIT_SET
         PRIMARY KEY (split_set_id),
+
+    CONSTRAINT UQ_CV_SPLIT_SET_MANIFEST_SPLIT
+        UNIQUE (manifest_id, split_set_id),
 
     CONSTRAINT FK_CV_SPLIT_SET_MANIFEST
         FOREIGN KEY (manifest_id)
@@ -172,7 +178,7 @@ CREATE TABLE mlops.MODEL_RUN_DATASET (
     dataset_role NVARCHAR(64) NOT NULL,
 
     CONSTRAINT PK_MODEL_RUN_DATASET
-        PRIMARY KEY (model_run_id, manifest_id, dataset_role),
+        PRIMARY KEY (model_run_id, dataset_role, manifest_id),
 
     CONSTRAINT FK_MODEL_RUN_DATASET_RUN
         FOREIGN KEY (model_run_id)
@@ -185,7 +191,9 @@ CREATE TABLE mlops.MODEL_RUN_DATASET (
 
 CREATE TABLE mlops.MODEL_RUN_SPLIT_SET (
     model_run_id BIGINT NOT NULL,
+    manifest_id NVARCHAR(128) NOT NULL,
     split_set_id NVARCHAR(128) NOT NULL,
+    dataset_role NVARCHAR(64) NOT NULL,
     split_role NVARCHAR(64) NOT NULL,
 
     CONSTRAINT PK_MODEL_RUN_SPLIT_SET
@@ -195,9 +203,13 @@ CREATE TABLE mlops.MODEL_RUN_SPLIT_SET (
         FOREIGN KEY (model_run_id)
         REFERENCES mlops.MODEL_RUN(model_run_id),
 
-    CONSTRAINT FK_MODEL_RUN_SPLIT_SET_SPLIT_SET
-        FOREIGN KEY (split_set_id)
-        REFERENCES mlops.CV_SPLIT_SET(split_set_id)
+    CONSTRAINT FK_MODEL_RUN_SPLIT_SET_DATASET
+        FOREIGN KEY (model_run_id, dataset_role, manifest_id)
+        REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id),
+
+    CONSTRAINT FK_MODEL_RUN_SPLIT_SET_SPLIT
+        FOREIGN KEY (manifest_id, split_set_id)
+        REFERENCES mlops.CV_SPLIT_SET(manifest_id, split_set_id)
 );
 
 CREATE TABLE mlops.MODEL_RUN_METRIC (
@@ -250,17 +262,20 @@ CREATE TABLE pricing.RATE_PACKAGE (
     CONSTRAINT PK_RATE_PACKAGE
         PRIMARY KEY (rate_package_id),
 
-    CONSTRAINT FK_RATE_PACKAGE_PARENT
-        FOREIGN KEY (parent_rate_package_id)
-        REFERENCES pricing.RATE_PACKAGE(rate_package_id),
+    CONSTRAINT UQ_RATE_PACKAGE_MODEL_PACKAGE
+        UNIQUE (model_id, rate_package_id),
+
+    CONSTRAINT FK_RATE_PACKAGE_PARENT_SAME_MODEL
+        FOREIGN KEY (model_id, parent_rate_package_id)
+        REFERENCES pricing.RATE_PACKAGE(model_id, rate_package_id),
 
     CONSTRAINT FK_RATE_PACKAGE_MODEL
         FOREIGN KEY (model_id)
         REFERENCES pricing.MODEL(model_id),
 
     CONSTRAINT FK_RATE_PACKAGE_MODEL_RUN
-        FOREIGN KEY (model_run_id)
-        REFERENCES mlops.MODEL_RUN(model_run_id),
+        FOREIGN KEY (model_id, model_run_id)
+        REFERENCES mlops.MODEL_RUN(model_id, model_run_id),
 
     CONSTRAINT CK_RATE_PACKAGE_STATUS
         CHECK (package_status IN ('DRAFT', 'PUBLISHED', 'RETIRED'))
@@ -296,6 +311,9 @@ CREATE TABLE pricing.FEATURE_LEVEL_SET (
     CONSTRAINT PK_FEATURE_LEVEL_SET
         PRIMARY KEY (level_set_id),
 
+    CONSTRAINT UQ_FEATURE_LEVEL_SET_FEATURE_LEVEL_SET
+        UNIQUE (feature_id, level_set_id),
+
     CONSTRAINT FK_FEATURE_LEVEL_SET_MODEL
         FOREIGN KEY (model_id)
         REFERENCES pricing.MODEL(model_id),
@@ -322,6 +340,9 @@ CREATE TABLE pricing.FEATURE_LEVEL (
 
     CONSTRAINT PK_FEATURE_LEVEL
         PRIMARY KEY (feature_level_id),
+
+    CONSTRAINT UQ_FEATURE_LEVEL_SET_LEVEL
+        UNIQUE (level_set_id, feature_level_id),
 
     CONSTRAINT FK_FEATURE_LEVEL_SET
         FOREIGN KEY (level_set_id)
@@ -362,17 +383,16 @@ CREATE TABLE pricing.TERM_FEATURE (
     CONSTRAINT PK_TERM_FEATURE
         PRIMARY KEY (term_id, position_no),
 
+    CONSTRAINT UQ_TERM_FEATURE_TERM_POSITION_LEVEL_SET
+        UNIQUE (term_id, position_no, level_set_id),
+
     CONSTRAINT FK_TERM_FEATURE_TERM
         FOREIGN KEY (term_id)
         REFERENCES pricing.TERM(term_id),
 
-    CONSTRAINT FK_TERM_FEATURE_FEATURE
-        FOREIGN KEY (feature_id)
-        REFERENCES pricing.FEATURE(feature_id),
-
-    CONSTRAINT FK_TERM_FEATURE_LEVEL_SET
-        FOREIGN KEY (level_set_id)
-        REFERENCES pricing.FEATURE_LEVEL_SET(level_set_id)
+    CONSTRAINT FK_TERM_FEATURE_LEVEL_SET_FEATURE
+        FOREIGN KEY (feature_id, level_set_id)
+        REFERENCES pricing.FEATURE_LEVEL_SET(feature_id, level_set_id)
 );
 
 CREATE TABLE pricing.RATE_CELL (
@@ -391,29 +411,39 @@ CREATE TABLE pricing.RATE_CELL (
     CONSTRAINT PK_RATE_CELL
         PRIMARY KEY (cell_id),
 
+    CONSTRAINT UQ_RATE_CELL_CELL_TERM
+        UNIQUE (cell_id, term_id),
+
     CONSTRAINT FK_RATE_CELL_TERM
         FOREIGN KEY (term_id)
-        REFERENCES pricing.TERM(term_id),
-
-    CONSTRAINT UQ_RATE_CELL
-        UNIQUE (term_id, cell_key_digest)
+        REFERENCES pricing.TERM(term_id)
 );
+
+CREATE UNIQUE INDEX UX_RATE_CELL_TERM_DIGEST_ACTIVE
+ON pricing.RATE_CELL(term_id, cell_key_digest)
+WHERE is_deleted = 0;
 
 CREATE TABLE pricing.RATE_CELL_LEVEL (
     cell_id BIGINT NOT NULL,
+    term_id BIGINT NOT NULL,
     position_no SMALLINT NOT NULL,
+    level_set_id BIGINT NOT NULL,
     feature_level_id BIGINT NOT NULL,
 
     CONSTRAINT PK_RATE_CELL_LEVEL
         PRIMARY KEY (cell_id, position_no),
 
     CONSTRAINT FK_RATE_CELL_LEVEL_CELL
-        FOREIGN KEY (cell_id)
-        REFERENCES pricing.RATE_CELL(cell_id),
+        FOREIGN KEY (cell_id, term_id)
+        REFERENCES pricing.RATE_CELL(cell_id, term_id),
 
-    CONSTRAINT FK_RATE_CELL_LEVEL_LEVEL
-        FOREIGN KEY (feature_level_id)
-        REFERENCES pricing.FEATURE_LEVEL(feature_level_id)
+    CONSTRAINT FK_RATE_CELL_LEVEL_TERM_FEATURE
+        FOREIGN KEY (term_id, position_no, level_set_id)
+        REFERENCES pricing.TERM_FEATURE(term_id, position_no, level_set_id),
+
+    CONSTRAINT FK_RATE_CELL_LEVEL_FEATURE_LEVEL
+        FOREIGN KEY (level_set_id, feature_level_id)
+        REFERENCES pricing.FEATURE_LEVEL(level_set_id, feature_level_id)
 );
 
 CREATE TABLE pricing.MODEL_DEPLOYMENT (
@@ -435,8 +465,8 @@ CREATE TABLE pricing.MODEL_DEPLOYMENT (
         REFERENCES pricing.MODEL(model_id),
 
     CONSTRAINT FK_MODEL_DEPLOYMENT_PACKAGE
-        FOREIGN KEY (rate_package_id)
-        REFERENCES pricing.RATE_PACKAGE(rate_package_id),
+        FOREIGN KEY (model_id, rate_package_id)
+        REFERENCES pricing.RATE_PACKAGE(model_id, rate_package_id),
 
     CONSTRAINT CK_MODEL_DEPLOYMENT_EFFECTIVE_DATES
         CHECK (effective_to_ts IS NULL OR effective_to_ts > effective_from_ts)
@@ -499,6 +529,7 @@ SELECT
     c.cell_id,
     rcl.position_no,
     f.feature_id,
+    rcl.level_set_id,
     fl.feature_level_id,
     f.feature_name,
     fl.level_code,
@@ -510,10 +541,12 @@ JOIN pricing.RATE_CELL AS c
     ON c.term_id = t.term_id
 JOIN pricing.RATE_CELL_LEVEL AS rcl
     ON rcl.cell_id = c.cell_id
+   AND rcl.term_id = c.term_id
 JOIN pricing.FEATURE_LEVEL AS fl
-    ON fl.feature_level_id = rcl.feature_level_id
+    ON fl.level_set_id = rcl.level_set_id
+   AND fl.feature_level_id = rcl.feature_level_id
 JOIN pricing.FEATURE_LEVEL_SET AS fls
-    ON fls.level_set_id = fl.level_set_id
+    ON fls.level_set_id = rcl.level_set_id
 JOIN pricing.FEATURE AS f
     ON f.feature_id = fls.feature_id
 WHERE c.is_deleted = 0;
@@ -522,6 +555,7 @@ CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_1D_RATE_BAND AS
 SELECT
     p.rate_package_id,
     t.term_id,
+    rcl.level_set_id,
     fl.feature_level_id,
     t.term_name,
     f.feature_name,
@@ -539,10 +573,12 @@ JOIN pricing.RATE_CELL AS c
     ON c.term_id = t.term_id
 JOIN pricing.RATE_CELL_LEVEL AS rcl
     ON rcl.cell_id = c.cell_id
+   AND rcl.term_id = c.term_id
 JOIN pricing.FEATURE_LEVEL AS fl
-    ON fl.feature_level_id = rcl.feature_level_id
+    ON fl.level_set_id = rcl.level_set_id
+   AND fl.feature_level_id = rcl.feature_level_id
 JOIN pricing.FEATURE_LEVEL_SET AS fls
-    ON fls.level_set_id = fl.level_set_id
+    ON fls.level_set_id = rcl.level_set_id
 JOIN pricing.FEATURE AS f
     ON f.feature_id = fls.feature_id
 WHERE c.is_deleted = 0

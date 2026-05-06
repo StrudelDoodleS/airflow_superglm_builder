@@ -176,6 +176,38 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
     assert "FOREIGN KEY (model_id) REFERENCES pricing.MODEL(model_id)" in ddl
     assert "FOREIGN KEY (manifest_id) REFERENCES mlops.DATASET_MANIFEST(manifest_id)" in ddl
     assert "FOREIGN KEY (rate_package_id) REFERENCES pricing.RATE_PACKAGE(rate_package_id)" in ddl
+    assert (
+        "FOREIGN KEY (model_id, parent_rate_package_id) "
+        "REFERENCES pricing.RATE_PACKAGE(model_id, rate_package_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (model_id, model_run_id) "
+        "REFERENCES mlops.MODEL_RUN(model_id, model_run_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (model_run_id, dataset_role, manifest_id) "
+        "REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (manifest_id, split_set_id) "
+        "REFERENCES mlops.CV_SPLIT_SET(manifest_id, split_set_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (feature_id, level_set_id) "
+        "REFERENCES pricing.FEATURE_LEVEL_SET(feature_id, level_set_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (cell_id, term_id) "
+        "REFERENCES pricing.RATE_CELL(cell_id, term_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (term_id, position_no, level_set_id) "
+        "REFERENCES pricing.TERM_FEATURE(term_id, position_no, level_set_id)"
+    ) in ddl
+    assert (
+        "FOREIGN KEY (level_set_id, feature_level_id) "
+        "REFERENCES pricing.FEATURE_LEVEL(level_set_id, feature_level_id)"
+    ) in ddl
 
 
 def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
@@ -216,6 +248,29 @@ def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_index
     assert "CONSTRAINT CK_MODEL_STATUS" in ddl
     assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl
     assert "WHERE effective_to_ts IS NULL" in ddl
+    assert "CONSTRAINT FK_RATE_PACKAGE_PARENT_SAME_MODEL" in ddl
+    assert "FOREIGN KEY (model_id, parent_rate_package_id)" in ddl
+    assert "REFERENCES pricing.RATE_PACKAGE(model_id, rate_package_id)" in ddl
+    assert "CONSTRAINT FK_RATE_PACKAGE_MODEL_RUN" in ddl
+    assert "FOREIGN KEY (model_id, model_run_id)" in ddl
+    assert "REFERENCES mlops.MODEL_RUN(model_id, model_run_id)" in ddl
+    assert "CONSTRAINT FK_MODEL_RUN_SPLIT_SET_DATASET" in ddl
+    assert "FOREIGN KEY (model_run_id, dataset_role, manifest_id)" in ddl
+    assert "REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id)" in ddl
+    assert "CONSTRAINT FK_MODEL_RUN_SPLIT_SET_SPLIT" in ddl
+    assert "FOREIGN KEY (manifest_id, split_set_id)" in ddl
+    assert "REFERENCES mlops.CV_SPLIT_SET(manifest_id, split_set_id)" in ddl
+    assert "CONSTRAINT FK_TERM_FEATURE_LEVEL_SET_FEATURE" in ddl
+    assert "FOREIGN KEY (feature_id, level_set_id)" in ddl
+    assert "REFERENCES pricing.FEATURE_LEVEL_SET(feature_id, level_set_id)" in ddl
+    assert "CONSTRAINT FK_RATE_CELL_LEVEL_CELL" in ddl
+    assert "FOREIGN KEY (cell_id, term_id)" in ddl
+    assert "CONSTRAINT FK_RATE_CELL_LEVEL_TERM_FEATURE" in ddl
+    assert "FOREIGN KEY (term_id, position_no, level_set_id)" in ddl
+    assert "CONSTRAINT FK_RATE_CELL_LEVEL_FEATURE_LEVEL" in ddl
+    assert "FOREIGN KEY (level_set_id, feature_level_id)" in ddl
+    assert "CREATE UNIQUE INDEX UX_RATE_CELL_TERM_DIGEST_ACTIVE" in ddl
+    assert "WHERE is_deleted = 0" in ddl
     assert "PACKAGE_POINTER" not in ddl
     assert "PRICING_PACKAGE_POINTER" not in ddl
     assert "pricing_stg" not in ddl

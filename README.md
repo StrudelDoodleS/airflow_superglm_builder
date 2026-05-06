@@ -389,7 +389,9 @@ schema-qualified names, named constraints, checks, unique constraints, filtered
 unique indexes, and actual view definitions. The current package pointer is now
 `pricing.V_CURRENT_RATE_PACKAGE`, derived from `pricing.MODEL_DEPLOYMENT`, so
 there is no package pointer table. Both files deliberately exclude
-`pricing_stg`, old `STG_*` tables, and `DATASET_ROW_KEY`.
+`pricing_stg`, old `STG_*` tables, and `DATASET_ROW_KEY`. These files are
+fresh-create references for ERDs and review, not migrations for an existing
+database.
 
 The default diagram focuses on the persisted pricing model. Import staging
 tables live in the separate `pricing_stg` schema so they do not clutter the
