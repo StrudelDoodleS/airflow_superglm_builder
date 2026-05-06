@@ -1,6 +1,102 @@
+import re
 from pathlib import Path
 
 from pricing_pipeline.migrations import migration_files, split_sql_server_batches
+
+
+def _create_table_bodies(ddl: str) -> dict[str, str]:
+    bodies = {}
+    current_table = None
+    current_body = []
+
+    for line in ddl.splitlines():
+        match = re.match(r"CREATE TABLE ([a-z_]+\.[A-Z0-9_]+) \(", line)
+        if match:
+            current_table = match.group(1)
+            current_body = []
+            continue
+
+        if current_table and line == ");":
+            bodies[current_table] = "\n".join(current_body)
+            current_table = None
+            continue
+
+        if current_table:
+            current_body.append(line)
+
+    return bodies
+
+
+def _create_table_columns(ddl: str) -> dict[str, list[str]]:
+    skipped_keywords = {
+        "CHECK",
+        "CONSTRAINT",
+        "FOREIGN",
+        "PRIMARY",
+        "REFERENCES",
+        "UNIQUE",
+    }
+    columns = {}
+
+    for table_name, body in _create_table_bodies(ddl).items():
+        table_columns = []
+        for line in body.splitlines():
+            stripped = line.strip().rstrip(",")
+            if not stripped:
+                continue
+
+            first_token = stripped.split()[0]
+            if first_token.upper() in skipped_keywords:
+                continue
+
+            table_columns.append(first_token)
+
+        columns[table_name] = table_columns
+
+    return columns
+
+
+def _create_table_foreign_keys(ddl: str) -> dict[str, list[tuple[tuple[str, ...], str, tuple[str, ...]]]]:
+    foreign_key_pattern = re.compile(
+        r"FOREIGN KEY \(([^)]*)\)\s+REFERENCES\s+([a-z_]+\.[A-Z0-9_]+)\(([^)]*)\)",
+        re.S,
+    )
+    foreign_keys = {}
+
+    for table_name, body in _create_table_bodies(ddl).items():
+        table_foreign_keys = []
+        for source_columns, target_table, target_columns in foreign_key_pattern.findall(body):
+            table_foreign_keys.append(
+                (
+                    tuple(column.strip() for column in source_columns.replace("\n", " ").split(",")),
+                    target_table,
+                    tuple(column.strip() for column in target_columns.replace("\n", " ").split(",")),
+                )
+            )
+
+        foreign_keys[table_name] = sorted(table_foreign_keys)
+
+    return foreign_keys
+
+
+def _view_columns(ddl: str, view_name: str) -> list[str]:
+    view_pattern = re.compile(
+        rf"CREATE OR ALTER VIEW {re.escape(view_name)} AS\nSELECT\n(?P<select>.*?)\nFROM ",
+        re.S,
+    )
+    match = view_pattern.search(ddl)
+    assert match is not None, f"Missing view {view_name}"
+
+    columns = []
+    for line in match.group("select").splitlines():
+        stripped = line.strip().rstrip(",")
+        if not stripped:
+            continue
+
+        alias = re.search(r"\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$", stripped, re.I)
+        columns.append(alias.group(1) if alias else stripped.split(".")[-1])
+
+    return columns
 
 
 def test_split_sql_server_batches_handles_go_lines():
@@ -227,6 +323,43 @@ def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
     assert "NVARCHAR(MAX)" in ddl
     assert "DATETIME2(3)" in ddl
     assert "IDENTITY(1,1)" in ddl
+
+
+def test_full_useful_tables_reference_matches_strict_erd_table_contract():
+    strict_ddl = Path("docs/pricing_useful_tables_ddl.sql").read_text(encoding="utf-8")
+    full_ddl = Path("docs/pricing_useful_tables_full_ddl.sql").read_text(encoding="utf-8")
+
+    strict_columns = _create_table_columns(strict_ddl)
+    full_columns = _create_table_columns(full_ddl)
+    strict_foreign_keys = _create_table_foreign_keys(strict_ddl)
+    full_foreign_keys = _create_table_foreign_keys(full_ddl)
+
+    persisted_tables = {
+        table_name: columns
+        for table_name, columns in strict_columns.items()
+        if not table_name.startswith("pricing_runtime.")
+    }
+
+    assert set(full_columns) == set(persisted_tables)
+    assert {
+        table_name: full_columns[table_name] for table_name in sorted(full_columns)
+    } == {
+        table_name: persisted_tables[table_name] for table_name in sorted(persisted_tables)
+    }
+    assert {
+        table_name: full_foreign_keys[table_name] for table_name in sorted(full_foreign_keys)
+    } == {
+        table_name: strict_foreign_keys[table_name]
+        for table_name in sorted(persisted_tables)
+    }
+
+    runtime_views = [
+        "pricing_runtime.V_COMPILED_RATE_CELL",
+        "pricing_runtime.V_COMPILED_RATE_CELL_LEVEL",
+        "pricing_runtime.V_COMPILED_1D_RATE_BAND",
+    ]
+    for view_name in runtime_views:
+        assert _view_columns(full_ddl, view_name) == strict_columns[view_name]
 
 
 def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_indexes():
