@@ -494,6 +494,54 @@ def test_runtime_tui_page_keys_update_log_scroll(monkeypatch):
     assert observed_scroll == [0, no_docker_services.LOG_SCROLL_STEP, 0, 0]
 
 
+def test_runtime_draw_screen_renders_logs_in_fixed_pane(tmp_path):
+    commands = [
+        no_docker_services.ServiceCommand(
+            name=f"service-{index}",
+            description=f"Service {index}",
+            argv=["python", "service.py"],
+            category="service",
+            long_running=True,
+        )
+        for index in range(12)
+    ]
+    manager = no_docker_services.RuntimeManager(commands, log_dir=tmp_path)
+    (tmp_path / "service-0.log").write_text("visible log line\n", encoding="utf-8")
+    screen = FakeCursesScreen(height=12, width=100)
+
+    no_docker_services._draw_runtime_screen(
+        screen,
+        manager,
+        cursor_index=0,
+        show_logs=True,
+        log_scroll=0,
+    )
+
+    rendered_text = "\n".join(text for _, _, text, _ in screen.rendered)
+
+    assert "-- Logs: service-0" in rendered_text
+    assert "visible log line" in rendered_text
+
+
+class FakeCursesScreen:
+    def __init__(self, *, height: int, width: int) -> None:
+        self.height = height
+        self.width = width
+        self.rendered: list[tuple[int, int, str, int]] = []
+
+    def erase(self):
+        return None
+
+    def getmaxyx(self):
+        return (self.height, self.width)
+
+    def addnstr(self, row, column, text, limit, attributes):
+        self.rendered.append((row, column, text[:limit], attributes))
+
+    def refresh(self):
+        return None
+
+
 class FakeProcess:
     def __init__(self, argv, kwargs):
         self.argv = argv

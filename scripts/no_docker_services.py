@@ -385,23 +385,38 @@ def runtime_screen_lines(
 
     if show_logs and manager.names():
         selected = selected_name or manager.names()[0]
-        log_lines, normalized_scroll = _log_window(
-            manager.tail_log(selected, max_lines=100_000),
-            max_lines=max_log_lines,
-            scroll_offset=log_scroll,
-        )
-        scroll_state = (
-            "tail" if normalized_scroll == 0 else f"scroll {normalized_scroll} from tail"
-        )
+        lines.extend([""])
         lines.extend(
-            [
-                "",
-                _section(f"Logs: {selected} ({scroll_state})"),
-                str(manager.log_path(selected)),
-            ]
+            runtime_log_pane_lines(
+                manager,
+                selected_name=selected,
+                log_scroll=log_scroll,
+                max_log_lines=max_log_lines,
+            )
         )
-        lines.extend(log_lines)
     return lines
+
+
+def runtime_log_pane_lines(
+    manager: RuntimeManager,
+    *,
+    selected_name: str,
+    log_scroll: int = 0,
+    max_log_lines: int = 18,
+) -> list[str]:
+    log_lines, normalized_scroll = _log_window(
+        manager.tail_log(selected_name, max_lines=100_000),
+        max_lines=max_log_lines,
+        scroll_offset=log_scroll,
+    )
+    scroll_state = (
+        "tail" if normalized_scroll == 0 else f"scroll {normalized_scroll} from tail"
+    )
+    return [
+        _section(f"Logs: {selected_name} ({scroll_state})"),
+        str(manager.log_path(selected_name)),
+        *log_lines,
+    ]
 
 
 def selected_runtime_row_index(manager: RuntimeManager, *, cursor_index: int) -> int:
@@ -432,24 +447,56 @@ def _draw_runtime_screen(
 ) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    selected_row = selected_runtime_row_index(manager, cursor_index=cursor_index)
-    base_line_count = len(
-        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=False)
+    selected_name = manager.names()[cursor_index]
+    service_screen_lines = runtime_screen_lines(
+        manager,
+        cursor_index=cursor_index,
+        show_logs=False,
     )
-    max_log_lines = max(3, height - base_line_count - 5)
-    for row, line in enumerate(
-        runtime_screen_lines(
+    selected_row = selected_runtime_row_index(manager, cursor_index=cursor_index)
+
+    if show_logs:
+        log_pane_height = min(max(5, height // 3), max(0, height - 5))
+        service_end_row = max(4, height - log_pane_height - 1)
+    else:
+        log_pane_height = 0
+        service_end_row = height - 1
+
+    header_lines = service_screen_lines[:3]
+    service_lines = service_screen_lines[3:]
+    service_start_row = len(header_lines)
+    service_height = max(0, service_end_row - service_start_row)
+    selected_service_index = max(0, selected_row - len(header_lines))
+    service_scroll = max(0, selected_service_index - service_height // 2)
+    max_service_scroll = max(0, len(service_lines) - service_height)
+    service_scroll = min(service_scroll, max_service_scroll)
+    visible_service_lines = service_lines[service_scroll : service_scroll + service_height]
+
+    display_lines = [*header_lines, *visible_service_lines]
+    for row, line in enumerate(display_lines):
+        if row >= height - 1:
+            break
+        attributes = (
+            curses.A_REVERSE
+            if line.startswith(f"> {selected_name:<16}")
+            else curses.A_NORMAL
+        )
+        stdscr.addnstr(row, 0, line, max(width - 1, 0), attributes)
+
+    if show_logs and log_pane_height > 0:
+        log_start_row = max(0, height - log_pane_height)
+        max_log_lines = max(1, log_pane_height - 2)
+        log_lines = runtime_log_pane_lines(
             manager,
-            cursor_index=cursor_index,
-            show_logs=show_logs,
+            selected_name=selected_name,
             log_scroll=log_scroll,
             max_log_lines=max_log_lines,
         )
-    ):
-        if row >= height - 1:
-            break
-        attributes = curses.A_REVERSE if row == selected_row else curses.A_NORMAL
-        stdscr.addnstr(row, 0, line, max(width - 1, 0), attributes)
+        for offset, line in enumerate(log_lines[:log_pane_height]):
+            row = log_start_row + offset
+            if row >= height - 1:
+                break
+            stdscr.addnstr(row, 0, line, max(width - 1, 0), curses.A_NORMAL)
     stdscr.refresh()
 
 
