@@ -189,3 +189,19 @@ def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
     assert "NVARCHAR(MAX)" in ddl
     assert "DATETIME2(3)" in ddl
     assert "IDENTITY(1,1)" in ddl
+
+
+def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_indexes():
+    ddl = Path("docs/pricing_useful_tables_full_ddl.sql").read_text(encoding="utf-8")
+
+    assert "CREATE SCHEMA pricing;" in ddl
+    assert "CREATE TABLE pricing.PRICING_MODEL (" in ddl
+    assert "CONSTRAINT PK_PRICING_MODEL" in ddl
+    assert "CONSTRAINT FK_MODEL_RUN_MODEL" in ddl
+    assert "CONSTRAINT CK_PRICING_MODEL_STATUS" in ddl
+    assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl
+    assert "WHERE effective_to_ts IS NULL" in ddl
+    assert "CREATE UNIQUE INDEX UX_PACKAGE_POINTER_MODEL_SLOT" in ddl
+    assert "pricing_stg" not in ddl
+    assert "STG_" not in ddl
+    assert "DATASET_ROW_KEY" not in ddl
