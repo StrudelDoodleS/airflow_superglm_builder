@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import curses
 from dataclasses import dataclass
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -36,6 +38,7 @@ RUNTIME_CATEGORIES = (
     ("pipeline-task", "Pipeline Tasks"),
     ("utility", "Utilities"),
 )
+PROCESS_STOP_TIMEOUT_SECONDS = 15
 
 
 def service_catalog(*, python_executable: str = sys.executable) -> dict[str, ServiceCommand]:
@@ -144,6 +147,44 @@ def list_services() -> None:
             print(f"  {command.name:<16} {kind:<13} {command.description}")
 
 
+def _process_group_id(process: subprocess.Popen) -> int | None:
+    pid = getattr(process, "pid", None)
+    if pid is None or not hasattr(os, "getpgid"):
+        return None
+    try:
+        return os.getpgid(pid)
+    except (OSError, ProcessLookupError):
+        return None
+
+
+def _signal_process(process: subprocess.Popen, signal_number: int) -> None:
+    process_group_id = _process_group_id(process)
+    if process_group_id is not None and hasattr(os, "killpg"):
+        try:
+            os.killpg(process_group_id, signal_number)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+
+    if signal_number == signal.SIGTERM:
+        process.terminate()
+    else:
+        process.kill()
+
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    _signal_process(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _signal_process(process, signal.SIGKILL)
+        process.wait()
+
+
 class RuntimeManager:
     def __init__(
         self,
@@ -203,6 +244,7 @@ class RuntimeManager:
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    start_new_session=True,
                 )
             except OSError as exc:
                 log_file.write(f"failed to start: {exc}\n")
@@ -220,13 +262,7 @@ class RuntimeManager:
         if process is None:
             record.status = "stopped"
             return
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        _terminate_process(process)
         record.process = None
         record.status = "stopped"
         record.return_code = process.poll()
@@ -429,7 +465,9 @@ def _run_long_running(commands: list[ServiceCommand], *, dry_run: bool) -> None:
             _print_command_warning(command)
             print(f"==> {command.name}: {' '.join(command.argv)}", flush=True)
             if not dry_run:
-                processes.append(subprocess.Popen(command.argv, cwd=ROOT))
+                processes.append(
+                    subprocess.Popen(command.argv, cwd=ROOT, start_new_session=True)
+                )
         if dry_run:
             return
         while processes:
@@ -444,13 +482,7 @@ def _run_long_running(commands: list[ServiceCommand], *, dry_run: bool) -> None:
         print("stopping selected local services", flush=True)
     finally:
         for process in processes:
-            process.terminate()
-        for process in processes:
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            _terminate_process(process)
 
 
 def run_services(names: list[str], *, dry_run: bool = False) -> None:

@@ -4,6 +4,7 @@ import json
 import importlib.util
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import types
@@ -194,6 +195,51 @@ def test_runtime_manager_starts_and_stops_long_running_service(tmp_path):
     manager.toggle("airflow")
 
     assert created_processes[0].terminated is True
+    assert manager.status("airflow") == "stopped"
+
+
+def test_runtime_manager_stops_long_running_service_process_group(monkeypatch, tmp_path):
+    command = no_docker_services.ServiceCommand(
+        name="airflow",
+        description="Start Airflow",
+        argv=["python", "airflow.py"],
+        long_running=True,
+    )
+    created_processes: list[FakeProcess] = []
+    sent_signals: list[tuple[int, int]] = []
+
+    def fake_popen(argv, **kwargs):
+        process = FakeProcess(argv=argv, kwargs=kwargs)
+        process.pid = 12345
+        created_processes.append(process)
+        return process
+
+    def fake_killpg(process_group_id: int, signal_number: int) -> None:
+        sent_signals.append((process_group_id, signal_number))
+        created_processes[0].returncode = 0
+
+    monkeypatch.setattr(
+        no_docker_services,
+        "os",
+        types.SimpleNamespace(getpgid=lambda pid: 54321, killpg=fake_killpg),
+        raising=False,
+    )
+    monkeypatch.setattr(no_docker_services, "signal", signal, raising=False)
+
+    manager = no_docker_services.RuntimeManager(
+        [command],
+        log_dir=tmp_path,
+        popen_factory=fake_popen,
+    )
+
+    manager.toggle("airflow")
+
+    assert created_processes[0].kwargs["start_new_session"] is True
+
+    manager.toggle("airflow")
+
+    assert sent_signals == [(54321, signal.SIGTERM)]
+    assert created_processes[0].terminated is False
     assert manager.status("airflow") == "stopped"
 
 
