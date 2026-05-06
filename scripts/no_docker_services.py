@@ -308,8 +308,8 @@ def _draw_runtime_screen(
     stdscr.refresh()
 
 
-def run_runtime_tui() -> None:
-    manager = RuntimeManager(list(service_catalog().values()))
+def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
+    manager = manager or RuntimeManager(list(service_catalog().values()))
 
     def _runtime(stdscr) -> None:
         cursor_index = 0
@@ -355,6 +355,8 @@ def run_runtime_tui() -> None:
 
     try:
         curses.wrapper(_runtime)
+    except KeyboardInterrupt:
+        pass
     finally:
         manager.stop_all()
 

@@ -270,6 +270,27 @@ def test_runtime_manager_screen_lines_show_status_and_logs(tmp_path):
     assert "line 2" in text
 
 
+def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
+    command = no_docker_services.ServiceCommand(
+        name="airflow",
+        description="Start Airflow",
+        argv=["python", "airflow.py"],
+        long_running=True,
+    )
+    manager = no_docker_services.RuntimeManager([command])
+    stopped = []
+
+    def fake_wrapper(callback):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(no_docker_services.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr(manager, "stop_all", lambda: stopped.append(True))
+
+    no_docker_services.run_runtime_tui(manager=manager)
+
+    assert stopped == [True]
+
+
 class FakeProcess:
     def __init__(self, argv, kwargs):
         self.argv = argv
