@@ -171,3 +171,18 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
     assert "CONSTRAINT FK_MODEL_RUN_MANIFEST" in ddl
     assert "CONSTRAINT FK_RATE_PACKAGE_MODEL" in ddl
     assert "CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT" in ddl
+
+
+def test_useful_tables_reference_ddl_is_plain_sql_server_ddl_for_erd_import():
+    ddl = Path("docs/pricing_useful_tables_ddl.sql").read_text(encoding="utf-8")
+
+    assert "\nGO\n" not in ddl
+    assert "IF NOT EXISTS" not in ddl
+    assert "EXEC(" not in ddl
+    assert "CREATE TABLE IF NOT EXISTS" not in ddl
+    assert "CREATE SCHEMA pricing;" in ddl
+    assert "CREATE TABLE pricing.PRICING_MODEL (" in ddl
+    assert "NVARCHAR(MAX)" in ddl
+    assert "DATETIME2(3)" in ddl
+    assert "IDENTITY(1,1)" in ddl
+    assert "WHERE effective_to_ts IS NULL" in ddl

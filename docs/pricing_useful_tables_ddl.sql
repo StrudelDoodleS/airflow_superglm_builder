@@ -1,17 +1,5 @@
-/*
-Reference SQL Server DDL for the useful persisted PricingLab tables.
+CREATE SCHEMA pricing;
 
-Use this in a scratch database or ERD tool when you want the model/data lineage
-without transient staging tables or row-per-policy CV materialization tables.
-The runtime migrations under db/migrations remain the source of truth for
-incremental upgrades.
-*/
-
-IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'pricing')
-    EXEC('CREATE SCHEMA pricing');
-GO
-
--- Dataset intake: raw freMTPL data and the dataset manifest used by runs.
 CREATE TABLE pricing.FREMTPL_RAW (
     IDpol       BIGINT NOT NULL,
     ClaimNb     INT NOT NULL,
@@ -29,7 +17,6 @@ CREATE TABLE pricing.FREMTPL_RAW (
     CONSTRAINT PK_FREMTPL_RAW
         PRIMARY KEY (IDpol)
 );
-GO
 
 CREATE TABLE pricing.DATASET_MANIFEST (
     manifest_id      NVARCHAR(128) NOT NULL,
@@ -46,7 +33,6 @@ CREATE TABLE pricing.DATASET_MANIFEST (
     CONSTRAINT PK_DATASET_MANIFEST
         PRIMARY KEY (manifest_id)
 );
-GO
 
 CREATE TABLE pricing.DATASET_COLUMN (
     manifest_id     NVARCHAR(128) NOT NULL,
@@ -64,9 +50,7 @@ CREATE TABLE pricing.DATASET_COLUMN (
         FOREIGN KEY (manifest_id)
         REFERENCES pricing.DATASET_MANIFEST(manifest_id)
 );
-GO
 
--- Model lifecycle: model families, training runs, packages, and deployments.
 CREATE TABLE pricing.PRICING_MODEL (
     model_id      BIGINT IDENTITY(1,1) NOT NULL,
     model_key     NVARCHAR(128) NOT NULL,
@@ -87,7 +71,6 @@ CREATE TABLE pricing.PRICING_MODEL (
     CONSTRAINT CK_PRICING_MODEL_STATUS
         CHECK (model_status IN ('ACTIVE', 'RETIRED', 'DISABLED'))
 );
-GO
 
 CREATE TABLE pricing.PRICING_RATE_PACKAGE (
     rate_package_id        BIGINT IDENTITY(1,1) NOT NULL,
@@ -114,7 +97,6 @@ CREATE TABLE pricing.PRICING_RATE_PACKAGE (
         FOREIGN KEY (model_id)
         REFERENCES pricing.PRICING_MODEL(model_id)
 );
-GO
 
 CREATE TABLE pricing.MODEL_RUN (
     model_run_id         BIGINT IDENTITY(1,1) NOT NULL,
@@ -149,16 +131,13 @@ CREATE TABLE pricing.MODEL_RUN (
         FOREIGN KEY (rate_package_id)
         REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id)
 );
-GO
 
 CREATE UNIQUE INDEX UX_MODEL_RUN_AIRFLOW
 ON pricing.MODEL_RUN(dag_id, airflow_run_id, model_name);
-GO
 
 CREATE UNIQUE INDEX UX_MODEL_RUN_AIRFLOW_MODEL_ID
 ON pricing.MODEL_RUN(dag_id, airflow_run_id, model_id)
 WHERE model_id IS NOT NULL;
-GO
 
 CREATE TABLE pricing.PRICING_MODEL_DEPLOYMENT (
     deployment_id     BIGINT IDENTITY(1,1) NOT NULL,
@@ -185,12 +164,10 @@ CREATE TABLE pricing.PRICING_MODEL_DEPLOYMENT (
     CONSTRAINT CK_MODEL_DEPLOYMENT_EFFECTIVE_DATES
         CHECK (effective_to_ts IS NULL OR effective_to_ts > effective_from_ts)
 );
-GO
 
 CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT
 ON pricing.PRICING_MODEL_DEPLOYMENT(model_id, deployment_slot)
 WHERE effective_to_ts IS NULL;
-GO
 
 CREATE TABLE pricing.PRICING_PACKAGE_POINTER (
     pointer_name     NVARCHAR(128) NOT NULL,
@@ -207,14 +184,11 @@ CREATE TABLE pricing.PRICING_PACKAGE_POINTER (
         FOREIGN KEY (rate_package_id)
         REFERENCES pricing.PRICING_RATE_PACKAGE(rate_package_id)
 );
-GO
 
 CREATE UNIQUE INDEX UX_PACKAGE_POINTER_MODEL_SLOT
 ON pricing.PRICING_PACKAGE_POINTER(model_id, pointer_name)
 WHERE model_id IS NOT NULL;
-GO
 
--- CV audit: replayable or materialized fold metadata, not row-per-policy keys.
 CREATE TABLE pricing.CV_SPLIT_SET (
     split_set_id          NVARCHAR(128) NOT NULL,
     manifest_id           NVARCHAR(128) NOT NULL,
@@ -242,7 +216,6 @@ CREATE TABLE pricing.CV_SPLIT_SET (
     CONSTRAINT CK_CV_SPLIT_SET_MODE
         CHECK (split_mode IN ('REPLAYABLE', 'MATERIALIZED'))
 );
-GO
 
 CREATE TABLE pricing.CV_FOLD (
     split_set_id  NVARCHAR(128) NOT NULL,
@@ -257,7 +230,6 @@ CREATE TABLE pricing.CV_FOLD (
         FOREIGN KEY (split_set_id)
         REFERENCES pricing.CV_SPLIT_SET(split_set_id)
 );
-GO
 
 CREATE TABLE pricing.CV_FOLD_METRIC (
     model_run_id  BIGINT NOT NULL,
@@ -277,9 +249,7 @@ CREATE TABLE pricing.CV_FOLD_METRIC (
         FOREIGN KEY (split_set_id, fold_no)
         REFERENCES pricing.CV_FOLD(split_set_id, fold_no)
 );
-GO
 
--- Rating lookup structure: package -> term -> cell -> rated feature levels.
 CREATE TABLE pricing.PRICING_FEATURE (
     feature_id          BIGINT IDENTITY(1,1) NOT NULL,
     feature_name        NVARCHAR(128) NOT NULL,
@@ -293,7 +263,6 @@ CREATE TABLE pricing.PRICING_FEATURE (
     CONSTRAINT UQ_PRICING_FEATURE_NAME
         UNIQUE (feature_name)
 );
-GO
 
 CREATE TABLE pricing.PRICING_FEATURE_LEVEL_SET (
     level_set_id      BIGINT IDENTITY(1,1) NOT NULL,
@@ -316,11 +285,9 @@ CREATE TABLE pricing.PRICING_FEATURE_LEVEL_SET (
         FOREIGN KEY (feature_id)
         REFERENCES pricing.PRICING_FEATURE(feature_id)
 );
-GO
 
 CREATE UNIQUE INDEX UX_LEVEL_SET_MODEL_FEATURE_NAME
 ON pricing.PRICING_FEATURE_LEVEL_SET(model_id, feature_id, level_set_name);
-GO
 
 CREATE TABLE pricing.PRICING_FEATURE_LEVEL (
     feature_level_id      BIGINT IDENTITY(1,1) NOT NULL,
@@ -344,7 +311,6 @@ CREATE TABLE pricing.PRICING_FEATURE_LEVEL (
     CONSTRAINT UQ_FEATURE_LEVEL
         UNIQUE (level_set_id, level_code)
 );
-GO
 
 CREATE TABLE pricing.PRICING_TERM (
     term_id                  BIGINT IDENTITY(1,1) NOT NULL,
@@ -366,7 +332,6 @@ CREATE TABLE pricing.PRICING_TERM (
     CONSTRAINT UQ_TERM_PACKAGE_NAME
         UNIQUE (rate_package_id, term_name)
 );
-GO
 
 CREATE TABLE pricing.PRICING_TERM_FEATURE (
     term_id            BIGINT NOT NULL,
@@ -390,7 +355,6 @@ CREATE TABLE pricing.PRICING_TERM_FEATURE (
         FOREIGN KEY (level_set_id)
         REFERENCES pricing.PRICING_FEATURE_LEVEL_SET(level_set_id)
 );
-GO
 
 CREATE TABLE pricing.PRICING_RATE_CELL (
     cell_id          BIGINT IDENTITY(1,1) NOT NULL,
@@ -415,7 +379,6 @@ CREATE TABLE pricing.PRICING_RATE_CELL (
     CONSTRAINT UQ_RATE_CELL
         UNIQUE (term_id, cell_key_digest)
 );
-GO
 
 CREATE TABLE pricing.PRICING_RATE_CELL_LEVEL (
     cell_id           BIGINT NOT NULL,
@@ -433,9 +396,7 @@ CREATE TABLE pricing.PRICING_RATE_CELL_LEVEL (
         FOREIGN KEY (feature_level_id)
         REFERENCES pricing.PRICING_FEATURE_LEVEL(feature_level_id)
 );
-GO
 
--- Compiled read models: flattened outputs for easier downstream lookup.
 CREATE TABLE pricing.PRICING_COMPILED_RATE_CELL (
     rate_package_id  BIGINT NOT NULL,
     term_id          BIGINT NOT NULL,
@@ -462,7 +423,6 @@ CREATE TABLE pricing.PRICING_COMPILED_RATE_CELL (
         FOREIGN KEY (term_id)
         REFERENCES pricing.PRICING_TERM(term_id)
 );
-GO
 
 CREATE TABLE pricing.PRICING_COMPILED_1D_RATE_BAND (
     rate_package_id       BIGINT NOT NULL,
@@ -493,4 +453,3 @@ CREATE TABLE pricing.PRICING_COMPILED_1D_RATE_BAND (
         FOREIGN KEY (feature_level_id)
         REFERENCES pricing.PRICING_FEATURE_LEVEL(feature_level_id)
 );
-GO
