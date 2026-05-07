@@ -212,51 +212,6 @@ def _log_window(
     return lines[start_index:end_index], normalized_scroll
 
 
-def _scrollbar_thumb_rows(
-    *,
-    start_row: int,
-    height: int,
-    total_items: int,
-    visible_items: int,
-    offset: int,
-) -> set[int]:
-    if height <= 0 or total_items <= visible_items or total_items <= 0:
-        return set()
-
-    visible_items = max(1, min(visible_items, total_items))
-    offset = min(max(offset, 0), total_items - visible_items)
-    thumb_height = max(1, round(height * (visible_items / total_items)))
-    max_thumb_top = max(0, height - thumb_height)
-    max_offset = max(1, total_items - visible_items)
-    thumb_top = round(max_thumb_top * (offset / max_offset))
-    return set(range(start_row + thumb_top, start_row + thumb_top + thumb_height))
-
-
-def _draw_scrollbar(
-    stdscr,
-    *,
-    column: int,
-    start_row: int,
-    height: int,
-    total_items: int,
-    visible_items: int,
-    offset: int,
-) -> None:
-    thumb_rows = _scrollbar_thumb_rows(
-        start_row=start_row,
-        height=height,
-        total_items=total_items,
-        visible_items=visible_items,
-        offset=offset,
-    )
-    if not thumb_rows:
-        return
-
-    for row in range(start_row, start_row + height):
-        character = "#" if row in thumb_rows else "|"
-        stdscr.addnstr(row, column, character, 1, curses.A_NORMAL)
-
-
 class RuntimeManager:
     def __init__(
         self,
@@ -527,53 +482,21 @@ def _draw_runtime_screen(
             else curses.A_NORMAL
         )
         stdscr.addnstr(row, 0, line, max(width - 1, 0), attributes)
-    _draw_scrollbar(
-        stdscr,
-        column=max(width - 1, 0),
-        start_row=service_start_row,
-        height=service_height,
-        total_items=len(service_lines),
-        visible_items=len(visible_service_lines),
-        offset=service_scroll,
-    )
 
     if show_logs and log_pane_height > 0:
         log_start_row = max(0, height - log_pane_height)
-        max_log_lines = max(1, log_pane_height - 3)
-        all_log_lines = manager.tail_log(selected_name, max_lines=100_000)
-        visible_log_lines, normalized_log_scroll = _log_window(
-            all_log_lines,
-            max_lines=max_log_lines,
-            scroll_offset=log_scroll,
+        max_log_lines = max(1, log_pane_height - 2)
+        log_lines = runtime_log_pane_lines(
+            manager,
+            selected_name=selected_name,
+            log_scroll=log_scroll,
+            max_log_lines=max_log_lines,
         )
-        log_scroll_state = (
-            "tail"
-            if normalized_log_scroll == 0
-            else f"scroll {normalized_log_scroll} from tail"
-        )
-        log_window_start = max(
-            0,
-            len(all_log_lines) - normalized_log_scroll - len(visible_log_lines),
-        )
-        log_lines = [
-            _section(f"Logs: {selected_name} ({log_scroll_state})"),
-            str(manager.log_path(selected_name)),
-            *visible_log_lines,
-        ]
         for offset, line in enumerate(log_lines[:log_pane_height]):
             row = log_start_row + offset
             if row >= height - 1:
                 break
             stdscr.addnstr(row, 0, line, max(width - 1, 0), curses.A_NORMAL)
-        _draw_scrollbar(
-            stdscr,
-            column=max(width - 1, 0),
-            start_row=log_start_row + 2,
-            height=max(0, min(max_log_lines, height - log_start_row - 3)),
-            total_items=len(all_log_lines),
-            visible_items=len(visible_log_lines),
-            offset=log_window_start,
-        )
     stdscr.refresh()
 
 

@@ -523,46 +523,6 @@ def test_runtime_draw_screen_renders_logs_in_fixed_pane(tmp_path):
     assert "visible log line" in rendered_text
 
 
-def test_runtime_draw_screen_renders_independent_selector_and_log_scrollbars(tmp_path):
-    commands = [
-        no_docker_services.ServiceCommand(
-            name=f"service-{index}",
-            description=f"Service {index}",
-            argv=["python", "service.py"],
-            category="service",
-            long_running=True,
-        )
-        for index in range(20)
-    ]
-    manager = no_docker_services.RuntimeManager(commands, log_dir=tmp_path)
-    (tmp_path / "service-12.log").write_text(
-        "\n".join(f"log line {number:02d}" for number in range(1, 41)) + "\n",
-        encoding="utf-8",
-    )
-    screen = FakeCursesScreen(height=18, width=90)
-
-    no_docker_services._draw_runtime_screen(
-        screen,
-        manager,
-        cursor_index=12,
-        show_logs=True,
-        log_scroll=8,
-    )
-
-    scrollbar_marks = [
-        (row, text)
-        for row, column, text, _ in screen.rendered
-        if column == screen.width - 1
-    ]
-    selector_marks = [text for row, text in scrollbar_marks if 3 <= row < 12]
-    log_marks = [text for row, text in scrollbar_marks if row >= 13]
-
-    assert "|" in selector_marks
-    assert "#" in selector_marks
-    assert "|" in log_marks
-    assert "#" in log_marks
-
-
 class FakeCursesScreen:
     def __init__(self, *, height: int, width: int) -> None:
         self.height = height

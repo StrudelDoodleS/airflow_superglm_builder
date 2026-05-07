@@ -140,12 +140,10 @@ Prerequisites:
    `Enter` or `Space` starts/stops the selected service or runs the selected
    one-shot task. The screen shows `[RUNNING]`, `[STOPPED]`, `[SUCCEEDED]`, or
    `[FAILED]` beside each item. Press `l` to show/hide the selected item's log
-   pane, which is fixed at the bottom of the terminal. The selector pane and
-   log pane each draw their own right-edge scrollbar. Use `Up`/`Down` or
-   `j`/`k` for the selector, `PageUp`/`u` to scroll the log pane back,
-   `PageDown`/`d` to move toward the tail, `End` to jump back to the live tail,
-   `r` to restart, `x` to stop all managed services, and `q` to quit. Logs are
-   written under `state/runtime/logs`.
+   pane, which is fixed at the bottom of the terminal. Press `PageUp`/`u` to
+   scroll that log pane back, `PageDown`/`d` to move toward the tail, `End` to
+   jump back to the live tail, `r` to restart, `x` to stop all managed
+   services, and `q` to quit. Logs are written under `state/runtime/logs`.
 
    `scripts/start_no_docker_runtime.sh` is an alias for the same launcher. Both
    shell wrappers are intentionally tiny and delegate the runtime manager to
