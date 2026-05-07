@@ -378,6 +378,52 @@ def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
     assert stopped == [True]
 
 
+def test_runtime_tui_mouse_wheel_down_moves_one_selector_row(monkeypatch, tmp_path):
+    commands = [
+        no_docker_services.ServiceCommand(
+            name=f"service-{index}",
+            description=f"Service {index}",
+            argv=["python", "service.py"],
+            category="service",
+            long_running=True,
+        )
+        for index in range(4)
+    ]
+    manager = no_docker_services.RuntimeManager(commands, log_dir=tmp_path)
+    screen = InteractiveFakeCursesScreen(
+        height=12,
+        width=120,
+        keys=[no_docker_services.curses.KEY_MOUSE, ord("q")],
+    )
+    cursor_indexes = []
+
+    monkeypatch.setattr(no_docker_services.curses, "BUTTON5_PRESSED", 0x200000, raising=False)
+    monkeypatch.setattr(no_docker_services.curses, "mousemask", lambda *_: None)
+    monkeypatch.setattr(no_docker_services.curses, "mouseinterval", lambda *_: None)
+    monkeypatch.setattr(
+        no_docker_services.curses,
+        "getmouse",
+        lambda: (0, 0, 0, 0, no_docker_services.curses.BUTTON5_PRESSED),
+    )
+    monkeypatch.setattr(
+        no_docker_services.curses,
+        "wrapper",
+        lambda callback: callback(screen),
+    )
+    monkeypatch.setattr(manager, "stop_all", lambda: None)
+    monkeypatch.setattr(
+        no_docker_services,
+        "_draw_runtime_screen",
+        lambda _screen, _manager, *, cursor_index, show_logs: cursor_indexes.append(
+            cursor_index
+        ),
+    )
+
+    no_docker_services.run_runtime_tui(manager=manager)
+
+    assert cursor_indexes == [0, 1]
+
+
 def test_runtime_draw_screen_keeps_selected_service_visible_without_skipping(tmp_path):
     commands = [
         no_docker_services.ServiceCommand(
@@ -423,6 +469,23 @@ class FakeCursesScreen:
 
     def refresh(self):
         return None
+
+
+class InteractiveFakeCursesScreen(FakeCursesScreen):
+    def __init__(self, *, height: int, width: int, keys: list[int]) -> None:
+        super().__init__(height=height, width=width)
+        self.keys = keys
+
+    def keypad(self, _enabled):
+        return None
+
+    def timeout(self, _milliseconds):
+        return None
+
+    def getch(self):
+        if self.keys:
+            return self.keys.pop(0)
+        return ord("q")
 
 
 class FakeProcess:

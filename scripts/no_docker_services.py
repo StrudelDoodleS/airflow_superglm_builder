@@ -425,6 +425,35 @@ def _draw_runtime_screen(
     stdscr.refresh()
 
 
+def _configure_mouse_navigation() -> None:
+    try:
+        curses.mousemask(getattr(curses, "ALL_MOUSE_EVENTS", 0))
+        curses.mouseinterval(0)
+    except (AttributeError, curses.error):
+        pass
+
+
+def _mouse_wheel_delta() -> int:
+    try:
+        _, _, _, _, state = curses.getmouse()
+    except curses.error:
+        return 0
+
+    wheel_up_flags = (
+        getattr(curses, "BUTTON4_PRESSED", 0)
+        | getattr(curses, "BUTTON4_CLICKED", 0)
+    )
+    wheel_down_flags = (
+        getattr(curses, "BUTTON5_PRESSED", 0)
+        | getattr(curses, "BUTTON5_CLICKED", 0)
+    )
+    if state & wheel_up_flags:
+        return -1
+    if state & wheel_down_flags:
+        return 1
+    return 0
+
+
 def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
     manager = manager or RuntimeManager(list(service_catalog().values()))
 
@@ -437,6 +466,7 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
             pass
         stdscr.keypad(True)
         stdscr.timeout(500)
+        _configure_mouse_navigation()
 
         while True:
             names = manager.names()
@@ -452,6 +482,9 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
             if key in (ord("q"), ord("Q"), 27):
                 manager.stop_all()
                 return
+            if key == curses.KEY_MOUSE:
+                cursor_index = (cursor_index + _mouse_wheel_delta()) % len(names)
+                continue
             if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                 cursor_index = (cursor_index + 1) % len(names)
                 continue
