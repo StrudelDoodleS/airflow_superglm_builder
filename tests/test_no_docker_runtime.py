@@ -378,6 +378,53 @@ def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
     assert stopped == [True]
 
 
+def test_runtime_draw_screen_keeps_selected_service_visible_without_skipping(tmp_path):
+    commands = [
+        no_docker_services.ServiceCommand(
+            name=f"service-{index}",
+            description=f"Service {index}",
+            argv=["python", "service.py"],
+            category="service",
+            long_running=True,
+        )
+        for index in range(20)
+    ]
+    manager = no_docker_services.RuntimeManager(commands, log_dir=tmp_path)
+    screen = FakeCursesScreen(height=8, width=120)
+
+    no_docker_services._draw_runtime_screen(
+        screen,
+        manager,
+        cursor_index=12,
+        show_logs=False,
+    )
+
+    rendered_text = "\n".join(text for _, _, text, _ in screen.rendered)
+
+    assert "> service-12" in rendered_text
+    assert "service-11" in rendered_text
+    assert "service-13" in rendered_text
+
+
+class FakeCursesScreen:
+    def __init__(self, *, height: int, width: int) -> None:
+        self.height = height
+        self.width = width
+        self.rendered: list[tuple[int, int, str, int]] = []
+
+    def erase(self):
+        return None
+
+    def getmaxyx(self):
+        return (self.height, self.width)
+
+    def addnstr(self, row, column, text, limit, attributes):
+        self.rendered.append((row, column, text[:limit], attributes))
+
+    def refresh(self):
+        return None
+
+
 class FakeProcess:
     def __init__(self, argv, kwargs):
         self.argv = argv

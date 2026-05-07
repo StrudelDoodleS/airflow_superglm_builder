@@ -369,6 +369,31 @@ def selected_runtime_row_index(manager: RuntimeManager, *, cursor_index: int) ->
     return 0
 
 
+def _visible_screen_lines(
+    lines: list[str],
+    *,
+    selected_row: int,
+    height: int,
+) -> tuple[list[tuple[int, str]], int]:
+    viewport_height = max(height - 1, 0)
+    if viewport_height <= 0:
+        return [], 0
+
+    header_count = min(3, len(lines), viewport_height)
+    header_lines = list(enumerate(lines[:header_count]))
+    body_lines = list(enumerate(lines[header_count:], start=header_count))
+    body_height = viewport_height - header_count
+    if body_height <= 0 or selected_row < header_count:
+        return list(enumerate(lines[:viewport_height])), 0
+
+    selected_body_index = selected_row - header_count
+    max_body_start = max(0, len(body_lines) - body_height)
+    body_start = max(0, selected_body_index - body_height // 2)
+    body_start = min(body_start, max_body_start)
+    visible_body_lines = body_lines[body_start : body_start + body_height]
+    return [*header_lines, *visible_body_lines], body_start
+
+
 def _command_kind(command: ServiceCommand) -> str:
     if command.category == "service":
         return "service"
@@ -387,13 +412,16 @@ def _draw_runtime_screen(
     stdscr.erase()
     height, width = stdscr.getmaxyx()
     selected_row = selected_runtime_row_index(manager, cursor_index=cursor_index)
-    for row, line in enumerate(
-        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=show_logs)
+    screen_lines = runtime_screen_lines(
+        manager,
+        cursor_index=cursor_index,
+        show_logs=show_logs,
+    )
+    for draw_row, (source_row, line) in enumerate(
+        _visible_screen_lines(screen_lines, selected_row=selected_row, height=height)[0]
     ):
-        if row >= height - 1:
-            break
-        attributes = curses.A_REVERSE if row == selected_row else curses.A_NORMAL
-        stdscr.addnstr(row, 0, line, max(width - 1, 0), attributes)
+        attributes = curses.A_REVERSE if source_row == selected_row else curses.A_NORMAL
+        stdscr.addnstr(draw_row, 0, line, max(width - 1, 0), attributes)
     stdscr.refresh()
 
 
