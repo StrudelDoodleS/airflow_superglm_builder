@@ -39,8 +39,6 @@ RUNTIME_CATEGORIES = (
     ("utility", "Utilities"),
 )
 PROCESS_STOP_TIMEOUT_SECONDS = 15
-SCREEN_WIDTH = 96
-LOG_SCROLL_STEP = 10
 
 
 def service_catalog(*, python_executable: str = sys.executable) -> dict[str, ServiceCommand]:
@@ -187,31 +185,6 @@ def _terminate_process(process: subprocess.Popen) -> None:
         process.wait()
 
 
-def _headline(title: str, *, width: int = SCREEN_WIDTH) -> str:
-    return f"+-- {title} ".ljust(width - 1, "-") + "+"
-
-
-def _section(title: str, *, width: int = SCREEN_WIDTH) -> str:
-    return f"-- {title} ".ljust(width, "-")
-
-
-def _log_window(
-    lines: list[str],
-    *,
-    max_lines: int,
-    scroll_offset: int,
-) -> tuple[list[str], int]:
-    if not lines:
-        return ["no logs yet"], 0
-
-    max_lines = max(1, max_lines)
-    max_scroll = max(0, len(lines) - max_lines)
-    normalized_scroll = min(max(scroll_offset, 0), max_scroll)
-    end_index = len(lines) - normalized_scroll
-    start_index = max(0, end_index - max_lines)
-    return lines[start_index:end_index], normalized_scroll
-
-
 class RuntimeManager:
     def __init__(
         self,
@@ -353,14 +326,11 @@ def runtime_screen_lines(
     *,
     cursor_index: int,
     show_logs: bool,
-    log_scroll: int = 0,
-    max_log_lines: int = 18,
 ) -> list[str]:
     manager.poll()
     lines = [
-        _headline("No-Docker Runtime Manager"),
+        "No-Docker runtime manager",
         "Enter/Space start/stop/run | r restart | l logs | x stop all | q quit",
-        "PageUp/u scroll up | PageDown/d scroll down | End tail",
         "",
     ]
     selected_name = manager.names()[cursor_index] if manager.names() else None
@@ -370,14 +340,13 @@ def runtime_screen_lines(
         ]
         if not category_names:
             continue
-        lines.append(_section(label))
+        lines.append(label)
         for name in category_names:
             record = manager.records[name]
             cursor = ">" if name == selected_name else " "
             kind = _command_kind(record.command)
             lines.append(
-                f"{cursor} {name:<16} [{record.status.upper():<9}] "
-                f"{kind:<7} {record.command.description}"
+                f"{cursor} {name:<16} [{record.status:<9}] {kind:<7} {record.command.description}"
             )
         lines.append("")
     if lines[-1] == "":
@@ -385,22 +354,8 @@ def runtime_screen_lines(
 
     if show_logs and manager.names():
         selected = selected_name or manager.names()[0]
-        log_lines, normalized_scroll = _log_window(
-            manager.tail_log(selected, max_lines=100_000),
-            max_lines=max_log_lines,
-            scroll_offset=log_scroll,
-        )
-        scroll_state = (
-            "tail" if normalized_scroll == 0 else f"scroll {normalized_scroll} from tail"
-        )
-        lines.extend(
-            [
-                "",
-                _section(f"Logs: {selected} ({scroll_state})"),
-                str(manager.log_path(selected)),
-            ]
-        )
-        lines.extend(log_lines)
+        lines.extend(["", f"Logs: {manager.log_path(selected)}", "-" * 72])
+        lines.extend(manager.tail_log(selected))
     return lines
 
 
@@ -428,23 +383,12 @@ def _draw_runtime_screen(
     *,
     cursor_index: int,
     show_logs: bool,
-    log_scroll: int,
 ) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
     selected_row = selected_runtime_row_index(manager, cursor_index=cursor_index)
-    base_line_count = len(
-        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=False)
-    )
-    max_log_lines = max(3, height - base_line_count - 5)
     for row, line in enumerate(
-        runtime_screen_lines(
-            manager,
-            cursor_index=cursor_index,
-            show_logs=show_logs,
-            log_scroll=log_scroll,
-            max_log_lines=max_log_lines,
-        )
+        runtime_screen_lines(manager, cursor_index=cursor_index, show_logs=show_logs)
     ):
         if row >= height - 1:
             break
@@ -459,7 +403,6 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
     def _runtime(stdscr) -> None:
         cursor_index = 0
         show_logs = True
-        log_scroll = 0
         try:
             curses.curs_set(0)
         except curses.error:
@@ -474,7 +417,6 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
                 manager,
                 cursor_index=cursor_index,
                 show_logs=show_logs,
-                log_scroll=log_scroll,
             )
             key = stdscr.getch()
             if key == -1:
@@ -484,20 +426,9 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
                 return
             if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                 cursor_index = (cursor_index + 1) % len(names)
-                log_scroll = 0
                 continue
             if key in (curses.KEY_UP, ord("k"), ord("K")):
                 cursor_index = (cursor_index - 1) % len(names)
-                log_scroll = 0
-                continue
-            if key in (curses.KEY_PPAGE, ord("u"), ord("U")):
-                log_scroll += LOG_SCROLL_STEP
-                continue
-            if key in (curses.KEY_NPAGE, ord("d"), ord("D")):
-                log_scroll = max(0, log_scroll - LOG_SCROLL_STEP)
-                continue
-            if key in (curses.KEY_END, ord("e"), ord("E")):
-                log_scroll = 0
                 continue
             if key in (ord("l"), ord("L")):
                 show_logs = not show_logs
@@ -507,11 +438,9 @@ def run_runtime_tui(manager: RuntimeManager | None = None) -> None:
                 continue
             if key in (ord("r"), ord("R")):
                 manager.restart(names[cursor_index])
-                log_scroll = 0
                 continue
             if key in (ord(" "), 10, 13, curses.KEY_ENTER):
                 manager.toggle(names[cursor_index])
-                log_scroll = 0
 
     try:
         curses.wrapper(_runtime)

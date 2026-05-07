@@ -171,7 +171,6 @@ def test_runtime_manager_starts_and_stops_long_running_service(tmp_path):
         name="airflow",
         description="Start Airflow",
         argv=["python", "airflow.py"],
-        category="service",
         long_running=True,
     )
     created_processes: list[FakeProcess] = []
@@ -204,7 +203,6 @@ def test_runtime_manager_stops_long_running_service_process_group(monkeypatch, t
         name="airflow",
         description="Start Airflow",
         argv=["python", "airflow.py"],
-        category="service",
         long_running=True,
     )
     created_processes: list[FakeProcess] = []
@@ -299,7 +297,6 @@ def test_runtime_manager_screen_lines_show_status_and_logs(tmp_path):
         name="mlflow",
         description="Start MLflow",
         argv=["python", "mlflow.py"],
-        category="service",
         long_running=True,
     )
     log_file = tmp_path / "mlflow.log"
@@ -314,76 +311,9 @@ def test_runtime_manager_screen_lines_show_status_and_logs(tmp_path):
 
     text = "\n".join(lines)
     assert "> mlflow" in text
-    assert "[STOPPED" in text
+    assert "[stopped" in text
     assert "Enter/Space start/stop" in text
     assert "line 2" in text
-
-
-def test_runtime_screen_lines_show_window_dressing_and_log_scroll_help(tmp_path):
-    command = no_docker_services.ServiceCommand(
-        name="airflow",
-        description="Start Airflow",
-        argv=["python", "airflow.py"],
-        category="service",
-        long_running=True,
-    )
-    manager = no_docker_services.RuntimeManager([command], log_dir=tmp_path)
-
-    lines = no_docker_services.runtime_screen_lines(
-        manager,
-        cursor_index=0,
-        show_logs=True,
-    )
-    text = "\n".join(lines)
-
-    assert "+-- No-Docker Runtime Manager" in text
-    assert "-- Services " in text
-    assert "-- Logs: airflow" in text
-    assert "PageUp/u scroll up" in text
-    assert "PageDown/d scroll down" in text
-    assert "End tail" in text
-
-
-def test_runtime_screen_lines_can_scroll_log_window(tmp_path):
-    command = no_docker_services.ServiceCommand(
-        name="airflow",
-        description="Start Airflow",
-        argv=["python", "airflow.py"],
-        category="service",
-        long_running=True,
-    )
-    log_file = tmp_path / "airflow.log"
-    log_file.write_text(
-        "\n".join(f"log line {number:02d}" for number in range(1, 31)) + "\n",
-        encoding="utf-8",
-    )
-    manager = no_docker_services.RuntimeManager([command], log_dir=tmp_path)
-
-    tail_lines = no_docker_services.runtime_screen_lines(
-        manager,
-        cursor_index=0,
-        show_logs=True,
-        log_scroll=0,
-        max_log_lines=3,
-    )
-    scrolled_lines = no_docker_services.runtime_screen_lines(
-        manager,
-        cursor_index=0,
-        show_logs=True,
-        log_scroll=2,
-        max_log_lines=3,
-    )
-
-    tail_text = "\n".join(tail_lines)
-    scrolled_text = "\n".join(scrolled_lines)
-
-    assert "log line 28" in tail_text
-    assert "log line 30" in tail_text
-    assert "log line 27" not in tail_text
-    assert "log line 26" in scrolled_text
-    assert "log line 28" in scrolled_text
-    assert "log line 29" not in scrolled_text
-    assert "scroll 2 from tail" in scrolled_text
 
 
 def test_runtime_screen_groups_services_tasks_and_utilities():
@@ -446,52 +376,6 @@ def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
     no_docker_services.run_runtime_tui(manager=manager)
 
     assert stopped == [True]
-
-
-def test_runtime_tui_page_keys_update_log_scroll(monkeypatch):
-    command = no_docker_services.ServiceCommand(
-        name="airflow",
-        description="Start Airflow",
-        argv=["python", "airflow.py"],
-        category="service",
-        long_running=True,
-    )
-    manager = no_docker_services.RuntimeManager([command])
-    observed_scroll: list[int] = []
-
-    class FakeScreen:
-        def __init__(self) -> None:
-            self.keys = iter(
-                [
-                    no_docker_services.curses.KEY_PPAGE,
-                    no_docker_services.curses.KEY_NPAGE,
-                    no_docker_services.curses.KEY_END,
-                    ord("q"),
-                ]
-            )
-
-        def keypad(self, flag):
-            return None
-
-        def timeout(self, milliseconds):
-            return None
-
-        def getch(self):
-            return next(self.keys)
-
-    def fake_wrapper(callback):
-        callback(FakeScreen())
-
-    def fake_draw_runtime_screen(stdscr, manager, *, cursor_index, show_logs, log_scroll):
-        observed_scroll.append(log_scroll)
-
-    monkeypatch.setattr(no_docker_services.curses, "wrapper", fake_wrapper)
-    monkeypatch.setattr(no_docker_services, "_draw_runtime_screen", fake_draw_runtime_screen)
-    monkeypatch.setattr(manager, "stop_all", lambda: None)
-
-    no_docker_services.run_runtime_tui(manager=manager)
-
-    assert observed_scroll == [0, no_docker_services.LOG_SCROLL_STEP, 0, 0]
 
 
 class FakeProcess:
