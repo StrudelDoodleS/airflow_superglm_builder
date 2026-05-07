@@ -46,10 +46,11 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
 
 
 def test_no_docker_scripts_exist_without_compose_dependency():
+    assert not Path("scripts/start_no_docker_runtime.sh").exists()
+
     for script in [
         Path("scripts/bootstrap_no_docker.sh"),
         Path("scripts/no_docker_services.py"),
-        Path("scripts/start_no_docker_runtime.sh"),
         Path("scripts/start_no_docker_stack.sh"),
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
@@ -566,24 +567,6 @@ def test_interactive_shell_launcher_runs_when_called_with_zsh():
     assert result.returncode == 0
     assert "scripts/apply_sql_migrations.py" in result.stdout
     assert "no coprocess" not in result.stderr
-
-
-def test_start_no_docker_runtime_alias_invokes_launcher():
-    result = subprocess.run(
-        [
-            "bash",
-            "scripts/start_no_docker_runtime.sh",
-            "--dry-run",
-            "--services",
-            "migrate",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert "scripts/apply_sql_migrations.py" in result.stdout
 
 
 def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_path):

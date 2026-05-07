@@ -143,9 +143,8 @@ Prerequisites:
    tail, `r` to restart, `x` to stop all managed services, and `q` to quit.
    Logs are written under `state/runtime/logs`.
 
-   `scripts/start_no_docker_runtime.sh` is an alias for the same launcher. Both
-   shell wrappers are intentionally tiny and delegate the runtime manager to
-   Python, so they work from normal zsh or Bash terminals while inheriting your
+   The shell wrapper is intentionally tiny and delegates the runtime manager to
+   Python, so it works from normal zsh or Bash terminals while inheriting your
    current environment.
 
    The TUI groups are:
