@@ -59,7 +59,7 @@ These steps assume Docker with the Compose v2 plugin is already installed.
 7. Trigger the pipeline from Airflow, or from the CLI:
 
    ```bash
-   docker compose exec -T airflow-apiserver airflow dags trigger pricing_superglm_pipeline
+   docker compose exec -T airflow-apiserver airflow dags trigger pricing_mtpl_frequency
    ```
 
 The full one-command local smoke path is also available:
@@ -69,7 +69,7 @@ scripts/run_local_pipeline.sh
 ```
 
 That script builds the image, starts the services, cleans stale Airflow example
-DAG metadata, waits for `pricing_superglm_pipeline` to be visible, and triggers
+DAG metadata, waits for `pricing_mtpl_frequency` to be visible, and triggers
 the DAG.
 
 ## No-Docker Work Quickstart
@@ -181,15 +181,36 @@ Prerequisites:
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
-6. Trigger `pricing_superglm_pipeline` from the Airflow UI, or run it directly
+6. Trigger `pricing_mtpl_frequency` from the Airflow UI, or run it directly
    without Airflow:
 
    ```bash
-   uv run python scripts/run_pipeline_no_airflow.py
+   uv run python scripts/run_pipeline_no_airflow.py --model-key MTPL_FREQ
    ```
 
    The direct runner uses the same schema DDL, freMTPL loader, manifest/CV
    metadata, MLflow logging, rating export, and SQL publish code as the DAG.
+
+## Adding Models
+
+The pipeline is split into global plumbing and model-specific code.
+
+- Global code in `pricing_pipeline/` owns database access, schema application,
+  dataset manifests, MLflow setup, rating export publishing, and lineage writes.
+- Reusable datasets are described with `DatasetSpec` objects, currently in
+  `pricing_pipeline/datasets.py`.
+- Model code lives under `pricing_models/<model_name>/`. A model package should
+  provide `training.py` for feature preparation/model construction and `spec.py`
+  with a `ModelSpec` that points at the dataset it trains on.
+- Register each spec in `pricing_models/registry.py` so direct runs can select it
+  with `--model-key`.
+- Add one thin DAG per model in `dags/`, using
+  `pricing_pipeline.dag_factory.build_pricing_model_dag(...)`.
+
+For example, the current MTPL frequency model is implemented in
+`pricing_models/mtpl_frequency/`, registered as `MTPL_FREQ`, and exposed as the
+`pricing_mtpl_frequency` DAG. `pricing_superglm_pipeline` remains as a
+compatibility alias for older local commands.
 
 For a work deployment, CloudBeaver is not required and should normally not be
 started. Changing from local testing to a work SQL Server is just an `.env`
@@ -342,7 +363,7 @@ scheduler, dag processor, worker, and triggerer services. It then runs the
 container smoke check with
 `docker compose run --rm airflow-apiserver python /opt/pricing/scripts/smoke_check.py`
 cleans stale example DAG metadata from existing local Airflow databases, waits
-for `pricing_superglm_pipeline` to be loaded by the DAG processor, and triggers
+for `pricing_mtpl_frequency` to be loaded by the DAG processor, and triggers
 it through the Airflow CLI.
 
 ## Local Services

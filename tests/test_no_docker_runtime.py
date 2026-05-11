@@ -100,6 +100,7 @@ def test_dag_schema_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
     airflow_sdk_module.get_current_context = lambda: {}
     airflow_sdk_module.task = task
     airflow_module.sdk = airflow_sdk_module
+    sys.modules.pop("pricing_pipeline.dag_factory", None)
     monkeypatch.setitem(sys.modules, "airflow", airflow_module)
     monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
 
@@ -127,6 +128,7 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     )
 
     assert result.returncode == 0
+    assert "--model-key" in result.stdout
     assert "--ensure-database" in result.stdout
     assert "--skip-schema-apply" in result.stdout
     assert "--skip-raw-load" in result.stdout

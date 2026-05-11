@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+from pathlib import Path
 
 import pandas as pd
 
@@ -30,27 +31,21 @@ from pricing_pipeline.config import Settings
 from pricing_pipeline.lineage import record_model_run
 from pricing_pipeline.mlflow_tracking import configure_mlflow
 from pricing_pipeline.model_registry import ensure_pricing_model
+from pricing_pipeline.model_spec import (
+    ModelExportResult,
+    ModelSpec,
+    coerce_training_frame,
+)
 from pricing_pipeline.rating_export import (
     build_export_id,
     build_rating_export_path,
     export_rating_tables,
 )
 from pricing_pipeline.rating_package import publish_rating_package, stage_rating_export
-from pricing_pipeline.training import (
-    FEATURE_COLUMNS,
-    TRAINING_SQL,
-    build_model,
-    build_training_frame,
-    fit_reml_with_diagnostics,
-)
+from pricing_pipeline.superglm_diagnostics import fit_reml_with_diagnostics
 
 
-MODEL_KEY = "MTPL_FREQ"
-MODEL_TARGET = "ClaimNb"
-MODEL_TYPE = "superglm_poisson"
-
-
-def run_training_export_publish(
+def train_and_export_model(
     engine,
     *,
     settings: Settings,
@@ -58,47 +53,48 @@ def run_training_export_publish(
     dag_id: str,
     airflow_run_id: str,
     logical_date: str,
+    spec: ModelSpec,
     created_by: str = "airflow",
-) -> dict[str, str]:
+) -> ModelExportResult:
     configure_mlflow(settings.mlflow_tracking_uri)
-    model_name = MODEL_KEY
     model_id = ensure_pricing_model(
         engine,
-        model_key=model_name,
-        target_name=MODEL_TARGET,
-        model_type=MODEL_TYPE,
+        model_key=spec.model_key,
+        model_label=spec.model_label,
+        target_name=spec.target_name,
+        model_type=spec.model_type,
         created_by=created_by,
     )
     model_version = logical_date.replace("-", "")
-    export_id = build_export_id(model_name, airflow_run_id)
+    export_id = build_export_id(spec.model_key, airflow_run_id)
     workbook_path = build_rating_export_path(
         settings.rating_export_root,
-        model_name=model_name,
+        model_name=spec.model_key,
         logical_date=logical_date,
         export_id=export_id,
     )
 
-    raw = pd.read_sql_query(TRAINING_SQL, engine)
-    X, y, exposure, offset = build_training_frame(raw)
+    raw = pd.read_sql_query(spec.training_sql, engine)
+    training_frame = coerce_training_frame(spec.build_training_frame(raw))
 
-    mlflow.set_experiment("pricing-mtpl-frequency")
+    mlflow.set_experiment(spec.experiment_name)
     with mlflow.start_run() as run:
-        model = build_model()
+        model = spec.build_model()
         workbook_path.parent.mkdir(parents=True, exist_ok=True)
-        mlflow.log_param("model_name", model_name)
+        mlflow.log_param("model_name", spec.model_key)
         mlflow.log_param("model_id", model_id)
         mlflow.log_param("model_version", model_version)
         mlflow.log_param("manifest_id", manifest_id)
-        mlflow.log_param("target", MODEL_TARGET)
-        mlflow.log_param("offset", "log(Exposure)")
-        mlflow.log_param("row_count", len(X))
-        mlflow.log_param("feature_columns", ",".join(FEATURE_COLUMNS))
+        mlflow.log_param("target", spec.target_name)
+        mlflow.log_param("offset", spec.offset_label)
+        mlflow.log_param("row_count", len(training_frame.X))
+        mlflow.log_param("feature_columns", ",".join(spec.feature_columns))
 
         fitted_model = fit_reml_with_diagnostics(
             model,
-            X,
-            y,
-            offset=offset,
+            training_frame.X,
+            training_frame.y,
+            offset=training_frame.offset,
             diagnostics_path=workbook_path.parent / "superglm_fit.log",
             mlflow_client=mlflow,
         )
@@ -113,46 +109,102 @@ def run_training_export_publish(
             pickle.dump(fitted_model, handle)
         mlflow.log_artifact(str(model_path), artifact_path="model")
 
-        export_rating_tables(fitted_model, X, y, exposure, output_path=workbook_path)
+        export_rating_tables(
+            fitted_model,
+            training_frame.X,
+            training_frame.y,
+            training_frame.exposure,
+            output_path=workbook_path,
+        )
 
-        stage_rating_export(
-            engine,
-            workbook_path=workbook_path,
-            export_id=export_id,
-            model_name=model_name,
+        return ModelExportResult(
+            model_id=model_id,
+            model_key=spec.model_key,
             model_version=model_version,
-            target_name=MODEL_TARGET,
-            model_type=MODEL_TYPE,
-            effective_from=logical_date,
-            created_by=created_by,
-            replace=True,
-        )
-        rate_package_id = publish_rating_package(
-            engine,
-            export_id=export_id,
-            pointer_name="MTPL_FREQ_UAT",
-            created_by=created_by,
-            package_status="DRAFT",
-        )
-        record_model_run(
-            engine,
+            model_type=spec.model_type,
+            target_name=spec.target_name,
+            deployment_slot=spec.deployment_slot,
+            manifest_id=manifest_id,
             dag_id=dag_id,
             airflow_run_id=airflow_run_id,
             mlflow_run_id=run.info.run_id,
-            manifest_id=manifest_id,
             export_id=export_id,
-            model_id=model_id,
-            model_name=model_name,
-            model_version=model_version,
-            rate_package_id=rate_package_id,
             rating_workbook_path=str(workbook_path),
-            run_status="SUCCESS",
+            effective_from=logical_date,
             created_by=created_by,
+            package_status=spec.package_status,
         )
 
-        return {
-            "mlflow_run_id": run.info.run_id,
-            "export_id": export_id,
-            "rate_package_id": str(rate_package_id),
-            "rating_workbook_path": str(workbook_path),
-        }
+
+def publish_model_export(
+    engine,
+    export: ModelExportResult | dict,
+) -> dict[str, str]:
+    export_result = ModelExportResult.from_mapping(export)
+    workbook_path = Path(export_result.rating_workbook_path)
+
+    stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id=export_result.export_id,
+        model_name=export_result.model_key,
+        model_version=export_result.model_version,
+        target_name=export_result.target_name,
+        model_type=export_result.model_type,
+        effective_from=export_result.effective_from,
+        created_by=export_result.created_by,
+        replace=True,
+    )
+    rate_package_id = publish_rating_package(
+        engine,
+        export_id=export_result.export_id,
+        pointer_name=export_result.deployment_slot,
+        created_by=export_result.created_by,
+        package_status=export_result.package_status,
+    )
+    record_model_run(
+        engine,
+        dag_id=export_result.dag_id,
+        airflow_run_id=export_result.airflow_run_id,
+        mlflow_run_id=export_result.mlflow_run_id,
+        manifest_id=export_result.manifest_id,
+        export_id=export_result.export_id,
+        model_id=export_result.model_id,
+        model_name=export_result.model_key,
+        model_version=export_result.model_version,
+        rate_package_id=rate_package_id,
+        rating_workbook_path=str(workbook_path),
+        run_status="SUCCESS",
+        created_by=export_result.created_by,
+    )
+
+    return {
+        "mlflow_run_id": export_result.mlflow_run_id,
+        "export_id": export_result.export_id,
+        "rate_package_id": str(rate_package_id),
+        "rating_workbook_path": str(workbook_path),
+    }
+
+
+def run_training_export_publish(
+    engine,
+    *,
+    settings: Settings,
+    manifest_id: str,
+    dag_id: str,
+    airflow_run_id: str,
+    logical_date: str,
+    spec: ModelSpec,
+    created_by: str = "airflow",
+) -> dict[str, str]:
+    export = train_and_export_model(
+        engine,
+        settings=settings,
+        manifest_id=manifest_id,
+        dag_id=dag_id,
+        airflow_run_id=airflow_run_id,
+        logical_date=logical_date,
+        spec=spec,
+        created_by=created_by,
+    )
+    return publish_model_export(engine, export)

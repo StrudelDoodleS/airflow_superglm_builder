@@ -14,6 +14,11 @@ README_CONTRACT_STRINGS = [
     "scripts/start_no_docker_stack.sh",
     "scripts/start_airflow_local.py",
     "scripts/start_mlflow_local.py",
+    "Adding Models",
+    "DatasetSpec",
+    "pricing_models/<model_name>/",
+    "pricing_mtpl_frequency",
+    "--model-key MTPL_FREQ",
 ]
 
 

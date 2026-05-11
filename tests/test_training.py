@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from pricing_pipeline import mlflow_tracking
-from pricing_pipeline import training
+from pricing_models.mtpl_frequency import training
 
 
 def raw_training_frame(**overrides) -> pd.DataFrame:

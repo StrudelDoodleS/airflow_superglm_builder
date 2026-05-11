@@ -9,8 +9,8 @@ from pricing_pipeline.dag_factory import (
 
 SCHEMA_DIR = schema_dir_from_env()
 
-pricing_superglm_pipeline = build_pricing_model_dag(
-    dag_id="pricing_superglm_pipeline",
+pricing_mtpl_frequency = build_pricing_model_dag(
+    dag_id="pricing_mtpl_frequency",
     spec=MODEL_SPEC,
-    tags=["pricing", "superglm", "mlflow"],
+    tags=["pricing", "mtpl", "frequency", "mlflow"],
 )

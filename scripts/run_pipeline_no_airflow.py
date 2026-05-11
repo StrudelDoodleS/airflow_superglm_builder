@@ -14,14 +14,10 @@ if str(ROOT) not in sys.path:
 from scripts.pricing_db import get_engine, load_env  # noqa: E402
 from pricing_pipeline.config import Settings  # noqa: E402
 from pricing_pipeline.db import ensure_database  # noqa: E402
-from pricing_pipeline.fremtpl import load_fremtpl_raw  # noqa: E402
-from pricing_pipeline.manifest import (  # noqa: E402
-    FREMTPL_DATASET_NAME,
-    create_fremtpl_manifest,
-    new_manifest_id,
-)
+from pricing_pipeline.manifest import new_manifest_id  # noqa: E402
 from pricing_pipeline.migrations import apply_migrations  # noqa: E402
 from pricing_pipeline.pipeline import run_training_export_publish  # noqa: E402
+from pricing_models.registry import get_model_spec, model_keys  # noqa: E402
 
 
 def _schema_dir() -> Path:
@@ -53,14 +49,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-raw-load",
         action="store_true",
-        help="Do not fetch/load freMTPL raw data before creating the manifest.",
+        help="Do not fetch/load source raw data before creating the manifest.",
     )
     parser.add_argument(
         "--replace-raw",
         action="store_true",
-        help="Truncate and reload pricing.FREMTPL_RAW before training.",
+        help="Truncate and reload the model dataset's raw table before training.",
     )
     parser.add_argument("--manifest-id", default=None)
+    parser.add_argument(
+        "--model-key",
+        default="MTPL_FREQ",
+        choices=model_keys(),
+        help="Registered model spec to train and publish.",
+    )
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--dag-id", default="no_docker_local")
@@ -83,17 +85,18 @@ def main() -> None:
             ensure_database(settings, settings.pricing_database)
 
     engine = get_engine()
+    model_spec = get_model_spec(args.model_key)
 
     if not args.skip_schema_apply:
         applied = apply_migrations(engine, _schema_dir())
         print(f"schema_files_applied={len(applied)}")
 
     if not args.skip_raw_load:
-        raw_rows = load_fremtpl_raw(engine, replace=args.replace_raw)
-        print(f"fremtpl_raw_rows={raw_rows}")
+        raw_rows = model_spec.dataset.load_raw(engine, replace=args.replace_raw)
+        print(f"{model_spec.dataset.dataset_name}_raw_rows={raw_rows}")
 
-    manifest_id = args.manifest_id or new_manifest_id(FREMTPL_DATASET_NAME)
-    created_manifest_id = create_fremtpl_manifest(
+    manifest_id = args.manifest_id or new_manifest_id(model_spec.dataset.dataset_name)
+    created_manifest_id = model_spec.dataset.create_manifest(
         engine,
         manifest_id=manifest_id,
         n_splits=args.n_splits,
@@ -109,6 +112,7 @@ def main() -> None:
         dag_id=args.dag_id,
         airflow_run_id=airflow_run_id,
         logical_date=logical_date,
+        spec=model_spec,
         created_by=args.created_by,
     )
     print(json.dumps({"manifest_id": created_manifest_id, **result}, indent=2))

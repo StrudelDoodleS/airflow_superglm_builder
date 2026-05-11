@@ -14,7 +14,14 @@ import pytest
 
 from pricing_pipeline import lineage, pipeline, rating_export, rating_package
 from pricing_pipeline.config import Settings
+from pricing_pipeline.datasets import FREMTPL_DATASET_SPEC
+from pricing_pipeline.model_spec import ModelSpec
 from pricing_pipeline.model_registry import ensure_pricing_model
+from pricing_models.mtpl_frequency.training import (
+    FEATURE_COLUMNS,
+    TRAINING_SQL,
+    build_training_frame,
+)
 from scripts import load_staging_to_rating_package
 from scripts import load_superglm_excel_to_staging
 from scripts import smoke_check
@@ -637,7 +644,6 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
         or 17,
     )
-    monkeypatch.setattr(pipeline, "build_model", lambda: model)
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(pipeline, "stage_rating_export", fake_stage_rating_export)
@@ -660,6 +666,18 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "RATING_EXPORT_ROOT": str(tmp_path),
         }
     )
+    spec = ModelSpec(
+        model_key="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        experiment_name="pricing-mtpl-frequency",
+        deployment_slot="MTPL_FREQ_UAT",
+        dataset=FREMTPL_DATASET_SPEC,
+        training_sql=TRAINING_SQL,
+        feature_columns=tuple(FEATURE_COLUMNS),
+        build_model=lambda: model,
+        build_training_frame=build_training_frame,
+    )
 
     result = pipeline.run_training_export_publish(
         engine,
@@ -668,6 +686,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         dag_id="pricing_dag",
         airflow_run_id="scheduled__2026-04-27T10:30:00+00:00",
         logical_date="2026-04-27",
+        spec=spec,
         created_by="airflow",
     )
 
@@ -689,6 +708,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         engine,
         {
             "model_key": "MTPL_FREQ",
+            "model_label": None,
             "target_name": "ClaimNb",
             "model_type": "superglm_poisson",
             "created_by": "airflow",

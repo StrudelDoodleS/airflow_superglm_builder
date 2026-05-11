@@ -215,6 +215,7 @@ def test_airflow_services_can_import_project_package_and_hide_examples():
     assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
     assert "cleanup_airflow_examples.py" in run_script
     assert "airflow dags list-import-errors" in run_script
+    assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script
     assert "airflow dags trigger \"${DAG_ID}\"" in run_script
     assert "bundle_name" in cleanup_script
     assert "example_dags" in cleanup_script
