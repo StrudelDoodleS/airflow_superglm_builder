@@ -15,6 +15,8 @@ from sklearn.model_selection import KFold
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from pricing_pipeline.models.spec import DatasetSpec
+
 
 FREMTPL_DATASET_NAME = "freMTPL2freq"
 FREMTPL_SOURCE_SYSTEM = "openml_41214"
@@ -49,7 +51,14 @@ def new_manifest_id(dataset_name: str) -> str:
     return f"{prefix}_{date.today():%Y%m%d}_{uuid.uuid4().hex[:10]}"
 
 
-def build_column_metadata(frame: pd.DataFrame, *, manifest_id: str) -> pd.DataFrame:
+def build_column_metadata(
+    frame: pd.DataFrame,
+    *,
+    manifest_id: str,
+    pk_columns: tuple[str, ...] = ("IDpol",),
+    target_column: str | None = "ClaimNb",
+    weight_column: str | None = "Exposure",
+) -> pd.DataFrame:
     column_df = pd.DataFrame(
         {
             "manifest_id": manifest_id,
@@ -62,16 +71,28 @@ def build_column_metadata(frame: pd.DataFrame, *, manifest_id: str) -> pd.DataFr
         }
     )
 
-    column_df.loc[column_df["column_name"].eq("IDpol"), "column_role"] = "KEY"
-    column_df.loc[column_df["column_name"].eq("ClaimNb"), "column_role"] = "TARGET"
-    column_df.loc[column_df["column_name"].eq("Exposure"), "column_role"] = "WEIGHT"
+    column_df.loc[column_df["column_name"].isin(pk_columns), "column_role"] = "KEY"
+    if target_column is not None:
+        column_df.loc[column_df["column_name"].eq(target_column), "column_role"] = "TARGET"
+    if weight_column is not None:
+        column_df.loc[column_df["column_name"].eq(weight_column), "column_role"] = "WEIGHT"
     return column_df
 
 
-def compute_row_order_sha256(frame: pd.DataFrame, *, pk_column: str) -> str:
+def compute_row_order_sha256(
+    frame: pd.DataFrame,
+    *,
+    pk_column: str | None = None,
+    pk_columns: tuple[str, ...] | None = None,
+) -> str:
+    if pk_columns is None:
+        if pk_column is None:
+            raise ValueError("pk_column or pk_columns is required")
+        pk_columns = (pk_column,)
+
     digest = hashlib.sha256()
-    for value in frame[pk_column].astype(str):
-        digest.update(value.encode("utf-8"))
+    for row in frame.loc[:, list(pk_columns)].itertuples(index=False, name=None):
+        digest.update(json.dumps(row, default=str, separators=(",", ":")).encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
 
@@ -91,6 +112,7 @@ def build_cv_split_set(
     manifest_id: str,
     n_splits: int,
     random_state: int,
+    pk_columns: tuple[str, ...] = ("IDpol",),
     created_by: str = "airflow",
 ) -> pd.DataFrame:
     return pd.DataFrame(
@@ -112,7 +134,7 @@ def build_cv_split_set(
                     },
                     sort_keys=True,
                 ),
-                "row_order_sha256": compute_row_order_sha256(frame, pk_column="IDpol"),
+                "row_order_sha256": compute_row_order_sha256(frame, pk_columns=pk_columns),
                 "row_count": int(len(frame)),
                 "fold_count": n_splits,
                 "groups_column": None,
@@ -147,37 +169,45 @@ def build_cv_folds(
     return pd.DataFrame(rows)
 
 
-def create_fremtpl_manifest(
+def create_dataset_manifest(
     engine: Engine,
     *,
+    dataset: DatasetSpec,
     manifest_id: str,
     n_splits: int = 5,
     random_state: int = 42,
     created_by: str = "airflow",
 ) -> str:
-    frame = pd.read_sql_query(text(FREMTPL_RAW_SELECT_SQL), engine)
+    frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
 
     manifest_df = pd.DataFrame(
         [
             {
                 "manifest_id": manifest_id,
-                "dataset_name": FREMTPL_DATASET_NAME,
-                "source_system": FREMTPL_SOURCE_SYSTEM,
+                "dataset_name": dataset.dataset_name,
+                "source_system": dataset.source_system,
                 "data_as_of_date": date.today(),
                 "row_count": int(len(frame)),
-                "pk_columns_json": json.dumps(["IDpol"]),
-                "target_column": "ClaimNb",
-                "weight_column": "Exposure",
+                "pk_columns_json": json.dumps(list(dataset.pk_columns)),
+                "target_column": dataset.target_column,
+                "weight_column": dataset.weight_column,
                 "created_by": created_by,
             }
         ]
     )
-    column_df = build_column_metadata(frame, manifest_id=manifest_id)
+    column_df = build_column_metadata(
+        frame,
+        manifest_id=manifest_id,
+        pk_columns=dataset.pk_columns,
+        target_column=dataset.target_column,
+        weight_column=dataset.weight_column,
+    )
     split_set_df = build_cv_split_set(
         frame,
         manifest_id=manifest_id,
         n_splits=n_splits,
         random_state=random_state,
+        pk_columns=dataset.pk_columns,
         created_by=created_by,
     )
     split_set_id = split_set_df.loc[0, "split_set_id"]
@@ -219,3 +249,29 @@ def create_fremtpl_manifest(
         )
 
     return manifest_id
+
+
+def create_fremtpl_manifest(
+    engine: Engine,
+    *,
+    manifest_id: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+    created_by: str = "airflow",
+) -> str:
+    dataset = DatasetSpec(
+        dataset_name=FREMTPL_DATASET_NAME,
+        source_system=FREMTPL_SOURCE_SYSTEM,
+        manifest_sql=FREMTPL_RAW_SELECT_SQL,
+        pk_columns=("IDpol",),
+        target_column="ClaimNb",
+        weight_column="Exposure",
+    )
+    return create_dataset_manifest(
+        engine,
+        dataset=dataset,
+        manifest_id=manifest_id,
+        n_splits=n_splits,
+        random_state=random_state,
+        created_by=created_by,
+    )

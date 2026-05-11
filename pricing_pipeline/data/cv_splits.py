@@ -11,8 +11,8 @@ from sklearn.model_selection import KFold
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline.manifest import compute_row_order_sha256
-from pricing_pipeline.manifest import runtime_dependency_metadata
+from pricing_pipeline.data.manifest import compute_row_order_sha256
+from pricing_pipeline.data.manifest import runtime_dependency_metadata
 
 
 @dataclass(frozen=True)

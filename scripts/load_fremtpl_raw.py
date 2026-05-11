@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.pricing_db import get_engine  # noqa: E402
-from pricing_pipeline.fremtpl import load_fremtpl_raw  # noqa: E402
+from pricing_pipeline.data.fremtpl import load_fremtpl_raw  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

@@ -17,6 +17,8 @@ README_CONTRACT_STRINGS = [
     "Adding Models",
     "DatasetSpec",
     "pricing_models/<model_name>/",
+    "pricing_pipeline/data/datasets.py",
+    "pricing_pipeline/infra/db.py",
     "pricing_mtpl_frequency",
     "--model-key MTPL_FREQ",
 ]

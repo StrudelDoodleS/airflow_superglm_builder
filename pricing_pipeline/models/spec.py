@@ -19,8 +19,12 @@ class TrainingFrame:
 @dataclass(frozen=True)
 class DatasetSpec:
     dataset_name: str
-    load_raw: Callable[..., int]
-    create_manifest: Callable[..., str]
+    source_system: str
+    manifest_sql: str
+    pk_columns: tuple[str, ...]
+    target_column: str
+    weight_column: str | None = None
+    raw_loader: Callable[..., int] | None = None
     default_n_splits: int = 5
     default_random_state: int = 42
 

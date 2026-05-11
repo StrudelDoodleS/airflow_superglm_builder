@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pricing_pipeline.cv_splits import load_cv_folds  # noqa: E402
-from pricing_pipeline.cv_splits import materialize_cv_folds  # noqa: E402
-from pricing_pipeline.cv_splits import fetch_split_set  # noqa: E402
-from pricing_pipeline.manifest import FREMTPL_RAW_SELECT_SQL  # noqa: E402
+from pricing_pipeline.data.cv_splits import load_cv_folds  # noqa: E402
+from pricing_pipeline.data.cv_splits import materialize_cv_folds  # noqa: E402
+from pricing_pipeline.data.cv_splits import fetch_split_set  # noqa: E402
+from pricing_pipeline.data.manifest import FREMTPL_RAW_SELECT_SQL  # noqa: E402
 from scripts.pricing_db import get_engine  # noqa: E402
 
 

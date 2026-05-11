@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from pricing_pipeline import fremtpl
-from pricing_pipeline.fremtpl import (
+from pricing_pipeline.data import fremtpl
+from pricing_pipeline.data.fremtpl import (
     FREMTPL_COLUMNS,
     FREMTPL_DATASET_NAME,
     FREMTPL_OPENML_ID,

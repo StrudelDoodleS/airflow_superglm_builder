@@ -5,7 +5,7 @@ from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline.config import Settings
+from pricing_pipeline.infra.config import Settings
 
 
 def _format_odbc_value(value: str, *, always_brace: bool = False) -> str:

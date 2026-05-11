@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from pricing_pipeline.config import Settings
+from pricing_pipeline.infra.config import Settings
 from scripts import no_docker_services
 
 LOCAL_AIRFLOW_ENV_KEYS = [
@@ -100,7 +100,7 @@ def test_dag_schema_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
     airflow_sdk_module.get_current_context = lambda: {}
     airflow_sdk_module.task = task
     airflow_module.sdk = airflow_sdk_module
-    sys.modules.pop("pricing_pipeline.dag_factory", None)
+    sys.modules.pop("pricing_pipeline.orchestration.dag_factory", None)
     monkeypatch.setitem(sys.modules, "airflow", airflow_module)
     monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
 
@@ -159,13 +159,13 @@ def test_no_docker_service_picker_lists_available_services_without_pythonpath():
 
 def test_no_docker_service_picker_builds_python_commands():
     commands = no_docker_services.selected_commands(
-        ["apply-schema", "load-raw-replace", "pipeline"],
+        ["apply-schema", "load-fremtpl-replace", "pipeline"],
         python_executable="/python",
     )
 
     assert [command.name for command in commands] == [
         "apply-schema",
-        "load-raw-replace",
+        "load-fremtpl-replace",
         "pipeline",
     ]
     assert commands[0].argv == ["/python", "scripts/apply_schema.py"]

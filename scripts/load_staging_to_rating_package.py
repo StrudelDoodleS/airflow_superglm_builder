@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.pricing_db import get_engine  # noqa: E402
-from pricing_pipeline.model_registry import ensure_pricing_model  # noqa: E402
+from pricing_pipeline.publishing.model_registry import ensure_pricing_model  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

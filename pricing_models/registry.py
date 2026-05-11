@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pricing_pipeline.model_spec import ModelSpec
+from pricing_pipeline.models.spec import ModelSpec
 from pricing_models.mtpl_frequency.spec import MODEL_SPEC as MTPL_FREQUENCY_SPEC
 
 

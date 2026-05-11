@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pricing_pipeline.cv_splits import (
+from pricing_pipeline.data.cv_splits import (
     CVSplitSet,
     load_cv_folds,
     load_materialized_cv_folds,
@@ -15,7 +15,7 @@ from pricing_pipeline.cv_splits import (
     replay_cv_folds,
     resolve_splitter,
 )
-from pricing_pipeline.manifest import compute_row_order_sha256
+from pricing_pipeline.data.manifest import compute_row_order_sha256
 from scripts import export_cv_indices
 
 

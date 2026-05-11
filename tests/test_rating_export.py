@@ -12,11 +12,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pricing_pipeline import lineage, pipeline, rating_export, rating_package
-from pricing_pipeline.config import Settings
-from pricing_pipeline.datasets import FREMTPL_DATASET_SPEC
-from pricing_pipeline.model_spec import ModelSpec
-from pricing_pipeline.model_registry import ensure_pricing_model
+from pricing_pipeline.orchestration import pipeline
+from pricing_pipeline.publishing import lineage, rating_export, rating_package
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
+from pricing_pipeline.models.spec import ModelSpec
+from pricing_pipeline.publishing.model_registry import ensure_pricing_model
 from pricing_models.mtpl_frequency.training import (
     FEATURE_COLUMNS,
     TRAINING_SQL,
@@ -549,7 +550,7 @@ def test_pipeline_imports_with_split_airflow_package_and_pricing_scripts_paths(
         [
             sys.executable,
             "-c",
-            "import pricing_pipeline.pipeline; print('pipeline_import=ok')",
+            "import pricing_pipeline.orchestration.pipeline; print('pipeline_import=ok')",
         ],
         cwd=tmp_path,
         check=False,

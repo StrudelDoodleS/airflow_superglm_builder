@@ -27,7 +27,7 @@ def _ensure_repo_root_on_path() -> None:
 
 def main() -> None:
     _ensure_repo_root_on_path()
-    from pricing_pipeline.migrations import apply_migrations, migration_files
+    from pricing_pipeline.infra.migrations import apply_migrations, migration_files
 
     load_env()
     engine = get_engine()

@@ -12,11 +12,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.pricing_db import get_engine, load_env  # noqa: E402
-from pricing_pipeline.config import Settings  # noqa: E402
-from pricing_pipeline.db import ensure_database  # noqa: E402
-from pricing_pipeline.manifest import new_manifest_id  # noqa: E402
-from pricing_pipeline.migrations import apply_migrations  # noqa: E402
-from pricing_pipeline.pipeline import run_training_export_publish  # noqa: E402
+from pricing_pipeline.infra.config import Settings  # noqa: E402
+from pricing_pipeline.infra.db import ensure_database  # noqa: E402
+from pricing_pipeline.data.manifest import create_dataset_manifest, new_manifest_id  # noqa: E402
+from pricing_pipeline.infra.migrations import apply_migrations  # noqa: E402
+from pricing_pipeline.orchestration.pipeline import run_training_export_publish  # noqa: E402
 from pricing_models.registry import get_model_spec, model_keys  # noqa: E402
 
 
@@ -92,12 +92,16 @@ def main() -> None:
         print(f"schema_files_applied={len(applied)}")
 
     if not args.skip_raw_load:
-        raw_rows = model_spec.dataset.load_raw(engine, replace=args.replace_raw)
-        print(f"{model_spec.dataset.dataset_name}_raw_rows={raw_rows}")
+        if model_spec.dataset.raw_loader is None:
+            print(f"{model_spec.dataset.dataset_name}_raw_loader=none")
+        else:
+            raw_rows = model_spec.dataset.raw_loader(engine, replace=args.replace_raw)
+            print(f"{model_spec.dataset.dataset_name}_raw_rows={raw_rows}")
 
     manifest_id = args.manifest_id or new_manifest_id(model_spec.dataset.dataset_name)
-    created_manifest_id = model_spec.dataset.create_manifest(
+    created_manifest_id = create_dataset_manifest(
         engine,
+        dataset=model_spec.dataset,
         manifest_id=manifest_id,
         n_splits=args.n_splits,
         random_state=args.random_state,

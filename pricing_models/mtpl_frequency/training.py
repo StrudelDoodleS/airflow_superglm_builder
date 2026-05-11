@@ -29,7 +29,7 @@ except ModuleNotFoundError:
 
     mlflow = _MissingMLflow()
 
-from pricing_pipeline.superglm_diagnostics import (
+from pricing_pipeline.models.superglm_diagnostics import (
     fit_reml_with_diagnostics,
     parse_deviance_log_metrics,  # noqa: F401
 )

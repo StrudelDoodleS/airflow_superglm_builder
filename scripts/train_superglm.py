@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pricing_pipeline.config import Settings  # noqa: E402
-from pricing_pipeline.db import get_engine  # noqa: E402
-from pricing_pipeline.mlflow_tracking import configure_mlflow  # noqa: E402
-from pricing_pipeline.training import train_superglm  # noqa: E402
+from pricing_pipeline.infra.config import Settings  # noqa: E402
+from pricing_pipeline.infra.db import get_engine  # noqa: E402
+from pricing_pipeline.infra.mlflow_tracking import configure_mlflow  # noqa: E402
+from pricing_models.mtpl_frequency.training import train_superglm  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

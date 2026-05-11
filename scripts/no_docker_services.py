@@ -70,14 +70,14 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
             argv=[python_executable, "scripts/apply_schema.py"],
             category="pipeline-task",
         ),
-        "load-raw": ServiceCommand(
-            name="load-raw",
+        "load-fremtpl": ServiceCommand(
+            name="load-fremtpl",
             description="Load freMTPL raw data if the table is empty.",
             argv=[python_executable, "scripts/load_fremtpl_raw.py"],
             category="pipeline-task",
         ),
-        "load-raw-replace": ServiceCommand(
-            name="load-raw-replace",
+        "load-fremtpl-replace": ServiceCommand(
+            name="load-fremtpl-replace",
             description="Truncate and reload freMTPL raw data.",
             argv=[python_executable, "scripts/load_fremtpl_raw.py", "--replace"],
             category="pipeline-task",
@@ -144,7 +144,7 @@ def list_services() -> None:
         print(label)
         for command in commands:
             kind = _command_kind(command)
-            print(f"  {command.name:<16} {kind:<13} {command.description}")
+            print(f"  {command.name:<22} {kind:<13} {command.description}")
 
 
 def _process_group_id(process: subprocess.Popen) -> int | None:

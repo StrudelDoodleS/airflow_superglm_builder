@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def _install_fake_airflow(monkeypatch):
-    sys.modules.pop("pricing_pipeline.dag_factory", None)
+    sys.modules.pop("pricing_pipeline.orchestration.dag_factory", None)
     airflow_module = types.ModuleType("airflow")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
     task_outputs = []

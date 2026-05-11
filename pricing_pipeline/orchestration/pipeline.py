@@ -27,22 +27,22 @@ except ModuleNotFoundError:
 
     mlflow = _MissingMLflow()
 
-from pricing_pipeline.config import Settings
-from pricing_pipeline.lineage import record_model_run
-from pricing_pipeline.mlflow_tracking import configure_mlflow
-from pricing_pipeline.model_registry import ensure_pricing_model
-from pricing_pipeline.model_spec import (
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.publishing.lineage import record_model_run
+from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
+from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.models.spec import (
     ModelExportResult,
     ModelSpec,
     coerce_training_frame,
 )
-from pricing_pipeline.rating_export import (
+from pricing_pipeline.publishing.rating_export import (
     build_export_id,
     build_rating_export_path,
     export_rating_tables,
 )
-from pricing_pipeline.rating_package import publish_rating_package, stage_rating_export
-from pricing_pipeline.superglm_diagnostics import fit_reml_with_diagnostics
+from pricing_pipeline.publishing.rating_package import publish_rating_package, stage_rating_export
+from pricing_pipeline.models.superglm_diagnostics import fit_reml_with_diagnostics
 
 
 def train_and_export_model(

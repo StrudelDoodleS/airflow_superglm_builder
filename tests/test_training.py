@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pricing_pipeline import mlflow_tracking
+from pricing_pipeline.infra import mlflow_tracking
 from pricing_models.mtpl_frequency import training
 
 

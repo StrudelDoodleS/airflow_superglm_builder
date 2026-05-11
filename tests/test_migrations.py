@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from pricing_pipeline.migrations import migration_files, split_sql_server_batches
+from pricing_pipeline.infra.migrations import migration_files, split_sql_server_batches
 
 
 def _create_table_bodies(ddl: str) -> dict[str, str]:

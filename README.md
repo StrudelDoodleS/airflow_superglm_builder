@@ -165,8 +165,8 @@ Prerequisites:
    For one-shot setup tasks, select only the pieces you want:
 
    ```bash
-   scripts/start_no_docker_stack.sh --services apply-schema,load-raw
-   scripts/start_no_docker_stack.sh --services apply-schema,load-raw-replace,pipeline
+   scripts/start_no_docker_stack.sh --services apply-schema,load-fremtpl
+   scripts/start_no_docker_stack.sh --services apply-schema,load-fremtpl-replace,pipeline
    scripts/start_no_docker_stack.sh --services diagrams
    ```
 
@@ -188,24 +188,56 @@ Prerequisites:
    uv run python scripts/run_pipeline_no_airflow.py --model-key MTPL_FREQ
    ```
 
-   The direct runner uses the same schema DDL, freMTPL loader, manifest/CV
-   metadata, MLflow logging, rating export, and SQL publish code as the DAG.
+   The direct runner uses the same schema DDL, dataset manifest/CV metadata,
+   MLflow logging, rating export, and SQL publish code as the DAG.
 
 ## Adding Models
 
-The pipeline is split into global plumbing and model-specific code.
+The pipeline is split into global plumbing and model-specific code. For normal
+model development, most edits should be under `pricing_models/`.
+
+```text
+pricing_models/<model_name>/
+  spec.py       # model key, model metadata, dataset choice, feature list
+  training.py   # model-specific SQL, feature prep, and SuperGLM construction
+
+pricing_pipeline/
+  data/          # dataset specs, raw loaders, manifests, CV split metadata
+  infra/         # env config, SQL connection, schema application, MLflow setup
+  models/        # shared model/data contracts and SuperGLM diagnostics capture
+  orchestration/ # Airflow DAG factory and direct train/export/publish flow
+  publishing/    # rating package publish, model registry, run lineage
+  tools/         # optional local ERD generation
+```
 
 - Global code in `pricing_pipeline/` owns database access, schema application,
   dataset manifests, MLflow setup, rating export publishing, and lineage writes.
 - Reusable datasets are described with `DatasetSpec` objects, currently in
-  `pricing_pipeline/datasets.py`.
+  `pricing_pipeline/data/datasets.py`, or directly in a model `spec.py`.
 - Model code lives under `pricing_models/<model_name>/`. A model package should
   provide `training.py` for feature preparation/model construction and `spec.py`
   with a `ModelSpec` that points at the dataset it trains on.
 - Register each spec in `pricing_models/registry.py` so direct runs can select it
   with `--model-key`.
 - Add one thin DAG per model in `dags/`, using
-  `pricing_pipeline.dag_factory.build_pricing_model_dag(...)`.
+  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`.
+
+For a work SQL table or view that already exists, the dataset definition can be
+just metadata and SQL. It does not need a custom Python loader:
+
+```python
+DatasetSpec(
+    dataset_name="work_motor_frequency_2026q1",
+    source_system="azure_sql",
+    manifest_sql="SELECT * FROM actuarial.motor_frequency ORDER BY policy_id",
+    pk_columns=("policy_id",),
+    target_column="claim_count",
+    weight_column="exposure",
+)
+```
+
+Only local/demo datasets like freMTPL need `raw_loader=...` to fetch and seed a
+source table.
 
 For example, the current MTPL frequency model is implemented in
 `pricing_models/mtpl_frequency/`, registered as `MTPL_FREQ`, and exposed as the
@@ -216,7 +248,7 @@ For a work deployment, CloudBeaver is not required and should normally not be
 started. Changing from local testing to a work SQL Server is just an `.env`
 change as long as the authentication mode is SQL username/password. If the
 work server requires Microsoft Entra token authentication, add a pyodbc token
-connection path in `pricing_pipeline/db.py` and keep the rest of the pipeline
+connection path in `pricing_pipeline/infra/db.py` and keep the rest of the pipeline
 unchanged.
 
 ## Optional Local Tools

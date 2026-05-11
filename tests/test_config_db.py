@@ -1,6 +1,6 @@
-from pricing_pipeline import db
-from pricing_pipeline.config import Settings
-from pricing_pipeline.db import build_odbc_connect_string
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra import db
+from pricing_pipeline.infra.db import build_odbc_connect_string
 
 
 def test_settings_defaults_are_local_dev_safe():

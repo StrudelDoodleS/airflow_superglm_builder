@@ -1,4 +1,4 @@
-from pricing_pipeline.db_diagrams import (
+from pricing_pipeline.tools.db_diagrams import (
     ColumnInfo,
     DiagramSection,
     ForeignKeyInfo,

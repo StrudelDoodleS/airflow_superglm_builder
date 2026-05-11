@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pricing_pipeline.datasets import FREMTPL_DATASET_SPEC
-from pricing_pipeline.model_spec import ModelSpec
+from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
+from pricing_pipeline.models.spec import ModelSpec
 from pricing_models.mtpl_frequency.training import (
     FEATURE_COLUMNS,
     TRAINING_SQL,

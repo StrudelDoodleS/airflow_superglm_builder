@@ -372,8 +372,8 @@ services:
         python - <<'PY'
         import os
 
-        from pricing_pipeline.config import Settings
-        from pricing_pipeline.db import ensure_database
+        from pricing_pipeline.infra.config import Settings
+        from pricing_pipeline.infra.db import ensure_database
 
         settings = Settings.from_env(os.environ)
         ensure_database(settings, settings.pricing_database)
@@ -398,8 +398,8 @@ services:
         export MLFLOW_BACKEND_STORE_URI="$$(python - <<'PY'
         import os
 
-        from pricing_pipeline.config import Settings
-        from pricing_pipeline.db import build_sqlalchemy_url
+        from pricing_pipeline.infra.config import Settings
+        from pricing_pipeline.infra.db import build_sqlalchemy_url
 
         settings = Settings.from_env(os.environ)
         print(build_sqlalchemy_url(settings, database=settings.mlflow_database))

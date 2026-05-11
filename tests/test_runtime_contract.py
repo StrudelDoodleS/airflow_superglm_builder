@@ -125,7 +125,7 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
     assert services["mlflow"]["depends_on"]["mssql-init"] == {
         "condition": "service_completed_successfully"
     }
-    assert "pricing_pipeline.db" in init_command
+    assert "pricing_pipeline.infra.db" in init_command
     assert "ensure_database" in init_command
     assert "settings.pricing_database" in init_command
     assert "settings.mlflow_database" in init_command
@@ -171,7 +171,7 @@ def test_mlflow_backend_uri_is_built_with_encoded_odbc_connection():
     assert "MLFLOW_BACKEND_STORE_URI" not in mlflow["environment"]
     assert "sa:${MSSQL_PASSWORD" not in compose_text
     assert "mssql+pyodbc://sa:${MSSQL_PASSWORD" not in mlflow_env_text
-    assert "pricing_pipeline.db" in mlflow_command
+    assert "pricing_pipeline.infra.db" in mlflow_command
     assert "build_sqlalchemy_url" in mlflow_command
     assert "PWD=" not in mlflow_command
     assert "Encrypt=" not in mlflow_command
