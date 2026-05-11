@@ -215,6 +215,29 @@ def test_cv_split_runtime_metadata_migration_adds_dependency_audit_json():
     assert "runtime_metadata_json" in current_view
 
 
+def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
+    migration = Path("db/migrations/V013__model_run_lineage_tables.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE SCHEMA mlops" in migration
+    assert "CREATE TABLE mlops.MODEL_RUN_DATASET" in migration
+    assert "CREATE TABLE mlops.MODEL_RUN_SPLIT_SET" in migration
+    assert "CREATE TABLE mlops.MODEL_RUN_METRIC" in migration
+    assert "CREATE TABLE mlops.CV_SPLIT_ROW" in migration
+    assert "UX_CV_SPLIT_SET_MANIFEST_SPLIT" in migration
+    assert "ON pricing.CV_SPLIT_SET(manifest_id, split_set_id)" in migration
+    assert "REFERENCES pricing.MODEL_RUN(model_run_id)" in migration
+    assert "REFERENCES pricing.DATASET_MANIFEST(manifest_id)" in migration
+    assert "REFERENCES pricing.CV_SPLIT_SET(manifest_id, split_set_id)" in migration
+    assert (
+        "REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id)"
+        in migration
+    )
+    assert "PRICING_PACKAGE_POINTER" not in migration
+    assert "pricing_stg" not in migration
+
+
 def test_clean_pricing_schema_migration_moves_staging_and_drops_obsolete_tables():
     migration = Path("db/migrations/V012__clean_pricing_schema_tables.sql").read_text(
         encoding="utf-8"

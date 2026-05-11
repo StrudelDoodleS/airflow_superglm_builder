@@ -28,6 +28,7 @@ except ModuleNotFoundError:
     mlflow = _MissingMLflow()
 
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.data.manifest import split_set_id_for_manifest
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model
@@ -128,6 +129,11 @@ def train_and_export_model(
             dag_id=dag_id,
             airflow_run_id=airflow_run_id,
             mlflow_run_id=run.info.run_id,
+            split_set_id=split_set_id_for_manifest(
+                manifest_id,
+                n_splits=spec.dataset.default_n_splits,
+                random_state=spec.dataset.default_random_state,
+            ),
             export_id=export_id,
             rating_workbook_path=str(workbook_path),
             effective_from=logical_date,
@@ -168,6 +174,7 @@ def publish_model_export(
         airflow_run_id=export_result.airflow_run_id,
         mlflow_run_id=export_result.mlflow_run_id,
         manifest_id=export_result.manifest_id,
+        split_set_id=export_result.split_set_id,
         export_id=export_result.export_id,
         model_id=export_result.model_id,
         model_name=export_result.model_key,

@@ -27,8 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schemas",
         nargs="+",
-        default=["pricing"],
-        help="SQL Server schema names to include. Defaults to pricing.",
+        default=["pricing", "mlops"],
+        help="SQL Server schema names to include. Defaults to pricing mlops.",
     )
     parser.add_argument(
         "--output-dir",

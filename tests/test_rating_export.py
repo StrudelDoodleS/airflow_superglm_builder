@@ -234,6 +234,9 @@ class FakeScalarResult:
     def scalar_one(self):
         return self.value
 
+    def scalar_one_or_none(self):
+        return self.value
+
 
 class FakeModelRegistryConnection(FakeBeginConnection):
     def execute(self, statement, params=None):
@@ -464,7 +467,7 @@ def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch)
 
 def test_record_model_run_uses_parameterized_sql_with_expected_params():
     events = []
-    engine = FakeEngine(events)
+    engine = FakeLineageEngine(events)
 
     lineage.record_model_run(
         engine,
@@ -476,13 +479,14 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         model_id=17,
         model_name="MTPL_FREQ",
         model_version="20260427",
+        split_set_id="manifest-1__kfold_5_seed_42",
         rate_package_id=42,
         rating_workbook_path="/tmp/rating_tables.xlsx",
         run_status="SUCCESS",
         created_by="airflow",
     )
 
-    assert len(events) == 2
+    assert len(events) == 5
     sql = events[1][1]
     params = events[1][2]
     assert "MERGE pricing.MODEL_RUN" in sql
@@ -502,10 +506,68 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "model_id": 17,
         "model_name": "MTPL_FREQ",
         "model_version": "20260427",
+        "split_set_id": "manifest-1__kfold_5_seed_42",
+        "dataset_role": "training",
+        "split_role": "cross_validation",
         "rate_package_id": 42,
         "rating_workbook_path": "/tmp/rating_tables.xlsx",
         "run_status": "SUCCESS",
         "created_by": "airflow",
+    }
+
+
+class FakeLineageConnection(FakeBeginConnection):
+    def execute(self, statement, params=None):
+        self.events.append(("execute", str(statement), params))
+        if "SELECT model_run_id" in str(statement):
+            return FakeScalarResult(501)
+        return FakeScalarResult(None)
+
+
+class FakeLineageEngine(FakeEngine):
+    def __init__(self, events: list[tuple]):
+        self.events = events
+        self.connection = FakeLineageConnection(events)
+
+
+def test_record_model_run_links_run_to_dataset_and_split_set():
+    events = []
+    engine = FakeLineageEngine(events)
+
+    model_run_id = lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-04-27",
+        mlflow_run_id="mlflow-1",
+        manifest_id="manifest-1",
+        split_set_id="manifest-1__kfold_5_seed_42",
+        export_id="export-1",
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        rate_package_id=42,
+        rating_workbook_path="/tmp/rating_tables.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+    )
+
+    assert model_run_id == 501
+    executed_sql = [event[1] for event in events if event[0] == "execute"]
+    assert "MERGE pricing.MODEL_RUN" in executed_sql[0]
+    assert "SELECT model_run_id" in executed_sql[1]
+    assert "MERGE mlops.MODEL_RUN_DATASET" in executed_sql[2]
+    assert "MERGE mlops.MODEL_RUN_SPLIT_SET" in executed_sql[3]
+    assert events[3][2] == {
+        "model_run_id": 501,
+        "manifest_id": "manifest-1",
+        "dataset_role": "training",
+    }
+    assert events[4][2] == {
+        "model_run_id": 501,
+        "manifest_id": "manifest-1",
+        "split_set_id": "manifest-1__kfold_5_seed_42",
+        "dataset_role": "training",
+        "split_role": "cross_validation",
     }
 
 
@@ -780,6 +842,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
             "mlflow_run_id": "mlflow-run-1",
             "manifest_id": "manifest-1",
+            "split_set_id": "manifest-1__kfold_5_seed_42",
             "export_id": export_id,
             "model_id": 17,
             "model_name": "MTPL_FREQ",

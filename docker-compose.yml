@@ -475,7 +475,7 @@ services:
         if [[ "$${DIAGRAM_INCLUDE_ROW_KEYS}" == "1" ]]; then
           extra_args+=(--include-row-keys)
         fi
-        python /opt/pricing/scripts/generate_db_diagrams.py --schemas pricing --output-dir /opt/pricing/state/db_diagrams "$${extra_args[@]}"
+        python /opt/pricing/scripts/generate_db_diagrams.py --schemas pricing mlops --output-dir /opt/pricing/state/db_diagrams "$${extra_args[@]}"
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
       - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/pricing/scripts

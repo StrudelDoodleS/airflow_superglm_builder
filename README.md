@@ -416,7 +416,8 @@ it through the Airflow CLI.
 
 ## Database Diagrams
 
-Generate and serve a local ERD site for the SQL Server `pricing` schema:
+Generate and serve a local ERD site for the SQL Server `pricing` and `mlops`
+schemas:
 
 ```bash
 docker compose --profile diagrams run --rm db-diagram-generator
@@ -514,10 +515,17 @@ row-order SHA-256 fingerprint, row count, fold count, and dependency/runtime
 metadata for the split environment. Per-fold sizes are stored in
 `pricing.CV_FOLD`.
 
-The older row-key materialization tables were removed. Exact fold indices are
-kept in compressed artifacts when needed rather than in one database row per
-policy. This avoids inserting hundreds of thousands of rows per manifest while
-still allowing exact replay from the stored artifact.
+Model runs are linked to their training data and split set through small
+`mlops` lineage tables:
+
+- `mlops.MODEL_RUN_DATASET`: which dataset manifest a run used.
+- `mlops.MODEL_RUN_SPLIT_SET`: which CV split set a run used for that dataset.
+- `mlops.MODEL_RUN_METRIC`: optional run-level metrics.
+
+`mlops.CV_SPLIT_ROW` exists for the cases where SQL itself must answer "which
+rows were in the test fold?" It is intentionally optional. For large datasets,
+the default remains metadata plus compressed artifacts rather than inserting a
+row for every policy on every split set.
 
 When exact fold indices need to be locked down, materialize the split set to a
 compressed NumPy artifact under `state/cv_splits`. The database row is updated

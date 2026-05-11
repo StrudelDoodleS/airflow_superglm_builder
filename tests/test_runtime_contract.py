@@ -197,7 +197,7 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
     assert generator["profiles"] == ["diagrams"]
     assert server["profiles"] == ["diagrams"]
     assert "generate_db_diagrams.py" in generator_command
-    assert "--schemas pricing" in generator_command
+    assert "--schemas pricing mlops" in generator_command
     assert server["ports"] == ["8088:80"]
     assert server["depends_on"]["state-init"] == {"condition": "service_completed_successfully"}
     assert generator["depends_on"]["mssql"] == {"condition": "service_healthy"}

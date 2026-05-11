@@ -108,6 +108,7 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
                 "scripts/generate_db_diagrams.py",
                 "--schemas",
                 "pricing",
+                "mlops",
                 "--output-dir",
                 "state/db_diagrams",
             ],

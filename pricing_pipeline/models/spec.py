@@ -58,6 +58,7 @@ class ModelExportResult:
     dag_id: str
     airflow_run_id: str
     mlflow_run_id: str
+    split_set_id: str | None
     export_id: str
     rating_workbook_path: str
     effective_from: str
