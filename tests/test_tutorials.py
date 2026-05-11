@@ -46,6 +46,10 @@ def test_basic_sql_etl_notebook_explains_schema_and_erd_files():
     for expected in [
         "tutorials/schema/pricing_useful_tables_ddl.sql",
         "docs/pricing_useful_tables_full_ddl.sql",
+        "parse_ddl_schema",
+        "schema_tables",
+        "schema_columns",
+        "schema_foreign_keys",
         "raw.FREMTPL_RAW",
         "mlops.DATASET_MANIFEST",
         "mlops.CV_SPLIT_SET",
@@ -54,5 +58,21 @@ def test_basic_sql_etl_notebook_explains_schema_and_erd_files():
         "pricing.RATE_PACKAGE",
         "pricing_runtime.V_COMPILED_RATE_CELL",
         "pricing.PREDICT_CURRENT_RATE",
+    ]:
+        assert expected in text
+
+
+def test_basic_sql_etl_notebook_shows_result_set_transform_model_and_load_shape():
+    text = _notebook_text()
+
+    for expected in [
+        "Offline End-To-End Demo",
+        "source_result_set",
+        "transformed_result_set",
+        "rating_output",
+        "load_preview",
+        "MODEL_SCORE",
+        "TARGET_SCHEMA",
+        "TARGET_TABLE",
     ]:
         assert expected in text
