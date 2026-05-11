@@ -27,6 +27,8 @@ def test_basic_sql_etl_notebook_teaches_connection_transform_and_load_pattern():
 
     for expected in [
         "Basic SQL ETL And Schema Walkthrough",
+        "REPO_ROOT",
+        "sys.path.insert",
         "get_engine(settings, database=source_database)",
         "pd.read_sql_query",
         "transform_source_rows",
