@@ -14,15 +14,14 @@ from pricing_pipeline.migrations import apply_migrations
 from pricing_pipeline.pipeline import run_training_export_publish
 
 
-_REPO_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
-_DOCKER_MIGRATIONS_DIR = Path("/opt/pricing/db/migrations")
-MIGRATIONS_DIR = Path(
+_REPO_SCHEMA_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
+_DOCKER_SCHEMA_DIR = Path("/opt/pricing/db/migrations")
+SCHEMA_DIR = Path(
     os.environ.get(
-        "PRICING_MIGRATIONS_DIR",
-        str(
-            _DOCKER_MIGRATIONS_DIR
-            if _DOCKER_MIGRATIONS_DIR.exists()
-            else _REPO_MIGRATIONS_DIR
+        "PRICING_SCHEMA_DIR",
+        os.environ.get(
+            "PRICING_MIGRATIONS_DIR",
+            str(_DOCKER_SCHEMA_DIR if _DOCKER_SCHEMA_DIR.exists() else _REPO_SCHEMA_DIR),
         ),
     )
 )
@@ -54,11 +53,11 @@ def _context_date_iso(context: dict) -> str:
 )
 def _pricing_superglm_pipeline():
     @task
-    def apply_pricing_migrations() -> list[str]:
+    def apply_pricing_schema() -> list[str]:
         settings = _settings()
         if not settings.skip_database_create:
             ensure_database(settings, settings.pricing_database)
-        return apply_migrations(get_engine(settings), MIGRATIONS_DIR)
+        return apply_migrations(get_engine(settings), SCHEMA_DIR)
 
     @task
     def load_raw() -> int:
@@ -85,12 +84,12 @@ def _pricing_superglm_pipeline():
             logical_date=logical_date,
         )
 
-    migrations = apply_pricing_migrations()
+    schema_applied = apply_pricing_schema()
     raw_rows = load_raw()
     manifest_id = create_manifest()
     published = train_and_publish(manifest_id)
 
-    migrations >> raw_rows >> manifest_id >> published
+    schema_applied >> raw_rows >> manifest_id >> published
 
 
 pricing_superglm_pipeline = _pricing_superglm_pipeline()

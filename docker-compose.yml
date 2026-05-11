@@ -52,7 +52,7 @@ x-airflow-common:
     MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
     MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
     RATING_EXPORT_ROOT: ${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}
-    PRICING_MIGRATIONS_DIR: ${PRICING_MIGRATIONS_DIR:-/opt/pricing/db/migrations}
+    PRICING_SCHEMA_DIR: ${PRICING_SCHEMA_DIR:-/opt/pricing/db/migrations}
     PRICING_SKIP_DATABASE_CREATE: ${PRICING_SKIP_DATABASE_CREATE:-false}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags

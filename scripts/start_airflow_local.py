@@ -89,7 +89,12 @@ def main() -> None:
         os.environ.get("RATING_EXPORT_ROOT", "state/rating_exports")
     )
     rating_export_root.mkdir(parents=True, exist_ok=True)
-    migrations_dir = _repo_path(os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"))
+    schema_dir = _repo_path(
+        os.environ.get(
+            "PRICING_SCHEMA_DIR",
+            os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"),
+        )
+    )
     project_root = _repo_path(os.environ.get("PRICING_PROJECT_ROOT", str(ROOT)))
 
     os.environ["AIRFLOW_HOME"] = str(airflow_home)
@@ -97,7 +102,7 @@ def main() -> None:
     os.environ.setdefault("AIRFLOW__CORE__LOAD_EXAMPLES", "false")
     os.environ.setdefault("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION", "true")
     os.environ["PRICING_PROJECT_ROOT"] = str(project_root)
-    os.environ["PRICING_MIGRATIONS_DIR"] = str(migrations_dir)
+    os.environ["PRICING_SCHEMA_DIR"] = str(schema_dir)
     os.environ["RATING_EXPORT_ROOT"] = str(rating_export_root)
     airflow_username, airflow_password = _configure_simple_auth(airflow_home)
     _prepend_pythonpath(ROOT)

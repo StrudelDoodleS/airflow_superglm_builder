@@ -1,7 +1,4 @@
-"""Apply versioned SQL files from db/migrations.
-
-This is a tiny Flyway-like runner for local testing. In production, use Flyway if you prefer.
-"""
+"""Apply versioned schema DDL files from db/migrations."""
 from __future__ import annotations
 
 import os
@@ -11,8 +8,13 @@ from pathlib import Path
 from scripts.pricing_db import ROOT, get_engine, load_env
 
 
-def _migrations_dir() -> Path:
-    path = Path(os.environ.get("PRICING_MIGRATIONS_DIR", ROOT / "db" / "migrations"))
+def _schema_dir() -> Path:
+    path = Path(
+        os.environ.get(
+            "PRICING_SCHEMA_DIR",
+            os.environ.get("PRICING_MIGRATIONS_DIR", ROOT / "db" / "migrations"),
+        )
+    )
     if path.is_absolute():
         return path
     return ROOT / path
@@ -29,13 +31,13 @@ def main() -> None:
 
     load_env()
     engine = get_engine()
-    migrations_dir = _migrations_dir()
+    schema_dir = _schema_dir()
 
-    files = migration_files(migrations_dir)
+    files = migration_files(schema_dir)
     if not files:
-        raise RuntimeError(f"No migration files found in {migrations_dir}")
+        raise RuntimeError(f"No schema DDL files found in {schema_dir}")
 
-    applied = set(apply_migrations(engine, migrations_dir))
+    applied = set(apply_migrations(engine, schema_dir))
     for path in files:
         verb = "apply" if path.name in applied else "skip"
         print(f"{verb} {path.name}")

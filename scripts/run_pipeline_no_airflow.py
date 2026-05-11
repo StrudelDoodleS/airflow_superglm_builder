@@ -24,8 +24,13 @@ from pricing_pipeline.migrations import apply_migrations  # noqa: E402
 from pricing_pipeline.pipeline import run_training_export_publish  # noqa: E402
 
 
-def _migrations_dir() -> Path:
-    path = Path(os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"))
+def _schema_dir() -> Path:
+    path = Path(
+        os.environ.get(
+            "PRICING_SCHEMA_DIR",
+            os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"),
+        )
+    )
     if path.is_absolute():
         return path
     return ROOT / path
@@ -41,9 +46,9 @@ def parse_args() -> argparse.Namespace:
         help="Create the target database if it does not exist.",
     )
     parser.add_argument(
-        "--skip-migrations",
+        "--skip-schema-apply",
         action="store_true",
-        help="Do not apply SQL migrations before the run.",
+        help="Do not apply schema DDL before the run.",
     )
     parser.add_argument(
         "--skip-raw-load",
@@ -79,9 +84,9 @@ def main() -> None:
 
     engine = get_engine()
 
-    if not args.skip_migrations:
-        applied = apply_migrations(engine, _migrations_dir())
-        print(f"migrations_applied={len(applied)}")
+    if not args.skip_schema_apply:
+        applied = apply_migrations(engine, _schema_dir())
+        print(f"schema_files_applied={len(applied)}")
 
     if not args.skip_raw_load:
         raw_rows = load_fremtpl_raw(engine, replace=args.replace_raw)

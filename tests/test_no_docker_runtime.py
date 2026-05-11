@@ -20,7 +20,7 @@ LOCAL_AIRFLOW_ENV_KEYS = [
     "AIRFLOW__CORE__DAGS_FOLDER",
     "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS",
     "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE",
-    "PRICING_MIGRATIONS_DIR",
+    "PRICING_SCHEMA_DIR",
     "PRICING_PROJECT_ROOT",
     "RATING_EXPORT_ROOT",
 ]
@@ -47,8 +47,10 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
 
 def test_no_docker_scripts_exist_without_compose_dependency():
     assert not Path("scripts/start_no_docker_runtime.sh").exists()
+    assert not Path("scripts/apply_sql_migrations.py").exists()
 
     for script in [
+        Path("scripts/apply_schema.py"),
         Path("scripts/bootstrap_no_docker.sh"),
         Path("scripts/no_docker_services.py"),
         Path("scripts/start_no_docker_stack.sh"),
@@ -68,8 +70,8 @@ def test_settings_can_skip_database_creation_for_hosted_targets():
     assert settings.skip_database_create is True
 
 
-def test_dag_migrations_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
-    monkeypatch.setenv("PRICING_MIGRATIONS_DIR", str(tmp_path))
+def test_dag_schema_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
+    monkeypatch.setenv("PRICING_SCHEMA_DIR", str(tmp_path))
 
     airflow_module = types.ModuleType("airflow")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
@@ -109,7 +111,7 @@ def test_dag_migrations_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_pat
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert module.MIGRATIONS_DIR == tmp_path
+    assert module.SCHEMA_DIR == tmp_path
 
 
 def test_no_airflow_runner_help_runs_without_pythonpath():
@@ -126,7 +128,9 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
 
     assert result.returncode == 0
     assert "--ensure-database" in result.stdout
+    assert "--skip-schema-apply" in result.stdout
     assert "--skip-raw-load" in result.stdout
+    assert "--skip-migrations" not in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
 
@@ -145,23 +149,24 @@ def test_no_docker_service_picker_lists_available_services_without_pythonpath():
     assert result.returncode == 0
     assert "mlflow" in result.stdout
     assert "airflow" in result.stdout
-    assert "migrate" in result.stdout
+    assert "apply-schema" in result.stdout
+    assert "migrate" not in result.stdout
     assert "cloudbeaver" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_no_docker_service_picker_builds_python_commands():
     commands = no_docker_services.selected_commands(
-        ["migrate", "load-raw-replace", "pipeline"],
+        ["apply-schema", "load-raw-replace", "pipeline"],
         python_executable="/python",
     )
 
     assert [command.name for command in commands] == [
-        "migrate",
+        "apply-schema",
         "load-raw-replace",
         "pipeline",
     ]
-    assert commands[0].argv == ["/python", "scripts/apply_sql_migrations.py"]
+    assert commands[0].argv == ["/python", "scripts/apply_schema.py"]
     assert commands[1].argv == ["/python", "scripts/load_fremtpl_raw.py", "--replace"]
     assert commands[2].argv == ["/python", "scripts/run_pipeline_no_airflow.py"]
     assert not any("docker" in part.lower() for command in commands for part in command.argv)
@@ -246,16 +251,16 @@ def test_runtime_manager_stops_long_running_service_process_group(monkeypatch, t
 
 def test_runtime_manager_runs_one_shot_service_to_log(tmp_path):
     command = no_docker_services.ServiceCommand(
-        name="migrate",
-        description="Apply migrations",
-        argv=["python", "migrate.py"],
+        name="apply-schema",
+        description="Apply schema",
+        argv=["python", "apply_schema.py"],
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
         stdout = kwargs["stdout"]
-        stdout.write("migration ok\n")
+        stdout.write("schema ok\n")
         return subprocess.CompletedProcess(argv, 0)
 
     manager = no_docker_services.RuntimeManager(
@@ -264,11 +269,13 @@ def test_runtime_manager_runs_one_shot_service_to_log(tmp_path):
         run_factory=fake_run,
     )
 
-    manager.toggle("migrate")
+    manager.toggle("apply-schema")
 
-    assert manager.status("migrate") == "succeeded"
-    assert calls[0][0] == ["python", "migrate.py"]
-    assert (tmp_path / "migrate.log").read_text(encoding="utf-8").endswith("migration ok\n")
+    assert manager.status("apply-schema") == "succeeded"
+    assert calls[0][0] == ["python", "apply_schema.py"]
+    assert (tmp_path / "apply-schema.log").read_text(encoding="utf-8").endswith(
+        "schema ok\n"
+    )
 
 
 def test_runtime_manager_marks_missing_command_as_failed(tmp_path):
@@ -334,7 +341,7 @@ def test_runtime_screen_groups_services_tasks_and_utilities():
     assert "Utilities" in text
     assert text.index("Services") < text.index("airflow")
     assert text.index("Services") < text.index("cloudbeaver")
-    assert text.index("Pipeline Tasks") < text.index("migrate")
+    assert text.index("Pipeline Tasks") < text.index("apply-schema")
     assert text.index("Pipeline Tasks") < text.index("seed-demo")
     assert text.index("Utilities") < text.index("bootstrap")
     assert text.index("Utilities") < text.index("diagrams")
@@ -355,7 +362,7 @@ def test_runtime_screen_selected_row_index_skips_section_headers():
         show_logs=False,
     )
 
-    assert lines[row_index].startswith("> migrate")
+    assert lines[row_index].startswith("> apply-schema")
 
 
 def test_runtime_tui_handles_ctrl_c_without_traceback(monkeypatch):
@@ -533,7 +540,7 @@ def test_interactive_shell_launcher_dry_run_selected_services():
             "scripts/start_no_docker_stack.sh",
             "--dry-run",
             "--services",
-            "migrate,mlflow,airflow",
+            "apply-schema,mlflow,airflow",
         ],
         check=False,
         capture_output=True,
@@ -541,7 +548,7 @@ def test_interactive_shell_launcher_dry_run_selected_services():
     )
 
     assert result.returncode == 0
-    assert "scripts/apply_sql_migrations.py" in result.stdout
+    assert "scripts/apply_schema.py" in result.stdout
     assert "scripts/start_mlflow_local.py" in result.stdout
     assert "scripts/start_airflow_local.py" in result.stdout
     assert "docker compose" not in result.stdout
@@ -557,7 +564,7 @@ def test_interactive_shell_launcher_runs_when_called_with_zsh():
             "scripts/start_no_docker_stack.sh",
             "--dry-run",
             "--services",
-            "migrate",
+            "apply-schema",
         ],
         check=False,
         capture_output=True,
@@ -565,7 +572,7 @@ def test_interactive_shell_launcher_runs_when_called_with_zsh():
     )
 
     assert result.returncode == 0
-    assert "scripts/apply_sql_migrations.py" in result.stdout
+    assert "scripts/apply_schema.py" in result.stdout
     assert "no coprocess" not in result.stderr
 
 
@@ -576,7 +583,7 @@ def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_pa
 
     def fake_load_env():
         monkeypatch.setenv("RATING_EXPORT_ROOT", "/opt/pricing/state/rating_exports")
-        monkeypatch.setenv("PRICING_MIGRATIONS_DIR", "/opt/pricing/db/migrations")
+        monkeypatch.setenv("PRICING_SCHEMA_DIR", "/opt/pricing/db/migrations")
         monkeypatch.setenv("PRICING_PROJECT_ROOT", "/opt/pricing")
 
     captured_exec: dict[str, object] = {}
@@ -602,7 +609,7 @@ def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_pa
 
     assert exit_info.value.code == 0
     assert Path(os.environ["RATING_EXPORT_ROOT"]) == tmp_path / "state/rating_exports"
-    assert Path(os.environ["PRICING_MIGRATIONS_DIR"]) == tmp_path / "db/migrations"
+    assert Path(os.environ["PRICING_SCHEMA_DIR"]) == tmp_path / "db/migrations"
     assert Path(os.environ["PRICING_PROJECT_ROOT"]) == tmp_path
     assert (tmp_path / "state/rating_exports").is_dir()
     assert captured_exec["command"] == ["/usr/bin/airflow", "version"]

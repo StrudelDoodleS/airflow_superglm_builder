@@ -43,10 +43,10 @@ These steps assume Docker with the Compose v2 plugin is already installed.
    docker compose ps
    ```
 
-5. Apply SQL migrations and load the raw freMTPL source table:
+5. Apply schema DDL and load the raw freMTPL source table:
 
    ```bash
-   docker compose exec -T airflow-apiserver python /opt/pricing/scripts/apply_sql_migrations.py
+   docker compose exec -T airflow-apiserver python /opt/pricing/scripts/apply_schema.py
    docker compose exec -T airflow-apiserver python /opt/pricing/scripts/load_fremtpl_raw.py --replace
    ```
 
@@ -104,6 +104,7 @@ Prerequisites:
    MSSQL_ENCRYPT=yes
    MSSQL_TRUST_SERVER_CERT=no
    PRICING_SKIP_DATABASE_CREATE=true
+   PRICING_SCHEMA_DIR=db/migrations
    ```
 
    Keep `PRICING_SKIP_DATABASE_CREATE=true` when the DBA has already created the
@@ -150,7 +151,7 @@ Prerequisites:
    The TUI groups are:
 
    - Services: `airflow`, `mlflow`, and local-only Docker-backed `cloudbeaver`.
-   - Pipeline Tasks: migrations, freMTPL raw load/reload, direct pipeline run,
+   - Pipeline Tasks: schema apply, freMTPL raw load/reload, direct pipeline run,
      and demo model seeding.
    - Utilities: bootstrap and ERD generation.
 
@@ -164,8 +165,8 @@ Prerequisites:
    For one-shot setup tasks, select only the pieces you want:
 
    ```bash
-   scripts/start_no_docker_stack.sh --services migrate,load-raw
-   scripts/start_no_docker_stack.sh --services migrate,load-raw-replace,pipeline
+   scripts/start_no_docker_stack.sh --services apply-schema,load-raw
+   scripts/start_no_docker_stack.sh --services apply-schema,load-raw-replace,pipeline
    scripts/start_no_docker_stack.sh --services diagrams
    ```
 
@@ -173,10 +174,10 @@ Prerequisites:
    Do not select it on work machines where Docker or Docker Hub access is
    blocked.
 
-5. Apply migrations and load raw freMTPL data once:
+5. Apply schema DDL and load raw freMTPL data once:
 
    ```bash
-   uv run python scripts/apply_sql_migrations.py
+   uv run python scripts/apply_schema.py
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
@@ -187,7 +188,7 @@ Prerequisites:
    uv run python scripts/run_pipeline_no_airflow.py
    ```
 
-   The direct runner uses the same SQL migrations, freMTPL loader, manifest/CV
+   The direct runner uses the same schema DDL, freMTPL loader, manifest/CV
    metadata, MLflow logging, rating export, and SQL publish code as the DAG.
 
 For a work deployment, CloudBeaver is not required and should normally not be
@@ -263,11 +264,11 @@ docker compose exec -T airflow-apiserver python /opt/pricing/scripts/reset_prici
 ```
 
 For a complete local `PricingLab` rebuild with identity counters reset, drop and
-recreate the database, then rerun migrations and raw load:
+recreate the database, then rerun schema apply and raw load:
 
 ```bash
 docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStrong(!)Password123' -C -d master -b -Q "IF DB_ID(N'PricingLab') IS NOT NULL BEGIN ALTER DATABASE [PricingLab] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [PricingLab]; END; CREATE DATABASE [PricingLab];"
-docker compose exec -T airflow-apiserver python /opt/pricing/scripts/apply_sql_migrations.py
+docker compose exec -T airflow-apiserver python /opt/pricing/scripts/apply_schema.py
 docker compose exec -T airflow-apiserver python /opt/pricing/scripts/load_fremtpl_raw.py --replace
 ```
 
@@ -318,8 +319,8 @@ Recommended database permissions for the pipeline user:
 
 - read access to approved source tables/views.
 - write access to `pricing` model, run, package, and rating tables.
-- execute/apply migrations only in non-production, or through a controlled DBA
-  migration process in production.
+- execute/apply schema DDL only in non-production, or through a controlled DBA
+  schema-change process in production.
 - no `sa`, no `db_owner`, and no permission to drop the database.
 
 The destructive local reset commands above should not be run against work
@@ -389,7 +390,7 @@ unique indexes, and actual view definitions. The current package pointer is now
 `pricing.V_CURRENT_RATE_PACKAGE`, derived from `pricing.MODEL_DEPLOYMENT`, so
 there is no package pointer table. Both files deliberately exclude
 `pricing_stg`, old `STG_*` tables, and `DATASET_ROW_KEY`. These files are
-fresh-create references for ERDs and review, not migrations for an existing
+fresh-create references for ERDs and review, not upgrade scripts for an existing
 database.
 
 The default diagram focuses on the persisted pricing model. Import staging
@@ -400,7 +401,7 @@ main `pricing` schema. Generate the full technical view when needed:
 DIAGRAM_INCLUDE_STAGING=1 DIAGRAM_INCLUDE_ROW_KEYS=1 docker compose --profile diagrams run --rm db-diagram-generator
 ```
 
-Regenerate the site whenever migrations or table relationships change.
+Regenerate the site whenever schema DDL or table relationships change.
 
 ## Durable Local State
 

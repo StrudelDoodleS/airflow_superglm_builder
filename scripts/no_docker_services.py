@@ -64,10 +64,10 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
             category="service",
             long_running=True,
         ),
-        "migrate": ServiceCommand(
-            name="migrate",
-            description="Apply SQL migrations to the configured pricing database.",
-            argv=[python_executable, "scripts/apply_sql_migrations.py"],
+        "apply-schema": ServiceCommand(
+            name="apply-schema",
+            description="Apply schema DDL to the configured pricing database.",
+            argv=[python_executable, "scripts/apply_schema.py"],
             category="pipeline-task",
         ),
         "load-raw": ServiceCommand(
