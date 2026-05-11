@@ -21,6 +21,10 @@ README_CONTRACT_STRINGS = [
     "pricing_pipeline/infra/db.py",
     "pricing_mtpl_frequency",
     "--model-key MTPL_FREQ",
+    "SQL Prediction Validation",
+    "scripts/validate_sql_prediction_against_superglm.py",
+    "pricing.PREDICT_CURRENT_RATE",
+    "predict(X, offset=np.log(exposure))",
 ]
 
 

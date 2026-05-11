@@ -540,6 +540,53 @@ The current split metadata, artifact path, hash, runtime metadata, and
 train/test fold definitions are exposed through
 `pricing.V_CURRENT_DATASET_CV_FOLD`.
 
+## SQL Prediction Validation
+
+`pricing.PREDICT_CURRENT_RATE` is a thin SQL Server scorer over the current
+deployed rating package. It reads one JSON feature row, resolves
+`pricing.V_CURRENT_RATE_PACKAGE`, matches the deployed compiled rating cells,
+and returns relativity plus predicted count. It is intended for auditable SQL
+serving, not for training.
+
+Example SQL call:
+
+```sql
+EXEC pricing.PREDICT_CURRENT_RATE
+    @model_key = N'MTPL_FREQ',
+    @deployment_slot = N'MTPL_FREQ_UAT',
+    @exposure = 0.75,
+    @features_json = N'{
+        "VehAge": 4,
+        "DrivAge": 44,
+        "BonusMalus": 82,
+        "LogDensity": 6.2,
+        "Area": "C",
+        "VehPower": 7,
+        "VehBrand": "B1",
+        "VehGas": "Regular",
+        "Region": "R24"
+    }',
+    @include_breakdown = 1;
+```
+
+The proc must be validated against the actual fitted SuperGLM artifact before
+being trusted for a deployed model. The validator rebuilds the model input
+frame, calls `fitted_model.predict(X, offset=offset)`, calls the SQL proc for
+the same rows, and fails if the results exceed tolerance:
+
+```bash
+uv run python scripts/validate_sql_prediction_against_superglm.py \
+  --model-key MTPL_FREQ \
+  --deployment-slot MTPL_FREQ_UAT \
+  --limit 1000 \
+  --rtol 1e-4 \
+  --atol 1e-8
+```
+
+`sample_weight` is used when exporting rating tables from SuperGLM, but
+prediction validation uses the model's prediction API with the exposure offset:
+`predict(X, offset=np.log(exposure))`.
+
 ## Demo Model Variants
 
 To seed extra model/package history for CloudBeaver inspection:

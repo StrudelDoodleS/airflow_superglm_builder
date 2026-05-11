@@ -238,6 +238,25 @@ def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
     assert "pricing_stg" not in migration
 
 
+def test_prediction_proc_migration_scores_current_package_from_compiled_views():
+    migration = Path("db/migrations/V014__current_rate_prediction_proc.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE OR ALTER PROCEDURE pricing.PREDICT_CURRENT_RATE" in migration
+    assert "@features_json NVARCHAR(MAX)" in migration
+    assert "@exposure FLOAT" in migration
+    assert "pricing.V_CURRENT_RATE_PACKAGE" in migration
+    assert "pricing.V_CURRENT_1D_RATE_BAND" in migration
+    assert "pricing.V_CURRENT_RATE_CELL" in migration
+    assert "JSON_VALUE(@features_json" in migration
+    assert "TRY_CONVERT(FLOAT" in migration
+    assert "EXP(SUM(log_coefficient))" in migration
+    assert "base_rate * @exposure * EXP(SUM(log_coefficient)) AS prediction" in migration
+    assert "@include_breakdown" in migration
+    assert "Input features did not match every required term" in migration
+
+
 def test_clean_pricing_schema_migration_moves_staging_and_drops_obsolete_tables():
     migration = Path("db/migrations/V012__clean_pricing_schema_tables.sql").read_text(
         encoding="utf-8"
