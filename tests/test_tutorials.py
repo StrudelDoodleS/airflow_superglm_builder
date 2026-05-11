@@ -66,13 +66,44 @@ def test_basic_sql_etl_notebook_shows_result_set_transform_model_and_load_shape(
     text = _notebook_text()
 
     for expected in [
-        "Offline End-To-End Demo",
+        "Notebook DAG: Offline Load, Train, Push, Deploy",
+        "sqlite3",
+        "attach_pricing_lab_schemas",
+        "create_offline_schema",
+        "seed_source_rows",
         "source_result_set",
         "transformed_result_set",
-        "rating_output",
-        "load_preview",
+        "train_superglm_revision",
+        "persist_model_revision",
+        "deploy_rate_package",
+        "create_manual_uplift_package",
+        "current_deployment",
+        "deployment_history",
         "MODEL_SCORE",
-        "TARGET_SCHEMA",
-        "TARGET_TABLE",
+        "raw.FREMTPL_RAW",
+        "mlops.MODEL_RUN",
+        "pricing.RATE_PACKAGE",
+        "pricing.MODEL_DEPLOYMENT",
+        "SQLite is only the offline stand-in",
+        "Azure SQL with Entra auth",
+        "Postgres",
+        "DuckDB",
+        "DDL dialect",
+    ]:
+        assert expected in text
+
+
+def test_basic_sql_etl_notebook_explains_model_revision_and_deployment_rules():
+    text = _notebook_text()
+
+    for expected in [
+        "What Counts As A Model Revision",
+        "Changed feature list",
+        "Changed training SQL or dataset window",
+        "Changed preprocessing",
+        "Changed model class or hyperparameters",
+        "Manual 10% Uplift Package",
+        "deployed package changes",
+        "historical packages remain",
     ]:
         assert expected in text
