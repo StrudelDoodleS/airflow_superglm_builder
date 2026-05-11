@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.ipynb_checkpoints/
 .codex
 .dags_root_owned_backup_*/
 logs/
