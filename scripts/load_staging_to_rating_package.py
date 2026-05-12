@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
     with engine.begin() as con:
+        requested_package_status = args.package_status
         meta = con.execute(text("""
             SELECT
                 export_id,
@@ -94,7 +95,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "base_rate": meta["base_rate"],
             "effective_from_date": meta["effective_from_date"],
             "effective_to_date": meta["effective_to_date"],
-            "package_status": args.package_status,
+            "package_status": "DRAFT",
             "created_by": args.created_by,
         }).scalar_one()
 
@@ -405,6 +406,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 fl.upper_bound,
                 fl.level_code;
         """), {"rate_package_id": rate_package_id})
+
+        con.execute(text("""
+            UPDATE pricing.PRICING_RATE_PACKAGE
+            SET package_status = :package_status
+            WHERE rate_package_id = :rate_package_id;
+        """), {
+            "package_status": requested_package_status,
+            "rate_package_id": rate_package_id,
+        })
 
         if args.set_pointer:
             con.execute(text("""

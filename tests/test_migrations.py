@@ -257,6 +257,35 @@ def test_prediction_proc_migration_scores_current_package_from_compiled_views():
     assert "Input features did not match every required term" in migration
 
 
+def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages():
+    migration = Path("db/migrations/V015__rate_package_immutability.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TR_PRICING_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE" in migration
+    assert "TR_PRICING_TERM_IMMUTABLE_WRITE" in migration
+    assert "TR_PRICING_RATE_CELL_IMMUTABLE_WRITE" in migration
+    assert "TR_PRICING_RATE_CELL_LEVEL_IMMUTABLE_WRITE" in migration
+    assert "TR_PRICING_FEATURE_LEVEL_IMMUTABLE_WRITE" in migration
+    assert "TR_PRICING_COMPILED_RATE_CELL_IMMUTABLE_WRITE" in migration
+    assert "TR_PRICING_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE" in migration
+    assert "package_status <> 'DRAFT'" in migration
+    assert "pricing.PRICING_MODEL_DEPLOYMENT" in migration
+    assert "THROW 51000" in migration
+    assert "Create a new package revision" in migration
+    assert "AFTER INSERT, UPDATE, DELETE" in migration
+
+
+def test_rating_package_loader_builds_package_as_draft_before_final_status():
+    loader = Path("scripts/load_staging_to_rating_package.py").read_text(encoding="utf-8")
+
+    assert "requested_package_status = args.package_status" in loader
+    assert '"package_status": "DRAFT"' in loader
+    assert "UPDATE pricing.PRICING_RATE_PACKAGE" in loader
+    assert "SET package_status = :package_status" in loader
+    assert "requested_package_status" in loader
+
+
 def test_clean_pricing_schema_migration_moves_staging_and_drops_obsolete_tables():
     migration = Path("db/migrations/V012__clean_pricing_schema_tables.sql").read_text(
         encoding="utf-8"
@@ -451,3 +480,18 @@ def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_index
     assert "pricing_stg" not in ddl
     assert "STG_" not in ddl
     assert "DATASET_ROW_KEY" not in ddl
+
+
+def test_full_useful_tables_reference_ddl_documents_immutability_triggers():
+    ddl = Path("docs/pricing_useful_tables_full_ddl.sql").read_text(encoding="utf-8")
+
+    assert "TR_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE" in ddl
+    assert "TR_TERM_IMMUTABLE_WRITE" in ddl
+    assert "TR_RATE_CELL_IMMUTABLE_WRITE" in ddl
+    assert "TR_RATE_CELL_LEVEL_IMMUTABLE_WRITE" in ddl
+    assert "TR_FEATURE_LEVEL_IMMUTABLE_WRITE" in ddl
+    assert "TR_COMPILED_RATE_CELL_IMMUTABLE_WRITE" in ddl
+    assert "TR_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE" in ddl
+    assert "package_status <> 'DRAFT'" in ddl
+    assert "MODEL_DEPLOYMENT" in ddl
+    assert "THROW 51000" in ddl

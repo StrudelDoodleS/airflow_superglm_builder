@@ -583,3 +583,265 @@ JOIN pricing.FEATURE AS f
     ON f.feature_id = fls.feature_id
 WHERE c.is_deleted = 0
   AND t.term_type IN ('GLM_1D', 'SPLINE_1D', 'DISCRETIZED_SPLINE_1D');
+
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE
+ON pricing.RATE_PACKAGE
+AFTER UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM deleted AS d
+        WHERE d.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = d.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_TERM_IMMUTABLE_WRITE
+ON pricing.TERM
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT rate_package_id FROM inserted
+            UNION
+            SELECT rate_package_id FROM deleted
+        ) AS changed
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = changed.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_TERM_FEATURE_IMMUTABLE_WRITE
+ON pricing.TERM_FEATURE
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT term_id FROM inserted
+            UNION
+            SELECT term_id FROM deleted
+        ) AS changed
+        JOIN pricing.TERM AS t
+          ON t.term_id = changed.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_RATE_CELL_IMMUTABLE_WRITE
+ON pricing.RATE_CELL
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT term_id FROM inserted
+            UNION
+            SELECT term_id FROM deleted
+        ) AS changed
+        JOIN pricing.TERM AS t
+          ON t.term_id = changed.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_RATE_CELL_LEVEL_IMMUTABLE_WRITE
+ON pricing.RATE_CELL_LEVEL
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT cell_id FROM inserted
+            UNION
+            SELECT cell_id FROM deleted
+        ) AS changed
+        JOIN pricing.RATE_CELL AS rc
+          ON rc.cell_id = changed.cell_id
+        JOIN pricing.TERM AS t
+          ON t.term_id = rc.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_FEATURE_LEVEL_IMMUTABLE_WRITE
+ON pricing.FEATURE_LEVEL
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT level_set_id FROM inserted
+            UNION
+            SELECT level_set_id FROM deleted
+        ) AS changed
+        JOIN pricing.TERM_FEATURE AS tf
+          ON tf.level_set_id = changed.level_set_id
+        JOIN pricing.TERM AS t
+          ON t.term_id = tf.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_FEATURE_LEVEL_SET_IMMUTABLE_WRITE
+ON pricing.FEATURE_LEVEL_SET
+AFTER UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM deleted AS changed
+        JOIN pricing.TERM_FEATURE AS tf
+          ON tf.level_set_id = changed.level_set_id
+        JOIN pricing.TERM AS t
+          ON t.term_id = tf.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing.TR_FEATURE_IMMUTABLE_WRITE
+ON pricing.FEATURE
+AFTER UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM deleted AS changed
+        JOIN pricing.FEATURE_LEVEL_SET AS fls
+          ON fls.feature_id = changed.feature_id
+        JOIN pricing.TERM_FEATURE AS tf
+          ON tf.level_set_id = fls.level_set_id
+        JOIN pricing.TERM AS t
+          ON t.term_id = tf.term_id
+        JOIN pricing.RATE_PACKAGE AS rp
+          ON rp.rate_package_id = t.rate_package_id
+        WHERE rp.package_status <> 'DRAFT'
+           OR EXISTS (
+               SELECT 1
+               FROM pricing.MODEL_DEPLOYMENT AS md
+               WHERE md.rate_package_id = rp.rate_package_id
+           )
+    )
+    BEGIN
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+    END;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing_runtime.TR_COMPILED_RATE_CELL_IMMUTABLE_WRITE
+ON pricing_runtime.V_COMPILED_RATE_CELL
+INSTEAD OF INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    THROW 51000, 'Compiled runtime views are immutable. Create a new package revision.', 1;
+END;
+GO
+
+CREATE OR ALTER TRIGGER pricing_runtime.TR_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE
+ON pricing_runtime.V_COMPILED_1D_RATE_BAND
+INSTEAD OF INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    THROW 51000, 'Compiled runtime views are immutable. Create a new package revision.', 1;
+END;
+GO
