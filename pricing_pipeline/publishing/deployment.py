@@ -8,6 +8,9 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import DeploymentResult
 
 
+_DEPLOYMENT_LOCK_TIMEOUT_MS = 10_000
+
+
 class DeploymentError(RuntimeError):
     """Raised when a rate package cannot be deployed."""
 
@@ -75,6 +78,27 @@ def _current_deployment(con, *, model_id: int, deployment_slot: str) -> dict[str
     return dict(row)
 
 
+def _acquire_deployment_lock(con, *, model_id: int, deployment_slot: str) -> None:
+    lock_resource = f"pricing_model_deployment:{int(model_id)}:{deployment_slot}"
+    lock_result = con.execute(text("""
+        DECLARE @lock_result INT;
+        EXEC @lock_result = sys.sp_getapplock
+            @Resource = :lock_resource,
+            @LockMode = 'Exclusive',
+            @LockOwner = 'Transaction',
+            @LockTimeout = :lock_timeout_ms;
+        SELECT @lock_result;
+    """), {
+        "lock_resource": lock_resource,
+        "lock_timeout_ms": _DEPLOYMENT_LOCK_TIMEOUT_MS,
+    }).scalar_one()
+    if int(lock_result) < 0:
+        raise DeploymentError(
+            f"could not acquire deployment lock for model_id={model_id} "
+            f"deployment_slot={deployment_slot!r}",
+        )
+
+
 def deploy_rate_package(
     engine,
     config: ModelBuildConfig,
@@ -92,9 +116,11 @@ def deploy_rate_package(
     if sum(selected) != 1:
         raise DeploymentError("exactly one rate package selector is required")
 
-    slot = deployment_slot or config.deployment_slot
+    slot = _required_text(deployment_slot or config.deployment_slot, "deployment_slot")
 
     with engine.begin() as con:
+        _acquire_deployment_lock(con, model_id=model_id, deployment_slot=slot)
+
         package = _resolve_package(
             con,
             rate_package_id=rate_package_id,
@@ -150,7 +176,7 @@ def deploy_rate_package(
         })
 
         con.execute(text("""
-            MERGE pricing.PRICING_PACKAGE_POINTER AS tgt
+            MERGE pricing.PRICING_PACKAGE_POINTER WITH (HOLDLOCK) AS tgt
             USING (
                 SELECT
                     :model_id AS model_id,

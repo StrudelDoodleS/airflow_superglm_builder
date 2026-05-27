@@ -14,23 +14,30 @@ class FakeMappingsResult:
 
 
 class FakeResult:
-    def __init__(self, row=None):
+    def __init__(self, row=None, scalar=None):
         self.row = row
+        self.scalar = scalar
 
     def mappings(self):
         return FakeMappingsResult(self.row)
 
+    def scalar_one(self):
+        return self.scalar
+
 
 class FakeConnection:
-    def __init__(self, *, package_row=None, current_row=None):
+    def __init__(self, *, package_row=None, current_row=None, lock_result=0):
         self.package_row = package_row
         self.current_row = current_row
+        self.lock_result = lock_result
         self.events = []
 
     def execute(self, statement, params=None):
         sql = str(statement)
         params = params or {}
         self.events.append((sql, params))
+        if "sys.sp_getapplock" in sql:
+            return FakeResult(scalar=self.lock_result)
         if "FROM pricing.PRICING_RATE_PACKAGE" in sql:
             return FakeResult(self.package_row)
         if "FROM pricing.PRICING_MODEL_DEPLOYMENT" in sql:
@@ -50,10 +57,11 @@ class FakeBegin:
 
 
 class FakeEngine:
-    def __init__(self, *, package_row=None, current_row=None):
+    def __init__(self, *, package_row=None, current_row=None, lock_result=0):
         self.connection = FakeConnection(
             package_row=package_row,
             current_row=current_row,
+            lock_result=lock_result,
         )
 
     def begin(self):
@@ -67,6 +75,17 @@ def config() -> ModelBuildConfig:
         target_name="ClaimNb",
         model_type="superglm_poisson",
         deployment_slot="MTPL_FREQ_UAT",
+        default_package_status="PUBLISHED",
+    )
+
+
+def config_with_slot(deployment_slot: str) -> ModelBuildConfig:
+    return ModelBuildConfig(
+        model_key="MTPL_FREQ",
+        model_label="Motor frequency",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        deployment_slot=deployment_slot,
         default_package_status="PUBLISHED",
     )
 
@@ -113,6 +132,18 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
     )
 
     sql = executed_sql(engine)
+    lock_index = next(
+        i for i, statement in enumerate(sql)
+        if "sys.sp_getapplock" in statement
+    )
+    package_select_index = next(
+        i for i, statement in enumerate(sql)
+        if "FROM pricing.PRICING_RATE_PACKAGE" in statement
+    )
+    current_select_index = next(
+        i for i, statement in enumerate(sql)
+        if "FROM pricing.PRICING_MODEL_DEPLOYMENT" in statement
+    )
     update_index = next(
         i for i, statement in enumerate(sql)
         if "UPDATE pricing.PRICING_MODEL_DEPLOYMENT" in statement
@@ -126,8 +157,16 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
         if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
     )
 
+    assert lock_index < package_select_index < current_select_index < update_index
     assert update_index < insert_index < merge_index
     assert "deployment_note" in sql[insert_index]
+    assert "MERGE pricing.PRICING_PACKAGE_POINTER WITH (HOLDLOCK) AS tgt" in sql[merge_index]
+
+    lock_params = engine.connection.events[lock_index][1]
+    assert lock_params == {
+        "lock_resource": "pricing_model_deployment:17:MTPL_FREQ_PROD",
+        "lock_timeout_ms": 10000,
+    }
 
     insert_params = engine.connection.events[insert_index][1]
     assert insert_params["deployment_note"] == "approved for launch"
@@ -152,13 +191,89 @@ def test_deploy_rate_package_resolves_by_model_and_package_version_using_default
         model_id=17,
     )
 
-    package_select, package_params = engine.connection.events[0]
+    package_select, package_params = next(
+        (statement, params) for statement, params in engine.connection.events
+        if "FROM pricing.PRICING_RATE_PACKAGE" in statement
+    )
     assert "package_version = :package_version" in package_select
     assert package_params == {"model_id": 17, "package_version": 4}
     assert result.previous_rate_package_id is None
     assert result.rate_package_id == 202
     assert result.package_version == 4
     assert result.deployment_slot == "MTPL_FREQ_UAT"
+
+
+def test_deploy_rate_package_trims_deployment_slot_before_lock_and_writes():
+    engine = FakeEngine(package_row=published_package())
+
+    result = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=101,
+        deployment_slot="  MTPL_FREQ_PROD  ",
+        deployment_reason="approved",
+        deployed_by="airflow",
+        model_id=17,
+    )
+
+    sql = executed_sql(engine)
+    lock_index = next(
+        i for i, statement in enumerate(sql)
+        if "sys.sp_getapplock" in statement
+    )
+    insert_index = next(
+        i for i, statement in enumerate(sql)
+        if "INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT" in statement
+    )
+    merge_index = next(
+        i for i, statement in enumerate(sql)
+        if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
+    )
+
+    assert result.deployment_slot == "MTPL_FREQ_PROD"
+    assert engine.connection.events[lock_index][1]["lock_resource"] == (
+        "pricing_model_deployment:17:MTPL_FREQ_PROD"
+    )
+    assert engine.connection.events[insert_index][1]["deployment_slot"] == "MTPL_FREQ_PROD"
+    assert engine.connection.events[merge_index][1]["pointer_name"] == "MTPL_FREQ_PROD"
+
+
+def test_deploy_rate_package_rejects_blank_default_deployment_slot():
+    engine = FakeEngine(package_row=published_package())
+
+    with pytest.raises(DeploymentError, match="deployment_slot"):
+        deploy_rate_package(
+            engine,
+            config_with_slot("   "),
+            rate_package_id=101,
+            deployment_reason="approved",
+            deployed_by="airflow",
+            model_id=17,
+        )
+
+    assert engine.connection.events == []
+
+
+def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
+    engine = FakeEngine(package_row=published_package(), lock_result=-1)
+
+    with pytest.raises(DeploymentError, match="deployment lock"):
+        deploy_rate_package(
+            engine,
+            config(),
+            rate_package_id=101,
+            deployment_reason="approved",
+            deployed_by="airflow",
+            model_id=17,
+        )
+
+    sql = executed_sql(engine)
+    assert any("sys.sp_getapplock" in statement for statement in sql)
+    write_sql = [
+        statement for statement in sql
+        if statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+    ]
+    assert write_sql == []
 
 
 @pytest.mark.parametrize(
