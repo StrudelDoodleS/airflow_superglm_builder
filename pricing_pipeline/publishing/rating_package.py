@@ -5,6 +5,10 @@ import os
 import sys
 from pathlib import Path
 
+from pricing_pipeline.publishing.staging import stage_rating_export
+
+__all__ = ["publish_rating_package", "stage_rating_export"]
+
 
 def _ensure_scripts_path() -> None:
     candidates = []
@@ -31,36 +35,6 @@ _ensure_scripts_path()
 _publish = import_module(
     "scripts.load_staging_to_rating_package"
 ).publish_rating_package
-_stage = import_module("scripts.load_superglm_excel_to_staging").stage_rating_export
-
-
-def stage_rating_export(
-    engine,
-    *,
-    workbook_path: Path,
-    export_id: str,
-    model_name: str,
-    model_version: str | None,
-    effective_from: str,
-    target_name: str = "ClaimNb",
-    model_type: str = "superglm_poisson",
-    effective_to: str | None = None,
-    created_by: str = "python",
-    replace: bool = False,
-) -> None:
-    _stage(
-        engine,
-        workbook_path=workbook_path,
-        export_id=export_id,
-        model_name=model_name,
-        model_version=model_version,
-        target_name=target_name,
-        model_type=model_type,
-        effective_from=effective_from,
-        effective_to=effective_to,
-        created_by=created_by,
-        replace=replace,
-    )
 
 
 def publish_rating_package(

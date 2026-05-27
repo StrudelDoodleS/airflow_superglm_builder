@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from pricing_pipeline.orchestration import pipeline
-from pricing_pipeline.publishing import lineage, rating_export, rating_package
+from pricing_pipeline.publishing import lineage, rating_export, rating_package, staging
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
 from pricing_pipeline.models.spec import ModelSpec
@@ -281,6 +281,14 @@ def test_ensure_pricing_model_merges_by_model_key_and_returns_model_id():
     }
 
 
+def test_package_staging_module_exposes_excel_staging_functions():
+    from pricing_pipeline.publishing import staging
+
+    assert callable(staging.build_staging_frames)
+    assert callable(staging.insert_staging_frames)
+    assert callable(staging.stage_rating_export)
+
+
 def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     monkeypatch, tmp_path: Path
 ):
@@ -295,11 +303,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
             FakeFrame("level", events),
         )
 
-    monkeypatch.setattr(
-        load_superglm_excel_to_staging,
-        "build_staging_frames",
-        fake_build_staging_frames,
-    )
+    monkeypatch.setattr(staging, "build_staging_frames", fake_build_staging_frames)
     engine = FakeModelRegistryEngine(events)
     workbook_path = tmp_path / "rating_tables.xlsx"
 
@@ -369,7 +373,7 @@ def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_p
     raw.iloc[7, 3:6] = ["[18, 20)", 1.1, 30.0]
 
     monkeypatch.setattr(
-        load_superglm_excel_to_staging.pd,
+        staging.pd,
         "read_excel",
         lambda *args, **kwargs: raw,
     )
@@ -624,7 +628,7 @@ def test_pipeline_imports_with_split_airflow_package_and_pricing_scripts_paths(
     assert result.returncode == 0
     assert "pipeline_import=ok" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
-    assert marker_path.read_text(encoding="utf-8").splitlines() == ["publish", "stage"]
+    assert marker_path.read_text(encoding="utf-8").splitlines() == ["publish"]
 
 
 class FakePipelineModel:
