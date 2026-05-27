@@ -116,7 +116,7 @@ def deploy_rate_package(
     if sum(selected) != 1:
         raise DeploymentError("exactly one rate package selector is required")
 
-    slot = _required_text(deployment_slot or config.deployment_slot, "deployment_slot")
+    slot = _required_text(deployment_slot or config.deployment_slot, "deployment_slot").upper()
 
     with engine.begin() as con:
         _acquire_deployment_lock(con, model_id=model_id, deployment_slot=slot)

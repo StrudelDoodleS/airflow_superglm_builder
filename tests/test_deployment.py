@@ -203,14 +203,14 @@ def test_deploy_rate_package_resolves_by_model_and_package_version_using_default
     assert result.deployment_slot == "MTPL_FREQ_UAT"
 
 
-def test_deploy_rate_package_trims_deployment_slot_before_lock_and_writes():
+def test_deploy_rate_package_canonicalizes_deployment_slot_before_lock_and_writes():
     engine = FakeEngine(package_row=published_package())
 
     result = deploy_rate_package(
         engine,
         config(),
         rate_package_id=101,
-        deployment_slot="  MTPL_FREQ_PROD  ",
+        deployment_slot="  mtpl_FREQ_prod  ",
         deployment_reason="approved",
         deployed_by="airflow",
         model_id=17,
