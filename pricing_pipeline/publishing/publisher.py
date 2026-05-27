@@ -9,6 +9,7 @@ from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.publishing.deployment import deploy_rate_package
 from pricing_pipeline.publishing.lifecycle import (
     DeploymentResult,
+    PredictionComparison,
     PublishResult,
     RatePackageRevisionResult,
     RatePackageSelector,
@@ -20,6 +21,7 @@ from pricing_pipeline.publishing.manual_revision import (
 )
 from pricing_pipeline.publishing.model_registry import validate_registered_model
 from pricing_pipeline.publishing.package_writer import publish_rating_package
+from pricing_pipeline.publishing.prediction_compare import compare_prediction_vectors
 from pricing_pipeline.publishing.staging import stage_rating_export
 
 
@@ -35,6 +37,15 @@ class ModelPublisher:
 
     def validate_registered_model(self) -> int:
         return validate_model_on_engine(self.engine, self.config)
+
+    def compare_prediction_vectors(
+        self,
+        before: pd.Series,
+        after: pd.Series,
+        *,
+        top_n: int = 25,
+    ) -> PredictionComparison:
+        return compare_prediction_vectors(before, after, top_n=top_n)
 
     def load_rate_package(self, selector: RatePackageSelector) -> RatePackageSnapshot:
         return load_rate_package_snapshot(self.engine, self.config, selector)

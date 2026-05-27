@@ -1,4 +1,5 @@
 import pytest
+import pandas as pd
 
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import (
@@ -187,3 +188,36 @@ def test_model_publisher_create_manual_revision_validates_model_and_delegates(
             },
         ),
     ]
+
+
+def test_model_publisher_compare_prediction_vectors_delegates(monkeypatch):
+    calls = []
+    engine = object()
+    publisher = ModelPublisher(engine, config())
+    before = pd.Series([1.0])
+    after = pd.Series([2.0])
+    expected = object()
+
+    def fake_compare_prediction_vectors(before_arg, after_arg, *, top_n):
+        calls.append(
+            {
+                "before": before_arg,
+                "after": after_arg,
+                "top_n": top_n,
+            },
+        )
+        return expected
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.compare_prediction_vectors",
+        fake_compare_prediction_vectors,
+        raising=False,
+    )
+
+    result = publisher.compare_prediction_vectors(before, after, top_n=3)
+
+    assert result is expected
+    assert len(calls) == 1
+    assert calls[0]["before"] is before
+    assert calls[0]["after"] is after
+    assert calls[0]["top_n"] == 3
