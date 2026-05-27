@@ -223,7 +223,340 @@ def _write_manual_revision(
     reason: str,
     created_by: str,
 ) -> tuple[int, int]:
-    raise NotImplementedError("manual revision SQL writer is implemented in the next step")
+    manual_edit_rows = []
+    for row in diff.itertuples(index=False):
+        multiplier = float(row.new_multiplier)
+        manual_edit_rows.append(
+            {
+                "cell_id": int(row.cell_id),
+                "multiplier": multiplier,
+                "log_coefficient": float(np.log(multiplier)),
+            },
+        )
+
+    parent_metadata = parent.metadata
+    parent_rate_package_id = int(parent_metadata["rate_package_id"])
+    model_id = int(parent_metadata["model_id"])
+
+    with engine.begin() as con:
+        con.execute(text("""
+            DROP TABLE IF EXISTS #manual_rate_cell_edits;
+            DROP TABLE IF EXISTS #term_map;
+            DROP TABLE IF EXISTS #cell_map;
+        """))
+
+        package_version = con.execute(text("""
+            SELECT ISNULL(MAX(package_version), 0) + 1
+            FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
+            WHERE model_id = :model_id
+        """), {"model_id": model_id}).scalar_one()
+
+        rate_package_id = con.execute(text("""
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                parent_rate_package_id,
+                model_id,
+                model_name,
+                model_version,
+                package_version,
+                base_rate,
+                effective_from_date,
+                effective_to_date,
+                package_status,
+                created_by
+            )
+            OUTPUT INSERTED.rate_package_id
+            VALUES (
+                :parent_rate_package_id,
+                :model_id,
+                :model_name,
+                :model_version,
+                :package_version,
+                :base_rate,
+                :effective_from_date,
+                :effective_to_date,
+                :package_status,
+                :created_by
+            );
+        """), {
+            "parent_rate_package_id": parent_rate_package_id,
+            "model_id": model_id,
+            "model_name": parent_metadata["model_name"],
+            "model_version": parent_metadata["model_version"],
+            "package_version": package_version,
+            "base_rate": parent_metadata["base_rate"],
+            "effective_from_date": parent_metadata["effective_from_date"],
+            "effective_to_date": parent_metadata["effective_to_date"],
+            "package_status": "DRAFT",
+            "created_by": created_by,
+        }).scalar_one()
+
+        con.execute(text("""
+            CREATE TABLE #manual_rate_cell_edits (
+                cell_id BIGINT NOT NULL PRIMARY KEY,
+                multiplier DECIMAL(19,10) NOT NULL,
+                log_coefficient DECIMAL(19,12) NOT NULL
+            );
+        """))
+        if manual_edit_rows:
+            con.execute(text("""
+                INSERT INTO #manual_rate_cell_edits (
+                    cell_id,
+                    multiplier,
+                    log_coefficient
+                )
+                VALUES (
+                    :cell_id,
+                    :multiplier,
+                    :log_coefficient
+                );
+            """), manual_edit_rows)
+
+        con.execute(text("""
+            CREATE TABLE #term_map (
+                old_term_id BIGINT NOT NULL PRIMARY KEY,
+                new_term_id BIGINT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE #cell_map (
+                old_cell_id BIGINT NOT NULL PRIMARY KEY,
+                new_cell_id BIGINT NOT NULL UNIQUE
+            );
+
+            MERGE pricing.PRICING_TERM AS tgt
+            USING (
+                SELECT
+                    term_id AS old_term_id,
+                    term_name,
+                    term_type,
+                    sequence_no,
+                    default_multiplier,
+                    default_log_coefficient,
+                    active_flag
+                FROM pricing.PRICING_TERM
+                WHERE rate_package_id = :parent_rate_package_id
+            ) AS src
+            ON 1 = 0
+            WHEN NOT MATCHED THEN
+                INSERT (
+                    rate_package_id,
+                    term_name,
+                    term_type,
+                    sequence_no,
+                    default_multiplier,
+                    default_log_coefficient,
+                    active_flag
+                )
+                VALUES (
+                    :rate_package_id,
+                    src.term_name,
+                    src.term_type,
+                    src.sequence_no,
+                    src.default_multiplier,
+                    src.default_log_coefficient,
+                    src.active_flag
+                )
+            OUTPUT
+                src.old_term_id,
+                INSERTED.term_id
+            INTO #term_map (
+                old_term_id,
+                new_term_id
+            );
+
+            INSERT INTO pricing.PRICING_TERM_FEATURE (
+                term_id,
+                position_no,
+                feature_id,
+                level_set_id,
+                input_column_name
+            )
+            SELECT
+                tm.new_term_id,
+                tf.position_no,
+                tf.feature_id,
+                tf.level_set_id,
+                tf.input_column_name
+            FROM pricing.PRICING_TERM_FEATURE AS tf
+            JOIN #term_map AS tm
+              ON tm.old_term_id = tf.term_id;
+
+            MERGE pricing.PRICING_RATE_CELL AS tgt
+            USING (
+                SELECT
+                    rc.cell_id AS old_cell_id,
+                    tm.new_term_id,
+                    rc.cell_key_text,
+                    rc.cell_key_digest,
+                    COALESCE(edit.multiplier, rc.multiplier) AS multiplier,
+                    COALESCE(edit.log_coefficient, rc.log_coefficient) AS log_coefficient,
+                    rc.exposure_weight,
+                    rc.record_count,
+                    rc.is_reference,
+                    rc.is_default,
+                    rc.is_deleted
+                FROM pricing.PRICING_RATE_CELL AS rc
+                JOIN #term_map AS tm
+                  ON tm.old_term_id = rc.term_id
+                LEFT JOIN #manual_rate_cell_edits AS edit
+                  ON edit.cell_id = rc.cell_id
+            ) AS src
+            ON 1 = 0
+            WHEN NOT MATCHED THEN
+                INSERT (
+                    term_id,
+                    cell_key_text,
+                    cell_key_digest,
+                    multiplier,
+                    log_coefficient,
+                    exposure_weight,
+                    record_count,
+                    is_reference,
+                    is_default,
+                    is_deleted
+                )
+                VALUES (
+                    src.new_term_id,
+                    src.cell_key_text,
+                    src.cell_key_digest,
+                    src.multiplier,
+                    src.log_coefficient,
+                    src.exposure_weight,
+                    src.record_count,
+                    src.is_reference,
+                    src.is_default,
+                    src.is_deleted
+                )
+            OUTPUT
+                src.old_cell_id,
+                INSERTED.cell_id
+            INTO #cell_map (
+                old_cell_id,
+                new_cell_id
+            );
+
+            INSERT INTO pricing.PRICING_RATE_CELL_LEVEL (
+                cell_id,
+                position_no,
+                feature_level_id
+            )
+            SELECT
+                cm.new_cell_id,
+                rcl.position_no,
+                rcl.feature_level_id
+            FROM pricing.PRICING_RATE_CELL_LEVEL AS rcl
+            JOIN #cell_map AS cm
+              ON cm.old_cell_id = rcl.cell_id;
+
+            INSERT INTO pricing.PRICING_COMPILED_RATE_CELL (
+                rate_package_id,
+                term_id,
+                cell_key_digest,
+                term_name,
+                term_type,
+                sequence_no,
+                cell_key_text,
+                multiplier,
+                log_coefficient,
+                exposure_weight,
+                record_count,
+                is_default,
+                is_reference
+            )
+            SELECT
+                :rate_package_id,
+                tm.new_term_id,
+                crc.cell_key_digest,
+                crc.term_name,
+                crc.term_type,
+                crc.sequence_no,
+                crc.cell_key_text,
+                COALESCE(edit.multiplier, crc.multiplier),
+                COALESCE(edit.log_coefficient, crc.log_coefficient),
+                crc.exposure_weight,
+                crc.record_count,
+                crc.is_default,
+                crc.is_reference
+            FROM pricing.PRICING_COMPILED_RATE_CELL AS crc
+            JOIN pricing.PRICING_TERM AS src_term
+              ON src_term.term_id = crc.term_id
+             AND src_term.rate_package_id = :parent_rate_package_id
+            JOIN #term_map AS tm
+              ON tm.old_term_id = src_term.term_id
+            LEFT JOIN pricing.PRICING_RATE_CELL AS src_rc
+              ON src_rc.term_id = src_term.term_id
+             AND src_rc.cell_key_digest = crc.cell_key_digest
+             AND src_rc.cell_key_text = crc.cell_key_text
+            LEFT JOIN #manual_rate_cell_edits AS edit
+              ON edit.cell_id = src_rc.cell_id
+            WHERE crc.rate_package_id = :parent_rate_package_id;
+
+            INSERT INTO pricing.PRICING_COMPILED_1D_RATE_BAND (
+                rate_package_id,
+                term_id,
+                feature_level_id,
+                term_name,
+                feature_name,
+                level_code,
+                sort_order,
+                lower_bound,
+                upper_bound,
+                representative_value,
+                multiplier,
+                log_coefficient
+            )
+            SELECT
+                :rate_package_id,
+                tm.new_term_id,
+                band.feature_level_id,
+                band.term_name,
+                band.feature_name,
+                band.level_code,
+                band.sort_order,
+                band.lower_bound,
+                band.upper_bound,
+                band.representative_value,
+                COALESCE(edit.multiplier, band.multiplier),
+                COALESCE(edit.log_coefficient, band.log_coefficient)
+            FROM pricing.PRICING_COMPILED_1D_RATE_BAND AS band
+            JOIN pricing.PRICING_TERM AS src_term
+              ON src_term.term_id = band.term_id
+             AND src_term.rate_package_id = :parent_rate_package_id
+            JOIN #term_map AS tm
+              ON tm.old_term_id = src_term.term_id
+            LEFT JOIN (
+                SELECT
+                    rc.cell_id,
+                    rc.term_id,
+                    rcl.feature_level_id
+                FROM pricing.PRICING_RATE_CELL AS rc
+                JOIN pricing.PRICING_RATE_CELL_LEVEL AS rcl
+                  ON rcl.cell_id = rc.cell_id
+                 AND rcl.position_no = 1
+                WHERE rc.is_deleted = 0
+            ) AS src_band_cell
+              ON src_band_cell.term_id = src_term.term_id
+             AND src_band_cell.feature_level_id = band.feature_level_id
+            LEFT JOIN #manual_rate_cell_edits AS edit
+              ON edit.cell_id = src_band_cell.cell_id
+            WHERE band.rate_package_id = :parent_rate_package_id;
+        """), {
+            "parent_rate_package_id": parent_rate_package_id,
+            "rate_package_id": rate_package_id,
+        })
+
+        con.execute(text("""
+            UPDATE pricing.PRICING_RATE_PACKAGE
+            SET package_status = 'PUBLISHED'
+            WHERE rate_package_id = :rate_package_id;
+        """), {"rate_package_id": rate_package_id})
+
+        con.execute(text("""
+            DROP TABLE IF EXISTS #cell_map;
+            DROP TABLE IF EXISTS #term_map;
+            DROP TABLE IF EXISTS #manual_rate_cell_edits;
+        """))
+
+    return int(rate_package_id), int(package_version)
 
 
 def create_manual_revision(

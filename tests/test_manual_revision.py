@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -105,6 +106,52 @@ class ReadSqlFake:
         if "FROM pricing.PRICING_TERM" in statement:
             return self.terms.copy()
         raise AssertionError(f"unexpected SQL: {statement}")
+
+
+class ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
+
+
+class FakeConnection:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        statement = str(sql)
+        self.calls.append((statement, params))
+        if "WITH (UPDLOCK, HOLDLOCK)" in statement:
+            return ScalarResult(5)
+        if (
+            "INSERT INTO pricing.PRICING_RATE_PACKAGE" in statement
+            and "OUTPUT INSERTED.rate_package_id" in statement
+        ):
+            return ScalarResult(303)
+        return ScalarResult(None)
+
+
+class FakeBegin:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakeEngine:
+    def __init__(self):
+        self.connection = FakeConnection()
+        self.begin_count = 0
+
+    def begin(self):
+        self.begin_count += 1
+        return FakeBegin(self.connection)
 
 
 def test_load_rate_package_snapshot_by_id_scopes_metadata_to_model_key(monkeypatch):
@@ -415,17 +462,101 @@ def test_validate_rate_cell_edits_rejects_duplicate_cell_ids(frame_name):
         validate_rate_cell_edits(original, edited)
 
 
-def test_write_manual_revision_default_is_not_implemented():
-    with pytest.raises(NotImplementedError, match="implemented in the next step"):
-        _write_manual_revision(
-            object(),
-            config(),
-            parent=snapshot(),
-            edited_rate_cells=rate_cells(),
-            diff=pd.DataFrame(),
-            reason="pricing correction",
-            created_by="pricing-user",
-        )
+def test_write_manual_revision_creates_child_package_and_copies_children():
+    engine = FakeEngine()
+    parent = snapshot(rate_package_id=202, model_id=17, package_version=4)
+    diff = pd.DataFrame(
+        {
+            "cell_id": [31, 44],
+            "old_multiplier": [1.10, 0.85],
+            "new_multiplier": [1.25, 0.90],
+            "old_log_coefficient": [0.09531, -0.16252],
+        },
+    )
+
+    result = _write_manual_revision(
+        engine,
+        config(),
+        parent=parent,
+        edited_rate_cells=rate_cells(),
+        diff=diff,
+        reason="pricing correction",
+        created_by="pricing-user",
+    )
+
+    assert result == (303, 5)
+    assert engine.begin_count == 1
+    calls = engine.connection.calls
+    statements = "\n".join(statement for statement, _params in calls)
+
+    version_sql, version_params = next(
+        (statement, params)
+        for statement, params in calls
+        if "WITH (UPDLOCK, HOLDLOCK)" in statement
+    )
+    assert "MAX(package_version)" in version_sql
+    assert "WHERE model_id = :model_id" in version_sql
+    assert version_params == {"model_id": 17}
+
+    insert_sql, insert_params = next(
+        (statement, params)
+        for statement, params in calls
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in statement
+        and "OUTPUT INSERTED.rate_package_id" in statement
+    )
+    assert "parent_rate_package_id" in insert_sql
+    assert "package_status" in insert_sql
+    assert insert_params == {
+        "parent_rate_package_id": 202,
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "2026.05",
+        "package_version": 5,
+        "base_rate": 1.25,
+        "effective_from_date": "2026-01-01",
+        "effective_to_date": None,
+        "package_status": "DRAFT",
+        "created_by": "pricing-user",
+    }
+
+    assert "DROP TABLE IF EXISTS #manual_rate_cell_edits" in statements
+    assert "CREATE TABLE #manual_rate_cell_edits" in statements
+    edit_sql, edit_params = next(
+        (statement, params)
+        for statement, params in calls
+        if "INSERT INTO #manual_rate_cell_edits" in statement
+    )
+    assert "cell_id" in edit_sql
+    assert "log_coefficient" in edit_sql
+    assert edit_params[0]["cell_id"] == 31
+    assert edit_params[0]["multiplier"] == 1.25
+    assert edit_params[0]["log_coefficient"] == pytest.approx(np.log(1.25))
+    assert edit_params[1]["cell_id"] == 44
+    assert edit_params[1]["multiplier"] == 0.90
+    assert edit_params[1]["log_coefficient"] == pytest.approx(np.log(0.90))
+
+    assert "#term_map" in statements
+    assert "#cell_map" in statements
+    assert "MERGE pricing.PRICING_TERM" in statements
+    assert "MERGE pricing.PRICING_RATE_CELL" in statements
+    for copied_table in [
+        "pricing.PRICING_TERM_FEATURE",
+        "pricing.PRICING_RATE_CELL_LEVEL",
+        "pricing.PRICING_COMPILED_RATE_CELL",
+        "pricing.PRICING_COMPILED_1D_RATE_BAND",
+    ]:
+        assert copied_table in statements
+    assert "COALESCE(edit.multiplier" in statements
+    assert "COALESCE(edit.log_coefficient" in statements
+
+    finalize_sql, finalize_params = next(
+        (statement, params)
+        for statement, params in calls
+        if "UPDATE pricing.PRICING_RATE_PACKAGE" in statement
+        and "'PUBLISHED'" in statement
+    )
+    assert "SET package_status = 'PUBLISHED'" in finalize_sql
+    assert finalize_params == {"rate_package_id": 303}
 
 
 def test_write_manual_revision_payload_args_are_keyword_only():

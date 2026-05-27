@@ -307,3 +307,17 @@ def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
     assert "s.order_index" in loader
     assert "s.lower_bound" in loader
     assert "s.upper_bound" in loader
+
+
+def test_manual_revision_writer_creates_child_package_and_finalizes_published():
+    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "parent_rate_package_id" in writer
+    assert "package_status" in writer
+    assert "PUBLISHED" in writer
+    assert "WITH (UPDLOCK, HOLDLOCK)" in writer
+    assert "PRICING_RATE_PACKAGE" in writer
+    assert "PRICING_RATE_CELL" in writer
+    assert "PRICING_COMPILED_RATE_CELL" in writer
