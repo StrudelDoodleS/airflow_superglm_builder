@@ -14,6 +14,7 @@ import pytest
 
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.publishing import lineage, rating_export, rating_package, staging
+from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
 from pricing_pipeline.models.spec import ModelSpec
@@ -406,36 +407,40 @@ def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_p
     assert level_df["feature_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
 
 
-def test_publish_rating_package_wrapper_passes_args_and_returns_package_id(monkeypatch):
-    calls = []
+def test_publish_rating_package_wrapper_returns_publish_result_without_pointer(monkeypatch):
+    captured = []
 
-    def fake_publish(engine, **kwargs):
-        calls.append((engine, kwargs))
+    def fake_load(engine, args):
+        captured.append((engine, args))
+        args.package_version = 3
         return 42
 
-    monkeypatch.setattr(rating_package, "_publish", fake_publish)
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
+        fake_load,
+    )
     engine = object()
 
-    package_id = rating_package.publish_rating_package(
+    result = rating_package.publish_rating_package(
         engine,
         export_id="export-1",
-        pointer_name="MTPL_FREQ_UAT",
         created_by="airflow",
         package_status="PUBLISHED",
     )
 
-    assert package_id == 42
-    assert calls == [
-        (
-            engine,
-            {
-                "export_id": "export-1",
-                "pointer_name": "MTPL_FREQ_UAT",
-                "created_by": "airflow",
-                "package_status": "PUBLISHED",
-            },
-        )
-    ]
+    assert result == PublishResult(
+        mlflow_run_id="",
+        export_id="export-1",
+        rate_package_id=42,
+        package_version=3,
+        rating_workbook_path="",
+    )
+    assert captured[0][0] is engine
+    args = captured[0][1]
+    assert args.export_id == "export-1"
+    assert args.created_by == "airflow"
+    assert args.package_status == "PUBLISHED"
+    assert args.set_pointer is None
 
 
 def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch):
@@ -575,7 +580,7 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
     }
 
 
-def test_pipeline_imports_with_split_airflow_package_and_pricing_scripts_paths(
+def test_pipeline_imports_with_split_airflow_package_without_script_import_side_effects(
     tmp_path: Path,
 ):
     airflow_root = tmp_path / "airflow"
@@ -628,7 +633,7 @@ def test_pipeline_imports_with_split_airflow_package_and_pricing_scripts_paths(
     assert result.returncode == 0
     assert "pipeline_import=ok" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
-    assert marker_path.read_text(encoding="utf-8").splitlines() == ["publish"]
+    assert not marker_path.exists()
 
 
 class FakePipelineModel:
