@@ -42,7 +42,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
 
         package_version = con.execute(text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
-            FROM pricing.PRICING_RATE_PACKAGE
+            FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
         """), {"model_id": model_id}).scalar_one()
 

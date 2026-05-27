@@ -160,6 +160,23 @@ def test_model_registry_migration_scopes_packages_pointers_and_level_sets():
     assert "UX_PACKAGE_POINTER_MODEL_SLOT" in migration
 
 
+def test_rate_package_version_guard_migration_adds_unique_model_version_index():
+    migration = Path("db/migrations/V016__rate_package_version_and_deploy_guards.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "UX_PRICING_RATE_PACKAGE_MODEL_VERSION" in migration
+    assert "PRICING_RATE_PACKAGE(model_id, package_version)" in migration
+    assert "WHERE model_id IS NOT NULL" in migration
+
+
+def test_package_writer_allocates_version_under_lock():
+    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
+
+    assert "WITH (UPDLOCK, HOLDLOCK)" in writer
+    assert "MAX(package_version)" in writer
+
+
 def test_model_registry_migration_exposes_current_views_not_mutable_active_flags():
     migration = Path("db/migrations/V006__model_registry_deployments.sql").read_text(
         encoding="utf-8"
