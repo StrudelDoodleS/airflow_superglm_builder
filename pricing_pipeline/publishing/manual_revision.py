@@ -25,6 +25,17 @@ _IDENTITY_RATE_CELL_COLUMNS = (
 )
 _MULTIPLIER_RTOL = 1e-12
 _MULTIPLIER_ATOL = 1e-12
+_REQUIRED_REVISION_PARENT_METADATA_KEYS = (
+    "rate_package_id",
+    "model_id",
+    "model_name",
+    "model_version",
+    "base_rate",
+    "effective_from_date",
+    "effective_to_date",
+    "package_status",
+    "package_version",
+)
 
 
 def _require_columns(frame_name: str, frame: pd.DataFrame, columns: tuple[str, ...]) -> None:
@@ -175,9 +186,20 @@ def _required_text(value: str | None, field_name: str) -> str:
     return cleaned
 
 
+def _validate_revision_parent_metadata(parent: RatePackageSnapshot) -> None:
+    missing = [
+        key for key in _REQUIRED_REVISION_PARENT_METADATA_KEYS if key not in parent.metadata
+    ]
+    if missing:
+        raise ManualRevisionError(
+            "parent metadata is missing required key(s): " + ", ".join(missing),
+        )
+
+
 def _write_manual_revision(
     engine,
     config: ModelBuildConfig,
+    *,
     parent: RatePackageSnapshot,
     edited_rate_cells: pd.DataFrame,
     diff: pd.DataFrame,
@@ -198,6 +220,7 @@ def create_manual_revision(
 ) -> RatePackageRevisionResult:
     reason = _required_text(reason, "reason")
     created_by = _required_text(created_by, "created_by")
+    _validate_revision_parent_metadata(parent)
 
     if parent.metadata.get("package_status") != "PUBLISHED":
         raise ManualRevisionError("manual revisions require a PUBLISHED parent package")
@@ -206,11 +229,11 @@ def create_manual_revision(
     rate_package_id, package_version = _write_manual_revision(
         engine,
         config,
-        parent,
-        edited_rate_cells,
-        diff,
-        reason,
-        created_by,
+        parent=parent,
+        edited_rate_cells=edited_rate_cells,
+        diff=diff,
+        reason=reason,
+        created_by=created_by,
     )
 
     return RatePackageRevisionResult(

@@ -32,6 +32,7 @@ def metadata_row(**overrides):
         "parent_rate_package_id": None,
         "model_id": 17,
         "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "model_version": "2026.05",
         "package_version": 4,
         "base_rate": 1.25,
@@ -419,6 +420,19 @@ def test_write_manual_revision_default_is_not_implemented():
         _write_manual_revision(
             object(),
             config(),
+            parent=snapshot(),
+            edited_rate_cells=rate_cells(),
+            diff=pd.DataFrame(),
+            reason="pricing correction",
+            created_by="pricing-user",
+        )
+
+
+def test_write_manual_revision_payload_args_are_keyword_only():
+    with pytest.raises(TypeError):
+        _write_manual_revision(
+            object(),
+            config(),
             snapshot(),
             rate_cells(),
             pd.DataFrame(),
@@ -480,6 +494,44 @@ def test_create_manual_revision_rejects_non_published_parent(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "rate_package_id",
+        "model_id",
+        "model_name",
+        "model_version",
+        "base_rate",
+        "effective_from_date",
+        "effective_to_date",
+        "package_status",
+        "package_version",
+    ],
+)
+def test_create_manual_revision_rejects_missing_parent_metadata_before_writer(
+    monkeypatch,
+    missing_key,
+):
+    parent = snapshot()
+    parent.metadata.pop(missing_key)
+    edited = parent.rate_cells.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args, **kwargs: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(ManualRevisionError, match=rf"parent metadata.*{missing_key}"):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=parent,
+            edited_rate_cells=edited,
+            reason="pricing correction",
+            created_by="pricing-user",
+        )
+
+
 def test_create_manual_revision_returns_result_from_writer_and_diff(monkeypatch):
     engine = object()
     parent = snapshot(rate_package_id=202, package_status="PUBLISHED")
@@ -492,21 +544,22 @@ def test_create_manual_revision_returns_result_from_writer_and_diff(monkeypatch)
     def fake_write_manual_revision(
         engine_arg,
         config_arg,
-        parent_arg,
-        edited_rate_cells_arg,
-        diff_arg,
-        reason_arg,
-        created_by_arg,
+        *,
+        parent,
+        edited_rate_cells,
+        diff,
+        reason,
+        created_by,
     ):
         calls.append(
             (
                 engine_arg,
                 config_arg,
-                parent_arg,
-                edited_rate_cells_arg,
-                diff_arg.copy(),
-                reason_arg,
-                created_by_arg,
+                parent,
+                edited_rate_cells,
+                diff.copy(),
+                reason,
+                created_by,
             ),
         )
         return 303, 5
