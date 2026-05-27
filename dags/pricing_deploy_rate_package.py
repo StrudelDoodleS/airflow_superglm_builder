@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from datetime import datetime
+
+from airflow.sdk import dag, get_current_context, task
+
+from pricing_models.registry import get_model_config
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.db import get_engine as _get_engine
+from pricing_pipeline.publishing.publisher import ModelPublisher
+
+
+_PARAMS = {
+    "model_key": "",
+    "rate_package_id": None,
+    "package_version": None,
+    "deployment_slot": None,
+    "deployment_reason": "",
+    "deployed_by": "",
+}
+
+
+def get_engine():
+    return _get_engine(Settings.from_env(os.environ))
+
+
+def _optional_value(value: object) -> object | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def _optional_int(value: object, field_name: str) -> int | None:
+    value = _optional_value(value)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+
+
+def _optional_text(value: object) -> str | None:
+    value = _optional_value(value)
+    if value is None:
+        return None
+    return str(value).strip()
+
+
+def _text_value(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _string_id(value: int | None) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, str]:
+    model_key = str(params.get("model_key", "")).strip()
+    if not model_key:
+        raise ValueError("model_key is required")
+
+    rate_package_id = _optional_int(params.get("rate_package_id"), "rate_package_id")
+    package_version = _optional_int(params.get("package_version"), "package_version")
+    if (rate_package_id is None) == (package_version is None):
+        raise ValueError("provide exactly one of rate_package_id or package_version")
+
+    config = get_model_config(model_key)
+    result = ModelPublisher(get_engine(), config).deploy(
+        rate_package_id=rate_package_id,
+        package_version=package_version,
+        deployment_slot=_optional_text(params.get("deployment_slot")),
+        deployment_reason=_text_value(params.get("deployment_reason")),
+        deployed_by=_text_value(params.get("deployed_by")),
+    )
+
+    return {
+        "model_key": config.model_key,
+        "deployment_slot": result.deployment_slot,
+        "previous_rate_package_id": _string_id(result.previous_rate_package_id),
+        "rate_package_id": str(result.rate_package_id),
+        "package_version": str(result.package_version),
+        "deployed_by": result.deployed_by,
+        "deployment_reason": result.deployment_reason,
+    }
+
+
+@dag(
+    dag_id="pricing_deploy_rate_package",
+    start_date=datetime(2026, 1, 1),
+    schedule=None,
+    catchup=False,
+    tags=["pricing", "deploy"],
+    params=_PARAMS,
+)
+def _pricing_deploy_rate_package():
+    @task
+    def deploy_package() -> dict[str, str]:
+        return deploy_rate_package_from_params(get_current_context()["params"])
+
+    deploy_package()
+
+
+pricing_deploy_rate_package = _pricing_deploy_rate_package()

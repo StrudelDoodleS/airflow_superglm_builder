@@ -92,3 +92,14 @@ def test_pricing_mtpl_frequency_dag_keeps_model_publish_tasks_separate(monkeypat
         "train_and_export",
         "publish_export",
     ]
+
+
+def test_pricing_deploy_rate_package_dag_imports_without_airflow(monkeypatch):
+    _install_fake_airflow(monkeypatch)
+
+    module = _import_dag_module(
+        "pricing_deploy_rate_package_test",
+        "pricing_deploy_rate_package.py",
+    )
+
+    assert hasattr(module, "pricing_deploy_rate_package")
