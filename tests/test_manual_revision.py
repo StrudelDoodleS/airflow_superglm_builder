@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pandas as pd
 import pytest
 
@@ -254,6 +256,57 @@ def test_validate_rate_cell_edits_rejects_empty_diff():
 
     with pytest.raises(ManualRevisionError, match="no manual rate cell changes"):
         validate_rate_cell_edits(original, original.copy())
+
+
+def test_validate_rate_cell_edits_treats_decimal_and_string_same_values_as_no_diff():
+    original = rate_cells()
+    original["multiplier"] = [Decimal("1.10"), Decimal("1.00"), Decimal("0.85")]
+    edited = original.copy()
+    edited["multiplier"] = ["1.10", "1.00", "0.85"]
+
+    with pytest.raises(ManualRevisionError, match="no manual rate cell changes"):
+        validate_rate_cell_edits(original, edited)
+
+
+def test_diff_rate_cell_edits_returns_numeric_diff_for_decimal_and_string_change():
+    original = rate_cells()
+    original["multiplier"] = [Decimal("1.10"), Decimal("1.00"), Decimal("0.85")]
+    edited = original.copy()
+    edited["multiplier"] = ["1.10", "1.05", "0.85"]
+
+    diff = diff_rate_cell_edits(original, edited)
+
+    pd.testing.assert_frame_equal(
+        diff,
+        pd.DataFrame(
+            {
+                "cell_id": [29],
+                "old_multiplier": [1.0],
+                "new_multiplier": [1.05],
+                "old_log_coefficient": [0.0],
+            },
+        ),
+    )
+
+
+def test_validate_rate_cell_edits_ignores_tiny_multiplier_roundtrip_delta():
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.10 + 1e-13
+
+    with pytest.raises(ManualRevisionError, match="no manual rate cell changes"):
+        validate_rate_cell_edits(original, edited)
+
+
+def test_diff_rate_cell_edits_rejects_non_numeric_original_multiplier():
+    original = rate_cells()
+    edited = original.copy()
+    original["multiplier"] = original["multiplier"].astype(object)
+    original.loc[original["cell_id"] == 31, "multiplier"] = "not-a-number"
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+
+    with pytest.raises(ManualRevisionError, match="original.*multiplier.*numeric"):
+        diff_rate_cell_edits(original, edited)
 
 
 def test_validate_rate_cell_edits_rejects_identity_column_change():
