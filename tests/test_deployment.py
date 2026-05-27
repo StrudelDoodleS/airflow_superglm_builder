@@ -254,6 +254,24 @@ def test_deploy_rate_package_rejects_blank_default_deployment_slot():
     assert engine.connection.events == []
 
 
+@pytest.mark.parametrize("deployment_slot", ["", "   "])
+def test_deploy_rate_package_rejects_blank_deployment_slot_override(deployment_slot):
+    engine = FakeEngine(package_row=published_package())
+
+    with pytest.raises(DeploymentError, match="deployment_slot"):
+        deploy_rate_package(
+            engine,
+            config(),
+            rate_package_id=101,
+            deployment_slot=deployment_slot,
+            deployment_reason="approved",
+            deployed_by="airflow",
+            model_id=17,
+        )
+
+    assert engine.connection.events == []
+
+
 def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
     engine = FakeEngine(package_row=published_package(), lock_result=-1)
 
