@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pickle
-from pathlib import Path
 
 import pandas as pd
 
@@ -32,6 +31,7 @@ from pricing_pipeline.data.manifest import split_set_id_for_manifest
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
     ModelExportResult,
     ModelSpec,
@@ -42,7 +42,7 @@ from pricing_pipeline.publishing.rating_export import (
     build_rating_export_path,
     export_rating_tables,
 )
-from pricing_pipeline.publishing.rating_package import publish_rating_package, stage_rating_export
+from pricing_pipeline.publishing.publisher import ModelPublisher
 from pricing_pipeline.models.superglm_diagnostics import fit_reml_with_diagnostics
 
 
@@ -145,29 +145,14 @@ def train_and_export_model(
 def publish_model_export(
     engine,
     export: ModelExportResult | dict,
+    *,
+    model_config: ModelBuildConfig,
 ) -> dict[str, str]:
     export_result = ModelExportResult.from_mapping(export)
-    workbook_path = Path(export_result.rating_workbook_path)
+    publisher = ModelPublisher(engine, model_config)
+    publisher.validate_registered_model()
+    publish_result = publisher.publish_training_export(export_result)
 
-    stage_rating_export(
-        engine,
-        workbook_path=workbook_path,
-        export_id=export_result.export_id,
-        model_name=export_result.model_key,
-        model_version=export_result.model_version,
-        target_name=export_result.target_name,
-        model_type=export_result.model_type,
-        effective_from=export_result.effective_from,
-        created_by=export_result.created_by,
-        replace=True,
-    )
-    rate_package_id = publish_rating_package(
-        engine,
-        export_id=export_result.export_id,
-        pointer_name=export_result.deployment_slot,
-        created_by=export_result.created_by,
-        package_status=export_result.package_status,
-    )
     record_model_run(
         engine,
         dag_id=export_result.dag_id,
@@ -179,17 +164,18 @@ def publish_model_export(
         model_id=export_result.model_id,
         model_name=export_result.model_key,
         model_version=export_result.model_version,
-        rate_package_id=rate_package_id,
-        rating_workbook_path=str(workbook_path),
+        rate_package_id=publish_result.rate_package_id,
+        rating_workbook_path=str(publish_result.rating_workbook_path),
         run_status="SUCCESS",
         created_by=export_result.created_by,
     )
 
     return {
-        "mlflow_run_id": export_result.mlflow_run_id,
-        "export_id": export_result.export_id,
-        "rate_package_id": str(rate_package_id),
-        "rating_workbook_path": str(workbook_path),
+        "mlflow_run_id": str(publish_result.mlflow_run_id),
+        "export_id": str(publish_result.export_id),
+        "rate_package_id": str(publish_result.rate_package_id),
+        "package_version": str(publish_result.package_version),
+        "rating_workbook_path": str(publish_result.rating_workbook_path),
     }
 
 
@@ -202,6 +188,7 @@ def run_training_export_publish(
     airflow_run_id: str,
     logical_date: str,
     spec: ModelSpec,
+    model_config: ModelBuildConfig,
     created_by: str = "airflow",
 ) -> dict[str, str]:
     export = train_and_export_model(
@@ -214,4 +201,4 @@ def run_training_export_publish(
         spec=spec,
         created_by=created_by,
     )
-    return publish_model_export(engine, export)
+    return publish_model_export(engine, export, model_config=model_config)

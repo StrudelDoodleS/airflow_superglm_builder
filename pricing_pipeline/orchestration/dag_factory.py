@@ -11,6 +11,7 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.db import ensure_database, get_engine
 from pricing_pipeline.data.manifest import create_dataset_manifest, new_manifest_id
 from pricing_pipeline.infra.migrations import apply_migrations
+from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelSpec
 from pricing_pipeline.orchestration.pipeline import publish_model_export, train_and_export_model
 
@@ -54,6 +55,7 @@ def build_pricing_model_dag(
     *,
     dag_id: str,
     spec: ModelSpec,
+    model_config: ModelBuildConfig,
     schedule=None,
     tags: list[str] | None = None,
 ):
@@ -104,7 +106,11 @@ def build_pricing_model_dag(
 
         @task
         def publish_export(export: dict[str, Any]) -> dict[str, str]:
-            return publish_model_export(get_engine(settings_from_env()), export)
+            return publish_model_export(
+                get_engine(settings_from_env()),
+                export,
+                model_config=model_config,
+            )
 
         schema_applied = apply_pricing_schema()
         manifest_id = prepare_dataset()

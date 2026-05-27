@@ -27,6 +27,7 @@ from pricing_models.mtpl_frequency.training import (
     TRAINING_SQL,
     build_training_frame,
 )
+from pricing_models.mtpl_frequency.spec import MODEL_CONFIG
 from scripts import load_staging_to_rating_package
 from scripts import load_superglm_excel_to_staging
 from scripts import smoke_check
@@ -825,12 +826,25 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         output_path.write_bytes(b"workbook")
         return output_path
 
-    def fake_stage_rating_export(engine, **kwargs):
-        calls.append(("stage_rating_export", engine, kwargs))
+    class FakePublisher:
+        def __init__(self, engine_arg, config):
+            calls.append(("publisher_init", engine_arg, config))
+            self.engine = engine_arg
+            self.config = config
 
-    def fake_publish_rating_package(engine, **kwargs):
-        calls.append(("publish_rating_package", engine, kwargs))
-        return 123
+        def validate_registered_model(self):
+            calls.append(("validate_registered_model",))
+            return 17
+
+        def publish_training_export(self, export):
+            calls.append(("publish_training_export", export))
+            return PublishResult(
+                mlflow_run_id=export.mlflow_run_id,
+                export_id=export.export_id,
+                rate_package_id=123,
+                package_version=4,
+                rating_workbook_path=export.rating_workbook_path,
+            )
 
     def fake_record_model_run(engine, **kwargs):
         calls.append(("record_model_run", engine, kwargs))
@@ -845,8 +859,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     )
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
-    monkeypatch.setattr(pipeline, "stage_rating_export", fake_stage_rating_export)
-    monkeypatch.setattr(pipeline, "publish_rating_package", fake_publish_rating_package)
+    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
     monkeypatch.setattr(pipeline, "record_model_run", fake_record_model_run)
 
     dumped = []
@@ -886,6 +899,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         airflow_run_id="scheduled__2026-04-27T10:30:00+00:00",
         logical_date="2026-04-27",
         spec=spec,
+        model_config=MODEL_CONFIG,
         created_by="airflow",
     )
 
@@ -899,6 +913,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "mlflow_run_id": "mlflow-run-1",
         "export_id": export_id,
         "rate_package_id": "123",
+        "package_version": "4",
         "rating_workbook_path": str(workbook_path),
     }
     assert ("configure_mlflow", "http://mlflow.local") in calls
@@ -940,34 +955,27 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     np.testing.assert_array_equal(export_call[4], raw["Exposure"].to_numpy(dtype=float))
     assert export_call[5] == workbook_path
 
-    stage_call = next(event for event in calls if event[0] == "stage_rating_export")
-    assert stage_call == (
-        "stage_rating_export",
-        engine,
-        {
-            "workbook_path": workbook_path,
-            "export_id": export_id,
-            "model_name": "MTPL_FREQ",
-            "model_version": "20260427",
-            "target_name": "ClaimNb",
-            "model_type": "superglm_poisson",
-            "effective_from": "2026-04-27",
-            "created_by": "airflow",
-            "replace": True,
-        },
-    )
-
-    publish_call = next(event for event in calls if event[0] == "publish_rating_package")
-    assert publish_call == (
-        "publish_rating_package",
-        engine,
-        {
-            "export_id": export_id,
-            "pointer_name": "MTPL_FREQ_UAT",
-            "created_by": "airflow",
-            "package_status": "DRAFT",
-        },
-    )
+    assert ("publisher_init", engine, MODEL_CONFIG) in calls
+    assert ("validate_registered_model",) in calls
+    publish_call = next(event for event in calls if event[0] == "publish_training_export")
+    assert publish_call[1].to_dict() == {
+        "model_id": 17,
+        "model_key": "MTPL_FREQ",
+        "model_version": "20260427",
+        "model_type": "superglm_poisson",
+        "target_name": "ClaimNb",
+        "deployment_slot": "MTPL_FREQ_UAT",
+        "manifest_id": "manifest-1",
+        "dag_id": "pricing_dag",
+        "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
+        "mlflow_run_id": "mlflow-run-1",
+        "split_set_id": "manifest-1__kfold_5_seed_42",
+        "export_id": export_id,
+        "rating_workbook_path": str(workbook_path),
+        "effective_from": "2026-04-27",
+        "created_by": "airflow",
+        "package_status": "DRAFT",
+    }
 
     record_call = next(event for event in calls if event[0] == "record_model_run")
     assert record_call == (
@@ -989,3 +997,60 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "created_by": "airflow",
         },
     )
+
+
+def test_publish_model_export_returns_candidate_without_deploying(
+    monkeypatch,
+    tmp_path: Path,
+):
+    calls = []
+
+    class FakePublisher:
+        def __init__(self, engine, config):
+            calls.append(("publisher_init", engine, config))
+
+        def validate_registered_model(self):
+            calls.append(("validate_registered_model",))
+            return 17
+
+        def publish_training_export(self, export):
+            calls.append(("publish_training_export", export))
+            return SimpleNamespace(
+                mlflow_run_id="mlflow-run-1",
+                export_id=export.export_id if hasattr(export, "export_id") else export["export_id"],
+                rate_package_id=123,
+                package_version=4,
+                rating_workbook_path=(
+                    export.rating_workbook_path
+                    if hasattr(export, "rating_workbook_path")
+                    else export["rating_workbook_path"]
+                ),
+            )
+
+    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    monkeypatch.setattr(pipeline, "record_model_run", lambda *args, **kwargs: None)
+    engine = object()
+    export = {
+        "model_id": 17,
+        "model_key": "MTPL_FREQ",
+        "model_version": "20260527",
+        "model_type": "superglm_poisson",
+        "target_name": "ClaimNb",
+        "deployment_slot": "MTPL_FREQ_UAT",
+        "manifest_id": "manifest-1",
+        "dag_id": "pricing_dag",
+        "airflow_run_id": "manual__1",
+        "mlflow_run_id": "mlflow-run-1",
+        "split_set_id": None,
+        "export_id": "export-1",
+        "rating_workbook_path": str(tmp_path / "rating_tables.xlsx"),
+        "effective_from": "2026-05-27",
+        "created_by": "airflow",
+        "package_status": "PUBLISHED",
+    }
+
+    result = pipeline.publish_model_export(engine, export, model_config=MODEL_CONFIG)
+
+    assert result["rate_package_id"] == "123"
+    assert result["package_version"] == "4"
+    assert ("validate_registered_model",) in calls
