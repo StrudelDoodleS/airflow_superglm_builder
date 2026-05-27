@@ -75,3 +75,20 @@ def test_compare_prediction_vectors_rejects_non_finite_values():
 
     with pytest.raises(ValueError, match="finite"):
         compare_prediction_vectors(pd.Series([1.0, 2.0]), pd.Series([2.0, np.nan]))
+
+
+def test_compare_prediction_vectors_rejects_overflowed_absolute_change():
+    with pytest.raises(ValueError, match="prediction changes must be finite"):
+        compare_prediction_vectors(pd.Series([1.79e308]), pd.Series([-1.79e308]))
+
+
+def test_compare_prediction_vectors_rejects_overflowed_relative_change():
+    with pytest.raises(ValueError, match="prediction changes must be finite"):
+        compare_prediction_vectors(pd.Series([5e-324]), pd.Series([1.0]))
+
+
+def test_compare_prediction_vectors_rejects_overflowed_summary_values():
+    max_float = np.finfo("float64").max
+
+    with pytest.raises(ValueError, match="prediction summary values must be finite"):
+        compare_prediction_vectors(pd.Series([0.0, 0.0]), pd.Series([max_float, max_float]))
