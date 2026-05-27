@@ -148,6 +148,90 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
     }
 
 
+def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
+    monkeypatch,
+):
+    module = _import_deploy_dag_module(monkeypatch)
+    calls = []
+    engine = object()
+    config = types.SimpleNamespace(model_key="MTPL_FREQ")
+
+    class FakePublisher:
+        def __init__(self, engine_arg, config_arg):
+            calls.append(("init", engine_arg, config_arg))
+
+        def deploy(self, **kwargs):
+            calls.append(("deploy", kwargs))
+            return types.SimpleNamespace(
+                deployment_slot="MTPL_FREQ_UAT",
+                previous_rate_package_id=101,
+                rate_package_id=202,
+                package_version=4,
+                deployed_by="airflow",
+                deployment_reason="approved",
+            )
+
+    monkeypatch.setattr(module, "get_model_config", lambda _model_key: config)
+    monkeypatch.setattr(module, "get_engine", lambda: engine)
+    monkeypatch.setattr(module, "ModelPublisher", FakePublisher)
+
+    result = module.deploy_rate_package_from_params(
+        {
+            "model_key": "MTPL_FREQ",
+            "rate_package_id": " 202 ",
+            "package_version": None,
+            "deployment_reason": "approved",
+            "deployed_by": "airflow",
+        }
+    )
+
+    assert calls == [
+        ("init", engine, config),
+        (
+            "deploy",
+            {
+                "rate_package_id": 202,
+                "package_version": None,
+                "deployment_slot": None,
+                "deployment_reason": "approved",
+                "deployed_by": "airflow",
+            },
+        ),
+    ]
+    assert result["rate_package_id"] == "202"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("rate_package_id", True),
+        ("package_version", False),
+        ("package_version", 4.9),
+        ("package_version", "4.9"),
+    ],
+)
+def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
+    monkeypatch,
+    field_name,
+    field_value,
+):
+    module = _import_deploy_dag_module(monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "get_model_config",
+        lambda _model_key: pytest.fail("invalid selector should fail before config lookup"),
+    )
+    params = {
+        "model_key": "MTPL_FREQ",
+        "rate_package_id": None,
+        "package_version": None,
+        field_name: field_value,
+    }
+
+    with pytest.raises(ValueError, match=f"{field_name} must be an integer"):
+        module.deploy_rate_package_from_params(params)
+
+
 @pytest.mark.parametrize(
     ("params", "message"),
     [

@@ -38,10 +38,20 @@ def _optional_int(value: object, field_name: str) -> int | None:
     value = _optional_value(value)
     if value is None:
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be an integer") from exc
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, str):
+        cleaned = value.strip()
+        unsigned = cleaned[1:] if cleaned[:1] in {"+", "-"} else cleaned
+        if unsigned.isdigit():
+            return int(cleaned)
+    raise ValueError(f"{field_name} must be an integer")
 
 
 def _optional_text(value: object) -> str | None:
