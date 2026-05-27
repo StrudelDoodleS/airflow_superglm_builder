@@ -27,9 +27,24 @@ README_CONTRACT_STRINGS = [
     "predict(X, offset=np.log(exposure))",
 ]
 
+RATE_PACKAGE_LIFECYCLE_STRINGS = [
+    "model.toml",
+    "ModelPublisher",
+    "pricing_deploy_rate_package",
+    "PUBLISHED",
+]
+
 
 def test_readme_documents_local_pipeline_contract():
     readme = Path("README.md").read_text(encoding="utf-8")
 
     for expected in README_CONTRACT_STRINGS:
         assert expected in readme
+
+
+def test_readme_documents_rate_package_lifecycle_contract():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    for expected in RATE_PACKAGE_LIFECYCLE_STRINGS:
+        assert expected in readme
+    assert "manual revision" in readme.lower()

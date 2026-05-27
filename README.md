@@ -507,6 +507,32 @@ Convenience views expose the current state:
 - `pricing.V_CURRENT_RATE_CELL`
 - `pricing.V_CURRENT_1D_RATE_BAND`
 
+## Rate Package Lifecycle
+
+Production model builds use stable model metadata from each model's
+`model.toml`. That config records housekeeping identity such as `model_key`,
+`target_name`, `model_type`, and the default deployment slot; SQL Server owns
+the generated `model_id`.
+
+`ModelPublisher` is the Python API for publishing training exports, deploying
+packages, loading package snapshots, creating manual revisions, and comparing
+prediction vectors. Airflow build DAGs use it to create immutable `PUBLISHED`
+candidate rate packages, but they do not move live deployment pointers by
+default.
+
+Live deployments happen through the generic manual DAG
+`pricing_deploy_rate_package`. The deploy run should name a reviewed
+`rate_package_id` or `package_version`, the deployment slot, the deploying
+user, and an audit reason. Manual rate changes follow the same lifecycle:
+load the package snapshot, edit the constrained rate-cell DataFrames, create a
+child package with `parent_rate_package_id`, then deploy that child package
+through `pricing_deploy_rate_package`.
+
+Published package rows are never edited directly. Once a package is no longer
+`DRAFT`, SQL Server immutability triggers block direct updates or deletes to
+the package and its rating rows, so changes must be published as new packages
+or manual revisions.
+
 ## CV Split Storage
 
 Cross-validation split lineage is metadata-first. New freMTPL manifests write a
