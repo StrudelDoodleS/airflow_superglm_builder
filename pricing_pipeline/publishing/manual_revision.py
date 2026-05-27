@@ -5,7 +5,11 @@ import pandas as pd
 from sqlalchemy import text
 
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.publishing.lifecycle import RatePackageSelector, RatePackageSnapshot
+from pricing_pipeline.publishing.lifecycle import (
+    RatePackageRevisionResult,
+    RatePackageSelector,
+    RatePackageSnapshot,
+)
 
 
 class ManualRevisionError(RuntimeError):
@@ -160,6 +164,63 @@ def validate_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd
     if diff.empty:
         raise ManualRevisionError("no manual rate cell changes found")
     return diff
+
+
+def _required_text(value: str | None, field_name: str) -> str:
+    if value is None:
+        raise ManualRevisionError(f"{field_name} is required")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ManualRevisionError(f"{field_name} is required")
+    return cleaned
+
+
+def _write_manual_revision(
+    engine,
+    config: ModelBuildConfig,
+    parent: RatePackageSnapshot,
+    edited_rate_cells: pd.DataFrame,
+    diff: pd.DataFrame,
+    reason: str,
+    created_by: str,
+) -> tuple[int, int]:
+    raise NotImplementedError("manual revision SQL writer is implemented in the next step")
+
+
+def create_manual_revision(
+    engine,
+    config: ModelBuildConfig,
+    *,
+    parent: RatePackageSnapshot,
+    edited_rate_cells: pd.DataFrame,
+    reason: str,
+    created_by: str,
+) -> RatePackageRevisionResult:
+    reason = _required_text(reason, "reason")
+    created_by = _required_text(created_by, "created_by")
+
+    if parent.metadata.get("package_status") != "PUBLISHED":
+        raise ManualRevisionError("manual revisions require a PUBLISHED parent package")
+
+    diff = validate_rate_cell_edits(parent.rate_cells, edited_rate_cells)
+    rate_package_id, package_version = _write_manual_revision(
+        engine,
+        config,
+        parent,
+        edited_rate_cells,
+        diff,
+        reason,
+        created_by,
+    )
+
+    return RatePackageRevisionResult(
+        rate_package_id=int(rate_package_id),
+        package_version=int(package_version),
+        parent_rate_package_id=int(parent.metadata["rate_package_id"]),
+        changed_rate_cell_count=len(diff),
+        base_rate_changed=False,
+        diff_summary=diff,
+    )
 
 
 def _metadata_query(selector: RatePackageSelector):

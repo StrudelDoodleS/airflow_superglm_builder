@@ -4,6 +4,7 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import (
     DeploymentResult,
     RatePackageSelector,
+    RatePackageRevisionResult,
     RatePackageSnapshot,
 )
 from pricing_pipeline.publishing.publisher import ModelPublisher
@@ -129,3 +130,60 @@ def test_model_publisher_load_rate_package_delegates(monkeypatch):
 
     assert publisher.load_rate_package(selector) == expected
     assert calls == [(engine, config(), selector)]
+
+
+def test_model_publisher_create_manual_revision_validates_model_and_delegates(
+    monkeypatch,
+):
+    calls = []
+    engine = object()
+    publisher = ModelPublisher(engine, config())
+    parent = object()
+    edited_rate_cells = object()
+    expected = RatePackageRevisionResult(
+        rate_package_id=303,
+        package_version=5,
+        parent_rate_package_id=202,
+        changed_rate_cell_count=2,
+        base_rate_changed=False,
+        diff_summary=object(),
+    )
+
+    monkeypatch.setattr(
+        publisher,
+        "validate_registered_model",
+        lambda: calls.append(("validate",)) or 17,
+    )
+
+    def fake_create_manual_revision(engine_arg, config_arg, **kwargs):
+        calls.append(("create", engine_arg, config_arg, kwargs))
+        return expected
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.create_manual_revision",
+        fake_create_manual_revision,
+        raising=False,
+    )
+
+    result = publisher.create_manual_revision(
+        parent=parent,
+        edited_rate_cells=edited_rate_cells,
+        reason="pricing correction",
+        created_by="pricing-user",
+    )
+
+    assert result == expected
+    assert calls == [
+        ("validate",),
+        (
+            "create",
+            engine,
+            config(),
+            {
+                "parent": parent,
+                "edited_rate_cells": edited_rate_cells,
+                "reason": "pricing correction",
+                "created_by": "pricing-user",
+            },
+        ),
+    ]

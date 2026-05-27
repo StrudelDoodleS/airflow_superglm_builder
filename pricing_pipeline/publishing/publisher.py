@@ -2,16 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.publishing.deployment import deploy_rate_package
 from pricing_pipeline.publishing.lifecycle import (
     DeploymentResult,
     PublishResult,
+    RatePackageRevisionResult,
     RatePackageSelector,
     RatePackageSnapshot,
 )
-from pricing_pipeline.publishing.manual_revision import load_rate_package_snapshot
+from pricing_pipeline.publishing.manual_revision import (
+    create_manual_revision,
+    load_rate_package_snapshot,
+)
 from pricing_pipeline.publishing.model_registry import validate_registered_model
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.staging import stage_rating_export
@@ -32,6 +38,24 @@ class ModelPublisher:
 
     def load_rate_package(self, selector: RatePackageSelector) -> RatePackageSnapshot:
         return load_rate_package_snapshot(self.engine, self.config, selector)
+
+    def create_manual_revision(
+        self,
+        *,
+        parent: RatePackageSnapshot,
+        edited_rate_cells: pd.DataFrame,
+        reason: str,
+        created_by: str,
+    ) -> RatePackageRevisionResult:
+        self.validate_registered_model()
+        return create_manual_revision(
+            self.engine,
+            self.config,
+            parent=parent,
+            edited_rate_cells=edited_rate_cells,
+            reason=reason,
+            created_by=created_by,
+        )
 
     def deploy(
         self,

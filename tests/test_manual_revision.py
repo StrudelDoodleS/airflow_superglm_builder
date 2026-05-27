@@ -7,6 +7,8 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import RatePackageSelector, RatePackageSnapshot
 from pricing_pipeline.publishing.manual_revision import (
     ManualRevisionError,
+    _write_manual_revision,
+    create_manual_revision,
     diff_rate_cell_edits,
     load_rate_package_snapshot,
     validate_rate_cell_edits,
@@ -54,6 +56,17 @@ def rate_cells() -> pd.DataFrame:
             "multiplier": [1.10, 1.00, 0.85],
             "log_coefficient": [0.09531, 0.0, -0.16252],
         },
+    )
+
+
+def snapshot(**metadata_overrides) -> RatePackageSnapshot:
+    return RatePackageSnapshot(
+        metadata=metadata_row(**metadata_overrides),
+        terms=pd.DataFrame(),
+        rate_cells=rate_cells(),
+        cell_levels=pd.DataFrame(),
+        compiled_rate_cells=pd.DataFrame(),
+        compiled_1d_bands=pd.DataFrame(),
     )
 
 
@@ -399,3 +412,147 @@ def test_validate_rate_cell_edits_rejects_duplicate_cell_ids(frame_name):
 
     with pytest.raises(ManualRevisionError, match=f"duplicate cell_id values in {frame_name}"):
         validate_rate_cell_edits(original, edited)
+
+
+def test_write_manual_revision_default_is_not_implemented():
+    with pytest.raises(NotImplementedError, match="implemented in the next step"):
+        _write_manual_revision(
+            object(),
+            config(),
+            snapshot(),
+            rate_cells(),
+            pd.DataFrame(),
+            "pricing correction",
+            "pricing-user",
+        )
+
+
+def test_create_manual_revision_requires_reason(monkeypatch):
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(ManualRevisionError, match="reason is required"):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=snapshot(),
+            edited_rate_cells=rate_cells(),
+            reason="  ",
+            created_by="pricing-user",
+        )
+
+
+def test_create_manual_revision_requires_created_by(monkeypatch):
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(ManualRevisionError, match="created_by is required"):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=snapshot(),
+            edited_rate_cells=rate_cells(),
+            reason="pricing correction",
+            created_by="  ",
+        )
+
+
+def test_create_manual_revision_rejects_non_published_parent(monkeypatch):
+    edited = rate_cells()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(ManualRevisionError, match="PUBLISHED"):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=snapshot(package_status="DRAFT"),
+            edited_rate_cells=edited,
+            reason="pricing correction",
+            created_by="pricing-user",
+        )
+
+
+def test_create_manual_revision_returns_result_from_writer_and_diff(monkeypatch):
+    engine = object()
+    parent = snapshot(rate_package_id=202, package_status="PUBLISHED")
+    edited = parent.rate_cells.copy()
+    edited.loc[edited["cell_id"] == 44, "multiplier"] = 0.90
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    edited = edited.sort_values("cell_id").reset_index(drop=True)
+    calls = []
+
+    def fake_write_manual_revision(
+        engine_arg,
+        config_arg,
+        parent_arg,
+        edited_rate_cells_arg,
+        diff_arg,
+        reason_arg,
+        created_by_arg,
+    ):
+        calls.append(
+            (
+                engine_arg,
+                config_arg,
+                parent_arg,
+                edited_rate_cells_arg,
+                diff_arg.copy(),
+                reason_arg,
+                created_by_arg,
+            ),
+        )
+        return 303, 5
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        fake_write_manual_revision,
+    )
+
+    result = create_manual_revision(
+        engine,
+        config(),
+        parent=parent,
+        edited_rate_cells=edited,
+        reason="  pricing correction  ",
+        created_by="  pricing-user  ",
+    )
+
+    expected_diff = pd.DataFrame(
+        {
+            "cell_id": [31, 44],
+            "old_multiplier": [1.10, 0.85],
+            "new_multiplier": [1.25, 0.90],
+            "old_log_coefficient": [0.09531, -0.16252],
+        },
+    )
+    assert result.rate_package_id == 303
+    assert result.package_version == 5
+    assert result.parent_rate_package_id == 202
+    assert result.changed_rate_cell_count == 2
+    assert result.base_rate_changed is False
+    pd.testing.assert_frame_equal(result.diff_summary, expected_diff)
+    assert len(calls) == 1
+    (
+        engine_arg,
+        config_arg,
+        parent_arg,
+        edited_rate_cells_arg,
+        diff_arg,
+        reason_arg,
+        created_by_arg,
+    ) = calls[0]
+    assert engine_arg is engine
+    assert config_arg == config()
+    assert parent_arg is parent
+    pd.testing.assert_frame_equal(edited_rate_cells_arg, edited)
+    pd.testing.assert_frame_equal(diff_arg, expected_diff)
+    assert reason_arg == "pricing correction"
+    assert created_by_arg == "pricing-user"
