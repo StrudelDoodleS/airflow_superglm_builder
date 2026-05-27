@@ -1,7 +1,7 @@
 import pytest
 
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.publishing.lifecycle import RatePackageSelector
+from pricing_pipeline.publishing.lifecycle import DeploymentResult, RatePackageSelector
 from pricing_pipeline.publishing.publisher import ModelPublisher
 
 
@@ -45,3 +45,57 @@ def test_model_publisher_validate_registered_model_delegates(monkeypatch):
 
     assert publisher.validate_registered_model() == 17
     assert calls == [(engine, config())]
+
+
+def test_model_publisher_deploy_validates_model_and_delegates(monkeypatch):
+    calls = []
+    engine = object()
+    publisher = ModelPublisher(engine, config())
+    expected = DeploymentResult(
+        model_id=17,
+        deployment_slot="MTPL_FREQ_UAT",
+        previous_rate_package_id=101,
+        rate_package_id=202,
+        package_version=4,
+        deployed_by="airflow",
+        deployment_reason="approved",
+    )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.validate_model_on_engine",
+        lambda engine_arg, config_arg: calls.append(("validate", engine_arg, config_arg)) or 17,
+    )
+
+    def fake_deploy_rate_package(engine_arg, config_arg, **kwargs):
+        calls.append(("deploy", engine_arg, config_arg, kwargs))
+        return expected
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.deploy_rate_package",
+        fake_deploy_rate_package,
+        raising=False,
+    )
+
+    result = publisher.deploy(
+        package_version=4,
+        deployment_reason="approved",
+        deployed_by="airflow",
+    )
+
+    assert result == expected
+    assert calls == [
+        ("validate", engine, config()),
+        (
+            "deploy",
+            engine,
+            config(),
+            {
+                "rate_package_id": None,
+                "package_version": 4,
+                "deployment_slot": None,
+                "deployment_reason": "approved",
+                "deployed_by": "airflow",
+                "model_id": 17,
+            },
+        ),
+    ]

@@ -4,7 +4,8 @@ from pathlib import Path
 
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelExportResult
-from pricing_pipeline.publishing.lifecycle import PublishResult
+from pricing_pipeline.publishing.deployment import deploy_rate_package
+from pricing_pipeline.publishing.lifecycle import DeploymentResult, PublishResult
 from pricing_pipeline.publishing.model_registry import validate_registered_model
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.staging import stage_rating_export
@@ -22,6 +23,27 @@ class ModelPublisher:
 
     def validate_registered_model(self) -> int:
         return validate_model_on_engine(self.engine, self.config)
+
+    def deploy(
+        self,
+        *,
+        rate_package_id: int | None = None,
+        package_version: int | None = None,
+        deployment_reason: str,
+        deployed_by: str,
+        deployment_slot: str | None = None,
+    ) -> DeploymentResult:
+        model_id = self.validate_registered_model()
+        return deploy_rate_package(
+            self.engine,
+            self.config,
+            rate_package_id=rate_package_id,
+            package_version=package_version,
+            deployment_slot=deployment_slot,
+            deployment_reason=deployment_reason,
+            deployed_by=deployed_by,
+            model_id=model_id,
+        )
 
     def publish_training_export(self, export: ModelExportResult | dict) -> PublishResult:
         export_result = ModelExportResult.from_mapping(export)
