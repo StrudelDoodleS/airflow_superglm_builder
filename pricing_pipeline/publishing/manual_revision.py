@@ -70,20 +70,21 @@ def _equal_with_matching_nulls(left: pd.Series, right: pd.Series) -> pd.Series:
     return left.eq(right) | (left.isna() & right.isna())
 
 
-def _numeric_multiplier(
+def _numeric_rate_cell_column(
     frame_name: str,
-    multiplier: pd.Series,
+    column_name: str,
+    values: pd.Series,
     *,
     error_message: str | None = None,
 ) -> pd.Series:
-    numeric_multiplier = pd.to_numeric(multiplier, errors="coerce").astype("float64")
-    finite_multiplier = np.isfinite(numeric_multiplier.to_numpy())
-    if not finite_multiplier.all():
+    numeric_values = pd.to_numeric(values, errors="coerce").astype("float64")
+    finite_values = np.isfinite(numeric_values.to_numpy())
+    if not finite_values.all():
         raise ManualRevisionError(
             error_message
-            or f"{frame_name} multiplier values must be numeric finite numbers",
+            or f"{frame_name} {column_name} values must be numeric finite numbers",
         )
-    return numeric_multiplier
+    return numeric_values
 
 
 def diff_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
@@ -91,13 +92,20 @@ def diff_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd.Dat
     _require_columns("original", original, ("cell_id", "multiplier", "log_coefficient"))
     _require_columns("edited", edited, ("cell_id", "multiplier"))
     original_aligned, edited_aligned = _align_rate_cells_by_cell_id(original, edited)
-    original_multiplier = _numeric_multiplier(
+    original_multiplier = _numeric_rate_cell_column(
         "original",
+        "multiplier",
         original_aligned["multiplier"],
     )
-    edited_multiplier = _numeric_multiplier(
+    edited_multiplier = _numeric_rate_cell_column(
         "edited",
+        "multiplier",
         edited_aligned["multiplier"],
+    )
+    original_log_coefficient = _numeric_rate_cell_column(
+        "original",
+        "log_coefficient",
+        original_aligned["log_coefficient"],
     )
 
     changed = ~np.isclose(
@@ -112,10 +120,7 @@ def diff_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd.Dat
             "cell_id": original_aligned.loc[changed, "cell_id"].to_numpy(),
             "old_multiplier": original_multiplier.loc[changed].to_numpy(),
             "new_multiplier": edited_multiplier.loc[changed].to_numpy(),
-            "old_log_coefficient": original_aligned.loc[
-                changed,
-                "log_coefficient",
-            ].to_numpy(),
+            "old_log_coefficient": original_log_coefficient.loc[changed].to_numpy(),
         },
     )
 
@@ -138,8 +143,9 @@ def validate_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd
                 f"manual rate cell edits cannot change identity column {column}",
             )
 
-    edited_multiplier = _numeric_multiplier(
+    edited_multiplier = _numeric_rate_cell_column(
         "edited",
+        "multiplier",
         edited_aligned["multiplier"],
         error_message=(
             "edited multiplier values must be positive finite numbers for every rate cell"

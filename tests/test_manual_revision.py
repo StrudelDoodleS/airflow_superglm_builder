@@ -289,6 +289,34 @@ def test_diff_rate_cell_edits_returns_numeric_diff_for_decimal_and_string_change
     )
 
 
+def test_diff_rate_cell_edits_returns_numeric_log_coefficient_for_decimal_input():
+    original = rate_cells()
+    original["multiplier"] = [Decimal("1.10"), Decimal("1.00"), Decimal("0.85")]
+    original["log_coefficient"] = [
+        Decimal("0.09531"),
+        Decimal("0.0"),
+        Decimal("-0.16252"),
+    ]
+    edited = original.copy()
+    edited["multiplier"] = ["1.25", "1.00", "0.85"]
+
+    diff = diff_rate_cell_edits(original, edited)
+
+    assert pd.api.types.is_float_dtype(diff["old_log_coefficient"])
+    assert diff.loc[0, "old_log_coefficient"] == pytest.approx(0.09531)
+
+
+def test_diff_rate_cell_edits_rejects_non_numeric_original_log_coefficient():
+    original = rate_cells()
+    edited = original.copy()
+    original["log_coefficient"] = original["log_coefficient"].astype(object)
+    original.loc[original["cell_id"] == 31, "log_coefficient"] = "not-a-number"
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+
+    with pytest.raises(ManualRevisionError, match="original.*log_coefficient.*numeric"):
+        diff_rate_cell_edits(original, edited)
+
+
 def test_validate_rate_cell_edits_ignores_tiny_multiplier_roundtrip_delta():
     original = rate_cells()
     edited = original.copy()
