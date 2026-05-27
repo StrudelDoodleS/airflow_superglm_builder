@@ -284,7 +284,7 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
 
 
 def test_rating_package_loader_publishes_model_scoped_deployment_history():
-    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
         encoding="utf-8"
     )
 
@@ -298,7 +298,7 @@ def test_rating_package_loader_publishes_model_scoped_deployment_history():
 
 
 def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
-    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
         encoding="utf-8"
     )
 

@@ -277,7 +277,9 @@ def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages()
 
 
 def test_rating_package_loader_builds_package_as_draft_before_final_status():
-    loader = Path("scripts/load_staging_to_rating_package.py").read_text(encoding="utf-8")
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "requested_package_status = args.package_status" in loader
     assert '"package_status": "DRAFT"' in loader

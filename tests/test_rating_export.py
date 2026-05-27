@@ -17,7 +17,10 @@ from pricing_pipeline.publishing import lineage, rating_export, rating_package, 
 from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
+from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelSpec
+from pricing_pipeline.models.spec import ModelExportResult
+from pricing_pipeline.publishing.publisher import ModelPublisher
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model
 from pricing_models.mtpl_frequency.training import (
     FEATURE_COLUMNS,
@@ -443,6 +446,37 @@ def test_publish_rating_package_wrapper_returns_publish_result_without_pointer(m
     assert args.set_pointer is None
 
 
+def test_publish_rating_package_wrapper_preserves_legacy_pointer_api(monkeypatch):
+    captured = []
+
+    def fake_load(engine, args):
+        captured.append((engine, args))
+        args.package_version = 4
+        return 77
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
+        fake_load,
+    )
+    engine = object()
+
+    package_id = rating_package.publish_rating_package(
+        engine,
+        export_id="export-legacy",
+        pointer_name="MTPL_FREQ_UAT",
+        created_by="airflow",
+        package_status="DRAFT",
+    )
+
+    assert package_id == 77
+    assert captured[0][0] is engine
+    args = captured[0][1]
+    assert args.export_id == "export-legacy"
+    assert args.created_by == "airflow"
+    assert args.package_status == "DRAFT"
+    assert args.set_pointer == "MTPL_FREQ_UAT"
+
+
 def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch):
     captured = []
 
@@ -460,7 +494,7 @@ def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch)
     package_id = load_staging_to_rating_package.publish_rating_package(
         engine,
         export_id="export-2",
-        pointer_name=None,
+        pointer_name="MTPL_FREQ_UAT",
         created_by="python",
         package_status="DRAFT",
     )
@@ -469,9 +503,102 @@ def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch)
     assert captured[0][0] is engine
     args = captured[0][1]
     assert args.export_id == "export-2"
-    assert args.set_pointer is None
+    assert args.set_pointer == "MTPL_FREQ_UAT"
     assert args.created_by == "python"
     assert args.package_status == "DRAFT"
+
+
+def test_model_publisher_publish_training_export_uses_config_and_maps_result(
+    monkeypatch,
+    tmp_path: Path,
+):
+    calls = []
+    engine = object()
+    workbook_path = tmp_path / "rating_tables.xlsx"
+    config = ModelBuildConfig(
+        model_key="CONFIG_MODEL",
+        model_label="Config model",
+        target_name="ConfigTarget",
+        model_type="config_type",
+        deployment_slot="CONFIG_UAT",
+        default_package_status="PUBLISHED",
+    )
+    export = ModelExportResult(
+        model_id=17,
+        model_key="EXPORT_MODEL",
+        model_version="20260527",
+        model_type="export_type",
+        target_name="ExportTarget",
+        deployment_slot="EXPORT_UAT",
+        manifest_id="manifest-1",
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-05-27",
+        mlflow_run_id="mlflow-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(workbook_path),
+        effective_from="2026-05-27",
+        created_by="airflow",
+        package_status="DRAFT",
+    )
+
+    def fake_stage_rating_export(engine_arg, **kwargs):
+        calls.append(("stage", engine_arg, kwargs))
+
+    def fake_publish_rating_package(engine_arg, **kwargs):
+        calls.append(("publish", engine_arg, kwargs))
+        return PublishResult(
+            mlflow_run_id="",
+            export_id="export-1",
+            rate_package_id=42,
+            package_version=6,
+            rating_workbook_path="",
+        )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.stage_rating_export",
+        fake_stage_rating_export,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.publish_rating_package",
+        fake_publish_rating_package,
+    )
+
+    result = ModelPublisher(engine, config).publish_training_export(export)
+
+    assert result == PublishResult(
+        mlflow_run_id="mlflow-1",
+        export_id="export-1",
+        rate_package_id=42,
+        package_version=6,
+        rating_workbook_path=str(workbook_path),
+    )
+    assert calls == [
+        (
+            "stage",
+            engine,
+            {
+                "workbook_path": workbook_path,
+                "export_id": "export-1",
+                "model_name": "CONFIG_MODEL",
+                "model_version": "20260527",
+                "target_name": "ConfigTarget",
+                "model_type": "config_type",
+                "effective_from": "2026-05-27",
+                "created_by": "airflow",
+                "replace": True,
+            },
+        ),
+        (
+            "publish",
+            engine,
+            {
+                "export_id": "export-1",
+                "created_by": "airflow",
+                "package_status": "PUBLISHED",
+            },
+        ),
+    ]
 
 
 def test_record_model_run_uses_parameterized_sql_with_expected_params():
