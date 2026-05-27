@@ -5,7 +5,9 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import RatePackageSelector, RatePackageSnapshot
 from pricing_pipeline.publishing.manual_revision import (
     ManualRevisionError,
+    diff_rate_cell_edits,
     load_rate_package_snapshot,
+    validate_rate_cell_edits,
 )
 
 
@@ -36,6 +38,21 @@ def metadata_row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+def rate_cells() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "cell_id": [31, 29, 44],
+            "term_id": [11, 11, 12],
+            "cell_key_text": ["A", "B", "C"],
+            "cell_key_digest": ["digest-a", "digest-b", "digest-c"],
+            "is_reference": [False, True, False],
+            "is_default": [False, False, True],
+            "multiplier": [1.10, 1.00, 0.85],
+            "log_coefficient": [0.09531, 0.0, -0.16252],
+        },
+    )
 
 
 class ReadSqlFake:
@@ -184,3 +201,120 @@ def test_load_rate_package_snapshot_returns_all_tables_using_resolved_package_id
     assert "JOIN pricing.PRICING_TERM" in subsequent_calls[2][0]
     assert "FROM pricing.PRICING_COMPILED_RATE_CELL" in subsequent_calls[3][0]
     assert "FROM pricing.PRICING_COMPILED_1D_RATE_BAND" in subsequent_calls[4][0]
+
+
+def test_diff_rate_cell_edits_returns_changed_multipliers_in_original_order():
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 44, "multiplier"] = 0.90
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    edited = edited.sort_values("cell_id").reset_index(drop=True)
+
+    diff = diff_rate_cell_edits(original, edited)
+
+    expected = pd.DataFrame(
+        {
+            "cell_id": [31, 44],
+            "old_multiplier": [1.10, 0.85],
+            "new_multiplier": [1.25, 0.90],
+            "old_log_coefficient": [0.09531, -0.16252],
+        },
+    )
+    pd.testing.assert_frame_equal(diff, expected)
+
+
+def test_validate_rate_cell_edits_returns_stable_diff_shape():
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 29, "multiplier"] = 1.15
+
+    diff = validate_rate_cell_edits(original, edited)
+
+    assert list(diff.columns) == [
+        "cell_id",
+        "old_multiplier",
+        "new_multiplier",
+        "old_log_coefficient",
+    ]
+    pd.testing.assert_frame_equal(
+        diff,
+        pd.DataFrame(
+            {
+                "cell_id": [29],
+                "old_multiplier": [1.00],
+                "new_multiplier": [1.15],
+                "old_log_coefficient": [0.0],
+            },
+        ),
+    )
+
+
+def test_validate_rate_cell_edits_rejects_empty_diff():
+    original = rate_cells()
+
+    with pytest.raises(ManualRevisionError, match="no manual rate cell changes"):
+        validate_rate_cell_edits(original, original.copy())
+
+
+def test_validate_rate_cell_edits_rejects_identity_column_change():
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 31, "term_id"] = 99
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+
+    with pytest.raises(ManualRevisionError, match="term_id"):
+        validate_rate_cell_edits(original, edited)
+
+
+@pytest.mark.parametrize("multiplier", [0.0, -0.5])
+def test_validate_rate_cell_edits_rejects_non_positive_multiplier(multiplier):
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = multiplier
+
+    with pytest.raises(ManualRevisionError, match="positive finite numbers"):
+        validate_rate_cell_edits(original, edited)
+
+
+@pytest.mark.parametrize("multiplier", [float("nan"), float("inf"), float("-inf")])
+def test_validate_rate_cell_edits_rejects_non_finite_multiplier(multiplier):
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = multiplier
+
+    with pytest.raises(ManualRevisionError, match="positive finite numbers"):
+        validate_rate_cell_edits(original, edited)
+
+
+@pytest.mark.parametrize(
+    ("cell_ids", "message"),
+    [
+        ([31, 29], "same cell_id values"),
+        ([31, 29, 45], "same cell_id values"),
+    ],
+)
+def test_validate_rate_cell_edits_rejects_missing_or_extra_cell_ids(cell_ids, message):
+    original = rate_cells()
+    edited = original[original["cell_id"].isin(cell_ids)].copy()
+    if 45 in cell_ids:
+        extra = original.iloc[[0]].copy()
+        extra["cell_id"] = 45
+        edited = pd.concat([edited, extra], ignore_index=True)
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+
+    with pytest.raises(ManualRevisionError, match=message):
+        validate_rate_cell_edits(original, edited)
+
+
+@pytest.mark.parametrize("frame_name", ["original", "edited"])
+def test_validate_rate_cell_edits_rejects_duplicate_cell_ids(frame_name):
+    original = rate_cells()
+    edited = original.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    if frame_name == "original":
+        original = pd.concat([original, original.iloc[[0]]], ignore_index=True)
+    else:
+        edited = pd.concat([edited, edited.iloc[[0]]], ignore_index=True)
+
+    with pytest.raises(ManualRevisionError, match=f"duplicate cell_id values in {frame_name}"):
+        validate_rate_cell_edits(original, edited)

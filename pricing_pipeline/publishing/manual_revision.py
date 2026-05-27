@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
@@ -8,7 +9,122 @@ from pricing_pipeline.publishing.lifecycle import RatePackageSelector, RatePacka
 
 
 class ManualRevisionError(RuntimeError):
-    """Raised when a manual rate package revision cannot be loaded."""
+    """Raised when a manual rate package revision cannot be loaded or validated."""
+
+
+_IDENTITY_RATE_CELL_COLUMNS = (
+    "term_id",
+    "cell_key_text",
+    "cell_key_digest",
+    "is_reference",
+    "is_default",
+)
+
+
+def _require_columns(frame_name: str, frame: pd.DataFrame, columns: tuple[str, ...]) -> None:
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise ManualRevisionError(
+            f"{frame_name} rate cell frame is missing required column(s): "
+            f"{', '.join(missing)}",
+        )
+
+
+def _validate_cell_id_key(frame_name: str, frame: pd.DataFrame) -> None:
+    _require_columns(frame_name, frame, ("cell_id",))
+    if frame["cell_id"].isna().any():
+        raise ManualRevisionError(f"{frame_name} rate cell frame contains null cell_id values")
+
+    duplicates = frame.loc[frame["cell_id"].duplicated(keep=False), "cell_id"]
+    if not duplicates.empty:
+        duplicate_values = ", ".join(str(value) for value in pd.unique(duplicates))
+        raise ManualRevisionError(
+            f"duplicate cell_id values in {frame_name} rate cell frame: {duplicate_values}",
+        )
+
+
+def _align_rate_cells_by_cell_id(
+    original: pd.DataFrame,
+    edited: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    _validate_cell_id_key("original", original)
+    _validate_cell_id_key("edited", edited)
+
+    original_cell_ids = set(original["cell_id"])
+    edited_cell_ids = set(edited["cell_id"])
+    if original_cell_ids != edited_cell_ids:
+        raise ManualRevisionError("edited frame must contain the same cell_id values as original")
+
+    original_aligned = original.reset_index(drop=True).copy()
+    edited_aligned = (
+        edited.set_index("cell_id", drop=False)
+        .loc[original_aligned["cell_id"].to_list()]
+        .reset_index(drop=True)
+    )
+    return original_aligned, edited_aligned
+
+
+def _equal_with_matching_nulls(left: pd.Series, right: pd.Series) -> pd.Series:
+    return left.eq(right) | (left.isna() & right.isna())
+
+
+def diff_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
+    """Return changed manual multiplier edits aligned one-to-one by cell_id."""
+    _require_columns("original", original, ("cell_id", "multiplier", "log_coefficient"))
+    _require_columns("edited", edited, ("cell_id", "multiplier"))
+    original_aligned, edited_aligned = _align_rate_cells_by_cell_id(original, edited)
+
+    changed = ~_equal_with_matching_nulls(
+        original_aligned["multiplier"],
+        edited_aligned["multiplier"],
+    )
+
+    return pd.DataFrame(
+        {
+            "cell_id": original_aligned.loc[changed, "cell_id"].to_numpy(),
+            "old_multiplier": original_aligned.loc[changed, "multiplier"].to_numpy(),
+            "new_multiplier": edited_aligned.loc[changed, "multiplier"].to_numpy(),
+            "old_log_coefficient": original_aligned.loc[
+                changed,
+                "log_coefficient",
+            ].to_numpy(),
+        },
+    )
+
+
+def validate_rate_cell_edits(original: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
+    """Validate a manually edited rate cell frame and return changed multipliers."""
+    _require_columns("original", original, ("cell_id", "multiplier", "log_coefficient"))
+    _require_columns("edited", edited, ("cell_id", "multiplier"))
+    original_aligned, edited_aligned = _align_rate_cells_by_cell_id(original, edited)
+
+    for column in _IDENTITY_RATE_CELL_COLUMNS:
+        if column not in original_aligned.columns or column not in edited_aligned.columns:
+            continue
+        changed_identity = ~_equal_with_matching_nulls(
+            original_aligned[column],
+            edited_aligned[column],
+        )
+        if changed_identity.any():
+            raise ManualRevisionError(
+                f"manual rate cell edits cannot change identity column {column}",
+            )
+
+    edited_multiplier = pd.to_numeric(edited_aligned["multiplier"], errors="coerce")
+    finite_multiplier = pd.Series(
+        np.isfinite(edited_multiplier.to_numpy(dtype=float)),
+        index=edited_multiplier.index,
+    )
+    valid_multiplier = finite_multiplier & edited_multiplier.gt(0)
+    if not valid_multiplier.all():
+        raise ManualRevisionError(
+            "edited multiplier values must be positive finite numbers for every rate cell",
+        )
+
+    diff = diff_rate_cell_edits(original_aligned, edited_aligned)
+    if diff.empty:
+        raise ManualRevisionError("no manual rate cell changes found")
+    return diff
 
 
 def _metadata_query(selector: RatePackageSelector):
