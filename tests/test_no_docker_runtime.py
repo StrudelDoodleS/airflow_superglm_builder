@@ -136,6 +136,62 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     assert "ModuleNotFoundError" not in result.stderr
 
 
+def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
+    from pricing_models.mtpl_frequency.spec import MODEL_CONFIG
+    from scripts import run_pipeline_no_airflow
+
+    engine = object()
+    calls = []
+    monkeypatch.setattr(
+        run_pipeline_no_airflow,
+        "parse_args",
+        lambda: types.SimpleNamespace(
+            ensure_database=False,
+            skip_schema_apply=True,
+            skip_raw_load=True,
+            replace_raw=False,
+            manifest_id="manifest-1",
+            model_key="MTPL_FREQ",
+            n_splits=5,
+            random_state=42,
+            dag_id="no_docker_local",
+            airflow_run_id="manual__1",
+            logical_date="2026-05-27",
+            created_by="no_docker",
+        ),
+    )
+    monkeypatch.setattr(run_pipeline_no_airflow.os, "chdir", lambda path: None)
+    monkeypatch.setattr(run_pipeline_no_airflow, "load_env", lambda: None)
+    monkeypatch.setattr(run_pipeline_no_airflow, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        run_pipeline_no_airflow,
+        "create_dataset_manifest",
+        lambda engine_arg, **kwargs: calls.append(("manifest", engine_arg, kwargs))
+        or kwargs["manifest_id"],
+    )
+
+    def fake_run_training_export_publish(engine_arg, **kwargs):
+        calls.append(("publish", engine_arg, kwargs))
+        return {"rate_package_id": "123", "package_version": "4"}
+
+    monkeypatch.setattr(
+        run_pipeline_no_airflow,
+        "run_training_export_publish",
+        fake_run_training_export_publish,
+    )
+
+    run_pipeline_no_airflow.main()
+
+    publish_call = next(call for call in calls if call[0] == "publish")
+    assert publish_call[1] is engine
+    assert publish_call[2]["model_config"] == MODEL_CONFIG
+    assert json.loads(capsys.readouterr().out) == {
+        "manifest_id": "manifest-1",
+        "rate_package_id": "123",
+        "package_version": "4",
+    }
+
+
 def test_no_docker_service_picker_lists_available_services_without_pythonpath():
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)

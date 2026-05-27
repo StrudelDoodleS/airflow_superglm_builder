@@ -26,6 +26,12 @@ def test_model_specs_are_available_from_registry():
     assert get_model_spec("MTPL_FREQ").model_key == "MTPL_FREQ"
 
 
+def test_model_configs_are_available_from_registry():
+    from pricing_models.registry import get_model_config
+
+    assert get_model_config("MTPL_FREQ") == MODEL_CONFIG
+
+
 def test_mtpl_frequency_model_config_matches_spec_identity():
     assert MODEL_CONFIG.model_key == MODEL_SPEC.model_key
     assert MODEL_CONFIG.model_label == MODEL_SPEC.model_label

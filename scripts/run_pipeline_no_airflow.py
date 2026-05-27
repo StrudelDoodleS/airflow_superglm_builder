@@ -17,7 +17,7 @@ from pricing_pipeline.infra.db import ensure_database  # noqa: E402
 from pricing_pipeline.data.manifest import create_dataset_manifest, new_manifest_id  # noqa: E402
 from pricing_pipeline.infra.migrations import apply_migrations  # noqa: E402
 from pricing_pipeline.orchestration.pipeline import run_training_export_publish  # noqa: E402
-from pricing_models.registry import get_model_spec, model_keys  # noqa: E402
+from pricing_models.registry import get_model_config, get_model_spec, model_keys  # noqa: E402
 
 
 def _schema_dir() -> Path:
@@ -86,6 +86,7 @@ def main() -> None:
 
     engine = get_engine()
     model_spec = get_model_spec(args.model_key)
+    model_config = get_model_config(args.model_key)
 
     if not args.skip_schema_apply:
         applied = apply_migrations(engine, _schema_dir())
@@ -117,6 +118,7 @@ def main() -> None:
         airflow_run_id=airflow_run_id,
         logical_date=logical_date,
         spec=model_spec,
+        model_config=model_config,
         created_by=args.created_by,
     )
     print(json.dumps({"manifest_id": created_manifest_id, **result}, indent=2))
