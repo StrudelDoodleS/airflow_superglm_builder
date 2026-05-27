@@ -532,6 +532,39 @@ def test_create_manual_revision_rejects_missing_parent_metadata_before_writer(
         )
 
 
+@pytest.mark.parametrize(
+    "metadata_overrides",
+    [
+        {"model_name": "OTHER_MODEL"},
+        {"model_key": "OTHER_MODEL"},
+    ],
+)
+def test_create_manual_revision_rejects_parent_model_mismatch_before_writer(
+    monkeypatch,
+    metadata_overrides,
+):
+    parent = snapshot(**metadata_overrides)
+    edited = parent.rate_cells.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args, **kwargs: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(
+        ManualRevisionError,
+        match="parent model.*configured model.*mismatch",
+    ):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=parent,
+            edited_rate_cells=edited,
+            reason="pricing correction",
+            created_by="pricing-user",
+        )
+
+
 def test_create_manual_revision_returns_result_from_writer_and_diff(monkeypatch):
     engine = object()
     parent = snapshot(rate_package_id=202, package_status="PUBLISHED")

@@ -196,6 +196,23 @@ def _validate_revision_parent_metadata(parent: RatePackageSnapshot) -> None:
         )
 
 
+def _validate_revision_parent_model(
+    config: ModelBuildConfig,
+    parent: RatePackageSnapshot,
+) -> None:
+    configured_model_key = config.model_key
+    for metadata_key in ("model_name", "model_key"):
+        if metadata_key not in parent.metadata:
+            continue
+        parent_model = str(parent.metadata[metadata_key]).strip()
+        if parent_model != configured_model_key:
+            raise ManualRevisionError(
+                "parent model/configured model mismatch: "
+                f"parent {metadata_key}={parent_model!r} does not match "
+                f"configured model_key={configured_model_key!r}",
+            )
+
+
 def _write_manual_revision(
     engine,
     config: ModelBuildConfig,
@@ -221,6 +238,7 @@ def create_manual_revision(
     reason = _required_text(reason, "reason")
     created_by = _required_text(created_by, "created_by")
     _validate_revision_parent_metadata(parent)
+    _validate_revision_parent_model(config, parent)
 
     if parent.metadata.get("package_status") != "PUBLISHED":
         raise ManualRevisionError("manual revisions require a PUBLISHED parent package")
