@@ -18,6 +18,8 @@ def compare_prediction_vectors(
         raise ValueError("top_n must be a non-negative integer")
     if len(before) != len(after):
         raise ValueError("before and after predictions must have the same length")
+    if len(before) == 0:
+        raise ValueError("before and after predictions must not be empty")
 
     before_values = _numeric_prediction_series(before, "before")
     after_values = _numeric_prediction_series(after, "after")

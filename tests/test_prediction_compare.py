@@ -48,6 +48,11 @@ def test_compare_prediction_vectors_rejects_length_mismatch():
         compare_prediction_vectors(before, after)
 
 
+def test_compare_prediction_vectors_rejects_empty_vectors():
+    with pytest.raises(ValueError, match="must not be empty"):
+        compare_prediction_vectors(pd.Series([], dtype="float64"), pd.Series([], dtype="float64"))
+
+
 def test_compare_prediction_vectors_treats_zero_baseline_relative_change_as_zero():
     before = pd.Series([0.0, -4.0, 2.0])
     after = pd.Series([5.0, -2.0, 1.0])
