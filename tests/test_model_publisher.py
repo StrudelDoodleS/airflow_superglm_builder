@@ -1,7 +1,11 @@
 import pytest
 
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.publishing.lifecycle import DeploymentResult, RatePackageSelector
+from pricing_pipeline.publishing.lifecycle import (
+    DeploymentResult,
+    RatePackageSelector,
+    RatePackageSnapshot,
+)
 from pricing_pipeline.publishing.publisher import ModelPublisher
 
 
@@ -99,3 +103,29 @@ def test_model_publisher_deploy_validates_model_and_delegates(monkeypatch):
             },
         ),
     ]
+
+
+def test_model_publisher_load_rate_package_delegates(monkeypatch):
+    calls = []
+    engine = object()
+    publisher = ModelPublisher(engine, config())
+    selector = RatePackageSelector(rate_package_id=123)
+    expected = RatePackageSnapshot(
+        metadata={"rate_package_id": 123},
+        terms=object(),
+        rate_cells=object(),
+        cell_levels=object(),
+        compiled_rate_cells=object(),
+        compiled_1d_bands=object(),
+    )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.load_rate_package_snapshot",
+        lambda engine_arg, config_arg, selector_arg: calls.append(
+            (engine_arg, config_arg, selector_arg),
+        )
+        or expected,
+    )
+
+    assert publisher.load_rate_package(selector) == expected
+    assert calls == [(engine, config(), selector)]
