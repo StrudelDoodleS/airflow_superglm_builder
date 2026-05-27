@@ -1,3 +1,5 @@
+import pytest
+
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.publishing.lifecycle import RatePackageSelector
 from pricing_pipeline.publishing.publisher import ModelPublisher
@@ -25,6 +27,10 @@ def test_model_publisher_stores_engine_and_config():
 def test_rate_package_selector_requires_one_selector():
     assert RatePackageSelector(rate_package_id=123).rate_package_id == 123
     assert RatePackageSelector(package_version=7).package_version == 7
+    with pytest.raises(ValueError):
+        RatePackageSelector()
+    with pytest.raises(ValueError):
+        RatePackageSelector(rate_package_id=123, package_version=7)
 
 
 def test_model_publisher_validate_registered_model_delegates(monkeypatch):
