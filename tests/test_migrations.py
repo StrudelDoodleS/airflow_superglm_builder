@@ -168,6 +168,20 @@ def test_rate_package_version_guard_migration_adds_unique_model_version_index():
     assert "UX_PRICING_RATE_PACKAGE_MODEL_VERSION" in migration
     assert "PRICING_RATE_PACKAGE(model_id, package_version)" in migration
     assert "WHERE model_id IS NOT NULL" in migration
+    assert "UX_PRICING_RATE_PACKAGE_MODEL_PACKAGE_ID" in migration
+    assert "PRICING_RATE_PACKAGE(model_id, rate_package_id)" in migration
+    assert "FK_MODEL_DEPLOYMENT_MODEL_PACKAGE" in migration
+    assert "FOREIGN KEY (model_id, rate_package_id)" in migration
+
+
+def test_deploy_guard_migration_blocks_unpublished_or_mismatched_packages():
+    migration = Path("db/migrations/V016__rate_package_version_and_deploy_guards.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD" in migration
+    assert "package_status <> 'PUBLISHED'" in migration
+    assert "rate package deployments must reference PUBLISHED packages" in migration
 
 
 def test_package_writer_allocates_version_under_lock():
@@ -511,6 +525,9 @@ def test_full_useful_tables_reference_ddl_documents_immutability_triggers():
     assert "TR_FEATURE_LEVEL_IMMUTABLE_WRITE" in ddl
     assert "TR_COMPILED_RATE_CELL_IMMUTABLE_WRITE" in ddl
     assert "TR_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE" in ddl
+    assert "TR_MODEL_DEPLOYMENT_PACKAGE_GUARD" in ddl
     assert "package_status <> 'DRAFT'" in ddl
+    assert "package_status <> 'PUBLISHED'" in ddl
     assert "MODEL_DEPLOYMENT" in ddl
     assert "THROW 51000" in ddl
+    assert "THROW 51001" in ddl

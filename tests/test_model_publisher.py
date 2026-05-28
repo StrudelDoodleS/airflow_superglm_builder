@@ -2,12 +2,15 @@ import pytest
 import pandas as pd
 
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.publishing.lifecycle import (
     DeploymentResult,
+    PublishResult,
     RatePackageSelector,
     RatePackageRevisionResult,
     RatePackageSnapshot,
 )
+from pricing_pipeline.publishing.model_registry import ModelRegistryError
 from pricing_pipeline.publishing.publisher import ModelPublisher
 
 
@@ -221,3 +224,106 @@ def test_model_publisher_compare_prediction_vectors_delegates(monkeypatch):
     assert calls[0]["before"] is before
     assert calls[0]["after"] is after
     assert calls[0]["top_n"] == 3
+
+
+def test_model_publisher_publish_training_export_rejects_mismatched_export_identity(
+    tmp_path,
+    monkeypatch,
+):
+    engine = object()
+    export = ModelExportResult(
+        model_id=17,
+        model_key="OTHER_MODEL",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-05-27",
+        mlflow_run_id="mlflow-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+    )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.stage_rating_export",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.publish_rating_package",
+        lambda *args, **kwargs: PublishResult(
+            mlflow_run_id="",
+            export_id="export-1",
+            rate_package_id=42,
+            package_version=6,
+            rating_workbook_path="",
+        ),
+    )
+
+    with pytest.raises(ModelRegistryError, match="model_key"):
+        ModelPublisher(engine, config()).publish_training_export(export)
+
+
+def test_model_publisher_publish_training_export_validates_and_delegates(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+    engine = object()
+    export = ModelExportResult(
+        model_id=17,
+        model_key="MTPL_FREQ",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-05-27",
+        mlflow_run_id="mlflow-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+    )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.validate_model_on_engine",
+        lambda engine_arg, config_arg: calls.append(("validate", engine_arg, config_arg)) or 17,
+    )
+
+    def fake_stage_rating_export(engine_arg, **kwargs):
+        calls.append(("stage", engine_arg, kwargs))
+
+    def fake_publish_rating_package(engine_arg, **kwargs):
+        calls.append(("publish", engine_arg, kwargs))
+        return PublishResult(
+            mlflow_run_id="",
+            export_id="export-1",
+            rate_package_id=42,
+            package_version=6,
+            rating_workbook_path="",
+        )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.stage_rating_export",
+        fake_stage_rating_export,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.publish_rating_package",
+        fake_publish_rating_package,
+    )
+
+    result = ModelPublisher(engine, config()).publish_training_export(export)
+
+    assert result.rate_package_id == 42
+    assert calls[0] == ("validate", engine, config())

@@ -476,6 +476,27 @@ CREATE UNIQUE INDEX UX_MODEL_DEPLOYMENT_CURRENT
 ON pricing.MODEL_DEPLOYMENT(model_id, deployment_slot)
 WHERE effective_to_ts IS NULL;
 
+CREATE OR ALTER TRIGGER pricing.TR_MODEL_DEPLOYMENT_PACKAGE_GUARD
+ON pricing.MODEL_DEPLOYMENT
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM inserted d
+        LEFT JOIN pricing.RATE_PACKAGE p
+            ON p.rate_package_id = d.rate_package_id
+           AND p.model_id = d.model_id
+        WHERE p.rate_package_id IS NULL
+           OR p.package_status <> 'PUBLISHED'
+    )
+    BEGIN
+        THROW 51001, 'rate package deployments must reference PUBLISHED packages for the same model_id.', 1;
+    END;
+END;
+
 CREATE OR ALTER VIEW pricing.V_CURRENT_RATE_PACKAGE AS
 SELECT
     d.deployment_id,

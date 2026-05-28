@@ -1,5 +1,35 @@
+from pathlib import Path
+
+import pytest
+
 from pricing_pipeline.publishing.lifecycle import PublishResult
+from pricing_pipeline.publishing.package_writer import load_staging_to_rating_package
 from pricing_pipeline.publishing.package_writer import publish_rating_package
+
+
+def test_package_writer_rejects_legacy_pointer_deployment():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": "MTPL_FREQ_UAT",
+        },
+    )()
+
+    with pytest.raises(ValueError, match="deploy"):
+        load_staging_to_rating_package(object(), args)
+
+
+def test_package_writer_does_not_write_deployment_tables_during_publish():
+    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "PRICING_MODEL_DEPLOYMENT" not in writer
+    assert "PRICING_PACKAGE_POINTER" not in writer
 
 
 def test_publish_rating_package_builds_args_without_deployment_pointer(monkeypatch):

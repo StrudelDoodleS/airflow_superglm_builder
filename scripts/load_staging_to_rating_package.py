@@ -20,7 +20,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--export-id", required=True)
     p.add_argument("--created-by", default="python")
     p.add_argument("--package-status", default="DRAFT")
-    p.add_argument("--set-pointer", default=None)
     return p.parse_args()
 
 
@@ -28,15 +27,20 @@ def publish_rating_package(
     engine,
     *,
     export_id: str,
-    pointer_name: str | None,
+    pointer_name: str | None = None,
     created_by: str = "python",
     package_status: str = "DRAFT",
 ) -> int:
+    if pointer_name is not None:
+        raise ValueError(
+            "package publish no longer deploys rate packages; publish the package "
+            "first, then deploy it with ModelPublisher.deploy or the deploy DAG"
+        )
     args = argparse.Namespace(
         export_id=export_id,
         created_by=created_by,
         package_status=package_status,
-        set_pointer=pointer_name,
+        set_pointer=None,
     )
     return load_staging_to_rating_package(engine, args)
 
@@ -48,8 +52,6 @@ def main() -> None:
 
     print(f"rate_package_id={rate_package_id}")
     print(f"package_version={args.package_version}")
-    if args.set_pointer:
-        print(f"pointer={args.set_pointer}")
 
 
 if __name__ == "__main__":

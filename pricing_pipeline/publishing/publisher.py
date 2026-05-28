@@ -19,10 +19,50 @@ from pricing_pipeline.publishing.manual_revision import (
     create_manual_revision,
     load_rate_package_snapshot,
 )
-from pricing_pipeline.publishing.model_registry import validate_registered_model
+from pricing_pipeline.publishing.model_registry import (
+    ModelRegistryError,
+    validate_registered_model,
+)
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.prediction_compare import compare_prediction_vectors
 from pricing_pipeline.publishing.staging import stage_rating_export
+
+
+def _validate_export_matches_config(
+    export_result: ModelExportResult,
+    config: ModelBuildConfig,
+    *,
+    model_id: int,
+) -> None:
+    mismatches: list[str] = []
+    if int(export_result.model_id) != int(model_id):
+        mismatches.append(
+            f"model_id export={export_result.model_id!r} config={model_id!r}"
+        )
+    if export_result.model_key != config.model_key:
+        mismatches.append(
+            f"model_key export={export_result.model_key!r} config={config.model_key!r}"
+        )
+    if export_result.target_name != config.target_name:
+        mismatches.append(
+            f"target_name export={export_result.target_name!r} "
+            f"config={config.target_name!r}"
+        )
+    if export_result.model_type != config.model_type:
+        mismatches.append(
+            f"model_type export={export_result.model_type!r} "
+            f"config={config.model_type!r}"
+        )
+    if export_result.deployment_slot != config.deployment_slot:
+        mismatches.append(
+            f"deployment_slot export={export_result.deployment_slot!r} "
+            f"config={config.deployment_slot!r}"
+        )
+
+    if mismatches:
+        raise ModelRegistryError(
+            "training export does not match model config: " + "; ".join(mismatches)
+        )
 
 
 def validate_model_on_engine(engine, config: ModelBuildConfig) -> int:
@@ -91,6 +131,12 @@ class ModelPublisher:
 
     def publish_training_export(self, export: ModelExportResult | dict) -> PublishResult:
         export_result = ModelExportResult.from_mapping(export)
+        model_id = self.validate_registered_model()
+        _validate_export_matches_config(
+            export_result,
+            self.config,
+            model_id=model_id,
+        )
         stage_rating_export(
             self.engine,
             workbook_path=Path(export_result.rating_workbook_path),

@@ -447,35 +447,30 @@ def test_publish_rating_package_wrapper_returns_publish_result_without_pointer(m
     assert args.set_pointer is None
 
 
-def test_publish_rating_package_wrapper_preserves_legacy_pointer_api(monkeypatch):
-    captured = []
-
-    def fake_load(engine, args):
-        captured.append((engine, args))
-        args.package_version = 4
-        return 77
-
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
-        fake_load,
-    )
+def test_publish_rating_package_wrapper_rejects_legacy_pointer_api():
     engine = object()
 
-    package_id = rating_package.publish_rating_package(
-        engine,
-        export_id="export-legacy",
-        pointer_name="MTPL_FREQ_UAT",
-        created_by="airflow",
-        package_status="DRAFT",
-    )
+    with pytest.raises(ValueError, match="deploy"):
+        rating_package.publish_rating_package(
+            engine,
+            export_id="export-legacy",
+            pointer_name="MTPL_FREQ_UAT",
+            created_by="airflow",
+            package_status="DRAFT",
+        )
 
-    assert package_id == 77
-    assert captured[0][0] is engine
-    args = captured[0][1]
-    assert args.export_id == "export-legacy"
-    assert args.created_by == "airflow"
-    assert args.package_status == "DRAFT"
-    assert args.set_pointer == "MTPL_FREQ_UAT"
+
+def test_publish_script_callable_rejects_legacy_pointer_api():
+    engine = object()
+
+    with pytest.raises(ValueError, match="deploy"):
+        load_staging_to_rating_package.publish_rating_package(
+            engine,
+            export_id="export-2",
+            pointer_name="MTPL_FREQ_UAT",
+            created_by="python",
+            package_status="DRAFT",
+        )
 
 
 def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch):
@@ -495,7 +490,6 @@ def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch)
     package_id = load_staging_to_rating_package.publish_rating_package(
         engine,
         export_id="export-2",
-        pointer_name="MTPL_FREQ_UAT",
         created_by="python",
         package_status="DRAFT",
     )
@@ -504,7 +498,7 @@ def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch)
     assert captured[0][0] is engine
     args = captured[0][1]
     assert args.export_id == "export-2"
-    assert args.set_pointer == "MTPL_FREQ_UAT"
+    assert args.set_pointer is None
     assert args.created_by == "python"
     assert args.package_status == "DRAFT"
 
@@ -526,11 +520,11 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
     )
     export = ModelExportResult(
         model_id=17,
-        model_key="EXPORT_MODEL",
+        model_key="CONFIG_MODEL",
         model_version="20260527",
-        model_type="export_type",
-        target_name="ExportTarget",
-        deployment_slot="EXPORT_UAT",
+        model_type="config_type",
+        target_name="ConfigTarget",
+        deployment_slot="CONFIG_UAT",
         manifest_id="manifest-1",
         dag_id="dag",
         airflow_run_id="scheduled__2026-05-27",
@@ -556,6 +550,10 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
             rating_workbook_path="",
         )
 
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.publisher.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
     monkeypatch.setattr(
         "pricing_pipeline.publishing.publisher.stage_rating_export",
         fake_stage_rating_export,

@@ -283,18 +283,19 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
 
 
-def test_rating_package_loader_publishes_model_scoped_deployment_history():
-    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
+def test_deploy_api_publishes_model_scoped_deployment_history():
+    deployer = Path("pricing_pipeline/publishing/deployment.py").read_text(
         encoding="utf-8"
     )
 
-    assert "model_id" in loader
-    assert "PRICING_MODEL_DEPLOYMENT" in loader
-    assert "effective_to_ts = SYSUTCDATETIME()" in loader
-    assert "deployment_slot" in loader
-    assert "PRICING_PACKAGE_POINTER" in loader
-    assert "pointer_name = src.pointer_name" in loader
-    assert "model_id = src.model_id" in loader
+    assert "model_id" in deployer
+    assert "PRICING_MODEL_DEPLOYMENT" in deployer
+    assert "effective_to_ts = SYSUTCDATETIME()" in deployer
+    assert "deployment_slot" in deployer
+    assert "PRICING_PACKAGE_POINTER" in deployer
+    assert "pointer_name = src.pointer_name" in deployer
+    assert "model_id = src.model_id" in deployer
+    assert "deployment_note" in deployer
 
 
 def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():

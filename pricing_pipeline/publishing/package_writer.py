@@ -10,6 +10,12 @@ from pricing_pipeline.publishing.model_registry import ensure_pricing_model
 
 
 def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
+    if getattr(args, "set_pointer", None):
+        raise ValueError(
+            "package publish no longer deploys rate packages; publish the package "
+            "first, then deploy it with ModelPublisher.deploy or the deploy DAG"
+        )
+
     with engine.begin() as con:
         requested_package_status = args.package_status
         meta = con.execute(text("""
@@ -400,62 +406,6 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "package_status": requested_package_status,
             "rate_package_id": rate_package_id,
         })
-
-        if args.set_pointer:
-            con.execute(text("""
-                MERGE pricing.PRICING_PACKAGE_POINTER AS tgt
-                USING (
-                    SELECT
-                        :model_id AS model_id,
-                        :pointer_name AS pointer_name,
-                        :rate_package_id AS rate_package_id,
-                        :updated_by AS updated_by
-                ) AS src
-                ON tgt.model_id = src.model_id
-                   AND tgt.pointer_name = src.pointer_name
-                WHEN MATCHED THEN
-                    UPDATE SET
-                        rate_package_id = src.rate_package_id,
-                        updated_ts = SYSUTCDATETIME(),
-                        updated_by = src.updated_by
-                WHEN NOT MATCHED THEN
-                    INSERT (model_id, pointer_name, rate_package_id, updated_by)
-                    VALUES (src.model_id, src.pointer_name, src.rate_package_id, src.updated_by);
-            """), {
-                "model_id": model_id,
-                "pointer_name": args.set_pointer,
-                "rate_package_id": rate_package_id,
-                "updated_by": args.created_by,
-            })
-            con.execute(text("""
-                UPDATE pricing.PRICING_MODEL_DEPLOYMENT
-                SET effective_to_ts = SYSUTCDATETIME()
-                WHERE model_id = :model_id
-                  AND deployment_slot = :deployment_slot
-                  AND effective_to_ts IS NULL;
-            """), {
-                "model_id": model_id,
-                "deployment_slot": args.set_pointer,
-            })
-            con.execute(text("""
-                INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT (
-                    model_id,
-                    rate_package_id,
-                    deployment_slot,
-                    deployed_by
-                )
-                VALUES (
-                    :model_id,
-                    :rate_package_id,
-                    :deployment_slot,
-                    :deployed_by
-                );
-            """), {
-                "model_id": model_id,
-                "rate_package_id": rate_package_id,
-                "deployment_slot": args.set_pointer,
-                "deployed_by": args.created_by,
-            })
 
         args.package_version = package_version
 
