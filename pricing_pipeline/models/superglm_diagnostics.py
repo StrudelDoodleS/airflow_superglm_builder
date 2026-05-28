@@ -11,15 +11,9 @@ import pandas as pd
 try:
     import mlflow
 except ModuleNotFoundError:
+    mlflow = None
 
-    class _MissingMLflow:
-        def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-        def log_metric(self, key: str, value: float, **kwargs) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-    mlflow = _MissingMLflow()
+from pricing_pipeline.infra.mlflow_tracking import optional_mlflow_client
 
 
 _DEVIANCE_LOG_PATTERN = re.compile(
@@ -47,6 +41,7 @@ def fit_reml_with_diagnostics(
     mlflow_client=mlflow,
     sample_weight: np.ndarray | None = None,
 ):
+    mlflow_client = optional_mlflow_client(mlflow_client)
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
     log_buffer = io.StringIO()
     handler = logging.StreamHandler(log_buffer)

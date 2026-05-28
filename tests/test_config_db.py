@@ -8,6 +8,13 @@ def test_settings_defaults_are_local_dev_safe():
     assert settings.mssql_server == "mssql,1433"
     assert settings.pricing_database == "PricingLab"
     assert settings.mlflow_tracking_uri == "http://mlflow:5000"
+    assert settings.mlflow_enabled is True
+
+
+def test_settings_can_disable_optional_mlflow_tracking():
+    settings = Settings.from_env({"PRICING_ENABLE_MLFLOW": "false"})
+
+    assert settings.mlflow_enabled is False
 
 
 def test_odbc_connection_string_targets_database():

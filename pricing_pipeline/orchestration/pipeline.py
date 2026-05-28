@@ -4,28 +4,6 @@ import pickle
 
 import pandas as pd
 
-try:
-    import mlflow
-except ModuleNotFoundError:
-
-    class _MissingMLflow:
-        def set_experiment(self, experiment_name: str) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-        def start_run(self):
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-        def log_param(self, key: str, value) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-        def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-        def log_metric(self, key: str, value: float) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-    mlflow = _MissingMLflow()
-
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.data.manifest import split_set_id_for_manifest
 from pricing_pipeline.publishing.lineage import record_model_run
@@ -57,7 +35,10 @@ def train_and_export_model(
     spec: ModelSpec,
     created_by: str = "airflow",
 ) -> ModelExportResult:
-    configure_mlflow(settings.mlflow_tracking_uri)
+    mlflow_client = configure_mlflow(
+        settings.mlflow_tracking_uri,
+        enabled=settings.mlflow_enabled,
+    )
     model_id = ensure_pricing_model(
         engine,
         model_key=spec.model_key,
@@ -78,18 +59,18 @@ def train_and_export_model(
     raw = pd.read_sql_query(spec.training_sql, engine)
     training_frame = coerce_training_frame(spec.build_training_frame(raw))
 
-    mlflow.set_experiment(spec.experiment_name)
-    with mlflow.start_run() as run:
+    mlflow_client.set_experiment(spec.experiment_name)
+    with mlflow_client.start_run() as run:
         model = spec.build_model()
         workbook_path.parent.mkdir(parents=True, exist_ok=True)
-        mlflow.log_param("model_name", spec.model_key)
-        mlflow.log_param("model_id", model_id)
-        mlflow.log_param("model_version", model_version)
-        mlflow.log_param("manifest_id", manifest_id)
-        mlflow.log_param("target", spec.target_name)
-        mlflow.log_param("offset", spec.offset_label)
-        mlflow.log_param("row_count", len(training_frame.X))
-        mlflow.log_param("feature_columns", ",".join(spec.feature_columns))
+        mlflow_client.log_param("model_name", spec.model_key)
+        mlflow_client.log_param("model_id", model_id)
+        mlflow_client.log_param("model_version", model_version)
+        mlflow_client.log_param("manifest_id", manifest_id)
+        mlflow_client.log_param("target", spec.target_name)
+        mlflow_client.log_param("offset", spec.offset_label)
+        mlflow_client.log_param("row_count", len(training_frame.X))
+        mlflow_client.log_param("feature_columns", ",".join(spec.feature_columns))
 
         fitted_model = fit_reml_with_diagnostics(
             model,
@@ -97,18 +78,18 @@ def train_and_export_model(
             training_frame.y,
             offset=training_frame.offset,
             diagnostics_path=workbook_path.parent / "superglm_fit.log",
-            mlflow_client=mlflow,
+            mlflow_client=mlflow_client,
         )
 
         deviance = getattr(getattr(fitted_model, "result", None), "deviance", None)
         if deviance is not None:
-            mlflow.log_metric("deviance", float(deviance))
+            mlflow_client.log_metric("deviance", float(deviance))
 
         model_path = workbook_path.parent / "superglm_model.pkl"
         model_path.parent.mkdir(parents=True, exist_ok=True)
         with model_path.open("wb") as handle:
             pickle.dump(fitted_model, handle)
-        mlflow.log_artifact(str(model_path), artifact_path="model")
+        mlflow_client.log_artifact(str(model_path), artifact_path="model")
 
         export_rating_tables(
             fitted_model,
@@ -128,7 +109,7 @@ def train_and_export_model(
             manifest_id=manifest_id,
             dag_id=dag_id,
             airflow_run_id=airflow_run_id,
-            mlflow_run_id=run.info.run_id,
+            mlflow_run_id=str(getattr(run.info, "run_id", "")),
             split_set_id=split_set_id_for_manifest(
                 manifest_id,
                 n_splits=spec.dataset.default_n_splits,

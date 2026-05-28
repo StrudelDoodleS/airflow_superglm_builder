@@ -111,7 +111,6 @@ source = { virtual = "." }
 dependencies = [
     { name = "apache-airflow" },
     { name = "apache-airflow-providers-microsoft-mssql" },
-    { name = "mlflow" },
     { name = "numpy" },
     { name = "openpyxl" },
     { name = "pandas" },
@@ -122,11 +121,16 @@ dependencies = [
     { name = "superglm" },
 ]
 
+[package.optional-dependencies]
+mlflow = [
+    { name = "mlflow" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "apache-airflow", specifier = "==3.2.1" },
     { name = "apache-airflow-providers-microsoft-mssql" },
-    { name = "mlflow" },
+    { name = "mlflow", marker = "extra == 'mlflow'" },
     { name = "numpy" },
     { name = "openpyxl" },
     { name = "pandas" },
@@ -136,6 +140,7 @@ requires-dist = [
     { name = "sqlalchemy" },
     { name = "superglm", git = "https://github.com/StrudelDoodleS/superglm.git?rev=592891b6e405fdfa90e35ff39a16b8ebd5eb84f6" },
 ]
+provides-extras = ["mlflow"]
 
 [[package]]
 name = "alembic"

@@ -6,12 +6,9 @@ from pathlib import Path
 try:
     import mlflow
 except ModuleNotFoundError:
+    mlflow = None
 
-    class _MissingMLflow:
-        def log_artifact(self, local_path: str, artifact_path: str | None = None) -> None:
-            raise ModuleNotFoundError("No module named 'mlflow'")
-
-    mlflow = _MissingMLflow()
+from pricing_pipeline.infra.mlflow_tracking import optional_mlflow_client
 
 
 def build_export_id(model_name: str, run_id: str) -> str:
@@ -40,5 +37,8 @@ def export_rating_tables(model, X, y, exposure, output_path: Path) -> Path:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_fn(output_path, X, y, sample_weight=exposure, n_bins=150)
-    mlflow.log_artifact(str(output_path), artifact_path="rating_tables")
+    optional_mlflow_client(mlflow).log_artifact(
+        str(output_path),
+        artifact_path="rating_tables",
+    )
     return output_path

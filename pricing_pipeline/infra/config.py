@@ -23,6 +23,7 @@ class Settings:
     mssql_encrypt: str = "no"
     mssql_trust_server_cert: str = "yes"
     mlflow_tracking_uri: str = "http://mlflow:5000"
+    mlflow_enabled: bool = True
     rating_export_root: Path = Path("/opt/pricing/state/rating_exports")
     skip_database_create: bool = False
 
@@ -40,6 +41,7 @@ class Settings:
                 "MSSQL_TRUST_SERVER_CERT", cls.mssql_trust_server_cert
             ),
             mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI", cls.mlflow_tracking_uri),
+            mlflow_enabled=_env_bool(env, "PRICING_ENABLE_MLFLOW", cls.mlflow_enabled),
             rating_export_root=Path(
                 env.get("RATING_EXPORT_ROOT", str(cls.rating_export_root))
             ),

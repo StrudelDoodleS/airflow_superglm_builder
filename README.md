@@ -119,6 +119,11 @@ Prerequisites:
    By default, MLflow metadata is stored in `state/mlflow/mlflow.db` and
    artifacts are stored in `state/mlflow/artifacts`.
 
+   MLflow is optional for model builds. If the Python package or tracking
+   server is unavailable, training/export/publish continues with tracking
+   calls treated as no-ops and `mlflow_run_id` recorded as blank. Set
+   `PRICING_ENABLE_MLFLOW=false` to force this no-op mode.
+
 4. Start Airflow in another terminal:
 
    ```bash

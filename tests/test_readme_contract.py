@@ -7,6 +7,7 @@ README_CONTRACT_STRINGS = [
     "No-Docker Work Quickstart",
     "Airflow 3.2.1",
     "MLflow",
+    "PRICING_ENABLE_MLFLOW=false",
     "PRICING_SCHEMA_DIR=db/migrations",
     "scripts/apply_schema.py",
     "scripts/run_local_pipeline.sh",

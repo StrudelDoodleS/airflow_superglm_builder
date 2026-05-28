@@ -108,14 +108,58 @@ def test_build_model_constructs_poisson_discrete_superglm_with_expected_features
 def test_configure_mlflow_sets_tracking_uri(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        mlflow_tracking.mlflow,
-        "set_tracking_uri",
-        lambda tracking_uri: calls.append(tracking_uri),
+        mlflow_tracking,
+        "mlflow",
+        SimpleNamespace(set_tracking_uri=lambda tracking_uri: calls.append(tracking_uri)),
     )
 
     mlflow_tracking.configure_mlflow("http://mlflow:5000")
 
     assert calls == ["http://mlflow:5000"]
+
+
+def test_configure_mlflow_returns_noop_client_when_mlflow_is_missing(monkeypatch):
+    monkeypatch.setattr(mlflow_tracking, "mlflow", None)
+
+    client = mlflow_tracking.configure_mlflow("http://mlflow:5000")
+
+    client.set_experiment("pricing")
+    client.log_param("model", "MTPL_FREQ")
+    client.log_metric("deviance", 1.25)
+    client.log_artifact("/tmp/model.pkl", artifact_path="model")
+    with client.start_run() as run:
+        assert run.info.run_id == ""
+
+
+def test_optional_mlflow_client_swallows_tracking_backend_failures(monkeypatch):
+    class FailingMlflow:
+        def set_tracking_uri(self, tracking_uri):
+            raise RuntimeError("mlflow server down")
+
+        def set_experiment(self, experiment_name):
+            raise RuntimeError("mlflow server down")
+
+        def start_run(self):
+            raise RuntimeError("mlflow server down")
+
+        def log_param(self, key, value):
+            raise RuntimeError("mlflow server down")
+
+        def log_artifact(self, local_path, artifact_path=None):
+            raise RuntimeError("mlflow server down")
+
+        def log_metric(self, key, value, **kwargs):
+            raise RuntimeError("mlflow server down")
+
+    monkeypatch.setattr(mlflow_tracking, "mlflow", FailingMlflow())
+
+    client = mlflow_tracking.configure_mlflow("http://mlflow:5000")
+    client.set_experiment("pricing")
+    client.log_param("model", "MTPL_FREQ")
+    client.log_metric("deviance", 1.25)
+    client.log_artifact("/tmp/model.pkl", artifact_path="model")
+    with client.start_run() as run:
+        assert run.info.run_id == ""
 
 
 def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
@@ -254,6 +298,50 @@ def test_train_superglm_logs_superglm_fit_diagnostics_to_mlflow(
     ) in mlflow_calls
     assert ("log_metric", "fit_iteration_deviance", 18.25, {"step": 0}) in mlflow_calls
     assert ("log_metric", "fit_iteration_deviance", 12.5, {"step": 1}) in mlflow_calls
+
+
+def test_train_superglm_continues_when_mlflow_logging_fails(monkeypatch, tmp_path):
+    raw = raw_training_frame(Exposure=[0.5, 1.0, 2.0])
+    fit_calls = []
+
+    class FailingStartRun:
+        def __enter__(self):
+            raise RuntimeError("mlflow unavailable")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FailingMlflow:
+        def set_experiment(self, experiment):
+            raise RuntimeError("mlflow unavailable")
+
+        def start_run(self):
+            return FailingStartRun()
+
+        def log_param(self, key, value):
+            raise RuntimeError("mlflow unavailable")
+
+        def log_artifact(self, path, artifact_path=None):
+            raise RuntimeError("mlflow unavailable")
+
+        def log_metric(self, key, value, **kwargs):
+            raise RuntimeError("mlflow unavailable")
+
+    monkeypatch.setattr(training.pd, "read_sql_query", lambda sql, engine: raw)
+    monkeypatch.setattr(training, "build_model", lambda: PickleableFakeModel(fit_calls))
+    monkeypatch.setattr(training, "mlflow", FailingMlflow())
+
+    model_dir = tmp_path / "model"
+    result = training.train_superglm(
+        object(),
+        model_dir=model_dir,
+        mlflow_experiment="pricing-mtpl-frequency",
+    )
+
+    assert result["mlflow_run_id"] == ""
+    assert Path(result["model_path"]).exists()
+    assert (model_dir / "superglm_fit.log").exists()
+    assert len(fit_calls) == 1
 
 
 def test_train_superglm_script_help_runs_without_pythonpath():

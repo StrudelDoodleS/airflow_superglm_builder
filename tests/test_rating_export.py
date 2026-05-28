@@ -179,6 +179,28 @@ def test_export_rating_tables_requires_superglm_rating_export_support(
     assert mlflow_calls == []
 
 
+def test_export_rating_tables_ignores_mlflow_logging_failure(monkeypatch, tmp_path: Path):
+    model = FakeExportModel()
+
+    class FailingMlflow:
+        def log_artifact(self, path, artifact_path=None):
+            raise RuntimeError("mlflow unavailable")
+
+    monkeypatch.setattr(rating_export, "mlflow", FailingMlflow())
+
+    output_path = tmp_path / "rating_tables.xlsx"
+    result = rating_export.export_rating_tables(
+        model,
+        pd.DataFrame({"x": [1]}),
+        np.array([0.0]),
+        np.array([1.0]),
+        output_path,
+    )
+
+    assert result == output_path
+    assert output_path.read_bytes() == b"workbook"
+
+
 def test_smoke_check_reports_missing_rating_export_without_failing(capsys):
     class OldSuperGLM:
         pass
@@ -847,7 +869,11 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     def fake_record_model_run(engine, **kwargs):
         calls.append(("record_model_run", engine, kwargs))
 
-    monkeypatch.setattr(pipeline, "configure_mlflow", lambda uri: calls.append(("configure_mlflow", uri)))
+    monkeypatch.setattr(
+        pipeline,
+        "configure_mlflow",
+        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs)) or fake_mlflow,
+    )
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(
         pipeline,
@@ -855,7 +881,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
         or 17,
     )
-    monkeypatch.setattr(pipeline, "mlflow", fake_mlflow)
+    monkeypatch.setattr(pipeline, "mlflow", fake_mlflow, raising=False)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
     monkeypatch.setattr(pipeline, "record_model_run", fake_record_model_run)
@@ -914,7 +940,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "package_version": "4",
         "rating_workbook_path": str(workbook_path),
     }
-    assert ("configure_mlflow", "http://mlflow.local") in calls
+    assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
     assert (
         "ensure_pricing_model",
         engine,
@@ -995,6 +1021,135 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "created_by": "airflow",
         },
     )
+
+
+def test_run_training_export_publish_continues_when_mlflow_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+):
+    raw = raw_training_frame()
+    model = FakePipelineModel()
+    calls = []
+
+    class NoOpRun:
+        info = SimpleNamespace(run_id="")
+
+    class NoOpStartRun:
+        def __enter__(self):
+            calls.append(("noop_start_run_enter",))
+            return NoOpRun()
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("noop_start_run_exit", exc_type))
+            return False
+
+    class NoOpMlflowClient:
+        def set_experiment(self, experiment):
+            calls.append(("noop_set_experiment", experiment))
+
+        def start_run(self):
+            return NoOpStartRun()
+
+        def log_param(self, key, value):
+            calls.append(("noop_log_param", key, value))
+
+        def log_artifact(self, path, artifact_path=None):
+            calls.append(("noop_log_artifact", path, artifact_path))
+
+        def log_metric(self, key, value, **kwargs):
+            calls.append(("noop_log_metric", key, value, kwargs))
+
+    class RaisingMlflow:
+        def __getattr__(self, name):
+            raise AssertionError(f"pipeline used global mlflow.{name}")
+
+    def fake_read_sql_query(sql, engine):
+        calls.append(("read_sql_query", sql, engine))
+        return raw
+
+    def fake_export_rating_tables(fitted_model, X, y, exposure, *, output_path):
+        calls.append(("export_rating_tables", output_path))
+        output_path.write_bytes(b"workbook")
+        return output_path
+
+    class FakePublisher:
+        def __init__(self, engine_arg, config):
+            calls.append(("publisher_init", engine_arg, config))
+
+        def validate_registered_model(self):
+            calls.append(("validate_registered_model",))
+            return 17
+
+        def publish_training_export(self, export):
+            calls.append(("publish_training_export", export))
+            return PublishResult(
+                mlflow_run_id=export.mlflow_run_id,
+                export_id=export.export_id,
+                rate_package_id=123,
+                package_version=4,
+                rating_workbook_path=export.rating_workbook_path,
+            )
+
+    monkeypatch.setattr(
+        pipeline,
+        "configure_mlflow",
+        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs))
+        or NoOpMlflowClient(),
+    )
+    monkeypatch.setattr(pipeline, "mlflow", RaisingMlflow(), raising=False)
+    monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_pricing_model",
+        lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
+        or 17,
+    )
+    monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
+    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    monkeypatch.setattr(
+        pipeline,
+        "record_model_run",
+        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
+    )
+
+    engine = object()
+    settings = Settings.from_env(
+        {
+            "MLFLOW_TRACKING_URI": "http://mlflow.local",
+            "RATING_EXPORT_ROOT": str(tmp_path),
+        }
+    )
+    result = pipeline.run_training_export_publish(
+        engine,
+        settings=settings,
+        manifest_id="manifest-1",
+        dag_id="pricing_dag",
+        airflow_run_id="manual__without_mlflow",
+        logical_date="2026-05-28",
+        spec=ModelSpec(
+            model_key="MTPL_FREQ",
+            target_name="ClaimNb",
+            model_type="superglm_poisson",
+            experiment_name="pricing-mtpl-frequency",
+            deployment_slot="MTPL_FREQ_UAT",
+            dataset=FREMTPL_DATASET_SPEC,
+            training_sql=TRAINING_SQL,
+            feature_columns=tuple(FEATURE_COLUMNS),
+            build_model=lambda: model,
+            build_training_frame=build_training_frame,
+        ),
+        model_config=MODEL_CONFIG,
+        created_by="airflow",
+    )
+
+    assert result["mlflow_run_id"] == ""
+    assert result["rate_package_id"] == "123"
+    assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
+    assert ("noop_start_run_enter",) in calls
+    assert any(call[:2] == ("noop_log_param", "row_count") for call in calls)
+    assert any(call[0] == "publish_training_export" for call in calls)
+    record_call = next(call for call in calls if call[0] == "record_model_run")
+    assert record_call[2]["mlflow_run_id"] == ""
 
 
 def test_publish_model_export_returns_candidate_without_deploying(

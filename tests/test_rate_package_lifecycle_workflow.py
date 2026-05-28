@@ -288,9 +288,8 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
         output_path.write_bytes(b"rating workbook")
         return output_path
 
-    monkeypatch.setattr(pipeline, "configure_mlflow", lambda uri: None)
+    monkeypatch.setattr(pipeline, "configure_mlflow", lambda uri, **kwargs: fake_mlflow)
     monkeypatch.setattr(pipeline, "ensure_pricing_model", lambda *args, **kwargs: 17)
-    monkeypatch.setattr(pipeline, "mlflow", fake_mlflow)
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(pipeline, "fit_reml_with_diagnostics", fake_fit_reml_with_diagnostics)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
