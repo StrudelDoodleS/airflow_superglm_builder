@@ -97,6 +97,7 @@ def train_and_export_model(
             training_frame.y,
             training_frame.exposure,
             output_path=workbook_path,
+            mlflow_client=mlflow_client,
         )
 
         return ModelExportResult(

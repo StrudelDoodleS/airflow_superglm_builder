@@ -201,6 +201,29 @@ def test_export_rating_tables_ignores_mlflow_logging_failure(monkeypatch, tmp_pa
     assert output_path.read_bytes() == b"workbook"
 
 
+def test_export_rating_tables_can_use_disabled_mlflow_client(monkeypatch, tmp_path: Path):
+    model = FakeExportModel()
+
+    class RaisingMlflow:
+        def log_artifact(self, path, artifact_path=None):
+            raise AssertionError("global mlflow should not be used")
+
+    monkeypatch.setattr(rating_export, "mlflow", RaisingMlflow())
+
+    output_path = tmp_path / "rating_tables.xlsx"
+    result = rating_export.export_rating_tables(
+        model,
+        pd.DataFrame({"x": [1]}),
+        np.array([0.0]),
+        np.array([1.0]),
+        output_path,
+        mlflow_client=None,
+    )
+
+    assert result == output_path
+    assert output_path.read_bytes() == b"workbook"
+
+
 def test_smoke_check_reports_missing_rating_export_without_failing(capsys):
     class OldSuperGLM:
         pass
@@ -839,9 +862,25 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         calls.append(("read_sql_query", sql, engine))
         return raw
 
-    def fake_export_rating_tables(fitted_model, X, y, exposure, *, output_path):
+    def fake_export_rating_tables(
+        fitted_model,
+        X,
+        y,
+        exposure,
+        *,
+        output_path,
+        mlflow_client,
+    ):
         calls.append(
-            ("export_rating_tables", fitted_model, X.copy(), y.copy(), exposure.copy(), output_path)
+            (
+                "export_rating_tables",
+                fitted_model,
+                X.copy(),
+                y.copy(),
+                exposure.copy(),
+                output_path,
+                mlflow_client,
+            )
         )
         output_path.write_bytes(b"workbook")
         return output_path
@@ -978,6 +1017,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     assert export_call[1] is model
     np.testing.assert_array_equal(export_call[4], raw["Exposure"].to_numpy(dtype=float))
     assert export_call[5] == workbook_path
+    assert export_call[6] is fake_mlflow
 
     assert ("publisher_init", engine, MODEL_CONFIG) in calls
     assert ("validate_registered_model",) in calls
@@ -1067,8 +1107,16 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
         calls.append(("read_sql_query", sql, engine))
         return raw
 
-    def fake_export_rating_tables(fitted_model, X, y, exposure, *, output_path):
-        calls.append(("export_rating_tables", output_path))
+    def fake_export_rating_tables(
+        fitted_model,
+        X,
+        y,
+        exposure,
+        *,
+        output_path,
+        mlflow_client,
+    ):
+        calls.append(("export_rating_tables", output_path, mlflow_client))
         output_path.write_bytes(b"workbook")
         return output_path
 

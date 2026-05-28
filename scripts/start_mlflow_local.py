@@ -44,10 +44,15 @@ def main() -> None:
     os.chdir(ROOT)
     load_env()
 
-    artifact_root = _repo_path(os.environ.get("MLFLOW_ARTIFACT_ROOT", "state/mlflow/artifacts"))
+    artifact_root = _repo_path(
+        os.environ.get("MLFLOW_ARTIFACT_ROOT", "state/no_docker/mlflow/artifacts")
+    )
     artifact_root.mkdir(parents=True, exist_ok=True)
     backend_store_uri = _normalise_sqlite_uri(
-        os.environ.get("MLFLOW_BACKEND_STORE_URI", "sqlite:///state/mlflow/mlflow.db")
+        os.environ.get(
+            "MLFLOW_BACKEND_STORE_URI",
+            "sqlite:///state/no_docker/mlflow/mlflow.db",
+        )
     )
     allowed_hosts = os.environ.get(
         "MLFLOW_ALLOWED_HOSTS",

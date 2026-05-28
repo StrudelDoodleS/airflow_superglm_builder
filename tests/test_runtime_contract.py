@@ -206,13 +206,23 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
 def test_airflow_services_can_import_project_package_and_hide_examples():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     common_env = compose["x-airflow-common"]["environment"]
+    common_volumes = compose["x-airflow-common"]["volumes"]
     run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
     cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(
         encoding="utf-8"
     )
 
     assert common_env["PYTHONPATH"] == "/opt/airflow"
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline"
+        in common_volumes
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models"
+        in common_volumes
+    )
     assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
+    assert common_env["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
     assert "cleanup_airflow_examples.py" in run_script
     assert "airflow dags list-import-errors" in run_script
     assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script

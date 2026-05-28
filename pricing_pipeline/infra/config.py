@@ -17,6 +17,7 @@ class Settings:
     mssql_server: str = "mssql,1433"
     pricing_database: str = "PricingLab"
     mlflow_database: str = "MLflowTracking"
+    mssql_sqlalchemy_dialect: str = "mssql+pyodbc"
     mssql_user: str = "sa"
     mssql_password: str = "YourStrong(!)Password123"
     mssql_driver: str = "ODBC Driver 18 for SQL Server"
@@ -33,6 +34,10 @@ class Settings:
             mssql_server=env.get("MSSQL_SERVER", cls.mssql_server),
             pricing_database=env.get("MSSQL_DATABASE", cls.pricing_database),
             mlflow_database=env.get("MLFLOW_DATABASE", cls.mlflow_database),
+            mssql_sqlalchemy_dialect=env.get(
+                "MSSQL_SQLALCHEMY_DIALECT",
+                cls.mssql_sqlalchemy_dialect,
+            ),
             mssql_user=env.get("MSSQL_USER", cls.mssql_user),
             mssql_password=env.get("MSSQL_PASSWORD", cls.mssql_password),
             mssql_driver=env.get("MSSQL_DRIVER", cls.mssql_driver),

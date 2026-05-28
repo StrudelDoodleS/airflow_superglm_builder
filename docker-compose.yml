@@ -36,6 +36,7 @@ x-airflow-common:
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
@@ -59,9 +60,10 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-    - ./pricing_pipeline:/opt/airflow/pricing_pipeline
-    - ./db:/opt/pricing/db
-    - ./scripts:/opt/pricing/scripts
+    - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
+    - ${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models
+    - ${AIRFLOW_PROJ_DIR:-.}/db:/opt/pricing/db
+    - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/pricing/scripts
     - ${AIRFLOW_PROJ_DIR:-.}/state/rating_exports:/opt/pricing/state/rating_exports
     - ${AIRFLOW_PROJ_DIR:-.}/state/cv_splits:/opt/pricing/state/cv_splits
   user: "${AIRFLOW_UID:-50000}:0"

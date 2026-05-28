@@ -80,13 +80,13 @@ def main() -> None:
     os.chdir(ROOT)
     load_env()
 
-    airflow_home = _repo_path(os.environ.get("AIRFLOW_HOME", "state/airflow"))
+    airflow_home = _repo_path(os.environ.get("AIRFLOW_HOME", "state/no_docker/airflow"))
     airflow_home.mkdir(parents=True, exist_ok=True)
     _repo_path("logs").mkdir(parents=True, exist_ok=True)
 
     dags_folder = _repo_path(os.environ.get("AIRFLOW__CORE__DAGS_FOLDER", "dags"))
     rating_export_root = _repo_path(
-        os.environ.get("RATING_EXPORT_ROOT", "state/rating_exports")
+        os.environ.get("RATING_EXPORT_ROOT", "state/no_docker/rating_exports")
     )
     rating_export_root.mkdir(parents=True, exist_ok=True)
     schema_dir = _repo_path(
@@ -101,6 +101,7 @@ def main() -> None:
     os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(dags_folder)
     os.environ.setdefault("AIRFLOW__CORE__LOAD_EXAMPLES", "false")
     os.environ.setdefault("AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION", "true")
+    os.environ.setdefault("AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE", "false")
     os.environ["PRICING_PROJECT_ROOT"] = str(project_root)
     os.environ["PRICING_SCHEMA_DIR"] = str(schema_dir)
     os.environ["RATING_EXPORT_ROOT"] = str(rating_export_root)

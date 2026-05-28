@@ -168,9 +168,11 @@ class FakeRawConnection:
 
 
 class FakeEngine:
-    def __init__(self, *, existing_count=0, raw_connection=None):
+    def __init__(self, *, existing_count=0, raw_connection=None, paramstyle=None):
         self.begin_connection = FakeBeginConnection(existing_count)
         self.raw_connection_obj = raw_connection
+        if paramstyle is not None:
+            self.dialect = SimpleNamespace(paramstyle=paramstyle)
 
     def begin(self):
         return FakeBegin(self.begin_connection)
@@ -212,6 +214,18 @@ def test_bulk_insert_fremtpl_raw_uses_raw_connection_chunks_commits_and_closes()
     assert raw_connection.rollbacks == 0
     assert cursor.closed is True
     assert raw_connection.closed is True
+
+
+def test_bulk_insert_fremtpl_raw_uses_format_placeholders_for_pymssql():
+    cursor = FakeCursor()
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(raw_connection=raw_connection, paramstyle="pyformat")
+
+    bulk_insert_fremtpl_raw(engine, fremtpl_frame())
+
+    assert "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" in (
+        cursor.executemany_calls[0][0]
+    )
 
 
 def test_bulk_insert_fremtpl_raw_replace_truncates_and_inserts_in_one_transaction():

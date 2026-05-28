@@ -283,7 +283,15 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
         diagnostics_path.write_text("diagnostics", encoding="utf-8")
         return model
 
-    def fake_export_rating_tables(fitted_model, X, y, exposure, *, output_path):
+    def fake_export_rating_tables(
+        fitted_model,
+        X,
+        y,
+        exposure,
+        *,
+        output_path,
+        mlflow_client,
+    ):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"rating workbook")
         return output_path

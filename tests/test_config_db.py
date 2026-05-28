@@ -7,6 +7,7 @@ def test_settings_defaults_are_local_dev_safe():
     settings = Settings.from_env({})
     assert settings.mssql_server == "mssql,1433"
     assert settings.pricing_database == "PricingLab"
+    assert settings.mssql_sqlalchemy_dialect == "mssql+pyodbc"
     assert settings.mlflow_tracking_uri == "http://mlflow:5000"
     assert settings.mlflow_enabled is True
 
@@ -56,6 +57,56 @@ def test_odbc_connection_string_prevents_password_attribute_injection():
 
     assert "PWD={sec;Encrypt=yes};" in odbc
     assert ";Encrypt=yes;" not in odbc
+
+
+def test_pymssql_sqlalchemy_url_uses_host_port_database_and_escaped_credentials():
+    settings = Settings.from_env(
+        {
+            "MSSQL_SQLALCHEMY_DIALECT": "mssql+pymssql",
+            "MSSQL_SERVER": "localhost,1433",
+            "MSSQL_DATABASE": "PricingLab",
+            "MSSQL_USER": "pricing user",
+            "MSSQL_PASSWORD": "sec/ret@word",
+        }
+    )
+
+    url = db.build_sqlalchemy_url(settings, database=settings.pricing_database)
+
+    assert url == (
+        "mssql+pymssql://pricing%20user:sec%2Fret%40word@localhost:1433/PricingLab"
+    )
+
+
+def test_sqlalchemy_url_rejects_unknown_mssql_dialect():
+    settings = Settings.from_env({"MSSQL_SQLALCHEMY_DIALECT": "sqlite"})
+
+    try:
+        db.build_sqlalchemy_url(settings, database=settings.pricing_database)
+    except ValueError as exc:
+        assert "MSSQL_SQLALCHEMY_DIALECT" in str(exc)
+    else:
+        raise AssertionError("unknown SQLAlchemy dialect should fail clearly")
+
+
+def test_get_engine_only_enables_fast_executemany_for_pyodbc(monkeypatch):
+    calls = []
+
+    def fake_create_engine(url, **kwargs):
+        calls.append((url, kwargs))
+        return object()
+
+    monkeypatch.setattr(db, "create_engine", fake_create_engine)
+
+    pyodbc_settings = Settings.from_env({"MSSQL_SQLALCHEMY_DIALECT": "mssql+pyodbc"})
+    pymssql_settings = Settings.from_env({"MSSQL_SQLALCHEMY_DIALECT": "mssql+pymssql"})
+
+    db.get_engine(pyodbc_settings)
+    db.get_engine(pymssql_settings)
+
+    assert calls[0][1]["fast_executemany"] is True
+    assert "fast_executemany" not in calls[1][1]
+    assert calls[0][1]["future"] is True
+    assert calls[1][1]["future"] is True
 
 
 def test_ensure_database_uses_autocommit_connection_when_creating(monkeypatch):

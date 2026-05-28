@@ -5,9 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 mkdir -p \
-  state/airflow \
-  state/mlflow/artifacts \
-  state/rating_exports \
+  state/no_docker/airflow \
+  state/no_docker/mlflow/artifacts \
+  state/no_docker/rating_exports \
   state/cv_splits \
   state/db_diagrams
 

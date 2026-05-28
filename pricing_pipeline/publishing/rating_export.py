@@ -10,6 +10,8 @@ except ModuleNotFoundError:
 
 from pricing_pipeline.infra.mlflow_tracking import optional_mlflow_client
 
+_DEFAULT_MLFLOW_CLIENT = object()
+
 
 def build_export_id(model_name: str, run_id: str) -> str:
     raw = f"{model_name}__{run_id}".lower()
@@ -27,7 +29,15 @@ def build_rating_export_path(
     return root / model_name / logical_date / export_id / "rating_tables.xlsx"
 
 
-def export_rating_tables(model, X, y, exposure, output_path: Path) -> Path:
+def export_rating_tables(
+    model,
+    X,
+    y,
+    exposure,
+    output_path: Path,
+    *,
+    mlflow_client=_DEFAULT_MLFLOW_CLIENT,
+) -> Path:
     export_fn = getattr(model, "export_rating_tables", None)
     if not callable(export_fn):
         raise RuntimeError(
@@ -37,7 +47,10 @@ def export_rating_tables(model, X, y, exposure, output_path: Path) -> Path:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_fn(output_path, X, y, sample_weight=exposure, n_bins=150)
-    optional_mlflow_client(mlflow).log_artifact(
+    resolved_mlflow_client = (
+        mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
+    )
+    optional_mlflow_client(resolved_mlflow_client).log_artifact(
         str(output_path),
         artifact_path="rating_tables",
     )

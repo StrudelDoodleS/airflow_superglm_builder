@@ -116,8 +116,8 @@ Prerequisites:
    uv run python scripts/start_mlflow_local.py
    ```
 
-   By default, MLflow metadata is stored in `state/mlflow/mlflow.db` and
-   artifacts are stored in `state/mlflow/artifacts`.
+   By default, MLflow metadata is stored in `state/no_docker/mlflow/mlflow.db`
+   and artifacts are stored in `state/no_docker/mlflow/artifacts`.
 
    MLflow is optional for model builds. If the Python package or tracking
    server is unavailable, training/export/publish continues with tracking
@@ -130,8 +130,9 @@ Prerequisites:
    uv run python scripts/start_airflow_local.py
    ```
 
-   This runs `airflow standalone` with `AIRFLOW_HOME=state/airflow`, the repo
-   `dags/` folder, example DAGs disabled, and repo-local rating exports.
+   This runs `airflow standalone` with `AIRFLOW_HOME=state/no_docker/airflow`,
+   the repo `dags/` folder, example DAGs disabled, and repo-local rating
+   exports.
    The local Airflow UI login defaults to `admin` / `admin`; set
    `AIRFLOW_LOCAL_PASSWORD` before starting if you want a different local
    password.
@@ -355,10 +356,15 @@ Typical hosted SQL Server settings:
 ```env
 MSSQL_SERVER=<server-name>.database.windows.net,1433
 MSSQL_DATABASE=PricingLab_UAT
+MSSQL_SQLALCHEMY_DIALECT=mssql+pymssql
 MSSQL_DRIVER=ODBC Driver 18 for SQL Server
 MSSQL_ENCRYPT=yes
 MSSQL_TRUST_SERVER_CERT=no
 ```
+
+`mssql+pymssql` is the easiest no-docker path when the host does not have the
+Microsoft ODBC driver installed. Use `mssql+pyodbc` when you want ODBC Driver 18
+semantics, including driver-level Azure SQL behavior.
 
 If the work database allows SQL authentication, use a restricted pipeline login:
 
@@ -466,13 +472,16 @@ Regenerate the site whenever schema DDL or table relationships change.
 
 Durable local project files live under `state/`:
 
-- `state/airflow`: host-process Airflow home for the no-Docker workflow.
+- `state/no_docker/airflow`: host-process Airflow home for the no-Docker
+  workflow.
 - `state/mssql/data`: SQL Server database files.
-- `state/mlflow/mlflow.db`: host-process MLflow SQLite metadata store for the
-  no-Docker workflow.
-- `state/mlflow/artifacts`: MLflow model and run artifacts.
-- `state/rating_exports`: rating export workbooks and normalized rating
-  packages produced by the pipeline.
+- `state/no_docker/mlflow/mlflow.db`: host-process MLflow SQLite metadata store
+  for the no-Docker workflow.
+- `state/no_docker/mlflow/artifacts`: no-Docker MLflow model and run artifacts.
+- `state/rating_exports`: Docker Airflow rating export workbooks and normalized
+  rating packages.
+- `state/no_docker/rating_exports`: no-Docker rating export workbooks and
+  normalized rating packages.
 - `state/cv_splits`: exported or materialized cross-validation fold index
   artifacts.
 - `state/db_diagrams`: generated schema diagrams and metadata snapshots.

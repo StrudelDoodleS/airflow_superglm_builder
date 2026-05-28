@@ -76,6 +76,13 @@ def _chunk_rows(rows: list[tuple[Any, ...]], chunksize: int):
         yield rows[index : index + chunksize]
 
 
+def _dbapi_placeholder(engine: Engine) -> str:
+    paramstyle = getattr(getattr(engine, "dialect", None), "paramstyle", None)
+    if paramstyle in {"format", "pyformat"}:
+        return "%s"
+    return "?"
+
+
 def bulk_insert_fremtpl_raw(
     engine: Engine,
     frame: pd.DataFrame,
@@ -92,7 +99,7 @@ def bulk_insert_fremtpl_raw(
         return 0
 
     columns = ", ".join(FREMTPL_COLUMNS)
-    placeholders = ", ".join("?" for _ in FREMTPL_COLUMNS)
+    placeholders = ", ".join(_dbapi_placeholder(engine) for _ in FREMTPL_COLUMNS)
     sql = f"INSERT INTO pricing.FREMTPL_RAW ({columns}) VALUES ({placeholders})"
 
     connection = engine.raw_connection()

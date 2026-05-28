@@ -5,7 +5,11 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.pricing_db import ROOT, get_engine, load_env
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pricing_db import get_engine, load_env  # noqa: E402
 
 
 def _schema_dir() -> Path:
@@ -30,13 +34,13 @@ def main() -> None:
     from pricing_pipeline.infra.migrations import apply_migrations, migration_files
 
     load_env()
-    engine = get_engine()
     schema_dir = _schema_dir()
 
     files = migration_files(schema_dir)
     if not files:
         raise RuntimeError(f"No schema DDL files found in {schema_dir}")
 
+    engine = get_engine()
     applied = set(apply_migrations(engine, schema_dir))
     for path in files:
         verb = "apply" if path.name in applied else "skip"

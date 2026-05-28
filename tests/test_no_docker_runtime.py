@@ -38,9 +38,14 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
     text = env_example.read_text(encoding="utf-8")
 
     assert "MSSQL_SERVER=<server-name>.database.windows.net,1433" in text
+    assert "MSSQL_SQLALCHEMY_DIALECT=mssql+pymssql" in text
     assert "PRICING_SKIP_DATABASE_CREATE=true" in text
     assert "MLFLOW_TRACKING_URI=http://127.0.0.1:5000" in text
-    assert "RATING_EXPORT_ROOT=state/rating_exports" in text
+    assert "AIRFLOW_HOME=state/no_docker/airflow" in text
+    assert "AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE=false" in text
+    assert "MLFLOW_BACKEND_STORE_URI=sqlite:///state/no_docker/mlflow/mlflow.db" in text
+    assert "MLFLOW_ARTIFACT_ROOT=state/no_docker/mlflow/artifacts" in text
+    assert "RATING_EXPORT_ROOT=state/no_docker/rating_exports" in text
     assert "mssql,1433" not in text
     assert "/opt/pricing" not in text
 
@@ -133,6 +138,24 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     assert "--skip-schema-apply" in result.stdout
     assert "--skip-raw-load" in result.stdout
     assert "--skip-migrations" not in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_apply_schema_script_starts_without_pythonpath(tmp_path):
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["PRICING_SCHEMA_DIR"] = str(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/apply_schema.py"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "No schema DDL files found" in result.stderr
     assert "ModuleNotFoundError" not in result.stderr
 
 
@@ -699,9 +722,10 @@ def test_local_airflow_configures_predictable_simple_auth(monkeypatch, tmp_path)
     with pytest.raises(SystemExit) as exit_info:
         start_airflow_local.main()
 
-    password_file = tmp_path / "state/airflow/simple_auth_manager_passwords.json"
+    password_file = tmp_path / "state/no_docker/airflow/simple_auth_manager_passwords.json"
     assert exit_info.value.code == 0
     assert os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS"] == "admin:admin"
+    assert os.environ["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
     assert Path(os.environ["AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"]) == password_file
     assert json.loads(password_file.read_text(encoding="utf-8")) == {"admin": "admin"}
     assert captured_exec["command"] == ["/usr/bin/airflow", "version"]
