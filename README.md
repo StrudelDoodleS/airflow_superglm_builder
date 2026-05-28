@@ -521,12 +521,13 @@ candidate rate packages, but they do not move live deployment pointers by
 default.
 
 Live deployments happen through the generic manual DAG
-`pricing_deploy_rate_package`. The deploy run should name a reviewed
-`rate_package_id` or `package_version`, the deployment slot, the deploying
-user, and an audit reason. Manual rate changes follow the same lifecycle:
-load the package snapshot, edit the constrained rate-cell DataFrames, create a
-child package with `parent_rate_package_id`, then deploy that child package
-through `pricing_deploy_rate_package`.
+`pricing_deploy_rate_package`. The deploy run requires `model_key`, exactly one
+reviewed package selector (`rate_package_id` or `package_version`),
+`deployment_slot`, `deployed_by`, and `deployment_reason` as the audit reason.
+Manual rate changes follow the same lifecycle: load the package snapshot, edit
+the constrained rate-cell DataFrames, create a child package with
+`parent_rate_package_id`, then deploy that child package through
+`pricing_deploy_rate_package`.
 
 Published package rows are never edited directly. Once a package is no longer
 `DRAFT`, SQL Server immutability triggers block direct updates or deletes to

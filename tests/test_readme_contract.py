@@ -31,6 +31,13 @@ RATE_PACKAGE_LIFECYCLE_STRINGS = [
     "model.toml",
     "ModelPublisher",
     "pricing_deploy_rate_package",
+    "model_key",
+    "rate_package_id",
+    "package_version",
+    "deployment_slot",
+    "deployment_reason",
+    "deployed_by",
+    "parent_rate_package_id",
     "PUBLISHED",
 ]
 
