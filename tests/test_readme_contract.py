@@ -41,6 +41,23 @@ RATE_PACKAGE_LIFECYCLE_STRINGS = [
     "PUBLISHED",
 ]
 
+RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS = [
+    "The deploy run requires `model_key`, exactly one",
+    "`rate_package_id` or `package_version`",
+    "`deployed_by`, and `deployment_reason`",
+    "`deployment_slot` is optional",
+    "defaults to the model config deployment slot",
+]
+
+
+def _readme_section(readme: str, heading: str) -> str:
+    start_marker = f"## {heading}"
+    start = readme.index(start_marker)
+    next_heading = readme.find("\n## ", start + len(start_marker))
+    if next_heading == -1:
+        return readme[start:]
+    return readme[start:next_heading]
+
 
 def test_readme_documents_local_pipeline_contract():
     readme = Path("README.md").read_text(encoding="utf-8")
@@ -51,7 +68,10 @@ def test_readme_documents_local_pipeline_contract():
 
 def test_readme_documents_rate_package_lifecycle_contract():
     readme = Path("README.md").read_text(encoding="utf-8")
+    lifecycle_section = _readme_section(readme, "Rate Package Lifecycle")
 
     for expected in RATE_PACKAGE_LIFECYCLE_STRINGS:
-        assert expected in readme
-    assert "manual revision" in readme.lower()
+        assert expected in lifecycle_section
+    for expected in RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS:
+        assert expected in lifecycle_section
+    assert "manual revision" in lifecycle_section.lower()
