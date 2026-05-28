@@ -288,6 +288,20 @@ def test_prediction_proc_migration_scores_current_package_from_compiled_views():
     assert "Input features did not match every required term" in migration
 
 
+def test_prediction_proc_aggregates_relativity_from_matched_terms():
+    migration = Path("db/migrations/V014__current_rate_prediction_proc.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert re.search(
+        r"SELECT\s+@model_key AS model_key,.*?"
+        r"EXP\(SUM\(log_coefficient\)\) AS relativity,.*?"
+        r"@matched_terms AS matched_terms\s+FROM @matched;",
+        migration,
+        flags=re.DOTALL,
+    )
+
+
 def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages():
     migration = Path("db/migrations/V015__rate_package_immutability.sql").read_text(
         encoding="utf-8"

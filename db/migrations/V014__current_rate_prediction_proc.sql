@@ -171,7 +171,8 @@ BEGIN
         EXP(SUM(log_coefficient)) AS relativity,
         @base_rate * @exposure * EXP(SUM(log_coefficient)) AS prediction,
         @required_terms AS required_terms,
-        @matched_terms AS matched_terms;
+        @matched_terms AS matched_terms
+    FROM @matched;
 
     IF @include_breakdown = 1
     BEGIN
