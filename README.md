@@ -6,6 +6,24 @@ The pipeline stores raw freMTPL rows in SQL Server, trains a SuperGLM Poisson
 frequency model, logs model runs to MLflow, exports rating tables, and publishes
 normalized rating packages back to SQL Server.
 
+## Contents
+
+- [Docker Quickstart](#docker-quickstart)
+- [No-Docker Work Quickstart](#no-docker-work-quickstart)
+- [Adding Models](#adding-models)
+- [Optional Local Tools](#optional-local-tools)
+- [Demo Data](#demo-data)
+- [Work SQL Server Targeting](#work-sql-server-targeting)
+- [Local Smoke Run](#local-smoke-run)
+- [Local Services](#local-services)
+- [Database Diagrams](#database-diagrams)
+- [Durable Local State](#durable-local-state)
+- [Pricing Model History](#pricing-model-history)
+- [Rate Package Lifecycle](#rate-package-lifecycle)
+- [CV Split Storage](#cv-split-storage)
+- [SQL Prediction Validation](#sql-prediction-validation)
+- [Demo Model Variants](#demo-model-variants)
+
 ## Docker Quickstart
 
 These steps assume Docker with the Compose v2 plugin is already installed.
