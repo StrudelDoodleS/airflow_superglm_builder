@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
+
 
 def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     raw = env.get(name)
@@ -18,6 +20,8 @@ class Settings:
     pricing_database: str = "PricingLab"
     mlflow_database: str = "MLflowTracking"
     mssql_sqlalchemy_dialect: str = "mssql+pyodbc"
+    mssql_auth_mode: str = "sql_password"
+    mssql_token_scope: str = "https://database.windows.net/.default"
     mssql_user: str = "sa"
     mssql_password: str = "YourStrong(!)Password123"
     mssql_driver: str = "ODBC Driver 18 for SQL Server"
@@ -26,7 +30,19 @@ class Settings:
     mlflow_tracking_uri: str = "http://mlflow:5000"
     mlflow_enabled: bool = True
     rating_export_root: Path = Path("/opt/pricing/state/rating_exports")
+    validation_split_artifact_root: Path = Path("/opt/pricing/state/validation_splits")
     skip_database_create: bool = False
+    pricing_schema: str = "pricing"
+    pricing_staging_schema: str = "pricing_stg"
+    mlops_schema: str = "mlops"
+
+    @property
+    def schema_names(self) -> SchemaNames:
+        return SchemaNames(
+            pricing=self.pricing_schema,
+            pricing_staging=self.pricing_staging_schema,
+            mlops=self.mlops_schema,
+        )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "Settings":
@@ -38,6 +54,8 @@ class Settings:
                 "MSSQL_SQLALCHEMY_DIALECT",
                 cls.mssql_sqlalchemy_dialect,
             ),
+            mssql_auth_mode=env.get("MSSQL_AUTH_MODE", cls.mssql_auth_mode),
+            mssql_token_scope=env.get("MSSQL_TOKEN_SCOPE", cls.mssql_token_scope),
             mssql_user=env.get("MSSQL_USER", cls.mssql_user),
             mssql_password=env.get("MSSQL_PASSWORD", cls.mssql_password),
             mssql_driver=env.get("MSSQL_DRIVER", cls.mssql_driver),
@@ -50,9 +68,27 @@ class Settings:
             rating_export_root=Path(
                 env.get("RATING_EXPORT_ROOT", str(cls.rating_export_root))
             ),
+            validation_split_artifact_root=Path(
+                env.get(
+                    "VALIDATION_SPLIT_ARTIFACT_ROOT",
+                    str(cls.validation_split_artifact_root),
+                )
+            ),
             skip_database_create=_env_bool(
                 env,
                 "PRICING_SKIP_DATABASE_CREATE",
                 cls.skip_database_create,
+            ),
+            pricing_schema=validate_schema_name(
+                env.get("PRICING_SCHEMA", cls.pricing_schema),
+                "PRICING_SCHEMA",
+            ),
+            pricing_staging_schema=validate_schema_name(
+                env.get("PRICING_STAGING_SCHEMA", cls.pricing_staging_schema),
+                "PRICING_STAGING_SCHEMA",
+            ),
+            mlops_schema=validate_schema_name(
+                env.get("MLOPS_SCHEMA", cls.mlops_schema),
+                "MLOPS_SCHEMA",
             ),
         )

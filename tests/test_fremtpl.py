@@ -168,9 +168,17 @@ class FakeRawConnection:
 
 
 class FakeEngine:
-    def __init__(self, *, existing_count=0, raw_connection=None, paramstyle=None):
+    def __init__(
+        self,
+        *,
+        existing_count=0,
+        raw_connection=None,
+        paramstyle=None,
+        execution_options=None,
+    ):
         self.begin_connection = FakeBeginConnection(existing_count)
         self.raw_connection_obj = raw_connection
+        self._execution_options = execution_options or {}
         if paramstyle is not None:
             self.dialect = SimpleNamespace(paramstyle=paramstyle)
 
@@ -225,6 +233,26 @@ def test_bulk_insert_fremtpl_raw_uses_format_placeholders_for_pymssql():
 
     assert "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" in (
         cursor.executemany_calls[0][0]
+    )
+
+
+def test_bulk_insert_fremtpl_raw_uses_configured_schema_for_raw_cursor_sql():
+    cursor = FakeCursor()
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(
+        raw_connection=raw_connection,
+        execution_options={
+            "pricing_schema": "python_pricing",
+            "pricing_staging_schema": "python_pricing_stg",
+            "mlops_schema": "python_mlops",
+        },
+    )
+
+    bulk_insert_fremtpl_raw(engine, fremtpl_frame(), replace=True)
+
+    assert cursor.execute_calls == ["TRUNCATE TABLE python_pricing.FREMTPL_RAW"]
+    assert cursor.executemany_calls[0][0].startswith(
+        "INSERT INTO python_pricing.FREMTPL_RAW"
     )
 
 

@@ -1,5 +1,6 @@
 apache-airflow==3.2.1
 apache-airflow-providers-microsoft-mssql
+azure-identity
 superglm @ git+https://github.com/StrudelDoodleS/superglm.git@592891b6e405fdfa90e35ff39a16b8ebd5eb84f6
 mlflow
 numpy

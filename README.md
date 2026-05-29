@@ -99,16 +99,32 @@ Prerequisites:
    ```env
    MSSQL_SERVER=<server-name>.database.windows.net,1433
    MSSQL_DATABASE=PricingLab_UAT
-   MSSQL_USER=pricing_pipeline_writer
-   MSSQL_PASSWORD=<from-secret-store>
+   MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc
+   MSSQL_AUTH_MODE=azure_token
+   MSSQL_TOKEN_SCOPE=https://database.windows.net/.default
    MSSQL_ENCRYPT=yes
    MSSQL_TRUST_SERVER_CERT=no
    PRICING_SKIP_DATABASE_CREATE=true
    PRICING_SCHEMA_DIR=db/migrations
+   PRICING_SCHEMA=python_pricing
+   PRICING_STAGING_SCHEMA=python_pricing_stg
+   MLOPS_SCHEMA=python_mlops
    ```
 
    Keep `PRICING_SKIP_DATABASE_CREATE=true` when the DBA has already created the
    database and your pipeline login should only manage objects inside it.
+   With `MSSQL_AUTH_MODE=azure_token`, the SQLAlchemy engine uses
+   `DefaultAzureCredential(exclude_interactive_browser_credential=False)` and
+   passes the Azure SQL bearer token to `pyodbc`. If you need SQL password auth
+   instead, set `MSSQL_AUTH_MODE=sql_password`, fill `MSSQL_USER` /
+   `MSSQL_PASSWORD`, and keep `MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc` or switch
+   to `mssql+pymssql`.
+
+   `PRICING_SCHEMA`, `PRICING_STAGING_SCHEMA`, and `MLOPS_SCHEMA` control where
+   the DDL and runtime writes land. The first schema apply stores those values
+   in `dbo.SCHEMA_CONFIGURATION`; later applies fail if a different set is
+   requested, so you do not accidentally write half the model registry into a
+   new namespace.
 
 3. Start MLflow in one terminal:
 
@@ -223,6 +239,13 @@ pricing_pipeline/
 - Model code lives under `pricing_models/<model_name>/`. A model package should
   provide `training.py` for feature preparation/model construction and `spec.py`
   with a `ModelSpec` that points at the dataset it trains on.
+- Validation split behavior belongs in the model `model.toml`. The final
+  published model still trains on the full dataset; the split is retained for
+  review/validation lineage. Use `method = "train_test_split"` for a holdout,
+  `method = "kfold"` for cross-validation, or `method = "none"` for no
+  validation split. Set `materialize = true` to write compressed `.npz` fold
+  indexes under `VALIDATION_SPLIT_ARTIFACT_ROOT`; SQL stores only the artifact
+  path, artifact SHA256, and dataset row-order SHA256.
 - Register each spec in `pricing_models/registry.py` so direct runs can select it
   with `--model-key`.
 - Add one thin DAG per model in `dags/`, using

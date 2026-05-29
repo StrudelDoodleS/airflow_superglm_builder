@@ -9,7 +9,7 @@ from airflow.sdk import dag, get_current_context, task
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.db import ensure_database, get_engine
-from pricing_pipeline.data.manifest import create_dataset_manifest, new_manifest_id
+from pricing_pipeline.data.manifest import create_dataset_manifest_with_split, new_manifest_id
 from pricing_pipeline.infra.migrations import apply_migrations
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelSpec
@@ -75,29 +75,30 @@ def build_pricing_model_dag(
             return apply_migrations(get_engine(settings), schema_dir_from_env())
 
         @task
-        def prepare_dataset() -> str:
+        def prepare_dataset() -> dict[str, str | None]:
             settings = settings_from_env()
             engine = get_engine(settings)
             if spec.dataset.raw_loader is not None:
                 spec.dataset.raw_loader(engine)
             manifest_id = new_manifest_id(spec.dataset.dataset_name)
-            return create_dataset_manifest(
+            return create_dataset_manifest_with_split(
                 engine,
                 dataset=spec.dataset,
                 manifest_id=manifest_id,
-                n_splits=spec.dataset.default_n_splits,
-                random_state=spec.dataset.default_random_state,
-            )
+                validation_split=model_config.validation_split,
+                validation_split_artifact_root=settings.validation_split_artifact_root,
+            ).to_dict()
 
         @task
-        def train_and_export(manifest_id: str) -> dict[str, Any]:
+        def train_and_export(manifest_result: dict[str, str | None]) -> dict[str, Any]:
             settings = settings_from_env()
             context = get_current_context()
             logical_date = context_date_iso(context)
             return train_and_export_model(
                 get_engine(settings),
                 settings=settings,
-                manifest_id=manifest_id,
+                manifest_id=str(manifest_result["manifest_id"]),
+                split_set_id=manifest_result.get("split_set_id"),
                 dag_id=context["dag"].dag_id,
                 airflow_run_id=context["run_id"],
                 logical_date=logical_date,

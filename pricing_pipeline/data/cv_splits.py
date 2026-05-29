@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -82,10 +82,12 @@ def resolve_splitter(split_set: CVSplitSet):
             f"split_set {split_set.split_set_id} is {split_set.split_mode}; "
             "load materialized artifact indices instead"
         )
-    if split_set.splitter_class != "sklearn.model_selection.KFold":
-        raise ValueError(f"Unsupported splitter_class: {split_set.splitter_class}")
     params = json.loads(split_set.splitter_params_json or "{}")
-    return KFold(**params)
+    if split_set.splitter_class == "sklearn.model_selection.KFold":
+        return KFold(**params)
+    if split_set.splitter_class == "sklearn.model_selection.train_test_split":
+        return train_test_split
+    raise ValueError(f"Unsupported splitter_class: {split_set.splitter_class}")
 
 
 def replay_cv_folds(
@@ -105,6 +107,17 @@ def replay_cv_folds(
             f"row_count mismatch for {split_set.split_set_id}: "
             f"expected {split_set.row_count}, got {len(frame)}"
         )
+
+    params = json.loads(split_set.splitter_params_json or "{}")
+    if split_set.splitter_class == "sklearn.model_selection.train_test_split":
+        stratify_column = params.pop("stratify_column", None)
+        stratify = frame[stratify_column] if stratify_column else None
+        train_idx, test_idx = train_test_split(
+            np.arange(len(frame), dtype=np.int64),
+            stratify=stratify,
+            **params,
+        )
+        return {1: (np.asarray(train_idx), np.asarray(test_idx))}
 
     cv = resolve_splitter(split_set)
     return {

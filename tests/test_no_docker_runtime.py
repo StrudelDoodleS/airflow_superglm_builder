@@ -38,7 +38,13 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
     text = env_example.read_text(encoding="utf-8")
 
     assert "MSSQL_SERVER=<server-name>.database.windows.net,1433" in text
-    assert "MSSQL_SQLALCHEMY_DIALECT=mssql+pymssql" in text
+    assert "MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc" in text
+    assert "MSSQL_AUTH_MODE=azure_token" in text
+    assert "MSSQL_TOKEN_SCOPE=https://database.windows.net/.default" in text
+    assert "PRICING_SCHEMA=python_pricing" in text
+    assert "PRICING_STAGING_SCHEMA=python_pricing_stg" in text
+    assert "MLOPS_SCHEMA=python_mlops" in text
+    assert "MSSQL_AUTH_MODE=sql_password" in text
     assert "PRICING_SKIP_DATABASE_CREATE=true" in text
     assert "MLFLOW_TRACKING_URI=http://127.0.0.1:5000" in text
     assert "AIRFLOW_HOME=state/no_docker/airflow" in text
@@ -161,6 +167,7 @@ def test_apply_schema_script_starts_without_pythonpath(tmp_path):
 
 def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
     from pricing_models.mtpl_frequency.spec import MODEL_CONFIG
+    from pricing_pipeline.data.manifest import DatasetManifestResult
     from scripts import run_pipeline_no_airflow
 
     engine = object()
@@ -175,8 +182,6 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
             replace_raw=False,
             manifest_id="manifest-1",
             model_key="MTPL_FREQ",
-            n_splits=5,
-            random_state=42,
             dag_id="no_docker_local",
             airflow_run_id="manual__1",
             logical_date="2026-05-27",
@@ -190,7 +195,11 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
         run_pipeline_no_airflow,
         "create_dataset_manifest",
         lambda engine_arg, **kwargs: calls.append(("manifest", engine_arg, kwargs))
-        or kwargs["manifest_id"],
+        or DatasetManifestResult(
+            manifest_id=kwargs["manifest_id"],
+            split_set_id="manifest-1__train_test_split_test_0_2_seed_99",
+            split_artifact_uri="/tmp/splits/manifest-1.npz",
+        ),
     )
 
     def fake_run_training_export_publish(engine_arg, **kwargs):
@@ -208,6 +217,9 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
     publish_call = next(call for call in calls if call[0] == "publish")
     assert publish_call[1] is engine
     assert publish_call[2]["model_config"] == MODEL_CONFIG
+    assert publish_call[2]["split_set_id"] == "manifest-1__train_test_split_test_0_2_seed_99"
+    manifest_call = next(call for call in calls if call[0] == "manifest")
+    assert manifest_call[2]["validation_split"] == MODEL_CONFIG.validation_split
     assert json.loads(capsys.readouterr().out) == {
         "manifest_id": "manifest-1",
         "rate_package_id": "123",

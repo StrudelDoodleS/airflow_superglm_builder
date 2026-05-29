@@ -7,6 +7,8 @@ from sklearn.datasets import fetch_openml
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from pricing_pipeline.infra.schema import render_sql_schemas, schema_names_from_connectable
+
 
 FREMTPL_OPENML_ID = 41214
 FREMTPL_DATASET_NAME = "freMTPL2freq"
@@ -100,14 +102,19 @@ def bulk_insert_fremtpl_raw(
 
     columns = ", ".join(FREMTPL_COLUMNS)
     placeholders = ", ".join(_dbapi_placeholder(engine) for _ in FREMTPL_COLUMNS)
-    sql = f"INSERT INTO pricing.FREMTPL_RAW ({columns}) VALUES ({placeholders})"
+    schemas = schema_names_from_connectable(engine)
+    sql = render_sql_schemas(
+        f"INSERT INTO pricing.FREMTPL_RAW ({columns}) VALUES ({placeholders})",
+        schemas,
+    )
+    truncate_sql = render_sql_schemas(FREMTPL_TRUNCATE_SQL, schemas)
 
     connection = engine.raw_connection()
     cursor = None
     try:
         cursor = connection.cursor()
         if replace:
-            cursor.execute(FREMTPL_TRUNCATE_SQL)
+            cursor.execute(truncate_sql)
         if hasattr(cursor, "fast_executemany"):
             cursor.fast_executemany = True
         for chunk in _chunk_rows(rows, chunksize):

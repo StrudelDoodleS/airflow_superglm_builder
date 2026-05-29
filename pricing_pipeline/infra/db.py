@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import struct
 from urllib.parse import quote, quote_plus
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.schema import render_sql_schemas
+
+
+SQL_COPT_SS_ACCESS_TOKEN = 1256
 
 
 def _format_odbc_value(value: str, *, always_brace: bool = False) -> str:
@@ -15,16 +20,34 @@ def _format_odbc_value(value: str, *, always_brace: bool = False) -> str:
     return "{" + value.replace("}", "}}") + "}"
 
 
-def build_odbc_connect_string(settings: Settings, *, database: str) -> str:
-    return (
-        f"DRIVER={_format_odbc_value(settings.mssql_driver, always_brace=True)};"
-        f"SERVER={_format_odbc_value(settings.mssql_server)};"
-        f"DATABASE={_format_odbc_value(database)};"
-        f"UID={_format_odbc_value(settings.mssql_user)};"
-        f"PWD={_format_odbc_value(settings.mssql_password)};"
-        f"Encrypt={_format_odbc_value(settings.mssql_encrypt)};"
-        f"TrustServerCertificate={_format_odbc_value(settings.mssql_trust_server_cert)};"
+def build_odbc_connect_string(
+    settings: Settings,
+    *,
+    database: str,
+    include_credentials: bool | None = None,
+) -> str:
+    if include_credentials is None:
+        include_credentials = settings.mssql_auth_mode.strip().lower() == "sql_password"
+
+    parts = [
+        f"DRIVER={_format_odbc_value(settings.mssql_driver, always_brace=True)};",
+        f"SERVER={_format_odbc_value(settings.mssql_server)};",
+        f"DATABASE={_format_odbc_value(database)};",
+    ]
+    if include_credentials:
+        parts.extend(
+            [
+                f"UID={_format_odbc_value(settings.mssql_user)};",
+                f"PWD={_format_odbc_value(settings.mssql_password)};",
+            ]
+        )
+    parts.extend(
+        [
+            f"Encrypt={_format_odbc_value(settings.mssql_encrypt)};",
+            f"TrustServerCertificate={_format_odbc_value(settings.mssql_trust_server_cert)};",
+        ]
     )
+    return "".join(parts)
 
 
 def _format_server_netloc(server: str) -> str:
@@ -46,6 +69,12 @@ def build_pymssql_url(settings: Settings, *, database: str) -> str:
 
 def build_sqlalchemy_url(settings: Settings, *, database: str) -> str:
     dialect = settings.mssql_sqlalchemy_dialect.strip().lower()
+    auth_mode = settings.mssql_auth_mode.strip().lower()
+    if auth_mode == "azure_token" and dialect != "mssql+pyodbc":
+        raise ValueError(
+            "MSSQL_AUTH_MODE=azure_token requires "
+            "MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc"
+        )
     if dialect == "mssql+pymssql":
         return build_pymssql_url(settings, database=database)
     if dialect != "mssql+pyodbc":
@@ -56,14 +85,56 @@ def build_sqlalchemy_url(settings: Settings, *, database: str) -> str:
     return f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}"
 
 
+def _azure_sql_access_token_struct(settings: Settings) -> bytes:
+    try:
+        from azure.identity import DefaultAzureCredential
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "MSSQL_AUTH_MODE=azure_token requires the azure-identity package"
+        ) from exc
+
+    credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+    token = credential.get_token(settings.mssql_token_scope).token
+    token_bytes = token.encode("utf-16-le")
+    return struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
+
+def _attach_schema_renderer(engine: Engine, settings: Settings) -> None:
+    schemas = settings.schema_names
+
+    @event.listens_for(engine, "before_cursor_execute", retval=True)
+    def _render_schema_names(_conn, _cursor, statement, parameters, _context, _executemany):
+        return render_sql_schemas(statement, schemas), parameters
+
+
 def get_engine(settings: Settings, *, database: str | None = None) -> Engine:
-    engine_kwargs = {"future": True}
-    if settings.mssql_sqlalchemy_dialect.strip().lower() == "mssql+pyodbc":
+    dialect = settings.mssql_sqlalchemy_dialect.strip().lower()
+    auth_mode = settings.mssql_auth_mode.strip().lower()
+    if auth_mode not in {"sql_password", "azure_token"}:
+        raise ValueError("MSSQL_AUTH_MODE must be one of: sql_password, azure_token")
+
+    engine_kwargs = {
+        "future": True,
+        "execution_options": settings.schema_names.as_execution_options(),
+    }
+    if dialect == "mssql+pyodbc":
         engine_kwargs["fast_executemany"] = True
-    return create_engine(
+    if auth_mode == "azure_token":
+        engine_kwargs["connect_args"] = {
+            "attrs_before": {
+                SQL_COPT_SS_ACCESS_TOKEN: _azure_sql_access_token_struct(settings)
+            }
+        }
+
+    engine = create_engine(
         build_sqlalchemy_url(settings, database=database or settings.pricing_database),
         **engine_kwargs,
     )
+    if hasattr(engine, "update_execution_options"):
+        engine.update_execution_options(**settings.schema_names.as_execution_options())
+    if hasattr(engine, "dispatch"):
+        _attach_schema_renderer(engine, settings)
+    return engine
 
 
 def ensure_database(settings: Settings, database: str) -> None:

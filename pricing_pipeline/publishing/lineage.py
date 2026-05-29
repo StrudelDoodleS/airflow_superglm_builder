@@ -21,7 +21,7 @@ def record_model_run(
     run_status: str,
     created_by: str,
     dataset_role: str = "training",
-    split_role: str = "cross_validation",
+    split_role: str = "validation",
 ) -> int:
     params = {
         "dag_id": dag_id,

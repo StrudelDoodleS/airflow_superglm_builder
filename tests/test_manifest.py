@@ -4,10 +4,12 @@ import subprocess
 import sys
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from pricing_pipeline.data import manifest
 from pricing_pipeline.data.manifest import (
+    create_dataset_manifest_with_split,
     build_column_metadata,
     build_cv_split_set,
     compute_row_order_sha256,
@@ -16,6 +18,7 @@ from pricing_pipeline.data.manifest import (
     new_manifest_id,
     runtime_dependency_metadata,
 )
+from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec
 
 
@@ -199,8 +202,9 @@ class FakeBegin:
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, execution_options=None):
         self.events = []
+        self._execution_options = execution_options or {}
         self.connection = FakeBeginConnection(self.events)
 
     def begin(self):
@@ -286,6 +290,147 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
     assert folds["n_train"].tolist() == [2, 2, 2]
     assert folds["n_test"].tolist() == [1, 1, 1]
     assert engine.connection.executed == []
+
+
+def test_create_fremtpl_manifest_uses_configured_pricing_schema_for_to_sql(monkeypatch):
+    engine = FakeEngine({"pricing_schema": "python_pricing"})
+    raw_frame = pd.DataFrame(
+        {
+            "IDpol": [1, 2, 3],
+            "ClaimNb": [0, 1, 0],
+            "Exposure": [0.5, 1.0, 0.25],
+            "Area": ["A", "B", "C"],
+        }
+    )
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append({"name": name, "schema": kwargs.get("schema")})
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    create_fremtpl_manifest(
+        engine,
+        manifest_id="manifest_custom_schema",
+        n_splits=3,
+        random_state=123,
+        created_by="unit-test",
+    )
+
+    assert [(call["name"], call["schema"]) for call in to_sql_calls] == [
+        ("DATASET_MANIFEST", "python_pricing"),
+        ("DATASET_COLUMN", "python_pricing"),
+        ("CV_SPLIT_SET", "python_pricing"),
+        ("CV_FOLD", "python_pricing"),
+    ]
+
+
+def test_create_dataset_manifest_can_materialize_train_test_split_npz(
+    monkeypatch,
+    tmp_path,
+):
+    engine = FakeEngine()
+    raw_frame = manifest_frame()
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append(
+            {
+                "name": name,
+                "schema": kwargs.get("schema"),
+                "frame": self.copy(),
+            }
+        )
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    result = create_dataset_manifest_with_split(
+        engine,
+        dataset=DatasetSpec(
+            dataset_name="unit",
+            source_system="unit",
+            manifest_sql="SELECT * FROM unit",
+            pk_columns=("IDpol",),
+            target_column="ClaimNb",
+            weight_column="Exposure",
+        ),
+        manifest_id="manifest_train_test",
+        validation_split=ValidationSplitConfig.train_test_split(
+            test_size=0.4,
+            random_state=42,
+            materialize=True,
+        ),
+        validation_split_artifact_root=tmp_path,
+        created_by="unit-test",
+    )
+
+    assert result.manifest_id == "manifest_train_test"
+    assert result.split_set_id == "manifest_train_test__train_test_split_test_0_4_seed_42"
+    assert result.split_artifact_uri is not None
+
+    artifact_path = tmp_path / "manifest_train_test__train_test_split_test_0_4_seed_42.npz"
+    loaded = np.load(artifact_path)
+    assert sorted(loaded.files) == ["fold_1_test_idx", "fold_1_train_idx"]
+    assert len(loaded["fold_1_train_idx"]) == 3
+    assert len(loaded["fold_1_test_idx"]) == 2
+
+    split_set_call = next(call for call in to_sql_calls if call["name"] == "CV_SPLIT_SET")
+    split_set = split_set_call["frame"].iloc[0]
+    assert split_set["splitter_class"] == "sklearn.model_selection.train_test_split"
+    assert split_set["fold_count"] == 1
+    assert split_set["artifact_uri"] == str(artifact_path)
+    assert len(split_set["artifact_sha256"]) == 64
+
+
+def test_create_dataset_manifest_with_none_validation_split_writes_no_cv_tables(
+    monkeypatch,
+):
+    engine = FakeEngine()
+    raw_frame = manifest_frame()
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda self, name, con, **kwargs: to_sql_calls.append(name),
+    )
+
+    result = create_dataset_manifest_with_split(
+        engine,
+        dataset=DatasetSpec(
+            dataset_name="unit",
+            source_system="unit",
+            manifest_sql="SELECT * FROM unit",
+            pk_columns=("IDpol",),
+            target_column="ClaimNb",
+            weight_column="Exposure",
+        ),
+        manifest_id="manifest_no_validation",
+        validation_split=ValidationSplitConfig.none(),
+        created_by="unit-test",
+    )
+
+    assert result.manifest_id == "manifest_no_validation"
+    assert result.split_set_id is None
+    assert "CV_SPLIT_SET" not in to_sql_calls
+    assert "CV_FOLD" not in to_sql_calls
 
 
 def test_create_dataset_manifest_uses_dataset_spec_without_fremtpl_assumptions(monkeypatch):

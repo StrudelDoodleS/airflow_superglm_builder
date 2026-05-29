@@ -6,21 +6,39 @@ import hashlib
 import platform
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from importlib import metadata
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec
 
 
 FREMTPL_DATASET_NAME = "freMTPL2freq"
 FREMTPL_SOURCE_SYSTEM = "openml_41214"
 FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
+
+
+@dataclass(frozen=True)
+class DatasetManifestResult:
+    manifest_id: str
+    split_set_id: str | None = None
+    split_artifact_uri: str | None = None
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "manifest_id": self.manifest_id,
+            "split_set_id": self.split_set_id,
+            "split_artifact_uri": self.split_artifact_uri,
+        }
 
 
 def _package_version(package_name: str) -> str | None:
@@ -106,6 +124,32 @@ def split_set_id_for_manifest(
     return f"{manifest_id}__kfold_{n_splits}_seed_{random_state}"
 
 
+def _format_split_float(value: float) -> str:
+    formatted = f"{value:.12g}"
+    return formatted.replace(".", "_").replace("-", "neg_")
+
+
+def split_set_id_for_validation_split(
+    manifest_id: str,
+    validation_split: ValidationSplitConfig,
+) -> str | None:
+    if validation_split.method == "none":
+        return None
+    if validation_split.method == "kfold":
+        return split_set_id_for_manifest(
+            manifest_id,
+            n_splits=int(validation_split.n_splits or 5),
+            random_state=int(validation_split.random_state or 0),
+        )
+    if validation_split.method == "train_test_split":
+        return (
+            f"{manifest_id}__train_test_split_test_"
+            f"{_format_split_float(float(validation_split.test_size or 0.2))}"
+            f"_seed_{validation_split.random_state}"
+        )
+    raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+
 def build_cv_split_set(
     frame: pd.DataFrame,
     *,
@@ -148,16 +192,76 @@ def build_cv_split_set(
     )
 
 
-def build_cv_folds(
+def build_validation_split_set(
+    frame: pd.DataFrame,
+    *,
+    manifest_id: str,
+    validation_split: ValidationSplitConfig,
+    pk_columns: tuple[str, ...] = ("IDpol",),
+    created_by: str = "airflow",
+    artifact_uri: str | None = None,
+    artifact_sha256: str | None = None,
+) -> pd.DataFrame:
+    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
+    if split_set_id is None:
+        return pd.DataFrame()
+
+    if validation_split.method == "kfold":
+        splitter_class = "sklearn.model_selection.KFold"
+        params = {
+            "n_splits": int(validation_split.n_splits or 5),
+            "shuffle": bool(validation_split.shuffle),
+            "random_state": validation_split.random_state,
+        }
+        fold_count = int(validation_split.n_splits or 5)
+    elif validation_split.method == "train_test_split":
+        splitter_class = "sklearn.model_selection.train_test_split"
+        params = {
+            "test_size": float(validation_split.test_size or 0.2),
+            "random_state": validation_split.random_state,
+            "shuffle": bool(validation_split.shuffle),
+        }
+        if validation_split.stratify_column is not None:
+            params["stratify_column"] = validation_split.stratify_column
+        fold_count = 1
+    else:
+        raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+    return pd.DataFrame(
+        [
+            {
+                "split_set_id": split_set_id,
+                "manifest_id": manifest_id,
+                "split_mode": "MATERIALIZED"
+                if artifact_uri is not None
+                else "REPLAYABLE",
+                "splitter_class": splitter_class,
+                "splitter_params_json": json.dumps(params, sort_keys=True),
+                "row_order_sha256": compute_row_order_sha256(frame, pk_columns=pk_columns),
+                "row_count": int(len(frame)),
+                "fold_count": fold_count,
+                "groups_column": None,
+                "stratify_column": validation_split.stratify_column,
+                "artifact_uri": artifact_uri,
+                "artifact_sha256": artifact_sha256,
+                "runtime_metadata_json": runtime_dependency_metadata(),
+                "created_by": created_by,
+            }
+        ]
+    )
+
+
+def build_validation_folds(
     frame: pd.DataFrame,
     *,
     split_set_id: str,
-    n_splits: int,
-    random_state: int,
+    validation_split: ValidationSplitConfig,
 ) -> pd.DataFrame:
     rows: list[dict[str, int | str]] = []
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    for fold_no, (train_idx, test_idx) in enumerate(kf.split(frame), start=1):
+    for fold_no, (train_idx, test_idx) in enumerate(
+        validation_split_indices(frame, validation_split),
+        start=1,
+    ):
         rows.append(
             {
                 "split_set_id": split_set_id,
@@ -169,15 +273,92 @@ def build_cv_folds(
     return pd.DataFrame(rows)
 
 
-def create_dataset_manifest(
+def build_cv_folds(
+    frame: pd.DataFrame,
+    *,
+    split_set_id: str,
+    n_splits: int,
+    random_state: int,
+) -> pd.DataFrame:
+    return build_validation_folds(
+        frame,
+        split_set_id=split_set_id,
+        validation_split=ValidationSplitConfig.kfold(
+            n_splits=n_splits,
+            random_state=random_state,
+        ),
+    )
+
+
+def validation_split_indices(
+    frame: pd.DataFrame,
+    validation_split: ValidationSplitConfig,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    if validation_split.method == "none":
+        return []
+    if validation_split.method == "kfold":
+        kf = KFold(
+            n_splits=int(validation_split.n_splits or 5),
+            shuffle=bool(validation_split.shuffle),
+            random_state=validation_split.random_state,
+        )
+        return [
+            (np.asarray(train_idx), np.asarray(test_idx))
+            for train_idx, test_idx in kf.split(frame)
+        ]
+    if validation_split.method == "train_test_split":
+        indices = np.arange(len(frame), dtype=np.int64)
+        stratify = (
+            frame[validation_split.stratify_column]
+            if validation_split.stratify_column is not None
+            else None
+        )
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=float(validation_split.test_size or 0.2),
+            random_state=validation_split.random_state,
+            shuffle=bool(validation_split.shuffle),
+            stratify=stratify,
+        )
+        return [(np.asarray(train_idx), np.asarray(test_idx))]
+    raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_validation_split_npz(
+    frame: pd.DataFrame,
+    *,
+    validation_split: ValidationSplitConfig,
+    output_path: Path,
+) -> str:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, np.ndarray] = {}
+    for fold_no, (train_idx, test_idx) in enumerate(
+        validation_split_indices(frame, validation_split),
+        start=1,
+    ):
+        arrays[f"fold_{fold_no}_train_idx"] = train_idx.astype(np.int64, copy=False)
+        arrays[f"fold_{fold_no}_test_idx"] = test_idx.astype(np.int64, copy=False)
+    np.savez_compressed(output_path, **arrays)
+    return file_sha256(output_path)
+
+
+def create_dataset_manifest_with_split(
     engine: Engine,
     *,
     dataset: DatasetSpec,
     manifest_id: str,
-    n_splits: int = 5,
-    random_state: int = 42,
+    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
+    validation_split_artifact_root: Path | None = None,
     created_by: str = "airflow",
-) -> str:
+) -> DatasetManifestResult:
     frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
 
     manifest_df = pd.DataFrame(
@@ -202,53 +383,100 @@ def create_dataset_manifest(
         target_column=dataset.target_column,
         weight_column=dataset.weight_column,
     )
-    split_set_df = build_cv_split_set(
+    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
+    split_artifact_uri = None
+    split_artifact_sha256 = None
+    if validation_split.materialize and split_set_id is not None:
+        if validation_split_artifact_root is None:
+            raise ValueError(
+                "validation_split_artifact_root is required when materialize=true"
+            )
+        artifact_path = Path(validation_split_artifact_root) / f"{split_set_id}.npz"
+        split_artifact_sha256 = write_validation_split_npz(
+            frame,
+            validation_split=validation_split,
+            output_path=artifact_path,
+        )
+        split_artifact_uri = str(artifact_path)
+
+    split_set_df = build_validation_split_set(
         frame,
         manifest_id=manifest_id,
-        n_splits=n_splits,
-        random_state=random_state,
+        validation_split=validation_split,
         pk_columns=dataset.pk_columns,
         created_by=created_by,
+        artifact_uri=split_artifact_uri,
+        artifact_sha256=split_artifact_sha256,
     )
-    split_set_id = split_set_df.loc[0, "split_set_id"]
-    cv_fold_df = build_cv_folds(
-        frame,
-        split_set_id=split_set_id,
-        n_splits=n_splits,
-        random_state=random_state,
+    cv_fold_df = (
+        build_validation_folds(
+            frame,
+            split_set_id=split_set_id,
+            validation_split=validation_split,
+        )
+        if split_set_id is not None
+        else pd.DataFrame()
     )
+    schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         manifest_df.to_sql(
             "DATASET_MANIFEST",
             con,
-            schema="pricing",
+            schema=schemas.pricing,
             if_exists="append",
             index=False,
         )
         column_df.to_sql(
             "DATASET_COLUMN",
             con,
-            schema="pricing",
+            schema=schemas.pricing,
             if_exists="append",
             index=False,
             chunksize=5000,
         )
-        split_set_df.to_sql(
-            "CV_SPLIT_SET",
-            con,
-            schema="pricing",
-            if_exists="append",
-            index=False,
-        )
-        cv_fold_df.to_sql(
-            "CV_FOLD",
-            con,
-            schema="pricing",
-            if_exists="append",
-            index=False,
-        )
+        if not split_set_df.empty:
+            split_set_df.to_sql(
+                "CV_SPLIT_SET",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+            )
+        if not cv_fold_df.empty:
+            cv_fold_df.to_sql(
+                "CV_FOLD",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+            )
 
-    return manifest_id
+    return DatasetManifestResult(
+        manifest_id=manifest_id,
+        split_set_id=split_set_id,
+        split_artifact_uri=split_artifact_uri,
+    )
+
+
+def create_dataset_manifest(
+    engine: Engine,
+    *,
+    dataset: DatasetSpec,
+    manifest_id: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+    created_by: str = "airflow",
+) -> str:
+    return create_dataset_manifest_with_split(
+        engine,
+        dataset=dataset,
+        manifest_id=manifest_id,
+        validation_split=ValidationSplitConfig.kfold(
+            n_splits=n_splits,
+            random_state=random_state,
+        ),
+        created_by=created_by,
+    ).manifest_id
 
 
 def create_fremtpl_manifest(

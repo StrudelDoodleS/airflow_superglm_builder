@@ -5,7 +5,6 @@ import pickle
 import pandas as pd
 
 from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.data.manifest import split_set_id_for_manifest
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model
@@ -29,6 +28,7 @@ def train_and_export_model(
     *,
     settings: Settings,
     manifest_id: str,
+    split_set_id: str | None = None,
     dag_id: str,
     airflow_run_id: str,
     logical_date: str,
@@ -111,11 +111,7 @@ def train_and_export_model(
             dag_id=dag_id,
             airflow_run_id=airflow_run_id,
             mlflow_run_id=str(getattr(run.info, "run_id", "")),
-            split_set_id=split_set_id_for_manifest(
-                manifest_id,
-                n_splits=spec.dataset.default_n_splits,
-                random_state=spec.dataset.default_random_state,
-            ),
+            split_set_id=split_set_id,
             export_id=export_id,
             rating_workbook_path=str(workbook_path),
             effective_from=logical_date,
@@ -166,6 +162,7 @@ def run_training_export_publish(
     *,
     settings: Settings,
     manifest_id: str,
+    split_set_id: str | None = None,
     dag_id: str,
     airflow_run_id: str,
     logical_date: str,
@@ -177,6 +174,7 @@ def run_training_export_publish(
         engine,
         settings=settings,
         manifest_id=manifest_id,
+        split_set_id=split_set_id,
         dag_id=dag_id,
         airflow_run_id=airflow_run_id,
         logical_date=logical_date,

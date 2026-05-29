@@ -1,7 +1,13 @@
 import re
 from pathlib import Path
 
-from pricing_pipeline.infra.migrations import migration_files, split_sql_server_batches
+from pricing_pipeline.infra.migrations import (
+    _ensure_schema_configuration,
+    migration_files,
+    render_migration_sql,
+    split_sql_server_batches,
+)
+from pricing_pipeline.infra.schema import SchemaNames
 
 
 def _create_table_bodies(ddl: str) -> dict[str, str]:
@@ -108,6 +114,95 @@ def test_migration_files_are_sorted(tmp_path: Path):
     (tmp_path / "V002__b.sql").write_text("SELECT 2", encoding="utf-8")
     (tmp_path / "V001__a.sql").write_text("SELECT 1", encoding="utf-8")
     assert [p.name for p in migration_files(tmp_path)] == ["V001__a.sql", "V002__b.sql"]
+
+
+def test_render_migration_sql_supports_custom_schema_names():
+    migration = """
+    CREATE SCHEMA pricing;
+    CREATE TABLE pricing.PRICING_MODEL(model_id BIGINT);
+    CREATE TABLE pricing_stg.STG_RATING_EXPORT(export_id NVARCHAR(128));
+    CREATE TABLE mlops.MODEL_RUN_METRIC(metric_name NVARCHAR(128));
+    """
+
+    rendered = render_migration_sql(
+        migration,
+        SchemaNames(
+            pricing="python_pricing",
+            pricing_staging="python_pricing_stg",
+            mlops="python_mlops",
+        ),
+    )
+
+    assert "CREATE SCHEMA python_pricing" in rendered
+    assert "python_pricing.PRICING_MODEL" in rendered
+    assert "python_pricing_stg.STG_RATING_EXPORT" in rendered
+    assert "python_mlops.MODEL_RUN_METRIC" in rendered
+
+
+class FakeSchemaConfigurationResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+class FakeSchemaConfigurationConnection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.executed.append((sql, params))
+        if "FROM dbo.SCHEMA_CONFIGURATION" in sql:
+            return FakeSchemaConfigurationResult(self.rows)
+        return FakeSchemaConfigurationResult([])
+
+
+def test_schema_configuration_guard_records_initial_schema_names():
+    con = FakeSchemaConfigurationConnection([])
+
+    _ensure_schema_configuration(
+        con,
+        SchemaNames(
+            pricing="python_pricing",
+            pricing_staging="python_pricing_stg",
+            mlops="python_mlops",
+        ),
+    )
+
+    insert_params = [params for _, params in con.executed if params is not None]
+    assert insert_params == [
+        {"key": "pricing_schema", "value": "python_pricing"},
+        {"key": "pricing_staging_schema", "value": "python_pricing_stg"},
+        {"key": "mlops_schema", "value": "python_mlops"},
+    ]
+
+
+def test_schema_configuration_guard_rejects_different_initialized_schema_names():
+    con = FakeSchemaConfigurationConnection(
+        [
+            ("pricing_schema", "pricing"),
+            ("pricing_staging_schema", "pricing_stg"),
+            ("mlops_schema", "mlops"),
+        ]
+    )
+
+    try:
+        _ensure_schema_configuration(
+            con,
+            SchemaNames(
+                pricing="python_pricing",
+                pricing_staging="python_pricing_stg",
+                mlops="python_mlops",
+            ),
+        )
+    except RuntimeError as exc:
+        assert "already initialized with different schema names" in str(exc)
+        assert "pricing_schema existing='pricing' requested='python_pricing'" in str(exc)
+    else:
+        raise AssertionError("schema mismatch should fail before applying migrations")
 
 
 def test_model_registry_migration_keeps_history_and_guards_current_deployments():

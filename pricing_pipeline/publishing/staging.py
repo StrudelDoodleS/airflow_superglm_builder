@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model
 
 INTERVAL_RE = re.compile(
@@ -249,6 +250,7 @@ def insert_staging_frames(
     rate_df: pd.DataFrame,
     level_df: pd.DataFrame,
 ) -> None:
+    schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         model_id = ensure_pricing_model(
             con,
@@ -277,7 +279,7 @@ def insert_staging_frames(
         export_df.to_sql(
             "STG_RATING_EXPORT",
             con,
-            schema="pricing_stg",
+            schema=schemas.pricing_staging,
             if_exists="append",
             index=False,
         )
@@ -291,7 +293,7 @@ def insert_staging_frames(
         rate_df.to_sql(
             "STG_RATE_CELL",
             con,
-            schema="pricing_stg",
+            schema=schemas.pricing_staging,
             if_exists="append",
             index=False,
             chunksize=5000,
@@ -299,7 +301,7 @@ def insert_staging_frames(
         level_df.to_sql(
             "STG_CELL_LEVEL",
             con,
-            schema="pricing_stg",
+            schema=schemas.pricing_staging,
             if_exists="append",
             index=False,
             chunksize=5000,

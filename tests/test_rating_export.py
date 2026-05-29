@@ -268,8 +268,9 @@ class FakeBegin:
 
 
 class FakeEngine:
-    def __init__(self, events: list[tuple]):
+    def __init__(self, events: list[tuple], execution_options=None):
         self.events = events
+        self._execution_options = execution_options or {}
         self.connection = FakeBeginConnection(events)
 
     def begin(self):
@@ -297,8 +298,9 @@ class FakeModelRegistryConnection(FakeBeginConnection):
 
 
 class FakeModelRegistryEngine(FakeEngine):
-    def __init__(self, events: list[tuple]):
+    def __init__(self, events: list[tuple], execution_options=None):
         self.events = events
+        self._execution_options = execution_options or {}
         self.connection = FakeModelRegistryConnection(events)
 
 
@@ -409,6 +411,38 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         5000,
     ]
     assert events[0] == ("begin",)
+
+
+def test_insert_staging_frames_uses_configured_staging_schema_for_to_sql():
+    events = []
+    engine = FakeModelRegistryEngine(
+        events,
+        {"pricing_staging_schema": "python_pricing_stg"},
+    )
+    args = SimpleNamespace(
+        model_name="MTPL_FREQ",
+        model_label=None,
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_status="ACTIVE",
+        created_by="unit-test",
+        replace=False,
+        export_id="export-1",
+    )
+
+    staging.insert_staging_frames(
+        engine,
+        args,
+        FakeFrame("export", events),
+        FakeFrame("rate", events),
+        FakeFrame("level", events),
+    )
+
+    assert [event[4] for event in events if event[0] == "to_sql"] == [
+        "python_pricing_stg",
+        "python_pricing_stg",
+        "python_pricing_stg",
+    ]
 
 
 def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_path: Path):
@@ -688,7 +722,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "model_version": "20260427",
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
-        "split_role": "cross_validation",
+            "split_role": "validation",
         "rate_package_id": 42,
         "rating_workbook_path": "/tmp/rating_tables.xlsx",
         "run_status": "SUCCESS",
@@ -747,7 +781,7 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
         "manifest_id": "manifest-1",
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
-        "split_role": "cross_validation",
+            "split_role": "validation",
     }
 
 
@@ -958,6 +992,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         engine,
         settings=settings,
         manifest_id="manifest-1",
+        split_set_id="manifest-1__train_test_split_test_0_2_seed_99",
         dag_id="pricing_dag",
         airflow_run_id="scheduled__2026-04-27T10:30:00+00:00",
         logical_date="2026-04-27",
@@ -1033,7 +1068,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "dag_id": "pricing_dag",
         "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
         "mlflow_run_id": "mlflow-run-1",
-        "split_set_id": "manifest-1__kfold_5_seed_42",
+        "split_set_id": "manifest-1__train_test_split_test_0_2_seed_99",
         "export_id": export_id,
         "rating_workbook_path": str(workbook_path),
         "effective_from": "2026-04-27",
@@ -1050,7 +1085,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
             "mlflow_run_id": "mlflow-run-1",
             "manifest_id": "manifest-1",
-            "split_set_id": "manifest-1__kfold_5_seed_42",
+            "split_set_id": "manifest-1__train_test_split_test_0_2_seed_99",
             "export_id": export_id,
             "model_id": 17,
             "model_name": "MTPL_FREQ",
