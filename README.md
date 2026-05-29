@@ -109,6 +109,7 @@ Prerequisites:
    PRICING_SCHEMA=python_pricing
    PRICING_STAGING_SCHEMA=python_pricing_stg
    MLOPS_SCHEMA=python_mlops
+   VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits
    ```
 
    Keep `PRICING_SKIP_DATABASE_CREATE=true` when the DBA has already created the
@@ -274,11 +275,12 @@ For example, the current MTPL frequency model is implemented in
 compatibility alias for older local commands.
 
 For a work deployment, CloudBeaver is not required and should normally not be
-started. Changing from local testing to a work SQL Server is just an `.env`
-change as long as the authentication mode is SQL username/password. If the
-work server requires Microsoft Entra token authentication, add a pyodbc token
-connection path in `pricing_pipeline/infra/db.py` and keep the rest of the pipeline
-unchanged.
+started. Changing from local testing to a work SQL Server is an `.env` change:
+set the target server/database, choose `MSSQL_AUTH_MODE=azure_token` for
+Microsoft Entra token authentication or `MSSQL_AUTH_MODE=sql_password` for SQL
+login authentication, and set the pricing/mlops schema names for that database.
+Both auth paths are handled by the SQLAlchemy engine helper in
+`pricing_pipeline/infra/db.py`.
 
 ## Optional Local Tools
 

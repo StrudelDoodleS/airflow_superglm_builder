@@ -8,7 +8,11 @@ README_CONTRACT_STRINGS = [
     "Airflow 3.2.1",
     "MLflow",
     "PRICING_ENABLE_MLFLOW=false",
+    "MSSQL_AUTH_MODE=azure_token",
+    "VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits",
     "PRICING_SCHEMA_DIR=db/migrations",
+    "PRICING_SCHEMA=python_pricing",
+    "MLOPS_SCHEMA=python_mlops",
     "scripts/apply_schema.py",
     "scripts/run_local_pipeline.sh",
     "scripts/no_docker_services.py",
@@ -65,6 +69,8 @@ def test_readme_documents_local_pipeline_contract():
 
     for expected in README_CONTRACT_STRINGS:
         assert expected in readme
+
+    assert "add a pyodbc token connection path" not in readme
 
 
 def test_readme_documents_rate_package_lifecycle_contract():
