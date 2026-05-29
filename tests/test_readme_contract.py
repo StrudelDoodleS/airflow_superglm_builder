@@ -4,6 +4,8 @@ from pathlib import Path
 README_CONTRACT_STRINGS = [
     "state/",
     "docker compose down -v",
+    "building, validating, publishing",
+    "freMTPL motor pricing model as a runnable",
     "No-Docker Work Quickstart",
     "Airflow 3.2.1",
     "## Contents",
@@ -74,6 +76,10 @@ def test_readme_documents_local_pipeline_contract():
         assert expected in readme
 
     assert "add a pyodbc token connection path" not in readme
+    assert "freMTPL pricing experiments" not in readme
+    assert "pipeline stores raw freMTPL rows" not in readme
+    assert "add an explicit auth mode to the SQL connection helper" not in readme
+    assert "New freMTPL manifests" not in readme
 
 
 def test_readme_documents_rate_package_lifecycle_contract():

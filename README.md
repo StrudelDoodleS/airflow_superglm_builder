@@ -1,10 +1,13 @@
 # Airflow SuperGLM Builder
 
-Production-minded local Airflow 3.2.1 pipeline for freMTPL pricing experiments.
+Production-minded Airflow 3.2.1 pipeline for building, validating, publishing,
+and deploying SQL-backed SuperGLM rate packages.
 
-The pipeline stores raw freMTPL rows in SQL Server, trains a SuperGLM Poisson
-frequency model, logs model runs to MLflow, exports rating tables, and publishes
-normalized rating packages back to SQL Server.
+The reusable pipeline stores dataset manifests and model lineage in SQL Server,
+trains model-specific SuperGLM estimators, optionally logs runs to MLflow,
+exports normalized rating tables, and publishes immutable rate packages back to
+SQL Server. The repository includes a freMTPL motor pricing model as a runnable
+demo/reference implementation.
 
 ## Contents
 
@@ -61,7 +64,7 @@ These steps assume Docker with the Compose v2 plugin is already installed.
    docker compose ps
    ```
 
-5. Apply schema DDL and load the raw freMTPL source table:
+5. Apply schema DDL and load the bundled freMTPL demo source table:
 
    ```bash
    docker compose exec -T airflow-apiserver python /opt/pricing/scripts/apply_schema.py
@@ -74,7 +77,7 @@ These steps assume Docker with the Compose v2 plugin is already installed.
    - MLflow: http://localhost:5000
    - SQL Server: `localhost,1433`, database `PricingLab`
 
-7. Trigger the pipeline from Airflow, or from the CLI:
+7. Trigger the bundled demo pipeline from Airflow, or from the CLI:
 
    ```bash
    docker compose exec -T airflow-apiserver airflow dags trigger pricing_mtpl_frequency
@@ -87,8 +90,8 @@ scripts/run_local_pipeline.sh
 ```
 
 That script builds the image, starts the services, cleans stale Airflow example
-DAG metadata, waits for `pricing_mtpl_frequency` to be visible, and triggers
-the DAG.
+DAG metadata, waits for the bundled `pricing_mtpl_frequency` demo DAG to be
+visible, and triggers the DAG.
 
 ## No-Docker Work Quickstart
 
@@ -192,8 +195,8 @@ Prerequisites:
    The TUI groups are:
 
    - Services: `airflow`, `mlflow`, and local-only Docker-backed `cloudbeaver`.
-   - Pipeline Tasks: schema apply, freMTPL raw load/reload, direct pipeline run,
-     and demo model seeding.
+   - Pipeline Tasks: schema apply, bundled demo data load/reload, direct
+     pipeline run, and demo model seeding.
    - Utilities: bootstrap and ERD generation.
 
    The same launcher can be scripted without the menu:
@@ -215,15 +218,15 @@ Prerequisites:
    Do not select it on work machines where Docker or Docker Hub access is
    blocked.
 
-5. Apply schema DDL and load raw freMTPL data once:
+5. Apply schema DDL and load the bundled freMTPL demo data once:
 
    ```bash
    uv run python scripts/apply_schema.py
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
-6. Trigger `pricing_mtpl_frequency` from the Airflow UI, or run it directly
-   without Airflow:
+6. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
+   run it directly without Airflow:
 
    ```bash
    uv run python scripts/run_pipeline_no_airflow.py --model-key MTPL_FREQ
@@ -347,7 +350,11 @@ Open http://localhost:8088.
 
 ## Demo Data
 
-After the schema and raw data are loaded, seed simulated model builds:
+The repository includes a freMTPL-based demo dataset and model specs so local
+smoke tests have runnable data. Work deployments usually point `DatasetSpec`
+objects at approved source tables or views instead of loading demo data.
+
+After the schema and bundled demo data are loaded, seed simulated model builds:
 
 ```bash
 docker compose exec -T airflow-apiserver python /opt/pricing/scripts/seed_demo_model_variants.py
@@ -366,7 +373,7 @@ docker compose exec -T airflow-apiserver python /opt/pricing/scripts/reset_prici
 ```
 
 For a complete local `PricingLab` rebuild with identity counters reset, drop and
-recreate the database, then rerun schema apply and raw load:
+recreate the database, then rerun schema apply and the bundled demo data load:
 
 ```bash
 docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStrong(!)Password123' -C -d master -b -Q "IF DB_ID(N'PricingLab') IS NOT NULL BEGIN ALTER DATABASE [PricingLab] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [PricingLab]; END; CREATE DATABASE [PricingLab];"
@@ -390,9 +397,9 @@ local Airflow / Python / MLflow
 hosted SQL Server / Azure SQL database
 ```
 
-The target database is controlled by environment variables. For SQL
-username/password targets, the code does not change between local and work; only
-`.env` or Airflow secrets/connections change.
+The target database is controlled by environment variables. For SQL login or
+Microsoft Entra token targets, the code does not change between local and work;
+only `.env` or Airflow secrets/connections change.
 
 Typical hosted SQL Server settings:
 
@@ -416,10 +423,10 @@ MSSQL_USER=pricing_pipeline_writer
 MSSQL_PASSWORD=<from-secret-store>
 ```
 
-If the work database requires Microsoft Entra authentication, add an explicit
-auth mode to the SQL connection helper before running the work deployment. The
-unattended Airflow-friendly option is usually an Entra service principal or an
-access token helper. The DBA or platform owner must also create the database user
+If the work database requires Microsoft Entra authentication, use
+`MSSQL_AUTH_MODE=azure_token` with `MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc`.
+The engine helper uses Azure Identity to request an Azure SQL bearer token and
+passes it to ODBC. The DBA or platform owner must also create the database user
 and grants inside the target database; Entra login alone is not enough.
 
 Recommended database permissions for the pipeline user:
@@ -437,7 +444,7 @@ before publishing a model package.
 
 ## Local Smoke Run
 
-Run the local Airflow 3.2.1 stack and trigger the end-to-end smoke DAG:
+Run the local Airflow 3.2.1 stack and trigger the bundled end-to-end smoke DAG:
 
 ```bash
 scripts/run_local_pipeline.sh
@@ -449,8 +456,8 @@ scheduler, dag processor, worker, and triggerer services. It then runs the
 container smoke check with
 `docker compose run --rm airflow-apiserver python /opt/pricing/scripts/smoke_check.py`
 cleans stale example DAG metadata from existing local Airflow databases, waits
-for `pricing_mtpl_frequency` to be loaded by the DAG processor, and triggers
-it through the Airflow CLI.
+for the bundled `pricing_mtpl_frequency` demo DAG to be loaded by the DAG
+processor, and triggers it through the Airflow CLI.
 
 ## Local Services
 
@@ -594,7 +601,7 @@ or manual revisions.
 
 ## CV Split Storage
 
-Cross-validation split lineage is metadata-first. New freMTPL manifests write a
+Cross-validation split lineage is metadata-first. Dataset manifests can write a
 `pricing.CV_SPLIT_SET` row with the replayable splitter class, splitter params,
 row-order SHA-256 fingerprint, row count, fold count, and dependency/runtime
 metadata for the split environment. Per-fold sizes are stored in
