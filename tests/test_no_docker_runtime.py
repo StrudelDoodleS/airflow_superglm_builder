@@ -37,21 +37,19 @@ def test_no_docker_env_example_targets_host_processes_and_external_sql():
     assert env_example.exists()
     text = env_example.read_text(encoding="utf-8")
 
-    assert "MSSQL_SERVER=<server-name>.database.windows.net,1433" in text
-    assert "MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc" in text
-    assert "MSSQL_AUTH_MODE=azure_token" in text
-    assert "MSSQL_TOKEN_SCOPE=https://database.windows.net/.default" in text
-    assert "PRICING_SCHEMA=python_pricing" in text
-    assert "PRICING_STAGING_SCHEMA=python_pricing_stg" in text
-    assert "MLOPS_SCHEMA=python_mlops" in text
-    assert "MSSQL_AUTH_MODE=sql_password" in text
-    assert "PRICING_SKIP_DATABASE_CREATE=true" in text
+    assert "PRICING_RUNTIME_MODULE=work_runtime.database" in text
+    assert "PRICING_PROJECT_ROOT=." in text
     assert "MLFLOW_TRACKING_URI=http://127.0.0.1:5000" in text
     assert "AIRFLOW_HOME=state/no_docker/airflow" in text
     assert "AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE=false" in text
     assert "MLFLOW_BACKEND_STORE_URI=sqlite:///state/no_docker/mlflow/mlflow.db" in text
     assert "MLFLOW_ARTIFACT_ROOT=state/no_docker/mlflow/artifacts" in text
     assert "RATING_EXPORT_ROOT=state/no_docker/rating_exports" in text
+    assert "MSSQL_SERVER=" not in text
+    assert "MSSQL_DATABASE=" not in text
+    assert "MSSQL_AUTH_MODE=" not in text
+    assert "PRICING_SCHEMA=python_pricing" not in text
+    assert "MLOPS_SCHEMA=python_mlops" not in text
     assert "mssql,1433" not in text
     assert "/opt/pricing" not in text
 
@@ -143,6 +141,7 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     assert "--ensure-database" in result.stdout
     assert "--skip-schema-apply" in result.stdout
     assert "--skip-raw-load" in result.stdout
+    assert "--runtime-module" in result.stdout
     assert "--skip-migrations" not in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
@@ -186,11 +185,19 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
             airflow_run_id="manual__1",
             logical_date="2026-05-27",
             created_by="no_docker",
+            runtime_module=None,
         ),
     )
     monkeypatch.setattr(run_pipeline_no_airflow.os, "chdir", lambda path: None)
     monkeypatch.setattr(run_pipeline_no_airflow, "load_env", lambda: None)
-    monkeypatch.setattr(run_pipeline_no_airflow, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        run_pipeline_no_airflow,
+        "get_runtime",
+        lambda runtime_module=None: types.SimpleNamespace(
+            settings=Settings.from_env({}),
+            get_engine=lambda: engine,
+        ),
+    )
     monkeypatch.setattr(
         run_pipeline_no_airflow,
         "create_dataset_manifest",

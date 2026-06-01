@@ -11,9 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.pricing_db import get_engine, load_env  # noqa: E402
-from pricing_pipeline.infra.config import Settings  # noqa: E402
-from pricing_pipeline.infra.db import ensure_database  # noqa: E402
+from scripts.pricing_db import get_runtime, load_env  # noqa: E402
 from pricing_pipeline.data.manifest import (  # noqa: E402
     create_dataset_manifest_with_split as create_dataset_manifest,
 )
@@ -59,6 +57,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Truncate and reload the model dataset's raw table before training.",
     )
+    parser.add_argument(
+        "--runtime-module",
+        default=None,
+        help=(
+            "Importable Python module that provides get_engine(database=None), "
+            "get_schema_names(), and optional get_runtime_settings()."
+        ),
+    )
     parser.add_argument("--manifest-id", default=None)
     parser.add_argument(
         "--model-key",
@@ -77,15 +83,16 @@ def main() -> None:
     args = parse_args()
     os.chdir(ROOT)
     load_env()
-    settings = Settings.from_env(os.environ)
+    runtime = get_runtime(args.runtime_module)
+    settings = runtime.settings
 
     if args.ensure_database:
         if settings.skip_database_create:
             print("skip_database_create=true; not creating database")
         else:
-            ensure_database(settings, settings.pricing_database)
+            runtime.ensure_database(settings.pricing_database)
 
-    engine = get_engine()
+    engine = runtime.get_engine()
     model_spec = get_model_spec(args.model_key)
     model_config = get_model_config(args.model_key)
 

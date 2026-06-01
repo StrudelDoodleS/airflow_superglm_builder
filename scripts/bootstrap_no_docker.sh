@@ -29,6 +29,6 @@ else
 fi
 
 echo
-echo "Edit .env for the target SQL Server, then start MLflow and Airflow with:"
+echo "Edit .env for local runtime paths and create src/work_runtime/database.py, then start MLflow and Airflow with:"
 echo "  uv run python scripts/start_mlflow_local.py"
 echo "  uv run python scripts/start_airflow_local.py"

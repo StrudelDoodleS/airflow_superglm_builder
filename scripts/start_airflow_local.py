@@ -29,6 +29,9 @@ def _repo_path(value: str | Path) -> Path:
 def _prepend_pythonpath(path: Path) -> None:
     existing = os.environ.get("PYTHONPATH")
     parts = [str(path)]
+    src_path = path / "src"
+    if src_path.exists():
+        parts.append(str(src_path))
     if existing:
         parts.append(existing)
     os.environ["PYTHONPATH"] = os.pathsep.join(parts)

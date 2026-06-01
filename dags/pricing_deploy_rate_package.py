@@ -7,8 +7,7 @@ from datetime import datetime
 from airflow.sdk import dag, get_current_context, task
 
 from pricing_models.registry import get_model_config
-from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.infra.db import get_engine as _get_engine
+from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.publishing.publisher import ModelPublisher
 
 
@@ -23,7 +22,7 @@ _PARAMS = {
 
 
 def get_engine():
-    return _get_engine(Settings.from_env(os.environ))
+    return runtime_from_env_or_module(env=os.environ).get_engine()
 
 
 def _optional_value(value: object) -> object | None:

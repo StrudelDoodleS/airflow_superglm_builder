@@ -94,6 +94,28 @@ def test_pricing_mtpl_frequency_dag_keeps_model_publish_tasks_separate(monkeypat
     ]
 
 
+def test_dag_factory_accepts_explicit_runtime_module(monkeypatch):
+    task_outputs = _install_fake_airflow(monkeypatch)
+
+    from pricing_models.mtpl_frequency.spec import MODEL_CONFIG, MODEL_SPEC
+    from pricing_pipeline.orchestration.dag_factory import build_pricing_model_dag
+
+    dag = build_pricing_model_dag(
+        dag_id="pricing.motor_frequency.build",
+        spec=MODEL_SPEC,
+        model_config=MODEL_CONFIG,
+        runtime_module="work_runtime.database",
+    )
+
+    assert dag.dag_id == "pricing.motor_frequency.build"
+    assert [output.task_id for output in task_outputs] == [
+        "apply_pricing_schema",
+        "prepare_dataset",
+        "train_and_export",
+        "publish_export",
+    ]
+
+
 def test_pricing_deploy_rate_package_dag_imports_without_airflow(monkeypatch):
     _install_fake_airflow(monkeypatch)
 

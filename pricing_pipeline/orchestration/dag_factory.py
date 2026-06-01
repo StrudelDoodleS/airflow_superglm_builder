@@ -8,9 +8,9 @@ from typing import Any
 from airflow.sdk import dag, get_current_context, task
 
 from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.infra.db import ensure_database, get_engine
 from pricing_pipeline.data.manifest import create_dataset_manifest_with_split, new_manifest_id
 from pricing_pipeline.infra.migrations import apply_migrations
+from pricing_pipeline.infra.runtime import PipelineRuntime, runtime_from_env_or_module
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelSpec
 from pricing_pipeline.orchestration.pipeline import publish_model_export, train_and_export_model
@@ -39,6 +39,10 @@ def settings_from_env() -> Settings:
     return Settings.from_env(os.environ)
 
 
+def runtime_from_dag_config(runtime_module: str | None = None) -> PipelineRuntime:
+    return runtime_from_env_or_module(runtime_module, env=os.environ)
+
+
 def context_date_iso(context: dict[str, Any]) -> str:
     dag_run = context.get("dag_run")
     run_datetime = (
@@ -58,6 +62,7 @@ def build_pricing_model_dag(
     model_config: ModelBuildConfig,
     schedule=None,
     tags: list[str] | None = None,
+    runtime_module: str | None = None,
 ):
     @dag(
         dag_id=dag_id,
@@ -69,15 +74,17 @@ def build_pricing_model_dag(
     def _pricing_model_dag():
         @task
         def apply_pricing_schema() -> list[str]:
-            settings = settings_from_env()
+            runtime = runtime_from_dag_config(runtime_module)
+            settings = runtime.settings
             if not settings.skip_database_create:
-                ensure_database(settings, settings.pricing_database)
-            return apply_migrations(get_engine(settings), schema_dir_from_env())
+                runtime.ensure_database(settings.pricing_database)
+            return apply_migrations(runtime.get_engine(), schema_dir_from_env())
 
         @task
         def prepare_dataset() -> dict[str, str | None]:
-            settings = settings_from_env()
-            engine = get_engine(settings)
+            runtime = runtime_from_dag_config(runtime_module)
+            settings = runtime.settings
+            engine = runtime.get_engine()
             if spec.dataset.raw_loader is not None:
                 spec.dataset.raw_loader(engine)
             manifest_id = new_manifest_id(spec.dataset.dataset_name)
@@ -91,11 +98,12 @@ def build_pricing_model_dag(
 
         @task
         def train_and_export(manifest_result: dict[str, str | None]) -> dict[str, Any]:
-            settings = settings_from_env()
+            runtime = runtime_from_dag_config(runtime_module)
+            settings = runtime.settings
             context = get_current_context()
             logical_date = context_date_iso(context)
             return train_and_export_model(
-                get_engine(settings),
+                runtime.get_engine(),
                 settings=settings,
                 manifest_id=str(manifest_result["manifest_id"]),
                 split_set_id=manifest_result.get("split_set_id"),
@@ -107,8 +115,9 @@ def build_pricing_model_dag(
 
         @task
         def publish_export(export: dict[str, Any]) -> dict[str, str]:
+            runtime = runtime_from_dag_config(runtime_module)
             return publish_model_export(
-                get_engine(settings_from_env()),
+                runtime.get_engine(),
                 export,
                 model_config=model_config,
             )

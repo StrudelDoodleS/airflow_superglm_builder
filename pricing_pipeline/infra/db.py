@@ -99,12 +99,21 @@ def _azure_sql_access_token_struct(settings: Settings) -> bytes:
     return struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
 
 
-def _attach_schema_renderer(engine: Engine, settings: Settings) -> None:
-    schemas = settings.schema_names
-
+def _attach_schema_renderer(engine: Engine, schemas) -> None:
     @event.listens_for(engine, "before_cursor_execute", retval=True)
     def _render_schema_names(_conn, _cursor, statement, parameters, _context, _executemany):
         return render_sql_schemas(statement, schemas), parameters
+
+
+def configure_engine(engine: Engine, schemas) -> Engine:
+    """Attach pricing schema execution options/rendering to an externally built engine."""
+    if hasattr(engine, "update_execution_options"):
+        engine.update_execution_options(**schemas.as_execution_options())
+    attached = getattr(engine, "_pricing_schema_renderer_schemas", None)
+    if hasattr(engine, "dispatch") and attached != schemas:
+        _attach_schema_renderer(engine, schemas)
+        setattr(engine, "_pricing_schema_renderer_schemas", schemas)
+    return engine
 
 
 def get_engine(settings: Settings, *, database: str | None = None) -> Engine:
@@ -130,11 +139,7 @@ def get_engine(settings: Settings, *, database: str | None = None) -> Engine:
         build_sqlalchemy_url(settings, database=database or settings.pricing_database),
         **engine_kwargs,
     )
-    if hasattr(engine, "update_execution_options"):
-        engine.update_execution_options(**settings.schema_names.as_execution_options())
-    if hasattr(engine, "dispatch"):
-        _attach_schema_renderer(engine, settings)
-    return engine
+    return configure_engine(engine, settings.schema_names)
 
 
 def ensure_database(settings: Settings, database: str) -> None:

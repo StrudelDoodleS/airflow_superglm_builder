@@ -97,12 +97,14 @@ visible, and triggers the DAG.
 
 Use this path when Docker is blocked but local Python processes are allowed. It
 runs Airflow and MLflow on the host, writes durable artifacts under `state/`,
-and targets an external SQL Server or Azure SQL database through ODBC.
+and targets an external SQL Server or Azure SQL database through a Python
+runtime module.
 
 Prerequisites:
 
 - Python 3.14 and `uv`.
-- Microsoft ODBC Driver 18 for SQL Server.
+- Whatever database driver your runtime module uses, such as Microsoft ODBC
+  Driver 18 for SQL Server.
 - Network access to the hosted SQL Server.
 - A target database that already exists, unless your login is allowed to create
   databases.
@@ -115,40 +117,64 @@ Prerequisites:
 
    If `.env` does not exist, this copies `.env.nodocker.example` to `.env`.
 
-2. Edit `.env` for the work SQL Server:
+2. Edit `.env` for local Airflow/MLflow paths and the runtime module name:
 
    ```env
-   MSSQL_SERVER=<server-name>.database.windows.net,1433
-   MSSQL_DATABASE=PricingLab_UAT
-   MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc
-   MSSQL_AUTH_MODE=azure_token
-   MSSQL_TOKEN_SCOPE=https://database.windows.net/.default
-   MSSQL_ENCRYPT=yes
-   MSSQL_TRUST_SERVER_CERT=no
-   PRICING_SKIP_DATABASE_CREATE=true
+   AIRFLOW_HOME=state/no_docker/airflow
+   PRICING_PROJECT_ROOT=.
+   PRICING_RUNTIME_MODULE=work_runtime.database
    PRICING_SCHEMA_DIR=db/migrations
-   PRICING_SCHEMA=python_pricing
-   PRICING_STAGING_SCHEMA=python_pricing_stg
-   MLOPS_SCHEMA=python_mlops
+   MLFLOW_TRACKING_URI=http://127.0.0.1:5000
+   MLFLOW_BACKEND_STORE_URI=sqlite:///state/no_docker/mlflow/mlflow.db
+   MLFLOW_ARTIFACT_ROOT=state/no_docker/mlflow/artifacts
+   RATING_EXPORT_ROOT=state/no_docker/rating_exports
    VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits
    ```
 
-   Keep `PRICING_SKIP_DATABASE_CREATE=true` when the DBA has already created the
-   database and your pipeline login should only manage objects inside it.
-   With `MSSQL_AUTH_MODE=azure_token`, the SQLAlchemy engine uses
-   `DefaultAzureCredential(exclude_interactive_browser_credential=False)` and
-   passes the Azure SQL bearer token to `pyodbc`. If you need SQL password auth
-   instead, set `MSSQL_AUTH_MODE=sql_password`, fill `MSSQL_USER` /
-   `MSSQL_PASSWORD`, and keep `MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc` or switch
-   to `mssql+pymssql`.
+   Keep server names, database names, tokens, schema names, and source-data
+   rules in Python code instead of `.env`.
 
-   `PRICING_SCHEMA`, `PRICING_STAGING_SCHEMA`, and `MLOPS_SCHEMA` control where
-   the DDL and runtime writes land. The first schema apply stores those values
-   in `dbo.SCHEMA_CONFIGURATION`; later applies fail if a different set is
-   requested, so you do not accidentally write half the model registry into a
-   new namespace.
+3. Put the work connection provider at `src/work_runtime/database.py`:
 
-3. Start MLflow in one terminal:
+   ```python
+   from pathlib import Path
+
+   from pricing_pipeline.infra.schema import SchemaNames
+
+
+   def get_engine(database: str | None = None):
+       # Return a SQLAlchemy Engine using your team's approved connection code.
+       ...
+
+
+   def get_schema_names() -> SchemaNames:
+       return SchemaNames(
+           pricing="python_pricing",
+           pricing_staging="python_pricing_stg",
+           mlops="python_mlops",
+       )
+
+
+   def get_runtime_settings() -> dict:
+       return {
+           "pricing_database": "PricingLab_UAT",
+           "skip_database_create": True,
+           "rating_export_root": Path("state/no_docker/rating_exports"),
+           "validation_split_artifact_root": Path(
+               "state/no_docker/validation_splits"
+           ),
+           "mlflow_tracking_uri": "http://127.0.0.1:5000",
+       }
+   ```
+
+   Airflow and the CLI import this module by name. The runtime loader adds both
+   the repo root and `src/` to `PYTHONPATH`, so `work_runtime.database` works
+   from DAG tasks and host scripts. The first schema apply stores the returned
+   schema names in `dbo.SCHEMA_CONFIGURATION`; later applies fail if a different
+   set is requested, so you do not accidentally write half the model registry
+   into a new namespace.
+
+4. Start MLflow in one terminal:
 
    ```bash
    uv run python scripts/start_mlflow_local.py
@@ -162,7 +188,7 @@ Prerequisites:
    calls treated as no-ops and `mlflow_run_id` recorded as blank. Set
    `PRICING_ENABLE_MLFLOW=false` to force this no-op mode.
 
-4. Start Airflow in another terminal:
+5. Start Airflow in another terminal:
 
    ```bash
    uv run python scripts/start_airflow_local.py
@@ -218,18 +244,20 @@ Prerequisites:
    Do not select it on work machines where Docker or Docker Hub access is
    blocked.
 
-5. Apply schema DDL and load the bundled freMTPL demo data once:
+6. Apply schema DDL and load the bundled freMTPL demo data once:
 
    ```bash
-   uv run python scripts/apply_schema.py
+   uv run python scripts/apply_schema.py --runtime-module work_runtime.database
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
-6. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
+7. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
    run it directly without Airflow:
 
    ```bash
-   uv run python scripts/run_pipeline_no_airflow.py --model-key MTPL_FREQ
+   uv run python scripts/run_pipeline_no_airflow.py \
+     --runtime-module work_runtime.database \
+     --model-key MTPL_FREQ
    ```
 
    The direct runner uses the same schema DDL, dataset manifest/CV metadata,
@@ -296,12 +324,10 @@ For example, the current MTPL frequency model is implemented in
 compatibility alias for older local commands.
 
 For a work deployment, CloudBeaver is not required and should normally not be
-started. Changing from local testing to a work SQL Server is an `.env` change:
-set the target server/database, choose `MSSQL_AUTH_MODE=azure_token` for
-Microsoft Entra token authentication or `MSSQL_AUTH_MODE=sql_password` for SQL
-login authentication, and set the pricing/mlops schema names for that database.
-Both auth paths are handled by the SQLAlchemy engine helper in
-`pricing_pipeline/infra/db.py`.
+started. Work SQL connectivity should usually live in an importable Python
+runtime module such as `src/work_runtime/database.py`; the DAG can pass
+`runtime_module="work_runtime.database"` explicitly, or local scripts can read
+`PRICING_RUNTIME_MODULE` from `.env`.
 
 ## Optional Local Tools
 
@@ -392,42 +418,45 @@ database:
 ```text
 local Airflow / Python / MLflow
         |
-        | ODBC Driver 18 for SQL Server
+        | src/work_runtime/database.py
         v
 hosted SQL Server / Azure SQL database
 ```
 
-The target database is controlled by environment variables. For SQL login or
-Microsoft Entra token targets, the code does not change between local and work;
-only `.env` or Airflow secrets/connections change.
+The target database is controlled by your runtime module. For SQL login,
+Microsoft Entra token, service principal, or any other team-approved auth path,
+put the connection code in `src/work_runtime/database.py` and keep `.env` for
+Airflow/MLflow/runtime paths.
 
-Typical hosted SQL Server settings:
+The runtime module contract is intentionally small:
 
-```env
-MSSQL_SERVER=<server-name>.database.windows.net,1433
-MSSQL_DATABASE=PricingLab_UAT
-MSSQL_SQLALCHEMY_DIALECT=mssql+pymssql
-MSSQL_DRIVER=ODBC Driver 18 for SQL Server
-MSSQL_ENCRYPT=yes
-MSSQL_TRUST_SERVER_CERT=no
+```python
+def get_engine(database: str | None = None):
+    ...
+
+
+def get_schema_names():
+    ...
+
+
+def get_runtime_settings():
+    ...
 ```
 
-`mssql+pymssql` is the easiest no-docker path when the host does not have the
-Microsoft ODBC driver installed. Use `mssql+pyodbc` when you want ODBC Driver 18
-semantics, including driver-level Azure SQL behavior.
+Then reference it from a model DAG:
 
-If the work database allows SQL authentication, use a restricted pipeline login:
-
-```env
-MSSQL_USER=pricing_pipeline_writer
-MSSQL_PASSWORD=<from-secret-store>
+```python
+pricing_motor_frequency = build_pricing_model_dag(
+    dag_id="pricing.motor_frequency.build",
+    spec=MODEL_SPEC,
+    model_config=MODEL_CONFIG,
+    runtime_module="work_runtime.database",
+    tags=["pricing", "motor", "frequency", "model-build"],
+)
 ```
 
-If the work database requires Microsoft Entra authentication, use
-`MSSQL_AUTH_MODE=azure_token` with `MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc`.
-The engine helper uses Azure Identity to request an Azure SQL bearer token and
-passes it to ODBC. The DBA or platform owner must also create the database user
-and grants inside the target database; Entra login alone is not enough.
+The DBA or platform owner must create the database user and grants inside the
+target database; cloud login alone is not enough.
 
 Recommended database permissions for the pipeline user:
 
