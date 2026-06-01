@@ -11,6 +11,7 @@ demo/reference implementation.
 
 ## Contents
 
+- [Seed Database Schema](#seed-database-schema)
 - [Docker Quickstart](#docker-quickstart)
 - [No-Docker Work Quickstart](#no-docker-work-quickstart)
 - [Adding Models](#adding-models)
@@ -26,6 +27,41 @@ demo/reference implementation.
 - [CV Split Storage](#cv-split-storage)
 - [SQL Prediction Validation](#sql-prediction-validation)
 - [Demo Model Variants](#demo-model-variants)
+
+## Seed Database Schema
+
+The target SQL Server database should already exist. Pick the schema names you
+want for this project, then use a small Python script to render and execute the
+DDL through whatever connection helper your team already uses. The reusable DDL
+renderer lives in `scripts/render_schema_sql.py`.
+
+```python
+# src/work_runtime/seed_pricing_schema.py
+from pathlib import Path
+
+from pricing_pipeline.infra.migrations import split_sql_server_batches
+from scripts.render_schema_sql import render_schema_sql
+from work_runtime.database import get_engine
+
+
+SCHEMA_SQL = render_schema_sql(
+    Path("db/migrations"),
+    pricing_schema="python_pricing",
+    pricing_staging_schema="python_pricing_stg",
+    mlops_schema="python_mlops",
+)
+
+engine = get_engine()
+with engine.begin() as conn:
+    for batch in split_sql_server_batches(SCHEMA_SQL):
+        conn.exec_driver_sql(batch)
+```
+
+The rendered SQL creates the configured pricing/staging/mlops schemas, core
+tables, lineage tables, views, stored procedures, triggers, and the
+`dbo.SCHEMA_CONFIGURATION` / `dbo.SCHEMA_MIGRATION` housekeeping tables.
+`dbo.SCHEMA_CONFIGURATION` records the selected schema names on first apply and
+throws if a later apply asks for a different set.
 
 ## Docker Quickstart
 
@@ -96,18 +132,16 @@ visible, and triggers the DAG.
 ## No-Docker Work Quickstart
 
 Use this path when Docker is blocked but local Python processes are allowed. It
-runs Airflow and MLflow on the host, writes durable artifacts under `state/`,
-and targets an external SQL Server or Azure SQL database through a Python
-runtime module.
+runs Airflow and MLflow on the host and writes durable local artifacts under
+`state/`. SQL Server connectivity and source-data access should live in Python
+modules that your DAGs import.
 
 Prerequisites:
 
 - Python 3.14 and `uv`.
-- Whatever database driver your runtime module uses, such as Microsoft ODBC
-  Driver 18 for SQL Server.
+- Any Python/ODBC/Azure packages your own connection module needs.
 - Network access to the hosted SQL Server.
-- A target database that already exists, unless your login is allowed to create
-  databases.
+- A target database seeded with the required schema DDL.
 
 1. Bootstrap local folders and dependencies:
 
@@ -117,7 +151,7 @@ Prerequisites:
 
    If `.env` does not exist, this copies `.env.nodocker.example` to `.env`.
 
-2. Edit `.env` for local Airflow/MLflow paths and the runtime module name:
+2. Keep `.env` focused on local runtime paths:
 
    ```env
    AIRFLOW_HOME=state/no_docker/airflow
@@ -131,50 +165,19 @@ Prerequisites:
    VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits
    ```
 
-   Keep server names, database names, tokens, schema names, and source-data
-   rules in Python code instead of `.env`.
+   Do not put SQL server names, tokens, table names, or source-data rules in
+   `.env`; keep those in the Python modules your DAG imports.
 
-3. Put the work connection provider at `src/work_runtime/database.py`:
+3. Seed the target database with the required DDL using the plain Python script
+   shown in [Seed Database Schema](#seed-database-schema).
 
-   ```python
-   from pathlib import Path
+4. Put your existing connection wrapper somewhere importable, for example
+   `src/work_runtime/database.py`, and point DAGs at
+   `runtime_module="work_runtime.database"`. Airflow local startup adds both the
+   repo root and `src/` to `PYTHONPATH`, so that module is importable inside DAG
+   tasks.
 
-   from pricing_pipeline.infra.schema import SchemaNames
-
-
-   def get_engine(database: str | None = None):
-       # Return a SQLAlchemy Engine using your team's approved connection code.
-       ...
-
-
-   def get_schema_names() -> SchemaNames:
-       return SchemaNames(
-           pricing="python_pricing",
-           pricing_staging="python_pricing_stg",
-           mlops="python_mlops",
-       )
-
-
-   def get_runtime_settings() -> dict:
-       return {
-           "pricing_database": "PricingLab_UAT",
-           "skip_database_create": True,
-           "rating_export_root": Path("state/no_docker/rating_exports"),
-           "validation_split_artifact_root": Path(
-               "state/no_docker/validation_splits"
-           ),
-           "mlflow_tracking_uri": "http://127.0.0.1:5000",
-       }
-   ```
-
-   Airflow and the CLI import this module by name. The runtime loader adds both
-   the repo root and `src/` to `PYTHONPATH`, so `work_runtime.database` works
-   from DAG tasks and host scripts. The first schema apply stores the returned
-   schema names in `dbo.SCHEMA_CONFIGURATION`; later applies fail if a different
-   set is requested, so you do not accidentally write half the model registry
-   into a new namespace.
-
-4. Start MLflow in one terminal:
+5. Start MLflow in one terminal:
 
    ```bash
    uv run python scripts/start_mlflow_local.py
@@ -188,7 +191,7 @@ Prerequisites:
    calls treated as no-ops and `mlflow_run_id` recorded as blank. Set
    `PRICING_ENABLE_MLFLOW=false` to force this no-op mode.
 
-5. Start Airflow in another terminal:
+6. Start Airflow in another terminal:
 
    ```bash
    uv run python scripts/start_airflow_local.py
@@ -244,14 +247,13 @@ Prerequisites:
    Do not select it on work machines where Docker or Docker Hub access is
    blocked.
 
-6. Apply schema DDL and load the bundled freMTPL demo data once:
+7. Load the bundled freMTPL demo data once if you want to run the demo model:
 
    ```bash
-   uv run python scripts/apply_schema.py --runtime-module work_runtime.database
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
-7. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
+8. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
    run it directly without Airflow:
 
    ```bash
@@ -442,6 +444,9 @@ def get_schema_names():
 def get_runtime_settings():
     ...
 ```
+
+The schema names returned by `get_schema_names()` should match the names used
+when rendering/running the database DDL.
 
 Then reference it from a model DAG:
 
