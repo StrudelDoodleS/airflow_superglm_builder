@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import struct
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import URL
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.schema import render_sql_schemas
@@ -82,7 +83,10 @@ def build_sqlalchemy_url(settings: Settings, *, database: str) -> str:
             "MSSQL_SQLALCHEMY_DIALECT must be one of: mssql+pyodbc, mssql+pymssql"
         )
     odbc = build_odbc_connect_string(settings, database=database)
-    return f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}"
+    return URL.create(
+        "mssql+pyodbc",
+        query={"odbc_connect": odbc},
+    ).render_as_string(hide_password=False)
 
 
 def _azure_sql_access_token_struct(settings: Settings) -> bytes:

@@ -200,7 +200,7 @@ def test_get_engine_can_use_azure_sql_access_token(monkeypatch):
     engine = db.get_engine(settings)
 
     assert engine is fake_engine
-    assert calls[0][0].startswith("mssql+pyodbc:///?odbc_connect=")
+    assert calls[0][0].startswith("mssql+pyodbc://?odbc_connect=")
     assert calls[0][1]["connect_args"]["attrs_before"] == {
         db.SQL_COPT_SS_ACCESS_TOKEN: b"packed-token"
     }

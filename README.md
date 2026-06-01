@@ -38,9 +38,9 @@ DDL with a normal SQLAlchemy connection. The reusable DDL renderer lives in
 ```python
 # seed_pricing_schema.py
 from pathlib import Path
-from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 
 from pricing_pipeline.infra.migrations import split_sql_server_batches
 from scripts.render_schema_sql import render_schema_sql
@@ -55,10 +55,11 @@ odbc_connect = (
     "Encrypt=yes;"
     "TrustServerCertificate=no;"
 )
-engine = create_engine(
-    "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_connect),
-    future=True,
+connection_url = URL.create(
+    "mssql+pyodbc",
+    query={"odbc_connect": odbc_connect},
 )
+engine = create_engine(connection_url, future=True)
 
 schema_sql = render_schema_sql(
     Path("db/migrations"),
