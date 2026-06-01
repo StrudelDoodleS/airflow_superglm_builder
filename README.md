@@ -32,28 +32,43 @@ demo/reference implementation.
 
 The target SQL Server database should already exist. Pick the schema names you
 want for this project, then use a small Python script to render and execute the
-DDL through whatever connection helper your team already uses. The reusable DDL
-renderer lives in `scripts/render_schema_sql.py`.
+DDL with a normal SQLAlchemy connection. The reusable DDL renderer lives in
+`scripts/render_schema_sql.py`.
 
 ```python
-# src/work_runtime/seed_pricing_schema.py
+# seed_pricing_schema.py
 from pathlib import Path
+from urllib.parse import quote_plus
+
+from sqlalchemy import create_engine
 
 from pricing_pipeline.infra.migrations import split_sql_server_batches
 from scripts.render_schema_sql import render_schema_sql
-from work_runtime.database import get_engine
 
 
-SCHEMA_SQL = render_schema_sql(
+# Replace this block with the SQLAlchemy create_engine(...) code that already
+# works in your environment.
+odbc_connect = (
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    "SERVER=<server>.database.windows.net,1433;"
+    "DATABASE=<database>;"
+    "Encrypt=yes;"
+    "TrustServerCertificate=no;"
+)
+engine = create_engine(
+    "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_connect),
+    future=True,
+)
+
+schema_sql = render_schema_sql(
     Path("db/migrations"),
     pricing_schema="python_pricing",
     pricing_staging_schema="python_pricing_stg",
     mlops_schema="python_mlops",
 )
 
-engine = get_engine()
 with engine.begin() as conn:
-    for batch in split_sql_server_batches(SCHEMA_SQL):
+    for batch in split_sql_server_batches(schema_sql):
         conn.exec_driver_sql(batch)
 ```
 
