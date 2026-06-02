@@ -6,7 +6,7 @@ import argparse
 from sqlalchemy import text
 
 from pricing_pipeline.publishing.lifecycle import PublishResult
-from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.publishing.model_registry import ModelRegistryError
 
 
 def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
@@ -33,18 +33,25 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
 
         model_id = meta["model_id"]
         if model_id is None:
-            model_id = ensure_pricing_model(
-                con,
-                model_key=meta["model_name"],
-                target_name="ClaimNb",
-                model_type="superglm_poisson",
-                created_by=args.created_by,
+            raise ModelRegistryError(
+                "staged rating export is missing model_id; validate/register the "
+                f"model before staging export_id={args.export_id!r}"
             )
-            con.execute(text("""
-                UPDATE pricing_stg.STG_RATING_EXPORT
-                SET model_id = :model_id
-                WHERE export_id = :export_id
-            """), {"model_id": model_id, "export_id": args.export_id})
+
+        existing_package = con.execute(text("""
+            SELECT
+                rate_package_id,
+                package_version
+            FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
+            WHERE model_id = :model_id
+              AND source_export_id = :export_id
+        """), {
+            "model_id": model_id,
+            "export_id": args.export_id,
+        }).mappings().one_or_none()
+        if existing_package is not None:
+            args.package_version = int(existing_package["package_version"])
+            return int(existing_package["rate_package_id"])
 
         package_version = con.execute(text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
@@ -63,6 +70,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 effective_from_date,
                 effective_to_date,
                 package_status,
+                source_export_id,
                 created_by
             )
             OUTPUT INSERTED.rate_package_id
@@ -76,6 +84,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :effective_from_date,
                 :effective_to_date,
                 :package_status,
+                :source_export_id,
                 :created_by
             )
         """), {
@@ -87,6 +96,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "effective_from_date": meta["effective_from_date"],
             "effective_to_date": meta["effective_to_date"],
             "package_status": "DRAFT",
+            "source_export_id": args.export_id,
             "created_by": args.created_by,
         }).scalar_one()
 

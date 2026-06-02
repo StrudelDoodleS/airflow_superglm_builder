@@ -12,27 +12,6 @@ CREATE UNIQUE INDEX UX_CV_SPLIT_SET_MANIFEST_SPLIT
 ON pricing.CV_SPLIT_SET(manifest_id, split_set_id);
 GO
 
-IF OBJECT_ID('mlops.CV_SPLIT_ROW', 'U') IS NULL
-CREATE TABLE mlops.CV_SPLIT_ROW (
-    split_set_id    NVARCHAR(128) NOT NULL,
-    row_ordinal     BIGINT NOT NULL,
-    row_key_text    NVARCHAR(900) NULL,
-    row_key_digest  VARBINARY(32) NOT NULL,
-    test_fold_no    INT NOT NULL,
-
-    CONSTRAINT PK_CV_SPLIT_ROW
-        PRIMARY KEY (split_set_id, row_ordinal),
-
-    CONSTRAINT FK_CV_SPLIT_ROW_SPLIT_SET
-        FOREIGN KEY (split_set_id)
-        REFERENCES pricing.CV_SPLIT_SET(split_set_id),
-
-    CONSTRAINT FK_CV_SPLIT_ROW_FOLD
-        FOREIGN KEY (split_set_id, test_fold_no)
-        REFERENCES pricing.CV_FOLD(split_set_id, fold_no)
-);
-GO
-
 IF OBJECT_ID('mlops.MODEL_RUN_DATASET', 'U') IS NULL
 CREATE TABLE mlops.MODEL_RUN_DATASET (
     model_run_id  BIGINT NOT NULL,

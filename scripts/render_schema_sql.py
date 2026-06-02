@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pricing_pipeline.infra.migrations import migration_files, render_migration_sql  # noqa: E402
+from pricing_pipeline.infra.migrations import (  # noqa: E402
+    migration_checksum,
+    migration_files,
+    render_migration_sql,
+)
 from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name  # noqa: E402
 
 
@@ -61,8 +65,28 @@ GO
 IF OBJECT_ID('dbo.SCHEMA_MIGRATION', 'U') IS NULL
 CREATE TABLE dbo.SCHEMA_MIGRATION (
     version_file NVARCHAR(256) NOT NULL PRIMARY KEY,
-    applied_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME()
+    checksum_sha256 NVARCHAR(64) NULL,
+    applied_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    applied_by NVARCHAR(128) NULL,
+    status NVARCHAR(32) NOT NULL DEFAULT 'APPLIED',
+    error_message NVARCHAR(4000) NULL
 );
+GO
+
+IF COL_LENGTH('dbo.SCHEMA_MIGRATION', 'checksum_sha256') IS NULL
+    ALTER TABLE dbo.SCHEMA_MIGRATION ADD checksum_sha256 NVARCHAR(64) NULL;
+GO
+
+IF COL_LENGTH('dbo.SCHEMA_MIGRATION', 'applied_by') IS NULL
+    ALTER TABLE dbo.SCHEMA_MIGRATION ADD applied_by NVARCHAR(128) NULL;
+GO
+
+IF COL_LENGTH('dbo.SCHEMA_MIGRATION', 'status') IS NULL
+    ALTER TABLE dbo.SCHEMA_MIGRATION ADD status NVARCHAR(32) NOT NULL DEFAULT 'APPLIED';
+GO
+
+IF COL_LENGTH('dbo.SCHEMA_MIGRATION', 'error_message') IS NULL
+    ALTER TABLE dbo.SCHEMA_MIGRATION ADD error_message NVARCHAR(4000) NULL;
 GO
 """
 
@@ -94,6 +118,7 @@ def render_schema_sql(
     for path in files:
         migration_name = path.name
         rendered = render_migration_sql(path.read_text(encoding="utf-8"), schemas)
+        checksum = migration_checksum(rendered)
         parts.extend(
             [
                 "",
@@ -101,7 +126,11 @@ def render_schema_sql(
                 rendered.rstrip(),
                 "",
                 f"IF NOT EXISTS (SELECT 1 FROM dbo.SCHEMA_MIGRATION WHERE version_file = {_sql_string(migration_name)})",
-                f"    INSERT INTO dbo.SCHEMA_MIGRATION(version_file) VALUES ({_sql_string(migration_name)});",
+                "    INSERT INTO dbo.SCHEMA_MIGRATION("
+                "version_file, checksum_sha256, applied_by, status"
+                ") VALUES ("
+                f"{_sql_string(migration_name)}, {_sql_string(checksum)}, "
+                "SUSER_SNAME(), N'APPLIED');",
                 "GO",
             ]
         )

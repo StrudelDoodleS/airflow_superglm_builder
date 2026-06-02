@@ -12,7 +12,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from pricing_pipeline.infra.schema import schema_names_from_connectable
-from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.publishing.model_registry import ModelRegistryError, get_pricing_model
 
 INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
@@ -243,6 +243,40 @@ def build_staging_frames(
     return export_df, rate_df, level_df
 
 
+def _resolve_registered_model_id(con, args: argparse.Namespace) -> int:
+    model_id = getattr(args, "model_id", None)
+    if model_id is not None:
+        return int(model_id)
+
+    record = get_pricing_model(con, args.model_name)
+    if record is None:
+        raise ModelRegistryError(
+            f"model_key {args.model_name!r} is not registered; "
+            "run explicit model registration first"
+        )
+
+    mismatches: list[str] = []
+    if getattr(args, "model_label", None) is not None and record.model_label != args.model_label:
+        mismatches.append(
+            f"model_label db={record.model_label!r} staging={args.model_label!r}"
+        )
+    if record.target_name != args.target_name:
+        mismatches.append(
+            f"target_name db={record.target_name!r} staging={args.target_name!r}"
+        )
+    if record.model_type != args.model_type:
+        mismatches.append(f"model_type db={record.model_type!r} staging={args.model_type!r}")
+    if record.model_status != "ACTIVE":
+        mismatches.append(f"model_status db={record.model_status!r} expected='ACTIVE'")
+
+    if mismatches:
+        raise ModelRegistryError(
+            f"registered model {args.model_name!r} does not match staged export: "
+            + "; ".join(mismatches)
+        )
+    return record.model_id
+
+
 def insert_staging_frames(
     engine,
     args: argparse.Namespace,
@@ -252,15 +286,7 @@ def insert_staging_frames(
 ) -> None:
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
-        model_id = ensure_pricing_model(
-            con,
-            model_key=args.model_name,
-            model_label=args.model_label,
-            target_name=args.target_name,
-            model_type=args.model_type,
-            model_status=args.model_status,
-            created_by=args.created_by,
-        )
+        model_id = _resolve_registered_model_id(con, args)
 
         if args.replace:
             con.execute(
@@ -321,6 +347,7 @@ def stage_rating_export(
     effective_to: str | None = None,
     created_by: str = "python",
     replace: bool = False,
+    model_id: int | None = None,
 ) -> None:
     args = argparse.Namespace(
         xlsx=workbook_path,
@@ -343,6 +370,7 @@ def stage_rating_export(
         interaction_features_json="{}",
         created_by=created_by,
         replace=replace,
+        model_id=model_id,
     )
     export_df, rate_df, level_df = build_staging_frames(args)
     insert_staging_frames(engine, args, export_df, rate_df, level_df)

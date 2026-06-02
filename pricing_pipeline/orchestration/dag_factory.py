@@ -111,6 +111,7 @@ def build_pricing_model_dag(
                 airflow_run_id=context["run_id"],
                 logical_date=logical_date,
                 spec=spec,
+                model_config=model_config,
             ).to_dict()
 
         @task

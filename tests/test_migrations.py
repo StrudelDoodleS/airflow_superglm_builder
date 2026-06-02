@@ -1,9 +1,11 @@
 import re
+import hashlib
 from pathlib import Path
 
 from pricing_pipeline.infra.migrations import (
     _ensure_schema_configuration,
     migration_files,
+    migration_checksum,
     render_migration_sql,
     split_sql_server_batches,
 )
@@ -114,6 +116,24 @@ def test_migration_files_are_sorted(tmp_path: Path):
     (tmp_path / "V002__b.sql").write_text("SELECT 2", encoding="utf-8")
     (tmp_path / "V001__a.sql").write_text("SELECT 1", encoding="utf-8")
     assert [p.name for p in migration_files(tmp_path)] == ["V001__a.sql", "V002__b.sql"]
+
+
+def test_migration_checksum_is_sha256_of_rendered_sql():
+    sql = "SELECT 1;\nGO\n"
+
+    assert migration_checksum(sql) == hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def test_migration_runner_tracks_checksum_status_and_uses_application_lock():
+    source = Path("pricing_pipeline/infra/migrations.py").read_text(encoding="utf-8")
+
+    assert "sys.sp_getapplock" in source
+    assert "pricing_schema_migrations" in source
+    assert "checksum_sha256 NVARCHAR(64)" in source
+    assert "applied_by NVARCHAR(128)" in source
+    assert "status NVARCHAR(32)" in source
+    assert "error_message NVARCHAR(4000)" in source
+    assert "Migration checksum mismatch" in source
 
 
 def test_render_migration_sql_supports_custom_schema_names():
@@ -279,6 +299,19 @@ def test_deploy_guard_migration_blocks_unpublished_or_mismatched_packages():
     assert "rate package deployments must reference PUBLISHED packages" in migration
 
 
+def test_rate_package_source_export_migration_adds_idempotency_key():
+    migration = Path("db/migrations/V017__rate_package_source_export_id.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ALTER TABLE pricing.PRICING_RATE_PACKAGE" in migration
+    assert "ADD source_export_id NVARCHAR(128) NULL" in migration
+    assert "UX_PRICING_RATE_PACKAGE_MODEL_SOURCE_EXPORT" in migration
+    assert "PRICING_RATE_PACKAGE(model_id, source_export_id)" in migration
+    assert "WHERE model_id IS NOT NULL" in migration
+    assert "source_export_id IS NOT NULL" in migration
+
+
 def test_package_writer_allocates_version_under_lock():
     writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
@@ -350,7 +383,7 @@ def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
     assert "CREATE TABLE mlops.MODEL_RUN_DATASET" in migration
     assert "CREATE TABLE mlops.MODEL_RUN_SPLIT_SET" in migration
     assert "CREATE TABLE mlops.MODEL_RUN_METRIC" in migration
-    assert "CREATE TABLE mlops.CV_SPLIT_ROW" in migration
+    assert "CV_SPLIT_ROW" not in migration
     assert "UX_CV_SPLIT_SET_MANIFEST_SPLIT" in migration
     assert "ON pricing.CV_SPLIT_SET(manifest_id, split_set_id)" in migration
     assert "REFERENCES pricing.MODEL_RUN(model_run_id)" in migration
@@ -362,6 +395,18 @@ def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
     )
     assert "PRICING_PACKAGE_POINTER" not in migration
     assert "pricing_stg" not in migration
+
+
+def test_cv_split_row_cleanup_migration_drops_only_when_empty():
+    migration = Path("db/migrations/V018__drop_cv_split_row_if_empty.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "OBJECT_ID('mlops.CV_SPLIT_ROW', 'U')" in migration
+    assert "SELECT 1 FROM mlops.CV_SPLIT_ROW" in migration
+    assert "DROP TABLE mlops.CV_SPLIT_ROW" in migration
+    assert "THROW" in migration
+    assert "row-level CV split assignments" in migration
 
 
 def test_prediction_proc_migration_scores_current_package_from_compiled_views():
@@ -452,7 +497,6 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
         "mlops.DATASET_COLUMN",
         "mlops.CV_SPLIT_SET",
         "mlops.CV_FOLD",
-        "mlops.CV_SPLIT_ROW",
         "mlops.MODEL_RUN",
         "mlops.MODEL_RUN_DATASET",
         "mlops.MODEL_RUN_SPLIT_SET",
@@ -482,6 +526,7 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
     assert "PRICING_PACKAGE_POINTER" not in ddl
     assert "CREATE TABLE pricing.PACKAGE_POINTER" not in ddl
     assert "CREATE TABLE mlops.CV_SPLIT (" not in ddl
+    assert "CV_SPLIT_ROW" not in ddl
     assert "FOREIGN KEY (model_id) REFERENCES pricing.MODEL(model_id)" in ddl
     assert "FOREIGN KEY (manifest_id) REFERENCES mlops.DATASET_MANIFEST(manifest_id)" in ddl
     assert "FOREIGN KEY (rate_package_id) REFERENCES pricing.RATE_PACKAGE(rate_package_id)" in ddl
@@ -586,7 +631,7 @@ def test_full_useful_tables_reference_ddl_keeps_sql_server_constraints_and_index
     assert "CREATE TABLE mlops.MODEL_RUN_DATASET (" in ddl
     assert "CREATE TABLE mlops.MODEL_RUN_SPLIT_SET (" in ddl
     assert "CREATE TABLE mlops.MODEL_RUN_METRIC (" in ddl
-    assert "CREATE TABLE mlops.CV_SPLIT_ROW (" in ddl
+    assert "CV_SPLIT_ROW" not in ddl
     assert "CREATE OR ALTER VIEW pricing.V_CURRENT_RATE_PACKAGE" in ddl
     assert "CREATE OR ALTER VIEW pricing_runtime.V_COMPILED_RATE_CELL" in ddl
     assert "CONSTRAINT PK_MODEL" in ddl

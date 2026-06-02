@@ -327,3 +327,6 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
 
     assert result.rate_package_id == 42
     assert calls[0] == ("validate", engine, config())
+    stage_call = calls[1]
+    assert stage_call[0] == "stage"
+    assert stage_call[2]["model_id"] == 17

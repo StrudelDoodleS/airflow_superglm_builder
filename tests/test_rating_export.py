@@ -21,7 +21,7 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelSpec
 from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.publishing.publisher import ModelPublisher
-from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.publishing.model_registry import ModelRegistryError, ensure_pricing_model
 from pricing_models.mtpl_frequency.training import (
     FEATURE_COLUMNS,
     TRAINING_SQL,
@@ -289,9 +289,26 @@ class FakeScalarResult:
         return self.value
 
 
+class FakePricingModelResult:
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return {
+            "model_id": 17,
+            "model_key": "MTPL_FREQ",
+            "model_label": None,
+            "target_name": "ClaimNb",
+            "model_type": "superglm_poisson",
+            "model_status": "ACTIVE",
+        }
+
+
 class FakeModelRegistryConnection(FakeBeginConnection):
     def execute(self, statement, params=None):
         self.events.append(("execute", str(statement), params))
+        if "SELECT model_id," in str(statement):
+            return FakePricingModelResult()
         if "SELECT model_id" in str(statement):
             return FakeScalarResult(17)
         return FakeScalarResult(None)
@@ -387,14 +404,14 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
 
     delete_sql = [event[1] for event in events if event[0] == "execute"]
     assert delete_sql == [
-        "\n                MERGE pricing.PRICING_MODEL WITH (HOLDLOCK) AS tgt\n                USING (\n                    SELECT\n                        :model_key AS model_key,\n                        :model_label AS model_label,\n                        :target_name AS target_name,\n                        :model_type AS model_type,\n                        :model_status AS model_status,\n                        :created_by AS created_by\n                ) AS src\n                ON tgt.model_key = src.model_key\n                WHEN MATCHED THEN\n                    UPDATE SET\n                        model_label = COALESCE(src.model_label, tgt.model_label),\n                        target_name = src.target_name,\n                        model_type = src.model_type,\n                        model_status = src.model_status\n                WHEN NOT MATCHED THEN\n                    INSERT (\n                        model_key,\n                        model_label,\n                        target_name,\n                        model_type,\n                        model_status,\n                        created_by\n                    )\n                    VALUES (\n                        src.model_key,\n                        src.model_label,\n                        src.target_name,\n                        src.model_type,\n                        src.model_status,\n                        src.created_by\n                    );\n                ",
-        "\n                SELECT model_id\n                FROM pricing.PRICING_MODEL\n                WHERE model_key = :model_key\n                ",
+        "\n                SELECT model_id,\n                    model_key,\n                    model_label,\n                    target_name,\n                    model_type,\n                    model_status\n                FROM pricing.PRICING_MODEL\n                WHERE model_key = :model_key\n                ",
         "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
         "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id WHERE export_id = :export_id",
     ]
-    assert [event[2] for event in events if event[0] == "execute"][-4:] == [
+    assert [event[2] for event in events if event[0] == "execute"] == [
+        {"model_key": "MTPL_FREQ"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
@@ -443,6 +460,53 @@ def test_insert_staging_frames_uses_configured_staging_schema_for_to_sql():
         "python_pricing_stg",
         "python_pricing_stg",
     ]
+
+
+class FakeMissingModelConnection(FakeBeginConnection):
+    def execute(self, statement, params=None):
+        self.events.append(("execute", str(statement), params))
+        if "FROM pricing.PRICING_MODEL" in str(statement):
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: None))
+        raise AssertionError("staging should stop before writing when model is missing")
+
+
+class FakeMissingModelEngine(FakeEngine):
+    def __init__(self, events: list[tuple]):
+        self.events = events
+        self._execution_options = {}
+        self.connection = FakeMissingModelConnection(events)
+
+
+def test_insert_staging_frames_requires_existing_registered_model(monkeypatch):
+    events = []
+    engine = FakeMissingModelEngine(events)
+    args = SimpleNamespace(
+        model_name="MTPL_FREQ",
+        model_label="Motor frequency",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_status="ACTIVE",
+        created_by="unit-test",
+        replace=False,
+        export_id="export-1",
+    )
+    monkeypatch.setattr(
+        staging,
+        "ensure_pricing_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("staging must not create model registry rows")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(ModelRegistryError, match="not registered"):
+        staging.insert_staging_frames(
+            engine,
+            args,
+            FakeFrame("export", events),
+            FakeFrame("rate", events),
+            FakeFrame("level", events),
+        )
 
 
 def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_path: Path):
@@ -665,6 +729,7 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
                 "effective_from": "2026-05-27",
                 "created_by": "airflow",
                 "replace": True,
+                "model_id": 17,
             },
         ),
         (
@@ -841,6 +906,102 @@ def test_pipeline_imports_with_split_airflow_package_without_script_import_side_
     assert not marker_path.exists()
 
 
+def test_train_and_export_model_validates_registered_model_without_creating(
+    monkeypatch,
+    tmp_path: Path,
+):
+    raw = raw_training_frame()
+    model = FakePipelineModel()
+    calls = []
+
+    class FakeRun:
+        info = SimpleNamespace(run_id="mlflow-run-1")
+
+    class FakeStartRun:
+        def __enter__(self):
+            return FakeRun()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_mlflow = SimpleNamespace(
+        set_experiment=lambda experiment: None,
+        start_run=lambda: FakeStartRun(),
+        log_param=lambda key, value: calls.append(("log_param", key, value)),
+        log_artifact=lambda path, artifact_path=None: None,
+        log_metric=lambda key, value, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "configure_mlflow",
+        lambda uri, **kwargs: fake_mlflow,
+    )
+    monkeypatch.setattr(pipeline.pd, "read_sql_query", lambda sql, engine: raw)
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_pricing_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("production training must not create model registry rows")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "validate_model_on_engine",
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
+        or 17,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "fit_reml_with_diagnostics",
+        lambda model_arg, X, y, *, offset, diagnostics_path, mlflow_client: model_arg,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "export_rating_tables",
+        lambda fitted_model, X, y, exposure, *, output_path, mlflow_client: output_path,
+    )
+
+    engine = object()
+    settings = Settings.from_env(
+        {
+            "MLFLOW_TRACKING_URI": "http://mlflow.local",
+            "RATING_EXPORT_ROOT": str(tmp_path),
+        }
+    )
+    spec = ModelSpec(
+        model_key="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        experiment_name="pricing-mtpl-frequency",
+        deployment_slot="MTPL_FREQ_UAT",
+        dataset=FREMTPL_DATASET_SPEC,
+        training_sql=TRAINING_SQL,
+        feature_columns=tuple(FEATURE_COLUMNS),
+        build_model=lambda: model,
+        build_training_frame=build_training_frame,
+    )
+
+    result = pipeline.train_and_export_model(
+        engine,
+        settings=settings,
+        manifest_id="manifest-1",
+        split_set_id=None,
+        dag_id="pricing_dag",
+        airflow_run_id="manual__strict_registry",
+        logical_date="2026-05-29",
+        spec=spec,
+        model_config=MODEL_CONFIG,
+        created_by="airflow",
+    )
+
+    assert result.model_id == 17
+    assert ("validate_model_on_engine", engine, MODEL_CONFIG) in calls
+    assert ("log_param", "model_id", 17) in calls
+
+
 class FakePipelineModel:
     family = "poisson"
 
@@ -950,8 +1111,8 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(
         pipeline,
-        "ensure_pricing_model",
-        lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
+        "validate_model_on_engine",
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
         or 17,
     )
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow, raising=False)
@@ -1015,17 +1176,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "rating_workbook_path": str(workbook_path),
     }
     assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
-    assert (
-        "ensure_pricing_model",
-        engine,
-        {
-            "model_key": "MTPL_FREQ",
-            "model_label": None,
-            "target_name": "ClaimNb",
-            "model_type": "superglm_poisson",
-            "created_by": "airflow",
-        },
-    ) in calls
+    assert ("validate_model_on_engine", engine, MODEL_CONFIG) in calls
     assert ("read_sql_query", "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol", engine) in calls
     assert ("set_experiment", "pricing-mtpl-frequency") in calls
     assert ("log_param", "model_name", "MTPL_FREQ") in calls
@@ -1183,8 +1334,8 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(
         pipeline,
-        "ensure_pricing_model",
-        lambda engine, **kwargs: calls.append(("ensure_pricing_model", engine, kwargs))
+        "validate_model_on_engine",
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
         or 17,
     )
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)

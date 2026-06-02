@@ -7,7 +7,6 @@ import pandas as pd
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
-from pricing_pipeline.publishing.model_registry import ensure_pricing_model
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
     ModelExportResult,
@@ -19,7 +18,7 @@ from pricing_pipeline.publishing.rating_export import (
     build_rating_export_path,
     export_rating_tables,
 )
-from pricing_pipeline.publishing.publisher import ModelPublisher
+from pricing_pipeline.publishing.publisher import ModelPublisher, validate_model_on_engine
 from pricing_pipeline.models.superglm_diagnostics import fit_reml_with_diagnostics
 
 
@@ -33,20 +32,14 @@ def train_and_export_model(
     airflow_run_id: str,
     logical_date: str,
     spec: ModelSpec,
+    model_config: ModelBuildConfig,
     created_by: str = "airflow",
 ) -> ModelExportResult:
     mlflow_client = configure_mlflow(
         settings.mlflow_tracking_uri,
         enabled=settings.mlflow_enabled,
     )
-    model_id = ensure_pricing_model(
-        engine,
-        model_key=spec.model_key,
-        model_label=spec.model_label,
-        target_name=spec.target_name,
-        model_type=spec.model_type,
-        created_by=created_by,
-    )
+    model_id = validate_model_on_engine(engine, model_config)
     model_version = logical_date.replace("-", "")
     export_id = build_export_id(spec.model_key, airflow_run_id)
     workbook_path = build_rating_export_path(
@@ -179,6 +172,7 @@ def run_training_export_publish(
         airflow_run_id=airflow_run_id,
         logical_date=logical_date,
         spec=spec,
+        model_config=model_config,
         created_by=created_by,
     )
     return publish_model_export(engine, export, model_config=model_config)

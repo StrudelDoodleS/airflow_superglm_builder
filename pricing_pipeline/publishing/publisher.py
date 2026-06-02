@@ -148,6 +148,7 @@ class ModelPublisher:
             effective_from=export_result.effective_from,
             created_by=export_result.created_by,
             replace=True,
+            model_id=model_id,
         )
         result = publish_rating_package(
             self.engine,

@@ -29,6 +29,9 @@ def test_render_schema_sql_outputs_custom_schema_seed_script(tmp_path):
 
     assert "dbo.SCHEMA_CONFIGURATION" in sql
     assert "dbo.SCHEMA_MIGRATION" in sql
+    assert "checksum_sha256" in sql
+    assert "status" in sql
+    assert "APPLIED" in sql
     assert "python_pricing.TEST_TABLE" in sql
     assert "python_pricing.V_TEST" in sql
     assert "V001__table.sql" in sql

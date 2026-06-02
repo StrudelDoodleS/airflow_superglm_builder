@@ -8,7 +8,6 @@ def test_reset_sql_deletes_dependent_pricing_tables_before_parent_tables():
         "DELETE FROM mlops.MODEL_RUN_SPLIT_SET",
         "DELETE FROM mlops.MODEL_RUN_DATASET",
         "DELETE FROM mlops.MODEL_RUN_METRIC",
-        "DELETE FROM mlops.CV_SPLIT_ROW",
         "DELETE FROM pricing.CV_FOLD_METRIC",
         "DELETE FROM pricing.MODEL_RUN",
         "DELETE FROM pricing.PRICING_MODEL_DEPLOYMENT",
