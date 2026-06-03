@@ -429,6 +429,14 @@ def ensure_demo_manifest(engine, package: DemoPackage, *, created_by: str) -> st
 
 
 def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
+    model_id = ensure_pricing_model(
+        engine,
+        model_key=package.model_name,
+        model_label=package.model_label,
+        target_name=package.target_name,
+        model_type=package.model_type,
+        created_by=created_by,
+    )
     export_df, rate_df, level_df = build_staging_frames(package, created_by=created_by)
     args = argparse.Namespace(
         export_id=package.export_id,
@@ -439,6 +447,7 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
         model_status="ACTIVE",
         created_by=created_by,
         replace=True,
+        model_id=model_id,
     )
     insert_staging_frames(engine, args, export_df, rate_df, level_df)
     rate_package_id = publish_rating_package(
@@ -448,14 +457,6 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
         package_status=package.package_status,
     )
     manifest_id = ensure_demo_manifest(engine, package, created_by=created_by)
-    model_id = ensure_pricing_model(
-        engine,
-        model_key=package.model_name,
-        model_label=package.model_label,
-        target_name=package.target_name,
-        model_type=package.model_type,
-        created_by=created_by,
-    )
     if package.package_status == "PUBLISHED":
         deploy_rate_package(
             engine,

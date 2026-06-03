@@ -117,3 +117,62 @@ def test_demo_manifest_id_is_stable_and_data_specific():
     assert seed_demo_model_variants.manifest_id_for_package(package) == (
         "demo__frequency_policy_sample__20260429"
     )
+
+
+def test_seed_package_registers_model_before_staging(monkeypatch):
+    package = seed_demo_model_variants.demo_packages()[0]
+    calls = []
+
+    def fake_ensure_pricing_model(engine, **kwargs):
+        calls.append(("ensure_model", kwargs))
+        return 17
+
+    def fake_insert_staging_frames(engine, args, export_df, rate_df, level_df):
+        calls.append(("stage", getattr(args, "model_id", None)))
+        assert getattr(args, "model_id", None) == 17
+
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "ensure_pricing_model",
+        fake_ensure_pricing_model,
+    )
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "insert_staging_frames",
+        fake_insert_staging_frames,
+    )
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "publish_rating_package",
+        lambda *args, **kwargs: calls.append(("publish", kwargs)) or 42,
+    )
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "ensure_demo_manifest",
+        lambda *args, **kwargs: "manifest-1",
+    )
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "deploy_rate_package",
+        lambda *args, **kwargs: calls.append(("deploy", kwargs)),
+    )
+    monkeypatch.setattr(
+        seed_demo_model_variants,
+        "record_model_run",
+        lambda *args, **kwargs: calls.append(("record_run", kwargs)),
+    )
+
+    rate_package_id = seed_demo_model_variants.seed_package(
+        object(),
+        package,
+        created_by="pytest",
+    )
+
+    assert rate_package_id == 42
+    assert [call[0] for call in calls] == [
+        "ensure_model",
+        "stage",
+        "publish",
+        "deploy",
+        "record_run",
+    ]
