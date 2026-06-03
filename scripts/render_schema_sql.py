@@ -48,9 +48,12 @@ IF EXISTS (
     FROM dbo.SCHEMA_CONFIGURATION AS existing
     JOIN @requested_schema_config AS requested
       ON requested.config_key = existing.config_key
-    WHERE existing.config_value <> requested.config_value
+WHERE existing.config_value <> requested.config_value
 )
-    THROW 50010, 'Database was already initialized with different schema names', 1;
+BEGIN
+    RAISERROR('Database was already initialized with different schema names', 16, 1);
+    RETURN;
+END;
 
 INSERT INTO dbo.SCHEMA_CONFIGURATION(config_key, config_value)
 SELECT requested.config_key, requested.config_value

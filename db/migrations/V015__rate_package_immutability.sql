@@ -16,7 +16,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -45,7 +47,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -76,7 +80,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -107,7 +113,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -140,7 +148,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -173,7 +183,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -206,7 +218,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -241,7 +255,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -270,7 +286,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO
@@ -299,7 +317,9 @@ BEGIN
            )
     )
     BEGIN
-        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
+        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
     END;
 END;
 GO

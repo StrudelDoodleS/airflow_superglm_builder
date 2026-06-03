@@ -13,10 +13,16 @@ BEGIN
     SET NOCOUNT ON;
 
     IF ISJSON(@features_json) <> 1
-        THROW 50000, 'features_json must be valid JSON', 1;
+    BEGIN
+        RAISERROR('features_json must be valid JSON', 16, 1);
+        RETURN;
+    END;
 
     IF @exposure IS NULL OR @exposure <= 0
-        THROW 50001, 'exposure must be positive', 1;
+    BEGIN
+        RAISERROR('exposure must be positive', 16, 1);
+        RETURN;
+    END;
 
     DECLARE @rate_package_id BIGINT;
     DECLARE @base_rate FLOAT;
@@ -31,7 +37,10 @@ BEGIN
       AND deployment_slot = @deployment_slot;
 
     IF @rate_package_id IS NULL
-        THROW 50002, 'No current deployed rate package found', 1;
+    BEGIN
+        RAISERROR('No current deployed rate package found', 16, 1);
+        RETURN;
+    END;
 
     DECLARE @matched TABLE (
         term_id BIGINT NOT NULL PRIMARY KEY,
@@ -160,7 +169,10 @@ BEGIN
     FROM @matched;
 
     IF @matched_terms <> @required_terms
-        THROW 50003, 'Input features did not match every required term', 1;
+    BEGIN
+        RAISERROR('Input features did not match every required term', 16, 1);
+        RETURN;
+    END;
 
     SELECT
         @model_key AS model_key,
