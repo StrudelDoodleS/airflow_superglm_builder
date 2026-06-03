@@ -9,6 +9,32 @@ from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
 
 
+def _identity_text(value) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _existing_export_conflicts(existing_package, meta) -> list[str]:
+    conflicts: list[str] = []
+    for field_name in (
+        "model_version",
+        "effective_from_date",
+        "effective_to_date",
+        "source_file",
+    ):
+        existing_value = _identity_text(existing_package[field_name])
+        staged_value = _identity_text(meta[field_name])
+        if field_name == "source_file" and (existing_value is None or staged_value is None):
+            continue
+        if existing_value != staged_value:
+            conflicts.append(
+                f"{field_name} existing={existing_package[field_name]!r} "
+                f"staged={meta[field_name]!r}"
+            )
+    return conflicts
+
+
 def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
     if getattr(args, "set_pointer", None):
         raise ValueError(
@@ -27,7 +53,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 model_version,
                 base_rate,
                 effective_from_date,
-                effective_to_date
+                effective_to_date,
+                source_file
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """), {"export_id": args.export_id}).mappings().one()
@@ -42,7 +69,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         existing_package = con.execute(text("""
             SELECT
                 rate_package_id,
-                package_version
+                package_version,
+                model_id,
+                model_name,
+                model_version,
+                effective_from_date,
+                effective_to_date,
+                package_status,
+                source_export_id,
+                source_file
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
@@ -51,7 +86,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "export_id": args.export_id,
         }).mappings().one_or_none()
         if existing_package is not None:
+            conflicts = _existing_export_conflicts(existing_package, meta)
+            if conflicts:
+                raise ValueError(
+                    f"export_id {args.export_id!r} is already published with "
+                    "incompatible metadata: "
+                    + "; ".join(conflicts)
+                )
             args.package_version = int(existing_package["package_version"])
+            args.package_status = str(existing_package["package_status"])
             args.was_existing = True
             return int(existing_package["rate_package_id"])
 
@@ -73,6 +116,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 effective_to_date,
                 package_status,
                 source_export_id,
+                source_file,
                 created_by
             )
             OUTPUT INSERTED.rate_package_id
@@ -87,6 +131,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :effective_to_date,
                 :package_status,
                 :source_export_id,
+                :source_file,
                 :created_by
             )
         """), {
@@ -99,6 +144,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "effective_to_date": meta["effective_to_date"],
             "package_status": "DRAFT",
             "source_export_id": args.export_id,
+            "source_file": meta["source_file"],
             "created_by": args.created_by,
         }).scalar_one()
 
@@ -444,5 +490,6 @@ def publish_rating_package(
         rate_package_id=int(rate_package_id),
         package_version=int(args.package_version),
         rating_workbook_path="",
+        package_status=str(args.package_status),
         was_existing=bool(getattr(args, "was_existing", False)),
     )

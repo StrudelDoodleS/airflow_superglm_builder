@@ -312,6 +312,18 @@ def test_rate_package_source_export_migration_adds_idempotency_key():
     assert "source_export_id IS NOT NULL" in migration
 
 
+def test_rate_package_source_file_migration_adds_workbook_identity():
+    migration = Path("db/migrations/V020__rate_package_source_file.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ALTER TABLE pricing.PRICING_RATE_PACKAGE" in migration
+    assert "ADD source_file NVARCHAR(1024) NULL" in migration
+    assert "JOIN pricing_stg.STG_RATING_EXPORT AS src" in migration
+    assert "src.export_id = rp.source_export_id" in migration
+    assert "rp.package_status = 'DRAFT'" in migration
+
+
 def test_package_writer_allocates_version_under_lock():
     writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 

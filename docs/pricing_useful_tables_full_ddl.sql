@@ -237,6 +237,8 @@ CREATE TABLE pricing.RATE_PACKAGE (
     effective_from_date DATE NOT NULL,
     effective_to_date DATE NULL,
     package_status NVARCHAR(32) NOT NULL,
+    source_export_id NVARCHAR(128) NULL,
+    source_file NVARCHAR(1024) NULL,
     created_ts DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
     created_by NVARCHAR(128) NOT NULL,
 

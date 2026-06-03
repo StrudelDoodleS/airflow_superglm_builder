@@ -72,6 +72,7 @@ def test_publish_rating_package_builds_args_without_deployment_pointer(monkeypat
 def test_publish_rating_package_reports_existing_source_export(monkeypatch):
     def fake_load(engine, args):
         args.package_version = 3
+        args.package_status = "DRAFT"
         args.was_existing = True
         return 42
 
@@ -88,6 +89,7 @@ def test_publish_rating_package_reports_existing_source_export(monkeypatch):
     )
 
     assert result.was_existing is True
+    assert result.package_status == "DRAFT"
 
 
 class _FakeMetaResult:
@@ -126,28 +128,73 @@ class _FakePublishEngine:
         return _FakePublishBegin()
 
 
+def _staged_meta(**overrides):
+    row = {
+        "export_id": "export-1",
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "20260529",
+        "base_rate": 1.0,
+        "effective_from_date": "2026-05-29",
+        "effective_to_date": None,
+        "source_file": "/tmp/export/rating_tables.xlsx",
+    }
+    row.update(overrides)
+    return row
+
+
+def _existing_package(**overrides):
+    row = {
+        "rate_package_id": 42,
+        "package_version": 3,
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "20260529",
+        "effective_from_date": "2026-05-29",
+        "effective_to_date": None,
+        "package_status": "DRAFT",
+        "source_export_id": "export-1",
+        "source_file": "/tmp/export/rating_tables.xlsx",
+    }
+    row.update(overrides)
+    return row
+
+
 class _FakeExistingPackageResult:
+    def __init__(self, row):
+        self.row = row
+
     def mappings(self):
         return self
 
     def one_or_none(self):
-        return {
-            "rate_package_id": 42,
-            "package_version": 3,
-        }
+        return self.row
+
+
+class _FakeMetaWithModelResult:
+    def __init__(self, row):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def one(self):
+        return self.row
 
 
 class _FakeExistingPackageConnection:
-    def __init__(self):
+    def __init__(self, staged_meta=None, existing_package=None):
         self.statements = []
+        self.staged_meta = staged_meta or _staged_meta()
+        self.existing_package = existing_package or _existing_package()
 
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append((sql, params))
         if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
-            return _FakeMetaWithModelResult()
+            return _FakeMetaWithModelResult(self.staged_meta)
         if "source_export_id = :export_id" in sql:
-            return _FakeExistingPackageResult()
+            return _FakeExistingPackageResult(self.existing_package)
         raise AssertionError("existing export publish should stop before package insert")
 
 
@@ -163,27 +210,14 @@ class _FakeExistingPackageBegin:
 
 
 class _FakeExistingPackageEngine:
-    def __init__(self):
-        self.connection = _FakeExistingPackageConnection()
+    def __init__(self, staged_meta=None, existing_package=None):
+        self.connection = _FakeExistingPackageConnection(
+            staged_meta=staged_meta,
+            existing_package=existing_package,
+        )
 
     def begin(self):
         return _FakeExistingPackageBegin(self.connection)
-
-
-class _FakeMetaWithModelResult:
-    def mappings(self):
-        return self
-
-    def one(self):
-        return {
-            "export_id": "export-1",
-            "model_id": 17,
-            "model_name": "MTPL_FREQ",
-            "model_version": "20260529",
-            "base_rate": 1.0,
-            "effective_from_date": "2026-05-29",
-            "effective_to_date": None,
-        }
 
 
 def test_package_writer_rejects_staged_export_without_registered_model_id(monkeypatch):
@@ -227,6 +261,7 @@ def test_package_writer_returns_existing_package_for_existing_source_export():
 
     assert rate_package_id == 42
     assert args.package_version == 3
+    assert args.package_status == "DRAFT"
     assert args.was_existing is True
     assert any(
         "source_export_id = :export_id" in sql
@@ -237,3 +272,100 @@ def test_package_writer_returns_existing_package_for_existing_source_export():
         "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
         for sql, _params in engine.connection.statements
     )
+
+
+def test_package_writer_rejects_existing_source_export_with_different_model_version():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": None,
+        },
+    )()
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(model_version="20260603"),
+        existing_package=_existing_package(model_version="20260529"),
+    )
+
+    with pytest.raises(ValueError, match="model_version"):
+        load_staging_to_rating_package(engine, args)
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+def test_package_writer_rejects_existing_source_export_with_different_effective_from():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": None,
+        },
+    )()
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(effective_from_date="2026-06-03"),
+        existing_package=_existing_package(effective_from_date="2026-05-29"),
+    )
+
+    with pytest.raises(ValueError, match="effective_from_date"):
+        load_staging_to_rating_package(engine, args)
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+def test_package_writer_rejects_existing_source_export_with_different_source_file():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": None,
+        },
+    )()
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(source_file="/tmp/new/rating_tables.xlsx"),
+        existing_package=_existing_package(source_file="/tmp/old/rating_tables.xlsx"),
+    )
+
+    with pytest.raises(ValueError, match="source_file"):
+        load_staging_to_rating_package(engine, args)
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+def test_package_writer_allows_existing_source_export_when_old_source_file_is_unknown():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": None,
+        },
+    )()
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(source_file="/tmp/new/rating_tables.xlsx"),
+        existing_package=_existing_package(source_file=None),
+    )
+
+    rate_package_id = load_staging_to_rating_package(engine, args)
+
+    assert rate_package_id == 42
+    assert args.was_existing is True

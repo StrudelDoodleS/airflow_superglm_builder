@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -78,6 +79,39 @@ def test_completed_model_build_rejects_unknown_mapping_keys():
                 "unexpected": "value",
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "payload"),
+    [
+        (
+            "rating_workbook_path",
+            {"model_version": "20260603", "effective_from": "2026-06-03"},
+        ),
+        (
+            "model_version",
+            {"rating_workbook_path": "rating.xlsx", "effective_from": "2026-06-03"},
+        ),
+        (
+            "effective_from",
+            {"rating_workbook_path": "rating.xlsx", "model_version": "20260603"},
+        ),
+    ],
+)
+def test_completed_model_build_missing_required_mapping_fields_raise_domain_error(
+    field_name,
+    payload,
+):
+    with pytest.raises(CompletedModelBuildError, match=field_name):
+        CompletedModelBuild.from_mapping(payload)
+
+
+def test_completed_build_publish_api_does_not_import_dag_factory():
+    source = Path(
+        "pricing_pipeline/orchestration/publish_completed_build.py"
+    ).read_text(encoding="utf-8")
+
+    assert "orchestration.dag_factory" not in source
 
 
 def test_completed_model_publish_result_to_dict():
@@ -258,8 +292,8 @@ def test_publish_completed_model_build_task_fills_airflow_context(
             return "engine"
 
     monkeypatch.setattr(
-        "pricing_pipeline.orchestration.publish_completed_build.runtime_from_dag_config",
-        lambda runtime_module=None: FakeRuntime(),
+        "pricing_pipeline.orchestration.publish_completed_build.runtime_from_env_or_module",
+        lambda runtime_module=None, *, env=None: FakeRuntime(),
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.get_current_context",

@@ -146,6 +146,7 @@ def publish_model_export(
         "export_id": str(publish_result.export_id),
         "rate_package_id": str(publish_result.rate_package_id),
         "package_version": str(publish_result.package_version),
+        "package_status": str(publish_result.package_status),
         "rating_workbook_path": str(publish_result.rating_workbook_path),
         "was_existing": bool(getattr(publish_result, "was_existing", False)),
     }

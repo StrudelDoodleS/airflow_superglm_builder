@@ -27,6 +27,7 @@ class PublishResult:
     rate_package_id: int
     package_version: int
     rating_workbook_path: str
+    package_status: str = "PUBLISHED"
     was_existing: bool = False
 
 

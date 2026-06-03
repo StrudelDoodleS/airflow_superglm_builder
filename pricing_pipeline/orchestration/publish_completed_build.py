@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,10 +13,10 @@ from pricing_pipeline.data.manifest import (
     new_manifest_id,
 )
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import DatasetSpec, ModelExportResult
-from pricing_pipeline.orchestration.dag_factory import runtime_from_dag_config
 from pricing_pipeline.orchestration.pipeline import publish_model_export
 from pricing_pipeline.publishing.publisher import validate_model_on_engine
 from pricing_pipeline.publishing.rating_export import build_export_id
@@ -57,7 +58,12 @@ class CompletedModelBuild:
             raise CompletedModelBuildError(
                 "unknown completed build field(s): " + ", ".join(unknown)
             )
-        return cls(**data)
+        try:
+            return cls(**data)
+        except TypeError as exc:
+            raise CompletedModelBuildError(
+                f"invalid completed build payload: {exc}"
+            ) from exc
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -218,7 +224,7 @@ def publish_completed_model_build(
         export_id=str(publish_result["export_id"]),
         rate_package_id=int(publish_result["rate_package_id"]),
         package_version=int(publish_result["package_version"]),
-        package_status=resolved_package_status,
+        package_status=str(publish_result.get("package_status") or resolved_package_status),
         rating_workbook_path=str(
             publish_result.get("rating_workbook_path") or rating_workbook_path
         ),
@@ -252,7 +258,7 @@ def publish_completed_model_build_task(
                 str(payload["airflow_run_id"]),
             )
 
-        runtime = runtime_from_dag_config(runtime_module)
+        runtime = runtime_from_env_or_module(runtime_module, env=os.environ)
         result = publish_completed_model_build(
             runtime.get_engine(),
             settings=runtime.settings,
