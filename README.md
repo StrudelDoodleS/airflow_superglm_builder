@@ -300,6 +300,20 @@ pricing_pipeline/
   tools/         # optional local ERD generation
 ```
 
+Create the starting files with the scaffold helper:
+
+```bash
+uv run python scripts/scaffold_pricing_model.py \
+  --model-key MY_MODEL \
+  --model-label "My model" \
+  --target-name derived_target
+```
+
+The helper writes `pricing_models/<model_name>/model.toml`, `training.py`,
+`spec.py`, and a thin DAG under `dags/`. It refuses to overwrite existing files
+unless `--force` is passed, and prints the `pricing_models/registry.py` lines to
+add manually.
+
 - Global code in `pricing_pipeline/` owns database access, schema application,
   dataset manifests, MLflow setup, rating export publishing, and lineage writes.
 - Reusable datasets are described with `DatasetSpec` objects, currently in
@@ -307,6 +321,10 @@ pricing_pipeline/
 - Model code lives under `pricing_models/<model_name>/`. A model package should
   provide `training.py` for feature preparation/model construction and `spec.py`
   with a `ModelSpec` that points at the dataset it trains on.
+- `target_name` is the final training DataFrame column after
+  `build_training_frame()` runs; it does not need to be a physical source
+  column. Use that transform function for derived targets, exposure/offset
+  columns, filters, and feature cleanup when the source SQL view is read-only.
 - Validation split behavior belongs in the model `model.toml`. The final
   published model still trains on the full dataset; the split is retained for
   review/validation lineage. Use `method = "train_test_split"` for a holdout,
