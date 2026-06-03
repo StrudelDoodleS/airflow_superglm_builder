@@ -69,6 +69,27 @@ def test_publish_rating_package_builds_args_without_deployment_pointer(monkeypat
     assert args.set_pointer is None
 
 
+def test_publish_rating_package_reports_existing_source_export(monkeypatch):
+    def fake_load(engine, args):
+        args.package_version = 3
+        args.was_existing = True
+        return 42
+
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
+        fake_load,
+    )
+
+    result = publish_rating_package(
+        object(),
+        export_id="export-1",
+        created_by="airflow",
+        package_status="PUBLISHED",
+    )
+
+    assert result.was_existing is True
+
+
 class _FakeMetaResult:
     def mappings(self):
         return self
@@ -206,6 +227,7 @@ def test_package_writer_returns_existing_package_for_existing_source_export():
 
     assert rate_package_id == 42
     assert args.package_version == 3
+    assert args.was_existing is True
     assert any(
         "source_export_id = :export_id" in sql
         and params == {"model_id": 17, "export_id": "export-1"}

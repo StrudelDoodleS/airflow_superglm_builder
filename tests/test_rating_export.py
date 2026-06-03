@@ -1174,6 +1174,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "rate_package_id": "123",
         "package_version": "4",
         "rating_workbook_path": str(workbook_path),
+        "was_existing": False,
     }
     assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
     assert ("validate_model_on_engine", engine, MODEL_CONFIG) in calls
@@ -1407,6 +1408,7 @@ def test_publish_model_export_returns_candidate_without_deploying(
                 export_id=export.export_id if hasattr(export, "export_id") else export["export_id"],
                 rate_package_id=123,
                 package_version=4,
+                was_existing=True,
                 rating_workbook_path=(
                     export.rating_workbook_path
                     if hasattr(export, "rating_workbook_path")
@@ -1440,4 +1442,5 @@ def test_publish_model_export_returns_candidate_without_deploying(
 
     assert result["rate_package_id"] == "123"
     assert result["package_version"] == "4"
+    assert result["was_existing"] is True
     assert ("validate_registered_model",) in calls

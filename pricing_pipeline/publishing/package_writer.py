@@ -17,6 +17,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         )
 
     with engine.begin() as con:
+        args.was_existing = False
         requested_package_status = args.package_status
         meta = con.execute(text("""
             SELECT
@@ -51,6 +52,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         }).mappings().one_or_none()
         if existing_package is not None:
             args.package_version = int(existing_package["package_version"])
+            args.was_existing = True
             return int(existing_package["rate_package_id"])
 
         package_version = con.execute(text("""
@@ -442,4 +444,5 @@ def publish_rating_package(
         rate_package_id=int(rate_package_id),
         package_version=int(args.package_version),
         rating_workbook_path="",
+        was_existing=bool(getattr(args, "was_existing", False)),
     )

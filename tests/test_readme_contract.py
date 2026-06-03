@@ -97,3 +97,12 @@ def test_readme_documents_rate_package_lifecycle_contract():
     for expected in RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS:
         assert expected in lifecycle_section
     assert "manual revision" in lifecycle_section.lower()
+
+
+def test_readme_documents_completed_build_publish_task():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "publish_completed_model_build_task" in readme
+    assert "custom DAG" in readme
+    assert "build_pricing_model_dag" in readme
+    assert "does not deploy" in readme

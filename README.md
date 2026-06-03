@@ -337,8 +337,57 @@ normal use.
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.
-- Add one thin DAG per model in `dags/`, using
-  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`.
+- Add one DAG per model in `dags/`. For quick demos you can use
+  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`;
+  for serious model builds, a custom DAG can own ingestion, transforms,
+  training, validation, and then bolt on the completed-build publish task.
+
+### Custom DAG Publish Task
+
+For production-style builds, keep your model-specific Airflow tasks in your
+model package and use the library only for the final SQL lifecycle publish:
+
+```python
+from airflow.sdk import dag
+
+from pricing_models.claim_freq.spec import DATASET_SPEC, MODEL_CONFIG
+from pricing_models.claim_freq.tasks import prepare_training_data, train_and_export_rates
+from pricing_pipeline.orchestration.publish_completed_build import (
+    publish_completed_model_build_task,
+)
+
+
+@dag(dag_id="claim_freq_build", schedule=None, catchup=False)
+def claim_freq_build():
+    data = prepare_training_data()
+    build = train_and_export_rates(data)
+
+    publish_completed_model_build_task(
+        model_config=MODEL_CONFIG,
+        dataset=DATASET_SPEC,
+    )(build)
+
+
+claim_freq_build()
+```
+
+The upstream `train_and_export_rates` task should return a small dictionary with
+paths and metadata, not a DataFrame. At minimum it needs the rating workbook
+path, model version, and effective-from date:
+
+```python
+return {
+    "rating_workbook_path": str(workbook_path),
+    "model_version": "20260603",
+    "effective_from": "2026-06-03",
+    "mlflow_run_id": mlflow_run_id,  # optional
+}
+```
+
+This final publish task writes manifest/split metadata, model-run lineage, and
+rate package rows to SQL. It does not deploy. It creates a deployable package
+candidate but does not move any deployment slot pointer. If MLflow is disabled
+or unavailable, leave `mlflow_run_id` blank or `None`.
 
 For a work SQL table or view that already exists, the dataset definition can be
 just metadata and SQL. It does not need a custom Python loader:

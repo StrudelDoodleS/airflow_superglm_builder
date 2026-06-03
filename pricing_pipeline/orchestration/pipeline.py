@@ -118,7 +118,7 @@ def publish_model_export(
     export: ModelExportResult | dict,
     *,
     model_config: ModelBuildConfig,
-) -> dict[str, str]:
+) -> dict[str, str | bool]:
     export_result = ModelExportResult.from_mapping(export)
     publisher = ModelPublisher(engine, model_config)
     publisher.validate_registered_model()
@@ -147,6 +147,7 @@ def publish_model_export(
         "rate_package_id": str(publish_result.rate_package_id),
         "package_version": str(publish_result.package_version),
         "rating_workbook_path": str(publish_result.rating_workbook_path),
+        "was_existing": bool(getattr(publish_result, "was_existing", False)),
     }
 
 

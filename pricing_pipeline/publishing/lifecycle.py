@@ -27,6 +27,7 @@ class PublishResult:
     rate_package_id: int
     package_version: int
     rating_workbook_path: str
+    was_existing: bool = False
 
 
 @dataclass(frozen=True)

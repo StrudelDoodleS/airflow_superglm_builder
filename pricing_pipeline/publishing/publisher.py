@@ -162,4 +162,5 @@ class ModelPublisher:
             rate_package_id=result.rate_package_id,
             package_version=result.package_version,
             rating_workbook_path=export_result.rating_workbook_path,
+            was_existing=result.was_existing,
         )
