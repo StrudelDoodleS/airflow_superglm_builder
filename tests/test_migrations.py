@@ -405,13 +405,12 @@ def test_cv_split_row_cleanup_migration_drops_only_when_empty():
     assert "OBJECT_ID('mlops.CV_SPLIT_ROW', 'U')" in migration
     assert "SELECT 1 FROM mlops.CV_SPLIT_ROW" in migration
     assert "DROP TABLE mlops.CV_SPLIT_ROW" in migration
-    assert "RAISERROR" in migration
-    assert "THROW" not in migration
+    assert "BEGIN;\n        THROW 51002" in migration
     assert "row-level CV split assignments" in migration
 
 
-def test_guard_error_compatibility_migration_rewrites_guards_without_throw():
-    migration = Path("db/migrations/V019__use_raiserror_for_guard_errors.sql").read_text(
+def test_guard_error_compatibility_migration_keeps_throw_with_statement_terminators():
+    migration = Path("db/migrations/V019__terminate_throw_guard_errors.sql").read_text(
         encoding="utf-8"
     )
 
@@ -419,8 +418,9 @@ def test_guard_error_compatibility_migration_rewrites_guards_without_throw():
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE" in migration
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_CELL_LEVEL_IMMUTABLE_WRITE" in migration
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD" in migration
-    assert "RAISERROR" in migration
-    assert "THROW" not in migration
+    assert ";THROW 51000" in migration
+    assert ";THROW 51001" in migration
+    assert "RAISERROR" not in migration
 
 
 def test_prediction_proc_migration_scores_current_package_from_compiled_views():
@@ -470,8 +470,7 @@ def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages()
     assert "TR_PRICING_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE" in migration
     assert "package_status <> 'DRAFT'" in migration
     assert "pricing.PRICING_MODEL_DEPLOYMENT" in migration
-    assert "RAISERROR" in migration
-    assert "THROW 51000" not in migration
+    assert "BEGIN;\n        THROW 51000" in migration
     assert "Create a new package revision" in migration
     assert "AFTER INSERT, UPDATE, DELETE" in migration
 
@@ -698,5 +697,6 @@ def test_full_useful_tables_reference_ddl_documents_immutability_triggers():
     assert "package_status <> 'DRAFT'" in ddl
     assert "package_status <> 'PUBLISHED'" in ddl
     assert "MODEL_DEPLOYMENT" in ddl
-    assert "RAISERROR" in ddl
-    assert "THROW" not in ddl
+    assert "BEGIN;\n        THROW 51000" in ddl
+    assert "BEGIN;\n        THROW 51001" in ddl
+    assert "RAISERROR" not in ddl

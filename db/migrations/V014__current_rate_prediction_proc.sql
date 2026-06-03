@@ -13,15 +13,13 @@ BEGIN
     SET NOCOUNT ON;
 
     IF ISJSON(@features_json) <> 1
-    BEGIN
-        RAISERROR('features_json must be valid JSON', 16, 1);
-        RETURN;
+    BEGIN;
+        THROW 50000, 'features_json must be valid JSON', 1;
     END;
 
     IF @exposure IS NULL OR @exposure <= 0
-    BEGIN
-        RAISERROR('exposure must be positive', 16, 1);
-        RETURN;
+    BEGIN;
+        THROW 50001, 'exposure must be positive', 1;
     END;
 
     DECLARE @rate_package_id BIGINT;
@@ -37,9 +35,8 @@ BEGIN
       AND deployment_slot = @deployment_slot;
 
     IF @rate_package_id IS NULL
-    BEGIN
-        RAISERROR('No current deployed rate package found', 16, 1);
-        RETURN;
+    BEGIN;
+        THROW 50002, 'No current deployed rate package found', 1;
     END;
 
     DECLARE @matched TABLE (
@@ -169,9 +166,8 @@ BEGIN
     FROM @matched;
 
     IF @matched_terms <> @required_terms
-    BEGIN
-        RAISERROR('Input features did not match every required term', 16, 1);
-        RETURN;
+    BEGIN;
+        THROW 50003, 'Input features did not match every required term', 1;
     END;
 
     SELECT

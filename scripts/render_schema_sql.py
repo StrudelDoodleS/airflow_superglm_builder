@@ -50,9 +50,8 @@ IF EXISTS (
       ON requested.config_key = existing.config_key
 WHERE existing.config_value <> requested.config_value
 )
-BEGIN
-    RAISERROR('Database was already initialized with different schema names', 16, 1);
-    RETURN;
+BEGIN;
+    THROW 50010, 'Database was already initialized with different schema names', 1;
 END;
 
 INSERT INTO dbo.SCHEMA_CONFIGURATION(config_key, config_value)

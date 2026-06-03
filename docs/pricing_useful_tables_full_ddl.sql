@@ -473,10 +473,8 @@ BEGIN
         WHERE p.rate_package_id IS NULL
            OR p.package_status <> 'PUBLISHED'
     )
-    BEGIN
-        RAISERROR('rate package deployments must reference PUBLISHED packages for the same model_id.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51001, 'rate package deployments must reference PUBLISHED packages for the same model_id.', 1;
     END;
 END;
 
@@ -607,10 +605,8 @@ BEGIN
                WHERE md.rate_package_id = d.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -638,10 +634,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -671,10 +665,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -704,10 +696,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -739,10 +729,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -774,10 +762,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -805,10 +791,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -838,10 +822,8 @@ BEGIN
                WHERE md.rate_package_id = rp.rate_package_id
            )
     )
-    BEGIN
-        RAISERROR('Immutable rate packages cannot be changed directly. Create a new package revision.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51000, 'Immutable rate packages cannot be changed directly. Create a new package revision.', 1;
     END;
 END;
 GO
@@ -852,8 +834,7 @@ INSTEAD OF INSERT, UPDATE, DELETE
 AS
 BEGIN
     SET NOCOUNT ON;
-    RAISERROR('Compiled runtime views are immutable. Create a new package revision.', 16, 1);
-    RETURN;
+    THROW 51000, 'Compiled runtime views are immutable. Create a new package revision.', 1;
 END;
 GO
 
@@ -863,7 +844,6 @@ INSTEAD OF INSERT, UPDATE, DELETE
 AS
 BEGIN
     SET NOCOUNT ON;
-    RAISERROR('Compiled runtime views are immutable. Create a new package revision.', 16, 1);
-    RETURN;
+    THROW 51000, 'Compiled runtime views are immutable. Create a new package revision.', 1;
 END;
 GO

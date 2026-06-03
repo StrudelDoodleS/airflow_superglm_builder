@@ -28,9 +28,8 @@ IF EXISTS (
     WHERE rp.rate_package_id IS NULL
        OR rp.package_status <> 'PUBLISHED'
 )
-BEGIN
-    RAISERROR('rate package deployments must reference PUBLISHED packages for the same model_id.', 16, 1);
-    RETURN;
+BEGIN;
+    THROW 51001, 'rate package deployments must reference PUBLISHED packages for the same model_id.', 1;
 END;
 GO
 
@@ -62,10 +61,8 @@ BEGIN
         WHERE rp.rate_package_id IS NULL
            OR rp.package_status <> 'PUBLISHED'
     )
-    BEGIN
-        RAISERROR('rate package deployments must reference PUBLISHED packages for the same model_id.', 16, 1);
-        ROLLBACK TRANSACTION;
-        RETURN;
+    BEGIN;
+        THROW 51001, 'rate package deployments must reference PUBLISHED packages for the same model_id.', 1;
     END;
 END;
 GO
