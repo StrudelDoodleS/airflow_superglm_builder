@@ -288,6 +288,7 @@ model development, most edits should be under `pricing_models/`.
 
 ```text
 pricing_models/<model_name>/
+  model.toml   # model key, label, target, deployment slot, validation split
   spec.py       # model key, model metadata, dataset choice, feature list
   training.py   # model-specific SQL, feature prep, and SuperGLM construction
 
@@ -311,8 +312,9 @@ uv run python scripts/scaffold_pricing_model.py \
 
 The helper writes `pricing_models/<model_name>/model.toml`, `training.py`,
 `spec.py`, and a thin DAG under `dags/`. It refuses to overwrite existing files
-unless `--force` is passed, and prints the `pricing_models/registry.py` lines to
-add manually.
+unless `--force` is passed. Model configs are auto-discovered from
+`pricing_models/<model_name>/model.toml`; no registry import edits are needed for
+normal use.
 
 - Global code in `pricing_pipeline/` owns database access, schema application,
   dataset manifests, MLflow setup, rating export publishing, and lineage writes.
@@ -332,8 +334,9 @@ add manually.
   validation split. Set `materialize = true` to write compressed `.npz` fold
   indexes under `VALIDATION_SPLIT_ARTIFACT_ROOT`; SQL stores only the artifact
   path, artifact SHA256, and dataset row-order SHA256.
-- Register each spec in `pricing_models/registry.py` so direct runs can select it
-  with `--model-key`.
+- `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
+  paths such as deployment read TOML without importing model code; full model
+  builds lazy-load only the selected model's `spec.py`.
 - Add one thin DAG per model in `dags/`, using
   `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`.
 

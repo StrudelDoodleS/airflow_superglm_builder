@@ -37,7 +37,6 @@ class ScaffoldResult:
     package_name: str
     dag_id: str
     created_files: tuple[Path, ...]
-    registry_instructions: tuple[str, ...]
 
 
 def _toml_string(value: str) -> str:
@@ -237,15 +236,6 @@ def _dag_template(*, package_name: str, dag_id: str) -> str:
     )
 
 
-def _registry_instructions(*, package_name: str, model_key: str) -> tuple[str, ...]:
-    return (
-        f"from pricing_models.{package_name}.spec import MODEL_CONFIG as {model_key}_CONFIG",
-        f"from pricing_models.{package_name}.spec import MODEL_SPEC as {model_key}_SPEC",
-        f"MODEL_SPECS[{model_key}_SPEC.model_key] = {model_key}_SPEC",
-        f"MODEL_CONFIGS[{model_key}_CONFIG.model_key] = {model_key}_CONFIG",
-    )
-
-
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     model_key = _validate_model_key(options.model_key)
     package_name = _validate_python_identifier(
@@ -313,10 +303,6 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         package_name=package_name,
         dag_id=dag_id,
         created_files=files,
-        registry_instructions=_registry_instructions(
-            package_name=package_name,
-            model_key=model_key,
-        ),
     )
 
 
@@ -356,9 +342,10 @@ def main(argv: list[str] | None = None) -> None:
     for path in result.created_files:
         print(f"  {path.as_posix()}")
     print()
-    print("add these lines to pricing_models/registry.py:")
-    for line in result.registry_instructions:
-        print(f"  {line}")
+    print(
+        "model is auto-discovered from "
+        f"pricing_models/{result.package_name}/model.toml"
+    )
 
 
 if __name__ == "__main__":

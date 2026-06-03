@@ -29,12 +29,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
         package_dir / "spec.py",
         dag_path,
     )
-    assert result.registry_instructions == (
-        "from pricing_models.my_model.spec import MODEL_CONFIG as MY_MODEL_CONFIG",
-        "from pricing_models.my_model.spec import MODEL_SPEC as MY_MODEL_SPEC",
-        "MODEL_SPECS[MY_MODEL_SPEC.model_key] = MY_MODEL_SPEC",
-        "MODEL_CONFIGS[MY_MODEL_CONFIG.model_key] = MY_MODEL_CONFIG",
-    )
+    assert not hasattr(result, "registry_instructions")
 
     model_toml = (package_dir / "model.toml").read_text(encoding="utf-8")
     assert 'model_key = "MY_MODEL"' in model_toml
@@ -130,3 +125,25 @@ def test_scaffold_pricing_model_script_help_runs_without_pythonpath():
     assert "--model-key" in result.stdout
     assert "--target-name" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_scaffold_pricing_model_script_reports_toml_discovery(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/scaffold_pricing_model.py",
+            "--model-key",
+            "SCRIPT_MODEL",
+            "--target-name",
+            "target",
+            "--root",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "auto-discovered from pricing_models/script_model/model.toml" in result.stdout
+    assert "add these lines to pricing_models/registry.py" not in result.stdout
