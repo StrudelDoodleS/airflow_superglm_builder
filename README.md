@@ -310,23 +310,36 @@ uv run python scripts/scaffold_pricing_model.py \
   --target-name derived_target
 ```
 
-The helper writes `pricing_models/<model_name>/model.toml`, `training.py`,
-`spec.py`, and a thin DAG under `dags/`. It refuses to overwrite existing files
-unless `--force` is passed. Model configs are auto-discovered from
-`pricing_models/<model_name>/model.toml`; no registry import edits are needed for
-normal use.
+By default, the helper writes a custom-DAG starter:
+
+- `pricing_models/<model_name>/model.toml`: model identity and validation split
+  config.
+- `pricing_models/<model_name>/spec.py`: loads `MODEL_CONFIG` only.
+- `pricing_models/<model_name>/data.py`: where you pull/transform/materialize
+  the final model-ready data and build the `DatasetSpec` for the manifest task.
+- `pricing_models/<model_name>/modeling.py`: where you fit/validate the model,
+  export the SuperGLM rating workbook, and return `CompletedModelBuild`.
+- `pricing_models/<model_name>/airflow_tasks.py`: thin TaskFlow wrappers around
+  your data/modeling code.
+- `dags/<dag_id>.py`: register -> prepare -> manifest -> train/export -> publish.
+
+It refuses to overwrite existing files unless `--force` is passed. Model configs
+are auto-discovered from `pricing_models/<model_name>/model.toml`; no registry
+import edits are needed for normal use. The older all-in-one `ModelSpec` /
+`build_pricing_model_dag(...)` scaffold is still available with
+`--template factory`.
 
 - Global code in `pricing_pipeline/` owns database access, schema application,
   dataset manifests, MLflow setup, rating export publishing, and lineage writes.
-- Reusable datasets are described with `DatasetSpec` objects, currently in
-  `pricing_pipeline/data/datasets.py`, or directly in a model `spec.py`.
-- Model code lives under `pricing_models/<model_name>/`. A model package should
-  provide `training.py` for feature preparation/model construction and `spec.py`
-  with a `ModelSpec` that points at the dataset it trains on.
-- `target_name` is the final training DataFrame column after
-  `build_training_frame()` runs; it does not need to be a physical source
-  column. Use that transform function for derived targets, exposure/offset
-  columns, filters, and feature cleanup when the source SQL view is read-only.
+- `DatasetSpec` is only the manifest receipt for the final model-ready SQL
+  source. Shared dataset helpers can live in `pricing_pipeline/data/datasets.py`,
+  but custom DAGs usually build it from the prepared task payload.
+- `ModelSpec` is only needed for the older all-in-one factory path. Custom DAGs
+  can ignore it.
+- `target_name` is the final training DataFrame column after your data/modeling
+  code runs; it does not need to be a physical source column. Use your model
+  data prep code for derived targets, exposure/offset columns, filters, and
+  feature cleanup when the source SQL view is read-only.
 - Validation split behavior belongs in the model `model.toml`. The final
   published model still trains on the full dataset; the split is retained for
   review/validation lineage. Use `method = "train_test_split"` for a holdout,
