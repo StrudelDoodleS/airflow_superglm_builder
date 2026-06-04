@@ -345,13 +345,22 @@ normal use.
 ### Custom DAG Publish Task
 
 For production-style builds, keep your model-specific Airflow tasks in your
-model package and use the library only for the final SQL lifecycle publish:
+model package and import the common SQL lifecycle tasks from
+`pricing_pipeline.orchestration`:
 
 ```python
 from airflow.sdk import dag
 
-from pricing_models.claim_freq.spec import DATASET_SPEC, MODEL_CONFIG
-from pricing_models.claim_freq.tasks import prepare_training_data, train_and_export_rates
+from pricing_models.claim_freq.airflow_tasks import (
+    prepare_training_data,
+    train_and_export_rates,
+)
+from pricing_models.claim_freq.data import dataset_spec_from_prepared_training
+from pricing_models.claim_freq.spec import MODEL_CONFIG
+from pricing_pipeline.orchestration.manifest_tasks import (
+    create_prepared_dataset_manifest_task,
+)
+from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
 from pricing_pipeline.orchestration.publish_completed_build import (
     publish_completed_model_build_task,
 )
@@ -359,13 +368,16 @@ from pricing_pipeline.orchestration.publish_completed_build import (
 
 @dag(dag_id="claim_freq_build", schedule=None, catchup=False)
 def claim_freq_build():
-    data = prepare_training_data()
-    build = train_and_export_rates(data)
-
-    publish_completed_model_build_task(
+    registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
+    prepared = prepare_training_data()
+    manifested = create_prepared_dataset_manifest_task(
         model_config=MODEL_CONFIG,
-        dataset=DATASET_SPEC,
-    )(build)
+        dataset_builder=dataset_spec_from_prepared_training,
+    )(prepared)
+    build = train_and_export_rates(manifested)
+
+    published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(build)
+    registered >> prepared >> manifested >> build >> published
 
 
 claim_freq_build()
@@ -419,21 +431,26 @@ return CompletedModelBuild(
 ).to_dict()
 ```
 
-This final publish task writes manifest/split metadata, model-run lineage, and
-rate package rows to SQL. It does not deploy. It creates a deployable package
-candidate but does not move any deployment slot pointer. If MLflow is disabled
-or unavailable, leave `mlflow_run_id` blank or `None`.
+The manifest task records the model-ready dataset and optional validation split
+metadata. The final publish task records model-run lineage and rate package rows
+to SQL. It does not deploy. It creates a deployable package candidate but does
+not move any deployment slot pointer. If MLflow is disabled or unavailable,
+leave `mlflow_run_id` blank or `None`.
 
 A runnable example of this shape lives in:
 
-- `pricing_models/demo_custom_publish/tasks.py`: user-owned data generation,
-  SQL staging materialization, SuperGLM fit, `model.summary(...)`, workbook
-  export, and dynamic model-version/effective-date helpers.
+- `pricing_models/demo_custom_publish/data.py`: demo-only data generation,
+  run-scoped SQL staging materialization, and `DatasetSpec` construction.
+- `pricing_models/demo_custom_publish/modeling.py`: demo-only SuperGLM fit,
+  `model.summary(...)`, workbook export, and dynamic
+  model-version/effective-date helpers.
+- `pricing_models/demo_custom_publish/airflow_tasks.py`: thin Airflow wrappers
+  around the demo ETL/modeling functions.
 - `dags/demo_custom_publish.py`: Airflow TaskFlow DAG using custom model tasks
-  followed by `publish_completed_model_build_task(...)`. The DAG explicitly
-  registers the demo model first, then prepares a run-scoped training source,
-  creates manifest/split metadata for that source, trains/exports, and publishes
-  by reusing the prepared manifest IDs.
+  plus global SQL lifecycle tasks from `pricing_pipeline.orchestration`. The
+  DAG explicitly registers the demo model first, then prepares a run-scoped
+  training source, creates manifest/split metadata for that source,
+  trains/exports, and publishes by reusing the prepared manifest IDs.
 - `scripts/run_demo_custom_publish.py`: normal Python runner for the same path,
   useful when testing outside Airflow. Set `PRICING_DEMO_CUSTOM_OUTPUT_DIR`
   when a container or work runtime needs a writable artifact directory.

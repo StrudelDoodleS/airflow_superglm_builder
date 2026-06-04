@@ -10,17 +10,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pricing_models.demo_custom_publish.spec import DATASET_SPEC, MODEL_CONFIG  # noqa: E402
-from pricing_models.demo_custom_publish.tasks import (  # noqa: E402
+from pricing_models.demo_custom_publish.data import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
     build_demo_training_frame,
-    create_manifest_for_training_table,
-    effective_from_for_run,
-    export_superglm_completed_build,
+    dataset_spec_for_training_table,
     materialize_training_source,
-    next_trained_model_version,
     training_table_for_run,
     write_training_frame,
+)
+from pricing_models.demo_custom_publish.modeling import (  # noqa: E402
+    effective_from_for_run,
+    export_superglm_completed_build,
+    next_trained_model_version,
+)
+from pricing_models.demo_custom_publish.spec import MODEL_CONFIG  # noqa: E402
+from pricing_pipeline.orchestration.manifest_tasks import (  # noqa: E402
+    create_model_build_manifest,
 )
 from pricing_pipeline.orchestration.publish_completed_build import (  # noqa: E402
     publish_completed_model_build,
@@ -63,9 +68,10 @@ def run_demo_custom_publish(
     table_name = training_table_for_run(export_id)
     materialize_training_source(engine, frame, table_name=table_name)
     write_training_frame(frame, resolved_output_dir / export_id)
-    manifest = create_manifest_for_training_table(
+    dataset = dataset_spec_for_training_table(table_name)
+    manifest = create_model_build_manifest(
         engine,
-        table_name=table_name,
+        dataset=dataset,
         model_config=MODEL_CONFIG,
         validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
         created_by=created_by,
@@ -86,7 +92,7 @@ def run_demo_custom_publish(
         engine,
         settings=runtime.settings,
         model_config=MODEL_CONFIG,
-        dataset=DATASET_SPEC,
+        dataset=None,
         completed_build=completed_build,
         created_by=created_by,
     ).to_dict()

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pricing_pipeline.models.config import load_model_build_config
-from pricing_pipeline.models.spec import ModelSpec
-from pricing_models.demo_custom_publish.tasks import (
+from pricing_models.demo_custom_publish.data import (
     FEATURE_COLUMNS,
     TRAINING_SQL,
-    build_model,
-    build_training_frame,
     dataset_spec_for_training_table,
 )
+from pricing_models.demo_custom_publish.modeling import (
+    build_model,
+    build_training_frame,
+)
+from pricing_pipeline.models.config import load_model_build_config
+from pricing_pipeline.models.spec import ModelSpec
 
 
 MODEL_CONFIG = load_model_build_config(Path(__file__).with_name("model.toml"))

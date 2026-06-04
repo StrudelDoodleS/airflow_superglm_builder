@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 
 
 def test_demo_version_helper_increments_trained_model_versions_only():
-    from pricing_models.demo_custom_publish.tasks import next_model_version_from_existing
+    from pricing_models.demo_custom_publish.modeling import next_model_version_from_existing
 
     assert next_model_version_from_existing([]) == "v1"
     assert next_model_version_from_existing(["v1", "v2"]) == "v3"
@@ -15,21 +15,18 @@ def test_demo_version_helper_increments_trained_model_versions_only():
 
 
 def test_demo_effective_from_uses_run_date_not_hardcoded_string():
-    from pricing_models.demo_custom_publish.tasks import (
+    from pricing_models.demo_custom_publish.data import training_table_for_run
+    from pricing_models.demo_custom_publish.modeling import (
         effective_from_for_run,
+    )
+    from pricing_pipeline.orchestration.run_context import (
         run_key_for_value,
-        training_table_for_run,
     )
 
     assert effective_from_for_run(date(2026, 6, 4)) == "2026-06-04"
-    assert (
-        effective_from_for_run(datetime(2026, 6, 4, 23, 15, tzinfo=UTC))
-        == "2026-06-04"
-    )
-    assert (
-        run_key_for_value("manual__2026-06-04T23:15:00+00:00").startswith(
-            "manual__20260604t2315000000_"
-        )
+    assert effective_from_for_run(datetime(2026, 6, 4, 23, 15, tzinfo=UTC)) == "2026-06-04"
+    assert run_key_for_value("manual__2026-06-04T23:15:00+00:00").startswith(
+        "manual__20260604t2315000000_"
     )
     assert training_table_for_run("manual__2026-06-04T23:15:00+00:00").startswith(
         "DEMO_CUSTOM_PUBLISH_TRAINING_manual__20260604t2315000000_"
@@ -38,10 +35,10 @@ def test_demo_effective_from_uses_run_date_not_hardcoded_string():
 
 
 def test_demo_run_scoped_keys_are_collision_safe():
-    from pricing_models.demo_custom_publish.tasks import (
-        run_key_for_value,
+    from pricing_models.demo_custom_publish.data import (
         training_table_for_run,
     )
+    from pricing_pipeline.orchestration.run_context import run_key_for_value
 
     punctuation_keys = {
         run_key_for_value("scheduled__2026-06-04T12:00:00+00:00"),
@@ -69,7 +66,7 @@ def test_demo_run_scoped_keys_are_collision_safe():
 
 
 def test_demo_dataset_spec_can_point_at_run_specific_training_table():
-    from pricing_models.demo_custom_publish.tasks import dataset_spec_for_training_table
+    from pricing_models.demo_custom_publish.data import dataset_spec_for_training_table
 
     dataset = dataset_spec_for_training_table("DEMO_CUSTOM_PUBLISH_TRAINING_run_1")
 
@@ -81,8 +78,10 @@ def test_demo_dataset_spec_can_point_at_run_specific_training_table():
 
 
 def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):
-    from pricing_models.demo_custom_publish.tasks import (
+    from pricing_models.demo_custom_publish.data import (
         build_demo_training_frame,
+    )
+    from pricing_models.demo_custom_publish.modeling import (
         export_superglm_completed_build,
     )
 

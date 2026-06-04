@@ -36,10 +36,9 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "ensure_pricing_model",
-        lambda engine_arg, **kwargs: calls.append(
-            ("ensure_pricing_model", engine_arg, kwargs)
-        )
-        or 17,
+        lambda engine_arg, **kwargs: (
+            calls.append(("ensure_pricing_model", engine_arg, kwargs)) or 17
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -49,24 +48,23 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "materialize_training_source",
-        lambda engine_arg, frame, *, table_name=None: calls.append(
-            ("materialize_training_source", engine_arg, len(frame), table_name)
-        )
-        or len(frame),
+        lambda engine_arg, frame, *, table_name=None: (
+            calls.append(("materialize_training_source", engine_arg, len(frame), table_name))
+            or len(frame)
+        ),
     )
     monkeypatch.setattr(
         runner,
         "write_training_frame",
-        lambda frame, output_dir: calls.append(
-            ("write_training_frame", len(frame), output_dir)
-        )
-        or str(tmp_path / "training_frame.csv"),
+        lambda frame, output_dir: (
+            calls.append(("write_training_frame", len(frame), output_dir))
+            or str(tmp_path / "training_frame.csv")
+        ),
     )
     monkeypatch.setattr(
         runner,
         "next_trained_model_version",
-        lambda engine_arg: calls.append(("next_trained_model_version", engine_arg))
-        or "v7",
+        lambda engine_arg: calls.append(("next_trained_model_version", engine_arg)) or "v7",
     )
     monkeypatch.setattr(
         runner,
@@ -76,26 +74,24 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "export_superglm_completed_build",
-        lambda frame, **kwargs: calls.append(
-            ("export_superglm_completed_build", len(frame), kwargs)
-        )
-        or completed_build,
+        lambda frame, **kwargs: (
+            calls.append(("export_superglm_completed_build", len(frame), kwargs)) or completed_build
+        ),
     )
     monkeypatch.setattr(
         runner,
-        "create_manifest_for_training_table",
-        lambda engine_arg, **kwargs: calls.append(
-            ("create_manifest_for_training_table", engine_arg, kwargs)
-        )
-        or SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1"),
+        "create_model_build_manifest",
+        lambda engine_arg, **kwargs: (
+            calls.append(("create_model_build_manifest", engine_arg, kwargs))
+            or SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1")
+        ),
     )
     monkeypatch.setattr(
         runner,
         "publish_completed_model_build",
-        lambda engine_arg, **kwargs: calls.append(
-            ("publish_completed_model_build", engine_arg, kwargs)
-        )
-        or publish_result,
+        lambda engine_arg, **kwargs: (
+            calls.append(("publish_completed_model_build", engine_arg, kwargs)) or publish_result
+        ),
     )
 
     result = runner.run_demo_custom_publish(output_dir=tmp_path, created_by="pytest")
@@ -110,14 +106,14 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "effective_from_for_run",
         "materialize_training_source",
         "write_training_frame",
-        "create_manifest_for_training_table",
+        "create_model_build_manifest",
         "export_superglm_completed_build",
         "publish_completed_model_build",
     ]
     materialize_call = calls[3]
     assert materialize_call[3].startswith("DEMO_CUSTOM_PUBLISH_TRAINING_")
     manifest_call = calls[-3]
-    assert manifest_call[2]["table_name"] == materialize_call[3]
+    assert "DEMO_CUSTOM_PUBLISH_TRAINING_" in manifest_call[2]["dataset"].manifest_sql
     export_call = calls[-2]
     assert export_call[2]["model_version"] == "v7"
     assert export_call[2]["effective_from"] == "2026-06-04"

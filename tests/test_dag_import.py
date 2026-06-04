@@ -89,9 +89,12 @@ def test_pricing_superglm_pipeline_dag_imports_without_airflow(monkeypatch):
     )
 
     assert hasattr(module, "pricing_superglm_pipeline")
-    assert module._context_date_iso(
-        {"dag_run": types.SimpleNamespace(run_after=datetime(2026, 4, 27, tzinfo=UTC))}
-    ) == "2026-04-27"
+    assert (
+        module._context_date_iso(
+            {"dag_run": types.SimpleNamespace(run_after=datetime(2026, 4, 27, tzinfo=UTC))}
+        )
+        == "2026-04-27"
+    )
 
 
 def test_pricing_mtpl_frequency_dag_keeps_model_publish_tasks_separate(monkeypatch):
@@ -157,6 +160,7 @@ def test_demo_custom_publish_dag_uses_custom_tasks_and_publish_task(monkeypatch)
     assert [output.task_id for output in task_outputs] == [
         "register_demo_model",
         "prepare_training_data",
+        "create_training_manifest",
         "train_validate_export",
         "publish_completed_model_build",
     ]

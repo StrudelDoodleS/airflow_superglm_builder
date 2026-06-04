@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -233,9 +234,9 @@ def test_completed_model_build_rejects_non_finite_metric(bad_metric):
 
 
 def test_completed_build_publish_api_does_not_import_dag_factory():
-    source = Path(
-        "pricing_pipeline/orchestration/publish_completed_build.py"
-    ).read_text(encoding="utf-8")
+    source = Path("pricing_pipeline/orchestration/publish_completed_build.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "orchestration.dag_factory" not in source
 
@@ -279,11 +280,13 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.create_dataset_manifest_with_split",
-        lambda engine_arg, **kwargs: calls.append(("manifest", engine_arg, kwargs))
-        or DatasetManifestResult(
-            manifest_id="claim_freq_training_manifest",
-            split_set_id="split-1",
-            split_artifact_uri=None,
+        lambda engine_arg, **kwargs: (
+            calls.append(("manifest", engine_arg, kwargs))
+            or DatasetManifestResult(
+                manifest_id="claim_freq_training_manifest",
+                split_set_id="split-1",
+                split_artifact_uri=None,
+            )
         ),
     )
 
@@ -339,8 +342,9 @@ def test_publish_completed_model_build_configures_engine_with_settings_schema_na
 
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.configure_engine",
-        lambda engine_arg, schemas: calls.append(("configure", engine_arg, schemas))
-        or configured_engine,
+        lambda engine_arg, schemas: (
+            calls.append(("configure", engine_arg, schemas)) or configured_engine
+        ),
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
@@ -354,16 +358,16 @@ def test_publish_completed_model_build_configures_engine_with_settings_schema_na
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
-        lambda engine_arg, export, *, model_config: calls.append(
-            ("publish", engine_arg, export, model_config)
-        )
-        or {
-            "mlflow_run_id": "",
-            "export_id": export.export_id,
-            "rate_package_id": "42",
-            "package_version": "7",
-            "rating_workbook_path": export.rating_workbook_path,
-        },
+        lambda engine_arg, export, *, model_config: (
+            calls.append(("publish", engine_arg, export, model_config))
+            or {
+                "mlflow_run_id": "",
+                "export_id": export.export_id,
+                "rate_package_id": "42",
+                "package_version": "7",
+                "rating_workbook_path": export.rating_workbook_path,
+            }
+        ),
     )
 
     settings = _settings(tmp_path)
@@ -405,7 +409,9 @@ def test_publish_completed_model_build_reuses_and_validates_supplied_manifest(
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
-        lambda engine_arg, manifest_id: calls.append(("validate_manifest", engine_arg, manifest_id)),
+        lambda engine_arg, manifest_id: calls.append(
+            ("validate_manifest", engine_arg, manifest_id)
+        ),
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.create_dataset_manifest_with_split",
@@ -605,3 +611,113 @@ def test_publish_completed_model_build_task_allows_dataset_none_with_manifest(
 
     assert result["manifest_id"] == "manifest-existing"
     assert calls[0][1]["dataset"] is None
+
+
+def test_register_pricing_model_task_uses_global_registry_helper(monkeypatch):
+    from pricing_pipeline.orchestration import model_registry_tasks
+
+    calls = []
+    engine = object()
+    config = _config()
+
+    monkeypatch.setattr(
+        model_registry_tasks,
+        "runtime_from_env_or_module",
+        lambda runtime_module=None: SimpleNamespace(get_engine=lambda: engine),
+    )
+    monkeypatch.setattr(
+        model_registry_tasks,
+        "ensure_pricing_model",
+        lambda engine_arg, **kwargs: (
+            calls.append(("ensure_pricing_model", engine_arg, kwargs)) or 17
+        ),
+    )
+
+    task_callable = model_registry_tasks.register_pricing_model_task(
+        model_config=config,
+        runtime_module="work_runtime.database",
+        created_by="pytest",
+        task_id="register_claim_freq",
+    )
+
+    assert task_callable.function() == 17
+    assert calls == [
+        (
+            "ensure_pricing_model",
+            engine,
+            {
+                "model_key": "CLAIM_FREQ",
+                "model_label": "Claim frequency",
+                "target_name": "claim_count",
+                "model_type": "superglm_poisson",
+                "created_by": "pytest",
+            },
+        )
+    ]
+
+
+def test_create_prepared_dataset_manifest_task_carries_payload(monkeypatch, tmp_path):
+    from pricing_pipeline.orchestration import manifest_tasks
+
+    calls = []
+    engine = object()
+    config = _config()
+
+    monkeypatch.setattr(
+        manifest_tasks,
+        "runtime_from_env_or_module",
+        lambda runtime_module=None: SimpleNamespace(
+            get_engine=lambda: engine,
+            settings=SimpleNamespace(validation_split_artifact_root=tmp_path / "splits"),
+        ),
+    )
+    monkeypatch.setattr(
+        manifest_tasks,
+        "create_model_build_manifest",
+        lambda engine_arg, **kwargs: (
+            calls.append(("create_model_build_manifest", engine_arg, kwargs))
+            or DatasetManifestResult(
+                manifest_id="manifest-1",
+                split_set_id="split-1",
+                split_artifact_uri=None,
+            )
+        ),
+    )
+
+    def dataset_builder(payload):
+        return DatasetSpec(
+            dataset_name="claim_freq_training",
+            source_system="azure_sql",
+            manifest_sql=f"SELECT * FROM work.{payload['training_table']}",
+            pk_columns=("policy_id",),
+            target_column="claim_count",
+            weight_column="earned_exposure",
+        )
+
+    task_callable = manifest_tasks.create_prepared_dataset_manifest_task(
+        model_config=config,
+        dataset_builder=dataset_builder,
+        runtime_module="work_runtime.database",
+        created_by="pytest",
+        task_id="create_claim_freq_manifest",
+    )
+
+    result = task_callable.function(
+        {
+            "training_table": "CLAIM_FREQ_RUN_1",
+            "training_frame_path": "/shared/claim_freq/training.csv",
+        }
+    )
+
+    assert result == {
+        "training_table": "CLAIM_FREQ_RUN_1",
+        "training_frame_path": "/shared/claim_freq/training.csv",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+    }
+    manifest_call = calls[0]
+    assert manifest_call[1] is engine
+    assert manifest_call[2]["dataset"].manifest_sql == ("SELECT * FROM work.CLAIM_FREQ_RUN_1")
+    assert manifest_call[2]["model_config"] == config
+    assert manifest_call[2]["validation_split_artifact_root"] == tmp_path / "splits"
+    assert manifest_call[2]["created_by"] == "pytest"
