@@ -125,7 +125,7 @@ def test_mssql_init_creates_pricing_and_mlflow_databases():
     assert services["mlflow"]["depends_on"]["mssql-init"] == {
         "condition": "service_completed_successfully"
     }
-    assert "pricing_pipeline.db" in init_command
+    assert "pricing_pipeline.infra.db" in init_command
     assert "ensure_database" in init_command
     assert "settings.pricing_database" in init_command
     assert "settings.mlflow_database" in init_command
@@ -171,7 +171,7 @@ def test_mlflow_backend_uri_is_built_with_encoded_odbc_connection():
     assert "MLFLOW_BACKEND_STORE_URI" not in mlflow["environment"]
     assert "sa:${MSSQL_PASSWORD" not in compose_text
     assert "mssql+pyodbc://sa:${MSSQL_PASSWORD" not in mlflow_env_text
-    assert "pricing_pipeline.db" in mlflow_command
+    assert "pricing_pipeline.infra.db" in mlflow_command
     assert "build_sqlalchemy_url" in mlflow_command
     assert "PWD=" not in mlflow_command
     assert "Encrypt=" not in mlflow_command
@@ -197,7 +197,7 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
     assert generator["profiles"] == ["diagrams"]
     assert server["profiles"] == ["diagrams"]
     assert "generate_db_diagrams.py" in generator_command
-    assert "--schemas pricing" in generator_command
+    assert "--schemas pricing mlops" in generator_command
     assert server["ports"] == ["8088:80"]
     assert server["depends_on"]["state-init"] == {"condition": "service_completed_successfully"}
     assert generator["depends_on"]["mssql"] == {"condition": "service_healthy"}
@@ -206,15 +206,26 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
 def test_airflow_services_can_import_project_package_and_hide_examples():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     common_env = compose["x-airflow-common"]["environment"]
+    common_volumes = compose["x-airflow-common"]["volumes"]
     run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
     cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(
         encoding="utf-8"
     )
 
     assert common_env["PYTHONPATH"] == "/opt/airflow"
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline"
+        in common_volumes
+    )
+    assert (
+        "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models"
+        in common_volumes
+    )
     assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
+    assert common_env["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
     assert "cleanup_airflow_examples.py" in run_script
     assert "airflow dags list-import-errors" in run_script
+    assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script
     assert "airflow dags trigger \"${DAG_ID}\"" in run_script
     assert "bundle_name" in cleanup_script
     assert "example_dags" in cleanup_script
@@ -282,22 +293,23 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
 
 
-def test_rating_package_loader_publishes_model_scoped_deployment_history():
-    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+def test_deploy_api_publishes_model_scoped_deployment_history():
+    deployer = Path("pricing_pipeline/publishing/deployment.py").read_text(
         encoding="utf-8"
     )
 
-    assert "model_id" in loader
-    assert "PRICING_MODEL_DEPLOYMENT" in loader
-    assert "effective_to_ts = SYSUTCDATETIME()" in loader
-    assert "deployment_slot" in loader
-    assert "PRICING_PACKAGE_POINTER" in loader
-    assert "pointer_name = src.pointer_name" in loader
-    assert "model_id = src.model_id" in loader
+    assert "model_id" in deployer
+    assert "PRICING_MODEL_DEPLOYMENT" in deployer
+    assert "effective_to_ts = SYSUTCDATETIME()" in deployer
+    assert "deployment_slot" in deployer
+    assert "PRICING_PACKAGE_POINTER" in deployer
+    assert "pointer_name = src.pointer_name" in deployer
+    assert "model_id = src.model_id" in deployer
+    assert "deployment_note" in deployer
 
 
 def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
-    loader = Path("scripts/load_staging_to_rating_package.py").read_text(
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
         encoding="utf-8"
     )
 
@@ -306,3 +318,17 @@ def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
     assert "s.order_index" in loader
     assert "s.lower_bound" in loader
     assert "s.upper_bound" in loader
+
+
+def test_manual_revision_writer_creates_child_package_and_finalizes_published():
+    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "parent_rate_package_id" in writer
+    assert "package_status" in writer
+    assert "PUBLISHED" in writer
+    assert "WITH (UPDLOCK, HOLDLOCK)" in writer
+    assert "PRICING_RATE_PACKAGE" in writer
+    assert "PRICING_RATE_CELL" in writer
+    assert "PRICING_COMPILED_RATE_CELL" in writer

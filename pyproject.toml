@@ -5,16 +5,20 @@ requires-python = ">=3.14"
 dependencies = [
   "apache-airflow==3.2.1",
   "apache-airflow-providers-microsoft-mssql",
-  "mlflow",
+  "azure-identity",
   "numpy",
   "openpyxl",
   "pandas",
+  "pydantic>=2.13,<3",
   "pyodbc",
   "python-dotenv",
   "scikit-learn",
   "sqlalchemy",
   "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@592891b6e405fdfa90e35ff39a16b8ebd5eb84f6",
 ]
+
+[project.optional-dependencies]
+mlflow = ["mlflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -24,3 +28,9 @@ addopts = "-q"
 [tool.ruff]
 target-version = "py314"
 line-length = 100
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "sqlfluff>=4.2.1",
+]

@@ -6,8 +6,8 @@ from urllib.parse import unquote_plus
 
 import scripts.load_fremtpl_raw as load_fremtpl_raw_script
 import scripts.pricing_db as script_db
-from pricing_pipeline import db as shared_db
-from pricing_pipeline.config import Settings
+from pricing_pipeline.infra import db as shared_db
+from pricing_pipeline.infra.config import Settings
 
 
 def _run_script_help(script: str) -> subprocess.CompletedProcess[str]:

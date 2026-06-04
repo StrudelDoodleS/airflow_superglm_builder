@@ -36,6 +36,7 @@ x-airflow-common:
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
@@ -52,16 +53,17 @@ x-airflow-common:
     MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-yes}
     MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
     RATING_EXPORT_ROOT: ${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}
-    PRICING_MIGRATIONS_DIR: ${PRICING_MIGRATIONS_DIR:-/opt/pricing/db/migrations}
+    PRICING_SCHEMA_DIR: ${PRICING_SCHEMA_DIR:-/opt/pricing/db/migrations}
     PRICING_SKIP_DATABASE_CREATE: ${PRICING_SKIP_DATABASE_CREATE:-false}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-    - ./pricing_pipeline:/opt/airflow/pricing_pipeline
-    - ./db:/opt/pricing/db
-    - ./scripts:/opt/pricing/scripts
+    - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
+    - ${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models
+    - ${AIRFLOW_PROJ_DIR:-.}/db:/opt/pricing/db
+    - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/pricing/scripts
     - ${AIRFLOW_PROJ_DIR:-.}/state/rating_exports:/opt/pricing/state/rating_exports
     - ${AIRFLOW_PROJ_DIR:-.}/state/cv_splits:/opt/pricing/state/cv_splits
   user: "${AIRFLOW_UID:-50000}:0"
@@ -372,8 +374,8 @@ services:
         python - <<'PY'
         import os
 
-        from pricing_pipeline.config import Settings
-        from pricing_pipeline.db import ensure_database
+        from pricing_pipeline.infra.config import Settings
+        from pricing_pipeline.infra.db import ensure_database
 
         settings = Settings.from_env(os.environ)
         ensure_database(settings, settings.pricing_database)
@@ -398,8 +400,8 @@ services:
         export MLFLOW_BACKEND_STORE_URI="$$(python - <<'PY'
         import os
 
-        from pricing_pipeline.config import Settings
-        from pricing_pipeline.db import build_sqlalchemy_url
+        from pricing_pipeline.infra.config import Settings
+        from pricing_pipeline.infra.db import build_sqlalchemy_url
 
         settings = Settings.from_env(os.environ)
         print(build_sqlalchemy_url(settings, database=settings.mlflow_database))
@@ -475,7 +477,7 @@ services:
         if [[ "$${DIAGRAM_INCLUDE_ROW_KEYS}" == "1" ]]; then
           extra_args+=(--include-row-keys)
         fi
-        python /opt/pricing/scripts/generate_db_diagrams.py --schemas pricing --output-dir /opt/pricing/state/db_diagrams "$${extra_args[@]}"
+        python /opt/pricing/scripts/generate_db_diagrams.py --schemas pricing mlops --output-dir /opt/pricing/state/db_diagrams "$${extra_args[@]}"
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline
       - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/pricing/scripts

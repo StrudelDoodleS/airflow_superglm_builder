@@ -1,0 +1,339 @@
+# Post-Modeling Dataset Manifest Design
+
+## Problem
+
+Every model build needs dataset lineage, but the current demo makes users write a
+small `DatasetSpec(...)` wrapper per model. The wrapper is mostly boilerplate,
+yet the metadata it creates is important: without it the SQL catalog cannot
+track which model-ready data produced a rate package.
+
+The manifest is an audit record for the data used by a model build. It should
+tell an auditor, performance analyst, or future modeler which final model-ready
+SQL source the model trained on, when that source was current as of, how many
+rows were present, and which columns were present in that final modeling frame.
+
+The existing name `training_table` is also misleading. The final model trains on
+the full model-ready data, and validation may happen separately. The lineage
+manifest should describe the final model-ready source used for the package, not
+necessarily an early raw/candidate training table.
+
+Raw source tables may have 100-200 columns. The final model-ready source may have
+50 selected or derived columns. `DATASET_COLUMN` should describe the final
+model-ready source captured by the manifest. It is not the raw source schema, and
+it is not the authoritative list of rate-package terms. Rate-package feature,
+term, and cell tables remain the source of truth for what was exported into the
+package.
+
+## Goals
+
+- Make dataset manifest housekeeping easy enough that users do not skip it.
+- Keep SQL execution, source joins, and feature engineering in user-owned DAG
+  tasks.
+- Treat the post-modeling final model-ready source as the default manifest
+  target.
+- Record the final manifest source identity and data as-of date clearly enough
+  for audit/review.
+- Keep TOML focused on stable metadata, not volatile SQL files or feature lists.
+- Preserve the current publish/deploy separation.
+
+## Non-Goals
+
+- Do not put connection strings, auth, or Azure credential logic in TOML.
+- Do not put SQL files or SQL execution instructions in `[dataset]`.
+- Do not require final feature columns in TOML.
+- Do not make the publish task infer or create dataset manifests implicitly.
+- Do not change rate-package deployment semantics.
+- Do not claim `DATASET_COLUMN` is the same thing as the rate-package feature
+  list.
+
+## Recommended Shape
+
+`model.toml` owns stable dataset housekeeping:
+
+```toml
+[dataset]
+dataset_name = "claim_frequency_modeling"
+source_system = "policy_admin"
+manifest_data_source = "pricing_work"
+pk_columns = ["policy_id"]
+target_column = "claim_count"
+weight_column = "earned_exposure"
+```
+
+The user-owned ETL/modeling task owns SQL execution and materialization. After
+feature selection/modeling, it returns a small payload pointing at the final
+stable model-ready source:
+
+```python
+return {
+    "modeling_schema": "pricing_work",
+    "modeling_table": final_modeling_table,
+    "data_as_of_date": data_as_of_date,
+    "rating_workbook_path": str(workbook_path),
+    "model_version": model_version,
+    "effective_from": effective_from,
+    "export_id": export_id,
+}
+```
+
+For relation-based sources, the library builds manifest SQL from the final
+relation:
+
+```sql
+SELECT *
+FROM pricing_work.<modeling_table>
+ORDER BY policy_id
+```
+
+For edge cases, the user task may return `manifest_sql` directly:
+
+```python
+return {
+    "manifest_sql": final_manifest_sql,
+    ...
+}
+```
+
+That escape hatch is for final model-ready queries only. SQL still lives in the
+task or imported task code, not in TOML.
+
+## DAG Flow
+
+The production-style DAG default becomes:
+
+```text
+register model
+-> pull/transform candidate data
+-> train/select features/materialize final model-ready source
+-> create manifest from final model-ready source
+-> publish completed build
+-> deploy separately after review
+```
+
+The publish task does not need dataset columns. It receives
+`CompletedModelBuild` plus `manifest_id` / `split_set_id` from the manifest task.
+Deployment remains a separate DAG/task that moves the model deployment slot.
+
+The preferred post-modeling flow creates the manifest before publish and passes
+`manifest_id` / `split_set_id` into `publish_completed_model_build_task(...)`.
+The v1 publish helper keeps its `dataset` fallback for compatibility and simple
+demos, but new production examples should use the separate manifest task.
+
+The model/rate-package audit path should read as:
+
+```text
+PRICING_RATE_PACKAGE
+-> MODEL_RUN.rate_package_id
+-> MODEL_RUN.manifest_id
+-> DATASET_MANIFEST.data_as_of_date and source identity
+-> DATASET_COLUMN final modeling columns
+```
+
+For manual revisions, the child package inherits the trained-data lineage through
+`parent_rate_package_id` back to the nearest trained package. A lineage view
+should make that easy to see without requiring users to hand-write recursive
+queries.
+
+## Components
+
+### Dataset Config
+
+Add an optional `DatasetBuildConfig` to the loaded model config:
+
+- `dataset_name`
+- `source_system`
+- `manifest_data_source`
+- `pk_columns`
+- `target_column`
+- `weight_column`
+
+The config should validate required strings, non-empty PK columns, and optional
+weight column. It should not contain `columns`, `sql_file`, or credentials.
+
+`manifest_data_source` is a logical key. If teams want a server/database lookup,
+that lookup should map logical names to metadata such as server, database, and
+default schema. It should not contain connection strings or auth code.
+
+As-of and period derivation should stay mostly out of TOML. The default should be
+explicit payload fields from the user task, with optional Python helper
+strategies for repetitive cases.
+
+### Manifest Source Metadata
+
+`pricing.DATASET_MANIFEST` already has `data_as_of_date`. That field should mean
+the as-at/as-of date for the final model-ready data source, not the date the
+manifest job happened to run. The manifest helper should accept it from the
+payload and only fall back to the current date for demos or legacy callers.
+
+The current table does not explicitly store the final source relation or query.
+Add source identity fields so the manifest can answer "what data did this model
+train on?" without relying on a naming convention:
+
+- `manifest_source_type`: `RELATION` or `SQL`.
+- `manifest_source_name`: display name for the final source, such as
+  `pricing_work.CLAIM_FREQ_MODELING_RUN_123`.
+- `source_server`: nullable logical/physical SQL Server name.
+- `source_database`: nullable database name.
+- `source_schema`: nullable schema name.
+- `source_object`: nullable table/view name.
+- `manifest_sql_sha256`: hash of the SQL used to read the final modeling frame.
+- `manifest_sql_text`: optional SQL text used to create the manifest. For
+  relation sources this is the generated `SELECT * ... ORDER BY ...`; for SQL
+  sources it is the user-supplied final manifest SQL.
+
+Add optional data-period fields:
+
+- `data_period_start_date`: nullable start of the observation/experience period.
+- `data_period_end_date`: nullable end of the observation/experience period.
+
+These are different from `data_as_of_date`. `data_as_of_date` says how current
+the modeled data was. The period fields say what date range the observations
+cover.
+
+These fields are metadata. They do not turn SQL Server into a row-level artifact
+store.
+
+### Dataset Spec Builder
+
+Add a generic builder that converts:
+
+- `DatasetBuildConfig`
+- prepared/completed payload from the user task
+
+into `DatasetSpec`.
+
+Supported payload forms:
+
+1. Relation form:
+
+```python
+{
+    "modeling_schema": "pricing_work",
+    "modeling_table": "CLAIM_FREQ_MODELING_RUN_123",
+    "data_as_of_date": "2026-06-04",
+    "data_period_start_date": "2025-01-01",
+    "data_period_end_date": "2026-03-31",
+}
+```
+
+2. SQL form:
+
+```python
+{
+    "manifest_sql": "SELECT ... ORDER BY policy_id",
+    "data_as_of_date": "2026-06-04",
+    "data_period_start_date": "2025-01-01",
+    "data_period_end_date": "2026-03-31",
+}
+```
+
+The relation form should build `SELECT * FROM schema.table ORDER BY pk_columns`.
+The SQL form should use the supplied SQL as-is.
+
+Payload date fields are the primary API. For common cases where teams do not
+want to compute the dates manually, provide Python helper strategies instead of
+TOML-heavy configuration:
+
+```python
+dataset_builder = dataset_spec_from_model_config(
+    MODEL_CONFIG,
+    data_as_of=DataAsOf.max_column("snapshot_date"),
+    data_period=DataPeriod.date_range("policy_effective_date"),
+)
+```
+
+Supported helper strategies:
+
+- `DataAsOf.payload("data_as_of_date")`
+- `DataAsOf.today()`
+- `DataAsOf.max_column("snapshot_date")`
+- `DataPeriod.none()`
+- `DataPeriod.payload("data_period_start_date", "data_period_end_date")`
+- `DataPeriod.date_range("policy_effective_date")`
+
+The column-based strategies run against the final model-ready source, not the raw
+source tables.
+
+### Manifest Task
+
+Keep `create_prepared_dataset_manifest_task(...)` as the generic orchestration
+task, but allow a standard dataset-builder factory so users do not hand-write a
+per-model function:
+
+```python
+manifested = create_prepared_dataset_manifest_task(
+    model_config=MODEL_CONFIG,
+    dataset_builder=dataset_spec_from_model_config(MODEL_CONFIG),
+)(completed_or_prepared)
+```
+
+The standard builder should require `data_as_of_date` by default. Demo or legacy
+callers may opt out explicitly with `require_data_as_of_date=False`, in which
+case the current date fallback is allowed.
+
+The task adds `manifest_id` and `split_set_id` to the payload and returns the
+enriched payload for `publish_completed_model_build_task(...)`.
+
+### Naming
+
+User-facing examples should prefer `modeling_table`, `modeling_schema`,
+`modeling_dataset`, or `manifest_source`. Avoid `training_table` in new docs and
+new demos except where it is existing compatibility code.
+
+## Error Handling
+
+The dataset builder should raise clear domain errors when:
+
+- `[dataset]` is missing but the standard builder is used.
+- Neither `manifest_sql` nor relation fields are supplied.
+- Only one of `modeling_schema` / `modeling_table` is supplied.
+- `data_as_of_date` is missing while `require_data_as_of_date=True`, blank, or
+  not a valid date.
+- Data period start/end values are invalid dates or start is after end.
+- PK columns are missing or blank.
+- Relation identifiers are blank.
+
+It should not validate database connectivity. The manifest task already validates
+the final SQL by executing it when creating `DATASET_MANIFEST` and
+`DATASET_COLUMN`.
+
+## Testing
+
+Add focused tests for:
+
+- TOML dataset config parsing.
+- Relation payload builds expected `DatasetSpec.manifest_sql`.
+- SQL payload passes explicit `manifest_sql` through.
+- Payload `data_as_of_date` is written to `DATASET_MANIFEST`.
+- Payload data period start/end dates are written to `DATASET_MANIFEST`.
+- `DataAsOf.max_column(...)` computes the max date from the final model-ready
+  source.
+- `DataPeriod.date_range(...)` computes min/max dates from the final model-ready
+  source.
+- Manifest source relation/query metadata is written to `DATASET_MANIFEST`.
+- Missing relation/SQL payload raises a clear error.
+- Missing/invalid `data_as_of_date` raises when `require_data_as_of_date=True`.
+- Manifest task can use the standard builder and pass the enriched payload to
+  publish.
+- A package lineage view exposes package id/version, model run completed time,
+  manifest id, manifest source identity, and `data_as_of_date`.
+- Demo DAG uses post-modeling manifest naming in comments/docs.
+
+Regression tests should confirm `publish_completed_model_build_task(...)` remains
+unchanged: it should publish from supplied manifest IDs and should not deploy.
+
+## Migration Impact
+
+A SQL migration is required to add manifest source identity fields and optional
+data-period fields to `pricing.DATASET_MANIFEST`. The `data_as_of_date` column
+already exists; the implementation should change how it is populated, not add a
+second as-of field.
+
+The existing `pricing.MODEL_RUN` table already has `started_ts`, `completed_ts`,
+`manifest_id`, and `rate_package_id`, which is enough to relate a trained package
+to the data manifest and the model build time. Add or update a convenience view
+for analysts so they can see package lineage without manually joining model run,
+manifest, package, and parent-package tables.
+
+Existing model folders may keep custom `dataset_builder` functions. The new
+standard builder is a convenience path, not a forced replacement.

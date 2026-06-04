@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pricing_db import get_engine  # noqa: E402
-from pricing_pipeline.manifest import (  # noqa: E402
+from pricing_pipeline.data.manifest import (  # noqa: E402
     FREMTPL_DATASET_NAME,
     create_fremtpl_manifest,
     new_manifest_id,

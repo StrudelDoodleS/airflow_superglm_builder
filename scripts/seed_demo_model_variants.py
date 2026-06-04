@@ -14,8 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pricing_pipeline.lineage import record_model_run  # noqa: E402
-from pricing_pipeline.model_registry import ensure_pricing_model  # noqa: E402
+from pricing_pipeline.models.config import ModelBuildConfig  # noqa: E402
+from pricing_pipeline.publishing.deployment import deploy_rate_package  # noqa: E402
+from pricing_pipeline.publishing.lineage import record_model_run  # noqa: E402
+from pricing_pipeline.publishing.model_registry import ensure_pricing_model  # noqa: E402
 from scripts.load_staging_to_rating_package import publish_rating_package  # noqa: E402
 from scripts.load_superglm_excel_to_staging import insert_staging_frames  # noqa: E402
 from scripts.pricing_db import get_engine  # noqa: E402
@@ -229,7 +231,7 @@ def demo_packages() -> list[DemoPackage]:
             base_rate=0.064,
             effective_from="2026-04-29",
             pointer_name="MTPL_FREQ_DEMO_UAT",
-            package_status="APPROVED",
+            package_status="PUBLISHED",
             terms=frequency_terms(expanded_data=False),
         ),
         DemoPackage(
@@ -242,7 +244,7 @@ def demo_packages() -> list[DemoPackage]:
             base_rate=0.061,
             effective_from="2026-04-29",
             pointer_name="MTPL_FREQ_DEMO_UAT",
-            package_status="APPROVED",
+            package_status="PUBLISHED",
             terms=frequency_terms(expanded_data=True),
         ),
         DemoPackage(
@@ -255,7 +257,7 @@ def demo_packages() -> list[DemoPackage]:
             base_rate=0.061,
             effective_from="2026-04-29",
             pointer_name="MTPL_FREQ_DEMO_UAT",
-            package_status="APPROVED",
+            package_status="PUBLISHED",
             terms=frequency_terms(expanded_data=True, vehage_uplift=1.10),
         ),
         DemoPackage(
@@ -268,7 +270,7 @@ def demo_packages() -> list[DemoPackage]:
             base_rate=1450.0,
             effective_from="2026-04-29",
             pointer_name="MTPL_SEV_DEMO_UAT",
-            package_status="APPROVED",
+            package_status="PUBLISHED",
             terms=severity_terms(include_brand=True, brand_b12_multiplier=1.20),
         ),
     ]
@@ -427,6 +429,14 @@ def ensure_demo_manifest(engine, package: DemoPackage, *, created_by: str) -> st
 
 
 def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
+    model_id = ensure_pricing_model(
+        engine,
+        model_key=package.model_name,
+        model_label=package.model_label,
+        target_name=package.target_name,
+        model_type=package.model_type,
+        created_by=created_by,
+    )
     export_df, rate_df, level_df = build_staging_frames(package, created_by=created_by)
     args = argparse.Namespace(
         export_id=package.export_id,
@@ -437,24 +447,33 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
         model_status="ACTIVE",
         created_by=created_by,
         replace=True,
+        model_id=model_id,
     )
     insert_staging_frames(engine, args, export_df, rate_df, level_df)
     rate_package_id = publish_rating_package(
         engine,
         export_id=package.export_id,
-        pointer_name=package.pointer_name,
         created_by=created_by,
         package_status=package.package_status,
     )
     manifest_id = ensure_demo_manifest(engine, package, created_by=created_by)
-    model_id = ensure_pricing_model(
-        engine,
-        model_key=package.model_name,
-        model_label=package.model_label,
-        target_name=package.target_name,
-        model_type=package.model_type,
-        created_by=created_by,
-    )
+    if package.package_status == "PUBLISHED":
+        deploy_rate_package(
+            engine,
+            ModelBuildConfig(
+                model_key=package.model_name,
+                model_label=package.model_label,
+                target_name=package.target_name,
+                model_type=package.model_type,
+                deployment_slot=package.pointer_name,
+                default_package_status="PUBLISHED",
+            ),
+            rate_package_id=rate_package_id,
+            deployment_slot=package.pointer_name,
+            deployment_reason="seed demo package",
+            deployed_by=created_by,
+            model_id=model_id,
+        )
     record_model_run(
         engine,
         dag_id="demo_model_seed",

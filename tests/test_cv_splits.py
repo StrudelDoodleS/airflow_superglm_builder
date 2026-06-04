@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pricing_pipeline.cv_splits import (
+from pricing_pipeline.data.cv_splits import (
     CVSplitSet,
     load_cv_folds,
     load_materialized_cv_folds,
@@ -15,7 +15,7 @@ from pricing_pipeline.cv_splits import (
     replay_cv_folds,
     resolve_splitter,
 )
-from pricing_pipeline.manifest import compute_row_order_sha256
+from pricing_pipeline.data.manifest import compute_row_order_sha256
 from scripts import export_cv_indices
 
 
@@ -47,6 +47,29 @@ def split_set() -> CVSplitSet:
     )
 
 
+def train_test_split_set() -> CVSplitSet:
+    rows = frame()
+    return CVSplitSet(
+        split_set_id="manifest_1__train_test_split_test_0_4_seed_42",
+        manifest_id="manifest_1",
+        split_mode="REPLAYABLE",
+        splitter_class="sklearn.model_selection.train_test_split",
+        splitter_params_json=json.dumps(
+            {
+                "test_size": 0.4,
+                "random_state": 42,
+                "shuffle": True,
+            },
+            sort_keys=True,
+        ),
+        row_order_sha256=compute_row_order_sha256(rows, pk_column="IDpol"),
+        row_count=5,
+        fold_count=1,
+        artifact_uri=None,
+        artifact_sha256=None,
+    )
+
+
 def test_resolve_splitter_recreates_supported_splitter():
     cv = resolve_splitter(split_set())
 
@@ -64,6 +87,15 @@ def test_replay_cv_folds_returns_one_based_fold_mapping():
     assert folds[1][1].tolist() == [1, 4]
     assert folds[3][0].tolist() == [0, 1, 2, 4]
     assert folds[3][1].tolist() == [3]
+
+
+def test_replay_cv_folds_supports_train_test_split_metadata():
+    folds = replay_cv_folds(train_test_split_set(), frame())
+
+    assert sorted(folds) == [1]
+    assert len(folds[1][0]) == 3
+    assert len(folds[1][1]) == 2
+    assert sorted(folds[1][0].tolist() + folds[1][1].tolist()) == [0, 1, 2, 3, 4]
 
 
 def test_replay_cv_folds_rejects_changed_row_order():

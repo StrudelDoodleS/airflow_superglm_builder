@@ -4,17 +4,22 @@ import subprocess
 import sys
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
-from pricing_pipeline import manifest
-from pricing_pipeline.manifest import (
+from pricing_pipeline.data import manifest
+from pricing_pipeline.data.manifest import (
+    create_dataset_manifest_with_split,
     build_column_metadata,
     build_cv_split_set,
     compute_row_order_sha256,
+    create_dataset_manifest,
     create_fremtpl_manifest,
     new_manifest_id,
     runtime_dependency_metadata,
 )
+from pricing_pipeline.models.config import ValidationSplitConfig
+from pricing_pipeline.models.spec import DatasetSpec
 
 
 def manifest_frame(**overrides):
@@ -71,6 +76,32 @@ def test_build_column_metadata_marks_roles_and_counts_columns():
     assert area["distinct_count"] == 3
 
 
+def test_build_column_metadata_uses_dataset_declared_roles():
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2],
+            "Snapshot": ["2026-01", "2026-02"],
+            "LossCost": [10.0, 20.0],
+            "Postcode": ["A", "B"],
+        }
+    )
+
+    columns = build_column_metadata(
+        frame,
+        manifest_id="manifest_custom",
+        pk_columns=("PolicyID", "Snapshot"),
+        target_column="LossCost",
+        weight_column=None,
+    )
+
+    assert dict(zip(columns["column_name"], columns["column_role"], strict=True)) == {
+        "PolicyID": "KEY",
+        "Snapshot": "KEY",
+        "LossCost": "TARGET",
+        "Postcode": "FEATURE",
+    }
+
+
 def test_compute_row_order_sha256_depends_on_ordered_primary_keys():
     first = pd.DataFrame({"IDpol": [10, 20, 30]})
     same = pd.DataFrame({"IDpol": [10, 20, 30]})
@@ -83,6 +114,23 @@ def test_compute_row_order_sha256_depends_on_ordered_primary_keys():
     assert compute_row_order_sha256(first, pk_column="IDpol") != compute_row_order_sha256(
         reordered,
         pk_column="IDpol",
+    )
+
+
+def test_compute_row_order_sha256_supports_composite_primary_keys():
+    first = pd.DataFrame(
+        {"PolicyID": [10, 10, 20], "Snapshot": ["2026-01", "2026-02", "2026-01"]}
+    )
+    same = first.copy()
+    changed_key_part = pd.DataFrame(
+        {"PolicyID": [10, 10, 20], "Snapshot": ["2026-01", "2026-03", "2026-01"]}
+    )
+
+    assert compute_row_order_sha256(first, pk_columns=("PolicyID", "Snapshot")) == (
+        compute_row_order_sha256(same, pk_columns=("PolicyID", "Snapshot"))
+    )
+    assert compute_row_order_sha256(first, pk_columns=("PolicyID", "Snapshot")) != (
+        compute_row_order_sha256(changed_key_part, pk_columns=("PolicyID", "Snapshot"))
     )
 
 
@@ -154,8 +202,9 @@ class FakeBegin:
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, execution_options=None):
         self.events = []
+        self._execution_options = execution_options or {}
         self.connection = FakeBeginConnection(self.events)
 
     def begin(self):
@@ -241,6 +290,220 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
     assert folds["n_train"].tolist() == [2, 2, 2]
     assert folds["n_test"].tolist() == [1, 1, 1]
     assert engine.connection.executed == []
+
+
+def test_create_fremtpl_manifest_uses_configured_pricing_schema_for_to_sql(monkeypatch):
+    engine = FakeEngine({"pricing_schema": "python_pricing"})
+    raw_frame = pd.DataFrame(
+        {
+            "IDpol": [1, 2, 3],
+            "ClaimNb": [0, 1, 0],
+            "Exposure": [0.5, 1.0, 0.25],
+            "Area": ["A", "B", "C"],
+        }
+    )
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append({"name": name, "schema": kwargs.get("schema")})
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    create_fremtpl_manifest(
+        engine,
+        manifest_id="manifest_custom_schema",
+        n_splits=3,
+        random_state=123,
+        created_by="unit-test",
+    )
+
+    assert [(call["name"], call["schema"]) for call in to_sql_calls] == [
+        ("DATASET_MANIFEST", "python_pricing"),
+        ("DATASET_COLUMN", "python_pricing"),
+        ("CV_SPLIT_SET", "python_pricing"),
+        ("CV_FOLD", "python_pricing"),
+    ]
+
+
+def test_create_dataset_manifest_can_materialize_train_test_split_npz(
+    monkeypatch,
+    tmp_path,
+):
+    engine = FakeEngine()
+    raw_frame = manifest_frame()
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append(
+            {
+                "name": name,
+                "schema": kwargs.get("schema"),
+                "frame": self.copy(),
+            }
+        )
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    result = create_dataset_manifest_with_split(
+        engine,
+        dataset=DatasetSpec(
+            dataset_name="unit",
+            source_system="unit",
+            manifest_sql="SELECT * FROM unit",
+            pk_columns=("IDpol",),
+            target_column="ClaimNb",
+            weight_column="Exposure",
+        ),
+        manifest_id="manifest_train_test",
+        validation_split=ValidationSplitConfig.train_test_split(
+            test_size=0.4,
+            random_state=42,
+            materialize=True,
+        ),
+        validation_split_artifact_root=tmp_path,
+        created_by="unit-test",
+    )
+
+    assert result.manifest_id == "manifest_train_test"
+    assert result.split_set_id == "manifest_train_test__train_test_split_test_0_4_seed_42"
+    assert result.split_artifact_uri is not None
+
+    artifact_path = tmp_path / "manifest_train_test__train_test_split_test_0_4_seed_42.npz"
+    loaded = np.load(artifact_path)
+    assert sorted(loaded.files) == ["fold_1_test_idx", "fold_1_train_idx"]
+    assert len(loaded["fold_1_train_idx"]) == 3
+    assert len(loaded["fold_1_test_idx"]) == 2
+
+    split_set_call = next(call for call in to_sql_calls if call["name"] == "CV_SPLIT_SET")
+    split_set = split_set_call["frame"].iloc[0]
+    assert split_set["splitter_class"] == "sklearn.model_selection.train_test_split"
+    assert split_set["fold_count"] == 1
+    assert split_set["artifact_uri"] == str(artifact_path)
+    assert len(split_set["artifact_sha256"]) == 64
+
+
+def test_create_dataset_manifest_with_none_validation_split_writes_no_cv_tables(
+    monkeypatch,
+):
+    engine = FakeEngine()
+    raw_frame = manifest_frame()
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        manifest.pd,
+        "read_sql_query",
+        lambda sql, con: raw_frame,
+    )
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda self, name, con, **kwargs: to_sql_calls.append(name),
+    )
+
+    result = create_dataset_manifest_with_split(
+        engine,
+        dataset=DatasetSpec(
+            dataset_name="unit",
+            source_system="unit",
+            manifest_sql="SELECT * FROM unit",
+            pk_columns=("IDpol",),
+            target_column="ClaimNb",
+            weight_column="Exposure",
+        ),
+        manifest_id="manifest_no_validation",
+        validation_split=ValidationSplitConfig.none(),
+        created_by="unit-test",
+    )
+
+    assert result.manifest_id == "manifest_no_validation"
+    assert result.split_set_id is None
+    assert "CV_SPLIT_SET" not in to_sql_calls
+    assert "CV_FOLD" not in to_sql_calls
+
+
+def test_create_dataset_manifest_uses_dataset_spec_without_fremtpl_assumptions(monkeypatch):
+    engine = FakeEngine()
+    raw_frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2, 3],
+            "Snapshot": ["2026-01", "2026-01", "2026-01"],
+            "LossCost": [1.2, 3.4, 0.0],
+            "ExposureYears": [0.5, 1.0, 0.25],
+            "Segment": ["A", "B", "A"],
+        }
+    )
+    dataset = DatasetSpec(
+        dataset_name="work_loss_cost",
+        source_system="work_sql",
+        manifest_sql="SELECT * FROM actuarial.loss_cost ORDER BY PolicyID, Snapshot",
+        pk_columns=("PolicyID", "Snapshot"),
+        target_column="LossCost",
+        weight_column="ExposureYears",
+    )
+    read_calls = []
+    to_sql_calls = []
+
+    def fake_read_sql_query(sql, con):
+        read_calls.append((str(sql), con))
+        return raw_frame
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append({"name": name, "frame": self.copy()})
+
+    monkeypatch.setattr(manifest.pd, "read_sql_query", fake_read_sql_query)
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    created = create_dataset_manifest(
+        engine,
+        dataset=dataset,
+        manifest_id="work_manifest_1",
+        n_splits=3,
+        random_state=123,
+        created_by="unit-test",
+    )
+
+    assert created == "work_manifest_1"
+    assert read_calls == [
+        ("SELECT * FROM actuarial.loss_cost ORDER BY PolicyID, Snapshot", engine)
+    ]
+    manifest_row = to_sql_calls[0]["frame"].iloc[0]
+    assert manifest_row["dataset_name"] == "work_loss_cost"
+    assert manifest_row["source_system"] == "work_sql"
+    assert json.loads(manifest_row["pk_columns_json"]) == ["PolicyID", "Snapshot"]
+    assert manifest_row["target_column"] == "LossCost"
+    assert manifest_row["weight_column"] == "ExposureYears"
+
+    column_roles = dict(
+        zip(
+            to_sql_calls[1]["frame"]["column_name"],
+            to_sql_calls[1]["frame"]["column_role"],
+            strict=True,
+        )
+    )
+    assert column_roles == {
+        "PolicyID": "KEY",
+        "Snapshot": "KEY",
+        "LossCost": "TARGET",
+        "ExposureYears": "WEIGHT",
+        "Segment": "FEATURE",
+    }
+    split_set = to_sql_calls[2]["frame"].iloc[0]
+    assert split_set["row_order_sha256"] == compute_row_order_sha256(
+        raw_frame,
+        pk_columns=("PolicyID", "Snapshot"),
+    )
 
 
 def test_create_fremtpl_manifest_defaults_to_metadata_only_cv_split_set(monkeypatch):

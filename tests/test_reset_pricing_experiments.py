@@ -5,6 +5,9 @@ from scripts import reset_pricing_experiments
 
 def test_reset_sql_deletes_dependent_pricing_tables_before_parent_tables():
     required_order = [
+        "DELETE FROM mlops.MODEL_RUN_SPLIT_SET",
+        "DELETE FROM mlops.MODEL_RUN_DATASET",
+        "DELETE FROM mlops.MODEL_RUN_METRIC",
         "DELETE FROM pricing.CV_FOLD_METRIC",
         "DELETE FROM pricing.MODEL_RUN",
         "DELETE FROM pricing.PRICING_MODEL_DEPLOYMENT",
