@@ -377,18 +377,44 @@ path, model version, and effective-from date. In a real DAG those values should
 come from the run context and SQL history, not hardcoded strings:
 
 ```python
+from airflow.sdk import get_current_context
+
 from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
+from pricing_pipeline.publishing.rating_export import build_export_id
 
 
+context = get_current_context()
+logical_date = context["logical_date"]
+run_id = context["run_id"]
+
+# These are usually derived inside the Airflow task, not hardcoded:
+# - model_version from SQL package history, e.g. next vN for this model_key
+# - effective_from from Airflow logical date, a DAG param, or business as-of date
+# - export_id from model_key + Airflow run_id, so reruns are idempotent
 model_version = next_trained_model_version(engine, model_key=MODEL_CONFIG.model_key)
 effective_from = effective_from_for_run(logical_date)
+export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
 
 return CompletedModelBuild(
+    # Required: the SuperGLM workbook exported by this task. It must be readable
+    # by the worker running the downstream publish task.
     rating_workbook_path=str(workbook_path),
+    # Required: the version label for this trained model candidate.
     model_version=model_version,
+    # Required: normalized to the package effective-from date.
     effective_from=effective_from,
+    # Optional in Airflow: the wrapper fills this if omitted.
+    created_by="airflow",
+    # Optional but recommended: deterministic id for rerun/idempotency checks.
+    export_id=export_id,
+    # Optional: set only if this task used MLflow.
     mlflow_run_id=None,
+    # Optional: path to the fitted model artifact, if you save one.
     model_artifact_path=str(model_path),
+    # Optional: include if the prior prepare/materialize task created these.
+    manifest_id=prepared.get("manifest_id"),
+    split_set_id=prepared.get("split_set_id"),
+    # Optional: small numeric validation/training metrics for lineage/review.
     metrics={"deviance": float(model.result.deviance)},
 ).to_dict()
 ```

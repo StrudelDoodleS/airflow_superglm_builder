@@ -296,15 +296,18 @@ def export_superglm_completed_build(
     if getattr(result, "n_iter", None) is not None:
         metrics["n_iter"] = float(result.n_iter)
 
+    # This is the handoff payload consumed by publish_completed_model_build_task.
+    # Real DAGs should derive these values from the task outputs, Airflow run
+    # context, SQL package history, and optional manifest/split tasks.
     return CompletedModelBuild(
-        rating_workbook_path=str(workbook_path),
-        model_version=model_version,
-        effective_from=effective_from,
-        created_by=created_by,
-        export_id=export_id,
-        mlflow_run_id=None,
-        model_artifact_path=str(model_path),
-        metrics=metrics,
+        rating_workbook_path=str(workbook_path),  # required, produced by export_rating_tables
+        model_version=model_version,  # required, normally next vN from SQL history
+        effective_from=effective_from,  # required, Airflow/business as-of date
+        created_by=created_by,  # optional in Airflow; wrapper can fill default actor
+        export_id=export_id,  # optional but recommended for idempotent reruns
+        mlflow_run_id=None,  # optional; keep None when MLflow is not used
+        model_artifact_path=str(model_path),  # optional fitted-model artifact
+        metrics=metrics,  # optional small numeric metrics for lineage/review
     ).to_dict()
 
 
