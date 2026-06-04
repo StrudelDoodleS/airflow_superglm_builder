@@ -18,6 +18,8 @@ training, and rating-table export. Source provenance remains important, but for
 v1 it should stay simple: track the logical source and source-data as-of date
 using the fields the schema already has.
 
+This design is about build audit metadata, not runtime scoring.
+
 ## Decision
 
 For v1, do not add a raw source view requirement and do not add new SQL columns.
@@ -38,6 +40,20 @@ source table.
 
 This avoids pretending engineered features exist in the source SQL and avoids
 forcing every model build to materialize a model-ready table back to SQL Server.
+
+## Non-Goals
+
+This design does not generate runtime scoring SQL.
+
+It does not create SQL views, stored procedures, table-valued functions, or
+application feature code for engineered model inputs. A published package may
+depend on banded or derived features, such as values produced by `pd.cut()` in
+the training task or by equivalent SQL in the scoring path. The scoring layer is
+responsible for supplying feature values compatible with the published package.
+
+This design records the final model frame and publishes the rating package. It
+does not attempt to make every Python feature-engineering step executable in SQL
+Server.
 
 ## Approaches Considered
 
@@ -71,6 +87,42 @@ and optional validation split metadata.
 **Rate package** is the exported pricing/rating structure. Its feature, term,
 level, cell, and compiled tables remain the source of truth for what was
 published into the rate package.
+
+## Audit Coverage
+
+For v1, the build audit trail is:
+
+```text
+DATASET_MANIFEST
+  manifest_id, dataset_name, source_system, data_as_of_date, row_count,
+  pk_columns_json, target_column, weight_column, created_ts, created_by
+
+DATASET_COLUMN
+  final model-frame columns, roles, pandas dtype, null counts, distinct counts
+
+CV_SPLIT_SET / CV_FOLD
+  split config, row-order hash, fold counts, optional materialized split artifact
+
+MODEL_RUN / related lineage tables
+  model_id, model_version, manifest_id, split_set_id, export_id,
+  rate_package_id, workbook/model artifact paths, Airflow IDs when available
+
+PRICING_RATE_PACKAGE and normalized package tables
+  actual published rating structure
+```
+
+This answers:
+
+- what model was built;
+- which final frame it trained/exported from;
+- what rows and columns were present;
+- what split was used;
+- what workbook was published;
+- what SQL rate package was created;
+- whether a rerun reused an existing package through the export ID.
+
+It does not answer how production scoring computes every engineered feature.
+That is a separate scoring integration project.
 
 ## Public API
 
@@ -184,6 +236,12 @@ return CompletedModelBuild(
 The publish task then uses the supplied `manifest_id` and `split_set_id`. It does
 not need a `DatasetSpec` and it should not create a manifest implicitly in the
 recommended custom DAG path.
+
+A frame-backed manifest is an audit receipt for the frame supplied by the model
+task. It does not persist the full frame unless the model task chooses to write a
+frame artifact separately. Reproducibility depends on the source data, model
+code, artifact paths, and recorded metadata being sufficient for the team's
+audit standard.
 
 ## Data As-Of Handling
 
