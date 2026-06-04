@@ -78,6 +78,46 @@ def next_trained_model_version(engine, *, model_key: str = MODEL_KEY) -> str:
     return next_model_version_from_existing(versions)
 
 
+def existing_model_version_for_export(
+    engine,
+    *,
+    model_key: str = MODEL_KEY,
+    export_id: str,
+) -> str | None:
+    with engine.begin() as con:
+        version = con.execute(
+            text(
+                """
+                SELECT TOP (1) rp.model_version
+                FROM pricing.PRICING_RATE_PACKAGE AS rp
+                JOIN pricing.PRICING_MODEL AS pm
+                  ON pm.model_id = rp.model_id
+                WHERE pm.model_key = :model_key
+                  AND rp.source_export_id = :export_id
+                ORDER BY rp.rate_package_id DESC
+                """
+            ),
+            {"model_key": model_key, "export_id": export_id},
+        ).scalar()
+    return None if version is None else str(version)
+
+
+def trained_model_version_for_export(
+    engine,
+    *,
+    model_key: str = MODEL_KEY,
+    export_id: str,
+) -> str:
+    existing = existing_model_version_for_export(
+        engine,
+        model_key=model_key,
+        export_id=export_id,
+    )
+    if existing is not None:
+        return existing
+    return next_trained_model_version(engine, model_key=model_key)
+
+
 def effective_from_for_run(value: date | datetime | str | None = None) -> str:
     if value is None:
         return date.today().isoformat()

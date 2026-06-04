@@ -114,6 +114,11 @@ The publish task does not need dataset columns. It receives
 `CompletedModelBuild` plus `manifest_id` / `split_set_id` from the manifest task.
 Deployment remains a separate DAG/task that moves the model deployment slot.
 
+The preferred post-modeling flow creates the manifest before publish and passes
+`manifest_id` / `split_set_id` into `publish_completed_model_build_task(...)`.
+The v1 publish helper keeps its `dataset` fallback for compatibility and simple
+demos, but new production examples should use the separate manifest task.
+
 The model/rate-package audit path should read as:
 
 ```text

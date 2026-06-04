@@ -14,6 +14,73 @@ def test_demo_version_helper_increments_trained_model_versions_only():
     assert next_model_version_from_existing(["manual-v99", "v4", "20260604"]) == "v5"
 
 
+def test_demo_version_for_existing_export_reuses_existing_model_version(monkeypatch):
+    from pricing_models.demo_custom_publish import modeling
+
+    engine = object()
+    calls = []
+
+    monkeypatch.setattr(
+        modeling,
+        "existing_model_version_for_export",
+        lambda engine_arg, *, model_key, export_id: (
+            calls.append(("existing", engine_arg, model_key, export_id)) or "v7"
+        ),
+    )
+    monkeypatch.setattr(
+        modeling,
+        "next_trained_model_version",
+        lambda engine_arg, *, model_key=modeling.MODEL_KEY: (
+            calls.append(("next", engine_arg, model_key)) or "v8"
+        ),
+    )
+
+    assert (
+        modeling.trained_model_version_for_export(
+            engine,
+            model_key="DEMO_MODEL",
+            export_id="demo-export-1",
+        )
+        == "v7"
+    )
+    assert calls == [("existing", engine, "DEMO_MODEL", "demo-export-1")]
+
+
+def test_demo_version_for_new_export_uses_next_trained_version(monkeypatch):
+    from pricing_models.demo_custom_publish import modeling
+
+    engine = object()
+    calls = []
+
+    monkeypatch.setattr(
+        modeling,
+        "existing_model_version_for_export",
+        lambda engine_arg, *, model_key, export_id: (
+            calls.append(("existing", engine_arg, model_key, export_id)) or None
+        ),
+    )
+    monkeypatch.setattr(
+        modeling,
+        "next_trained_model_version",
+        lambda engine_arg, *, model_key=modeling.MODEL_KEY: (
+            calls.append(("next", engine_arg, model_key)) or "v8"
+        ),
+    )
+
+    assert (
+        modeling.trained_model_version_for_export(
+            engine,
+            model_key="DEMO_MODEL",
+            export_id="demo-export-2",
+        )
+        == "v8"
+    )
+    assert calls == [
+        ("existing", engine, "DEMO_MODEL", "demo-export-2"),
+        ("next", engine, "DEMO_MODEL"),
+    ]
+
+
 def test_demo_effective_from_uses_run_date_not_hardcoded_string():
     from pricing_models.demo_custom_publish.data import training_table_for_run
     from pricing_models.demo_custom_publish.modeling import (

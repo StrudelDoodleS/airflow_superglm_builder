@@ -16,7 +16,7 @@ from pricing_models.demo_custom_publish.modeling import (
     MODEL_KEY,
     effective_from_for_run,
     export_superglm_completed_build,
-    next_trained_model_version,
+    trained_model_version_for_export,
 )
 from pricing_pipeline.orchestration.run_context import run_key_for_value
 from pricing_pipeline.publishing.rating_export import build_export_id
@@ -79,14 +79,18 @@ def train_validate_export_task(
     def _train_validate_export(prepared_training: dict[str, str | None]) -> dict[str, object]:
         runtime = runtime_from_env_or_module(runtime_module)
         context = get_current_context()
-        model_version = next_trained_model_version(runtime.get_engine())
         effective_from = effective_from_for_run(_context_logical_date(context))
         export_run_key = prepared_training.get("run_key") or run_key_for_value(
-            context.get("run_id") or model_version
+            context.get("run_id") or _context_logical_date(context) or "manual"
         )
         export_id = build_export_id(
             MODEL_KEY,
             str(export_run_key),
+        )
+        model_version = trained_model_version_for_export(
+            runtime.get_engine(),
+            model_key=MODEL_KEY,
+            export_id=export_id,
         )
         completed = export_superglm_completed_build(
             read_training_frame(str(prepared_training["training_frame_path"])),

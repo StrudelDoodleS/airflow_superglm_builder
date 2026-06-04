@@ -100,10 +100,12 @@ from pricing_pipeline.orchestration.publish_completed_build import (
 ### Completed Build Contract
 
 `CompletedModelBuild` is the small object that a user training task returns or
-constructs from a returned dictionary.
+constructs from a returned dictionary. The public contract is dataclass-like:
+construct it with keyword arguments, call `to_dict()`, or pass a plain mapping to
+`from_mapping()`. Internally the implementation uses Pydantic v2 for boundary
+validation and converts validation failures into `CompletedModelBuildError`.
 
 ```python
-@dataclass(frozen=True)
 class CompletedModelBuild:
     rating_workbook_path: str
     model_version: str
@@ -247,7 +249,7 @@ Signature:
 def publish_completed_model_build_task(
     *,
     model_config: ModelBuildConfig,
-    dataset: DatasetSpec,
+    dataset: DatasetSpec | None = None,
     runtime_module: str | None = None,
     created_by: str = "airflow",
     task_id: str = "publish_completed_model_build",
@@ -288,7 +290,9 @@ The wrapper resolves runtime with `runtime_from_env_or_module(...)`, reads the
 Airflow context, and fills missing `dag_id`, `airflow_run_id`, `export_id`, and
 `created_by` only when the user did not supply them. It does not invent
 `model_version` or `effective_from`; the user's training/export task must return
-those values because they are model/package business decisions.
+those values because they are model/package business decisions. `dataset` may be
+omitted when the completed-build payload already includes `manifest_id` and
+`split_set_id` from a separate manifest task.
 
 ## Dataset Manifest Boundary
 

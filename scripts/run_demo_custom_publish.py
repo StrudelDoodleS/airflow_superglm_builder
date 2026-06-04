@@ -21,7 +21,7 @@ from pricing_models.demo_custom_publish.data import (  # noqa: E402
 from pricing_models.demo_custom_publish.modeling import (  # noqa: E402
     effective_from_for_run,
     export_superglm_completed_build,
-    next_trained_model_version,
+    trained_model_version_for_export,
 )
 from pricing_models.demo_custom_publish.spec import MODEL_CONFIG  # noqa: E402
 from pricing_pipeline.orchestration.manifest_tasks import (  # noqa: E402
@@ -59,11 +59,15 @@ def run_demo_custom_publish(
     )
 
     frame = build_demo_training_frame()
-    model_version = next_trained_model_version(engine)
     effective_from = effective_from_for_run()
     export_id = build_export_id(
         MODEL_CONFIG.model_key,
-        f"python__{model_version}__{effective_from}",
+        f"python__{effective_from}",
+    )
+    model_version = trained_model_version_for_export(
+        engine,
+        model_key=MODEL_CONFIG.model_key,
+        export_id=export_id,
     )
     table_name = training_table_for_run(export_id)
     materialize_training_source(engine, frame, table_name=table_name)

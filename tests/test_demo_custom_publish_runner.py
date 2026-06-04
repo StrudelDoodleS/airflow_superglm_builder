@@ -15,7 +15,7 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "model_version": "v7",
         "effective_from": "2026-06-04",
         "created_by": "pytest",
-        "export_id": "demo_custom_freq__python__v7__20260604",
+        "export_id": "demo_custom_freq__python__20260604",
     }
     publish_result = SimpleNamespace(
         to_dict=lambda: {
@@ -63,8 +63,18 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     )
     monkeypatch.setattr(
         runner,
-        "next_trained_model_version",
-        lambda engine_arg: calls.append(("next_trained_model_version", engine_arg)) or "v7",
+        "trained_model_version_for_export",
+        lambda engine_arg, *, model_key, export_id: (
+            calls.append(
+                (
+                    "trained_model_version_for_export",
+                    engine_arg,
+                    model_key,
+                    export_id,
+                )
+            )
+            or "v7"
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -102,8 +112,8 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     assert calls[0][2]["created_by"] == "pytest"
     assert [call[0] for call in calls] == [
         "ensure_pricing_model",
-        "next_trained_model_version",
         "effective_from_for_run",
+        "trained_model_version_for_export",
         "materialize_training_source",
         "write_training_frame",
         "create_model_build_manifest",
@@ -114,10 +124,13 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     assert materialize_call[3].startswith("DEMO_CUSTOM_PUBLISH_TRAINING_")
     manifest_call = calls[-3]
     assert "DEMO_CUSTOM_PUBLISH_TRAINING_" in manifest_call[2]["dataset"].manifest_sql
+    version_call = calls[2]
+    assert version_call[2] == "DEMO_CUSTOM_FREQ"
+    assert version_call[3] == "demo_custom_freq__python__20260604"
     export_call = calls[-2]
     assert export_call[2]["model_version"] == "v7"
     assert export_call[2]["effective_from"] == "2026-06-04"
-    assert export_call[2]["export_id"] == "demo_custom_freq__python__v7__20260604"
+    assert export_call[2]["export_id"] == "demo_custom_freq__python__20260604"
     publish_call = calls[-1]
     assert publish_call[2]["settings"].validation_split_artifact_root == tmp_path / "splits"
     assert publish_call[2]["completed_build"]["manifest_id"] == "manifest-1"

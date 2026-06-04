@@ -391,6 +391,7 @@ come from the run context and SQL history, not hardcoded strings:
 ```python
 from airflow.sdk import get_current_context
 
+from pricing_models.claim_freq.modeling import trained_model_version_for_export
 from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
 from pricing_pipeline.publishing.rating_export import build_export_id
 
@@ -399,13 +400,19 @@ context = get_current_context()
 logical_date = context["logical_date"]
 run_id = context["run_id"]
 
-# These are usually derived inside the Airflow task, not hardcoded:
-# - model_version from SQL package history, e.g. next vN for this model_key
+# These are usually derived inside the Airflow task, not hardcoded.
+# Resolve export_id first, then resolve model_version for that export:
+# - same export_id reuses the already-published model_version on rerun
+# - new export_id gets the next vN from SQL package history
 # - effective_from from Airflow logical date, a DAG param, or business as-of date
 # - export_id from model_key + Airflow run_id, so reruns are idempotent
-model_version = next_trained_model_version(engine, model_key=MODEL_CONFIG.model_key)
 effective_from = effective_from_for_run(logical_date)
 export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
+model_version = trained_model_version_for_export(
+    engine,
+    model_key=MODEL_CONFIG.model_key,
+    export_id=export_id,
+)
 
 return CompletedModelBuild(
     # Required: the SuperGLM workbook exported by this task. It must be readable
