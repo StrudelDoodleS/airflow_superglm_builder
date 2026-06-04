@@ -373,21 +373,41 @@ claim_freq_build()
 
 The upstream `train_and_export_rates` task should return a small dictionary with
 paths and metadata, not a DataFrame. At minimum it needs the rating workbook
-path, model version, and effective-from date:
+path, model version, and effective-from date. In a real DAG those values should
+come from the run context and SQL history, not hardcoded strings:
 
 ```python
-return {
-    "rating_workbook_path": str(workbook_path),
-    "model_version": "20260603",
-    "effective_from": "2026-06-03",
-    "mlflow_run_id": mlflow_run_id,  # optional
-}
+from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
+
+
+model_version = next_trained_model_version(engine, model_key=MODEL_CONFIG.model_key)
+effective_from = effective_from_for_run(logical_date)
+
+return CompletedModelBuild(
+    rating_workbook_path=str(workbook_path),
+    model_version=model_version,
+    effective_from=effective_from,
+    mlflow_run_id=None,
+    model_artifact_path=str(model_path),
+    metrics={"deviance": float(model.result.deviance)},
+).to_dict()
 ```
 
 This final publish task writes manifest/split metadata, model-run lineage, and
 rate package rows to SQL. It does not deploy. It creates a deployable package
 candidate but does not move any deployment slot pointer. If MLflow is disabled
 or unavailable, leave `mlflow_run_id` blank or `None`.
+
+A runnable example of this shape lives in:
+
+- `pricing_models/demo_custom_publish/tasks.py`: user-owned data generation,
+  SQL staging materialization, SuperGLM fit, `model.summary(...)`, workbook
+  export, and dynamic model-version/effective-date helpers.
+- `dags/demo_custom_publish.py`: Airflow TaskFlow DAG using custom model tasks
+  followed by `publish_completed_model_build_task(...)`.
+- `scripts/run_demo_custom_publish.py`: normal Python runner for the same path,
+  useful when testing outside Airflow. Set `PRICING_DEMO_CUSTOM_OUTPUT_DIR`
+  when a container or work runtime needs a writable artifact directory.
 
 For a work SQL table or view that already exists, the dataset definition can be
 just metadata and SQL. It does not need a custom Python loader:

@@ -9,6 +9,9 @@ from pathlib import Path
 
 def _install_fake_airflow(monkeypatch):
     sys.modules.pop("pricing_pipeline.orchestration.dag_factory", None)
+    publish_completed_build = sys.modules.get(
+        "pricing_pipeline.orchestration.publish_completed_build"
+    )
     airflow_module = types.ModuleType("airflow")
     airflow_sdk_module = types.ModuleType("airflow.sdk")
     task_outputs = []
@@ -34,13 +37,20 @@ def _install_fake_airflow(monkeypatch):
 
         return decorator
 
-    def task(func):
-        def task_factory(*args, **kwargs):
-            output = FakeTaskOutput(func.__name__, args, kwargs)
-            task_outputs.append(output)
-            return output
+    def task(func=None, **task_kwargs):
+        def decorator(inner):
+            task_id = task_kwargs.get("task_id") or inner.__name__
 
-        return task_factory
+            def task_factory(*args, **kwargs):
+                output = FakeTaskOutput(task_id, args, kwargs)
+                task_outputs.append(output)
+                return output
+
+            return task_factory
+
+        if func is None:
+            return decorator
+        return decorator(func)
 
     airflow_sdk_module.dag = dag
     airflow_sdk_module.get_current_context = lambda: {}
@@ -48,6 +58,14 @@ def _install_fake_airflow(monkeypatch):
     airflow_module.sdk = airflow_sdk_module
     monkeypatch.setitem(sys.modules, "airflow", airflow_module)
     monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
+    if publish_completed_build is not None:
+        monkeypatch.setattr(publish_completed_build, "task", task, raising=False)
+        monkeypatch.setattr(
+            publish_completed_build,
+            "get_current_context",
+            lambda: {},
+            raising=False,
+        )
     return task_outputs
 
 
@@ -125,3 +143,19 @@ def test_pricing_deploy_rate_package_dag_imports_without_airflow(monkeypatch):
     )
 
     assert hasattr(module, "pricing_deploy_rate_package")
+
+
+def test_demo_custom_publish_dag_uses_custom_tasks_and_publish_task(monkeypatch):
+    task_outputs = _install_fake_airflow(monkeypatch)
+
+    module = _import_dag_module(
+        "demo_custom_publish_test",
+        "demo_custom_publish.py",
+    )
+
+    assert hasattr(module, "demo_custom_publish")
+    assert [output.task_id for output in task_outputs] == [
+        "prepare_training_data",
+        "train_validate_export",
+        "publish_completed_model_build",
+    ]
