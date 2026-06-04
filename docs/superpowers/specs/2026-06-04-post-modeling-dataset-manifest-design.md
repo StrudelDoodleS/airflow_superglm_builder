@@ -88,6 +88,12 @@ and optional validation split metadata.
 level, cell, and compiled tables remain the source of truth for what was
 published into the rate package.
 
+`DATASET_COLUMN` records all final model-frame columns, including PK, target,
+and weight columns. The rate package tables remain the source of truth for
+published rating inputs. PK, target, and weight columns should not become rating
+features unless the model author explicitly includes them, which should normally
+be treated as an export-layer error.
+
 ## Audit Coverage
 
 For v1, the build audit trail is:
@@ -139,6 +145,11 @@ class ModelFrameManifestSpec:
     weight_column: str | None = None
 ```
 
+Use the same boundary-hardening style as `CompletedModelBuild`: required strings
+must be non-empty, optional strings normalize cleanly, `data_as_of_date`
+normalizes to a date, and `pk_columns` must be a non-empty tuple of unique
+non-empty strings.
+
 Add a frame-backed writer:
 
 ```python
@@ -169,8 +180,9 @@ def create_dataset_manifest_with_split(..., dataset: DatasetSpec, ...):
     return create_model_frame_manifest_with_split(..., frame=frame, ...)
 ```
 
-That keeps old factory/demo flows working while giving custom DAGs the correct
-default path.
+`DatasetSpec.manifest_sql` is a compatibility path for SQL-backed final model
+frames and old factory/demo flows. It is not required for new custom DAGs and
+should not be used merely to re-read raw source data for manifesting.
 
 ## Custom DAG Flow
 
@@ -200,7 +212,11 @@ Inside the model-owned training/export task:
 ```python
 raw = read_prepared_source(prepared)
 frame = build_final_model_frame(raw)
+frame = frame.sort_values("policy_id").reset_index(drop=True)
 
+split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
+model, metrics, model_path = fit_model(frame, split_indices=split_indices)
+workbook_path = export_rating_tables(model, frame)
 manifest = create_model_frame_manifest_with_split(
     runtime.get_engine(),
     frame=frame,
@@ -216,9 +232,6 @@ manifest = create_model_frame_manifest_with_split(
     validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
     created_by="airflow",
 )
-
-model, metrics, model_path = fit_model(frame)
-workbook_path = export_rating_tables(model, frame)
 
 return CompletedModelBuild(
     rating_workbook_path=str(workbook_path),
@@ -242,6 +255,30 @@ task. It does not persist the full frame unless the model task chooses to write 
 frame artifact separately. Reproducibility depends on the source data, model
 code, artifact paths, and recorded metadata being sufficient for the team's
 audit standard.
+
+## Split, Row Order, and Retry Semantics
+
+The manifest writer treats the supplied frame order as the canonical model-frame
+order. Model tasks should sort the final frame by PK or another deterministic
+business key before calling `create_model_frame_manifest_with_split(...)`, unless
+the training method deliberately requires a different order. The writer should
+not silently sort the frame, because that could change what the model trained on.
+
+If validation metrics are reported, the recorded split metadata must describe
+the split actually used to produce those metrics. Model code should either use
+the same deterministic split helper/config that the manifest writer records, or
+pass/reuse its own split metadata when that API exists. Do not record default
+k-fold metadata merely because a default split config exists.
+
+A frame manifest is append-only unless a `manifest_id` is explicitly supplied.
+For idempotent reruns of the same export, model tasks may derive a stable
+manifest ID from the export/run key or look up and reuse an existing manifest.
+V1 does not require manifest de-duplication; package idempotency remains enforced
+by `source_export_id`.
+
+A manifest may exist even if a later fit, export, or publish step fails.
+Successful published builds are tied to the manifest through
+`CompletedModelBuild.manifest_id` and model-run lineage.
 
 ## Data As-Of Handling
 
@@ -298,16 +335,25 @@ New scaffolded custom models should make this clear:
 `create_model_frame_manifest_with_split(...)` should raise clear errors when:
 
 - the frame is empty;
+- the frame has duplicate column names;
+- the frame has blank or whitespace-only column names;
+- `pk_columns` is empty;
+- `pk_columns` contains duplicates;
 - required PK columns are missing;
 - target or weight columns are missing when supplied;
 - PK columns contain nulls;
 - PK column values are duplicated;
 - `data_as_of_date` is blank or not date-like;
 - `dataset_name` or `source_system` is blank;
+- `validation_split.stratify_column` is supplied but missing from the frame;
+- k-fold `n_splits` is greater than the frame row count;
 - `validation_split.materialize=True` and no artifact root is supplied.
 
 The function should not validate the original SQL source or connection logic.
 At this point the model task has already built the final frame.
+
+The DataFrame index is not part of row identity. A non-unique index is allowed
+and ignored; PK columns define row identity and row-order hashing.
 
 ## Testing
 
@@ -320,9 +366,16 @@ Add focused tests for the new frame-backed manifest writer:
 - writes target and weight column roles correctly;
 - writes replayable k-fold split metadata;
 - writes materialized train/test split `.npz` metadata when configured;
+- records the supplied frame order consistently in the row-order hash;
+- rejects duplicate final-frame column names;
+- rejects blank final-frame column names;
+- rejects empty `pk_columns`;
+- rejects duplicate `pk_columns`;
 - rejects missing PK columns;
 - rejects missing target/weight columns when configured;
 - rejects null or duplicate PK values;
+- rejects missing stratify columns when configured;
+- rejects k-fold splits where `n_splits > row_count`;
 - rejects invalid `data_as_of_date`;
 - leaves the existing SQL-backed `create_dataset_manifest_with_split(...)`
   working by delegating to the frame-backed writer.
@@ -334,6 +387,8 @@ Add scaffold/demo tests:
 - default custom DAG does not call `create_prepared_dataset_manifest_task(...)`;
 - default custom train/export task returns `CompletedModelBuild` with
   `manifest_id` and `split_set_id`;
+- custom train/export example creates the manifest from the final engineered
+  frame, not the prepared raw frame;
 - `publish_completed_model_build_task(...)` still publishes from supplied
   manifest IDs and does not deploy.
 
@@ -384,7 +439,5 @@ The implementation should extract the common write path from
 The SQL-backed function should become a thin adapter that reads `manifest_sql`
 into a frame and passes it to the new function.
 
-The currently open custom scaffold PR should stay unmerged until its default
-custom DAG aligns with this spec. The previous scaffold shape still creates the
-manifest before training/export from a SQL `DatasetSpec`, which is the issue this
-spec fixes.
+Default custom scaffold examples should align with this spec before being
+promoted as the recommended production pattern.
