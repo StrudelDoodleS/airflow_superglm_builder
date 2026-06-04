@@ -58,3 +58,25 @@ def test_render_schema_sql_can_be_used_from_plain_python_script(tmp_path):
     )
 
     assert "team_pricing.V_TEST" in sql
+
+
+def test_render_schema_sql_separates_print_from_migration_batch(tmp_path):
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "V001__view.sql").write_text(
+        "CREATE OR ALTER VIEW pricing.V_TEST AS SELECT 1 AS value;\nGO\n",
+        encoding="utf-8",
+    )
+
+    sql = render_schema_sql(
+        migrations,
+        pricing_schema="team_pricing",
+        pricing_staging_schema="team_pricing_stg",
+        mlops_schema="team_mlops",
+    )
+
+    assert (
+        "PRINT N'Applying V001__view.sql';\n"
+        "GO\n"
+        "CREATE OR ALTER VIEW team_pricing.V_TEST AS SELECT 1 AS value;"
+    ) in sql
