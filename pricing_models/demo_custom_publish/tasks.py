@@ -307,7 +307,7 @@ def export_superglm_completed_build(
         export_id=export_id,  # optional but recommended for idempotent reruns
         mlflow_run_id=None,  # optional; keep None when MLflow is not used
         model_artifact_path=str(model_path),  # optional fitted-model artifact
-        metrics=metrics,  # optional small numeric metrics for lineage/review
+        metrics=metrics,  # optional small numeric metrics for future review helpers
     ).to_dict()
 
 

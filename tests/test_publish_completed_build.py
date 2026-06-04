@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,105 @@ def test_completed_model_build_missing_required_mapping_fields_raise_domain_erro
         CompletedModelBuild.from_mapping(payload)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "payload"),
+    [
+        (
+            "rating_workbook_path",
+            {
+                "rating_workbook_path": "   ",
+                "model_version": "v1",
+                "effective_from": "2026-06-03",
+            },
+        ),
+        (
+            "model_version",
+            {
+                "rating_workbook_path": "rating.xlsx",
+                "model_version": "   ",
+                "effective_from": "2026-06-03",
+            },
+        ),
+        (
+            "effective_from",
+            {
+                "rating_workbook_path": "rating.xlsx",
+                "model_version": "v1",
+                "effective_from": "   ",
+            },
+        ),
+    ],
+)
+def test_completed_model_build_rejects_blank_required_strings(field_name, payload):
+    with pytest.raises(CompletedModelBuildError, match=field_name):
+        CompletedModelBuild.from_mapping(payload)
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (date(2026, 6, 3), "2026-06-03"),
+        (datetime(2026, 6, 3, 14, 30), "2026-06-03"),
+        ("2026-06-03T14:30:00", "2026-06-03"),
+    ],
+)
+def test_completed_model_build_normalises_effective_from(raw_value, expected):
+    build = CompletedModelBuild(
+        rating_workbook_path="rating.xlsx",
+        model_version="v1",
+        effective_from=raw_value,
+    )
+
+    assert build.effective_from == expected
+    assert build.to_dict()["effective_from"] == expected
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "created_by",
+        "export_id",
+        "dag_id",
+        "airflow_run_id",
+        "mlflow_run_id",
+        "manifest_id",
+        "split_set_id",
+        "model_artifact_path",
+    ],
+)
+def test_completed_model_build_blank_optional_strings_normalise_to_none(field_name):
+    build = CompletedModelBuild(
+        rating_workbook_path="rating.xlsx",
+        model_version="v1",
+        effective_from="2026-06-03",
+        **{field_name: "   "},
+    )
+
+    assert getattr(build, field_name) is None
+    assert build.to_dict()[field_name] is None
+
+
+def test_completed_model_build_rejects_string_metric():
+    with pytest.raises(CompletedModelBuildError, match="deviance"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from="2026-06-03",
+            metrics={"deviance": "12.5"},
+        )
+
+
+@pytest.mark.parametrize("bad_metric", [float("nan"), float("inf"), -float("inf")])
+def test_completed_model_build_rejects_non_finite_metric(bad_metric):
+    with pytest.raises(CompletedModelBuildError, match="finite"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from="2026-06-03",
+            metrics={"deviance": bad_metric},
+        )
+
+
 def test_completed_build_publish_api_does_not_import_dag_factory():
     source = Path(
         "pricing_pipeline/orchestration/publish_completed_build.py"
@@ -199,6 +299,69 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
     assert calls[0] == ("validate", engine, _config())
     assert calls[1][0] == "manifest"
     assert calls[2][0] == "publish"
+
+
+def test_publish_completed_model_build_configures_engine_with_settings_schema_names(
+    tmp_path,
+    monkeypatch,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    raw_engine = object()
+    configured_engine = object()
+    calls = []
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.configure_engine",
+        lambda engine_arg, schemas: calls.append(("configure", engine_arg, schemas))
+        or configured_engine,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: calls.append(("validate", engine_arg, config_arg)) or 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
+        lambda engine_arg, manifest_id: calls.append(
+            ("validate_manifest", engine_arg, manifest_id)
+        ),
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        lambda engine_arg, export, *, model_config: calls.append(
+            ("publish", engine_arg, export, model_config)
+        )
+        or {
+            "mlflow_run_id": "",
+            "export_id": export.export_id,
+            "rate_package_id": "42",
+            "package_version": "7",
+            "rating_workbook_path": export.rating_workbook_path,
+        },
+    )
+
+    settings = _settings(tmp_path)
+    publish_completed_model_build(
+        raw_engine,
+        settings=settings,
+        model_config=_config(),
+        dataset=None,
+        completed_build={
+            "rating_workbook_path": str(workbook),
+            "model_version": "20260603",
+            "effective_from": "2026-06-03",
+            "export_id": "export-1",
+            "manifest_id": "manifest-existing",
+            "created_by": "airflow",
+        },
+    )
+
+    assert calls[0] == ("configure", raw_engine, settings.schema_names)
+    assert calls[1][0] == "validate"
+    assert calls[1][1] is configured_engine
+    assert calls[2] == ("validate_manifest", configured_engine, "manifest-existing")
+    assert calls[3][0] == "publish"
+    assert calls[3][1] is configured_engine
 
 
 def test_publish_completed_model_build_reuses_and_validates_supplied_manifest(
@@ -346,3 +509,73 @@ def test_publish_completed_model_build_task_fills_airflow_context(
     assert completed["dag_id"] == "claim_freq_build"
     assert completed["airflow_run_id"] == "manual__20260603"
     assert completed["created_by"] == "airflow"
+
+
+def test_publish_completed_model_build_task_allows_dataset_none_with_manifest(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+    config = _config()
+
+    @dataclass(frozen=True)
+    class FakeDag:
+        dag_id: str
+
+    class FakeRuntime:
+        settings = _settings(tmp_path)
+
+        def get_engine(self):
+            return "engine"
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.runtime_from_env_or_module",
+        lambda runtime_module=None, *, env=None: FakeRuntime(),
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.get_current_context",
+        lambda: {
+            "dag": FakeDag("claim_freq_build"),
+            "run_id": "manual__20260603",
+        },
+    )
+
+    def fake_publish(engine, **kwargs):
+        calls.append((engine, kwargs))
+        return CompletedModelPublishResult(
+            model_id=17,
+            model_key="CLAIM_FREQ",
+            model_version="20260603",
+            manifest_id=kwargs["completed_build"]["manifest_id"],
+            split_set_id=None,
+            export_id="claim_freq__manual__20260603",
+            rate_package_id=42,
+            package_version=7,
+            package_status="PUBLISHED",
+            rating_workbook_path=kwargs["completed_build"]["rating_workbook_path"],
+        )
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_completed_model_build",
+        fake_publish,
+    )
+
+    from pricing_pipeline.orchestration.publish_completed_build import (
+        publish_completed_model_build_task,
+    )
+
+    task_callable = publish_completed_model_build_task(
+        model_config=config,
+        created_by="airflow",
+    )
+    result = task_callable.function(
+        {
+            "rating_workbook_path": str(tmp_path / "rating_tables.xlsx"),
+            "model_version": "20260603",
+            "effective_from": "2026-06-03",
+            "manifest_id": "manifest-existing",
+        }
+    )
+
+    assert result["manifest_id"] == "manifest-existing"
+    assert calls[0][1]["dataset"] is None

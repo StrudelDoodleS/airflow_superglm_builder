@@ -414,7 +414,7 @@ return CompletedModelBuild(
     # Optional: include if the prior prepare/materialize task created these.
     manifest_id=prepared.get("manifest_id"),
     split_set_id=prepared.get("split_set_id"),
-    # Optional: small numeric validation/training metrics for lineage/review.
+    # Optional: small numeric validation/training metrics for future review helpers.
     metrics={"deviance": float(model.result.deviance)},
 ).to_dict()
 ```

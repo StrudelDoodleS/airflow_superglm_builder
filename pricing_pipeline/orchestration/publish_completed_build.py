@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, replace
+from datetime import date, datetime
+from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import text
 from airflow.sdk import get_current_context, task
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import text
 
 from pricing_pipeline.data.manifest import (
     create_dataset_manifest_with_split,
     new_manifest_id,
 )
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.db import configure_engine
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
@@ -29,8 +34,39 @@ class CompletedModelBuildError(ValueError):
     """Raised when a completed-build payload cannot be published."""
 
 
-@dataclass(frozen=True)
-class CompletedModelBuild:
+def _format_validation_error(exc: ValidationError) -> str:
+    parts = []
+    for error in exc.errors():
+        loc = ".".join(str(item) for item in error.get("loc", ()))
+        msg = error.get("msg", "invalid value")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "invalid completed build payload: " + "; ".join(parts)
+
+
+def _normalise_effective_from(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if value is None or not str(value).strip():
+        raise ValueError("is required")
+
+    cleaned = str(value).strip()
+    try:
+        return datetime.fromisoformat(cleaned).date().isoformat()
+    except ValueError:
+        try:
+            return date.fromisoformat(cleaned).isoformat()
+        except ValueError as exc:
+            raise ValueError("must be a date, datetime, or ISO date string") from exc
+
+
+class CompletedModelBuild(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+    )
+
     rating_workbook_path: str
     model_version: str
     effective_from: str
@@ -42,7 +78,13 @@ class CompletedModelBuild:
     manifest_id: str | None = None
     split_set_id: str | None = None
     model_artifact_path: str | None = None
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, float] = Field(default_factory=dict)
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as exc:
+            raise CompletedModelBuildError(_format_validation_error(exc)) from exc
 
     @classmethod
     def from_mapping(
@@ -52,21 +94,69 @@ class CompletedModelBuild:
         if isinstance(value, cls):
             return value
         data = dict(value)
-        allowed = {item.name for item in fields(cls)}
+        allowed = set(cls.model_fields)
         unknown = sorted(set(data) - allowed)
         if unknown:
             raise CompletedModelBuildError(
                 "unknown completed build field(s): " + ", ".join(unknown)
             )
-        try:
-            return cls(**data)
-        except TypeError as exc:
-            raise CompletedModelBuildError(
-                f"invalid completed build payload: {exc}"
-            ) from exc
+        return cls(**data)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return self.model_dump(mode="json")
+
+    @field_validator("rating_workbook_path", "model_version", mode="before")
+    @classmethod
+    def _required_non_empty_text(cls, value: Any) -> str:
+        if value is None or not str(value).strip():
+            raise ValueError("is required")
+        return str(value).strip()
+
+    @field_validator("effective_from", mode="before")
+    @classmethod
+    def _effective_from_date_text(cls, value: Any) -> str:
+        return _normalise_effective_from(value)
+
+    @field_validator(
+        "created_by",
+        "export_id",
+        "dag_id",
+        "airflow_run_id",
+        "mlflow_run_id",
+        "manifest_id",
+        "split_set_id",
+        "model_artifact_path",
+        mode="before",
+    )
+    @classmethod
+    def _optional_non_empty_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _finite_numeric_metrics(cls, value: Any) -> dict[str, float]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("metrics must be a mapping of metric name to finite number")
+
+        metrics: dict[str, float] = {}
+        for key, raw_metric in value.items():
+            metric_name = str(key).strip()
+            if not metric_name:
+                raise ValueError("metric names must be non-empty strings")
+            if isinstance(raw_metric, bool) or not isinstance(raw_metric, Real):
+                raise ValueError(f"metric {metric_name!r} must be a finite number")
+
+            metric_value = float(raw_metric)
+            if not math.isfinite(metric_value):
+                raise ValueError(f"metric {metric_name!r} must be finite")
+            metrics[metric_name] = metric_value
+
+        return metrics
 
 
 @dataclass(frozen=True)
@@ -143,6 +233,7 @@ def publish_completed_model_build(
     package_status: str | None = None,
     created_by: str | None = None,
 ) -> CompletedModelPublishResult:
+    engine = configure_engine(engine, settings.schema_names)
     build = CompletedModelBuild.from_mapping(completed_build)
     rating_workbook_path = _existing_workbook(build.rating_workbook_path)
     model_version = _required_text(build.model_version, "model_version")
@@ -237,7 +328,7 @@ def publish_completed_model_build(
 def publish_completed_model_build_task(
     *,
     model_config: ModelBuildConfig,
-    dataset: DatasetSpec,
+    dataset: DatasetSpec | None = None,
     runtime_module: str | None = None,
     created_by: str = "airflow",
     task_id: str = "publish_completed_model_build",

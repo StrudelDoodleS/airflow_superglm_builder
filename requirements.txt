@@ -6,6 +6,7 @@ mlflow
 numpy
 openpyxl
 pandas
+pydantic>=2.13,<3
 pyodbc
 python-dotenv
 PyYAML
