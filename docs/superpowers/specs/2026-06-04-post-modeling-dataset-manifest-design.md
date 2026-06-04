@@ -149,6 +149,10 @@ weight column. It should not contain `columns`, `sql_file`, or credentials.
 that lookup should map logical names to metadata such as server, database, and
 default schema. It should not contain connection strings or auth code.
 
+As-of and period derivation should stay mostly out of TOML. The default should be
+explicit payload fields from the user task, with optional Python helper
+strategies for repetitive cases.
+
 ### Manifest Source Metadata
 
 `pricing.DATASET_MANIFEST` already has `data_as_of_date`. That field should mean
@@ -172,6 +176,15 @@ train on?" without relying on a naming convention:
   relation sources this is the generated `SELECT * ... ORDER BY ...`; for SQL
   sources it is the user-supplied final manifest SQL.
 
+Add optional data-period fields:
+
+- `data_period_start_date`: nullable start of the observation/experience period.
+- `data_period_end_date`: nullable end of the observation/experience period.
+
+These are different from `data_as_of_date`. `data_as_of_date` says how current
+the modeled data was. The period fields say what date range the observations
+cover.
+
 These fields are metadata. They do not turn SQL Server into a row-level artifact
 store.
 
@@ -193,6 +206,8 @@ Supported payload forms:
     "modeling_schema": "pricing_work",
     "modeling_table": "CLAIM_FREQ_MODELING_RUN_123",
     "data_as_of_date": "2026-06-04",
+    "data_period_start_date": "2025-01-01",
+    "data_period_end_date": "2026-03-31",
 }
 ```
 
@@ -202,11 +217,37 @@ Supported payload forms:
 {
     "manifest_sql": "SELECT ... ORDER BY policy_id",
     "data_as_of_date": "2026-06-04",
+    "data_period_start_date": "2025-01-01",
+    "data_period_end_date": "2026-03-31",
 }
 ```
 
 The relation form should build `SELECT * FROM schema.table ORDER BY pk_columns`.
 The SQL form should use the supplied SQL as-is.
+
+Payload date fields are the primary API. For common cases where teams do not
+want to compute the dates manually, provide Python helper strategies instead of
+TOML-heavy configuration:
+
+```python
+dataset_builder = dataset_spec_from_model_config(
+    MODEL_CONFIG,
+    data_as_of=DataAsOf.max_column("snapshot_date"),
+    data_period=DataPeriod.date_range("policy_effective_date"),
+)
+```
+
+Supported helper strategies:
+
+- `DataAsOf.payload("data_as_of_date")`
+- `DataAsOf.today()`
+- `DataAsOf.max_column("snapshot_date")`
+- `DataPeriod.none()`
+- `DataPeriod.payload("data_period_start_date", "data_period_end_date")`
+- `DataPeriod.date_range("policy_effective_date")`
+
+The column-based strategies run against the final model-ready source, not the raw
+source tables.
 
 ### Manifest Task
 
@@ -243,6 +284,7 @@ The dataset builder should raise clear domain errors when:
 - Only one of `modeling_schema` / `modeling_table` is supplied.
 - `data_as_of_date` is missing while `require_data_as_of_date=True`, blank, or
   not a valid date.
+- Data period start/end values are invalid dates or start is after end.
 - PK columns are missing or blank.
 - Relation identifiers are blank.
 
@@ -258,6 +300,11 @@ Add focused tests for:
 - Relation payload builds expected `DatasetSpec.manifest_sql`.
 - SQL payload passes explicit `manifest_sql` through.
 - Payload `data_as_of_date` is written to `DATASET_MANIFEST`.
+- Payload data period start/end dates are written to `DATASET_MANIFEST`.
+- `DataAsOf.max_column(...)` computes the max date from the final model-ready
+  source.
+- `DataPeriod.date_range(...)` computes min/max dates from the final model-ready
+  source.
 - Manifest source relation/query metadata is written to `DATASET_MANIFEST`.
 - Missing relation/SQL payload raises a clear error.
 - Missing/invalid `data_as_of_date` raises when `require_data_as_of_date=True`.
@@ -272,9 +319,10 @@ unchanged: it should publish from supplied manifest IDs and should not deploy.
 
 ## Migration Impact
 
-A SQL migration is required to add manifest source identity fields to
-`pricing.DATASET_MANIFEST`. The `data_as_of_date` column already exists; the
-implementation should change how it is populated, not add a second as-of field.
+A SQL migration is required to add manifest source identity fields and optional
+data-period fields to `pricing.DATASET_MANIFEST`. The `data_as_of_date` column
+already exists; the implementation should change how it is populated, not add a
+second as-of field.
 
 The existing `pricing.MODEL_RUN` table already has `started_ts`, `completed_ts`,
 `manifest_id`, and `rate_package_id`, which is enough to relate a trained package
