@@ -1,4 +1,5 @@
 """Render SQL Server schema DDL with configurable pricing/mlops schema names."""
+
 from __future__ import annotations
 
 import sys
@@ -125,6 +126,7 @@ def render_schema_sql(
             [
                 "",
                 f"PRINT N'Applying {migration_name}';",
+                "GO",
                 rendered.rstrip(),
                 "",
                 f"IF NOT EXISTS (SELECT 1 FROM dbo.SCHEMA_MIGRATION WHERE version_file = {_sql_string(migration_name)})",
