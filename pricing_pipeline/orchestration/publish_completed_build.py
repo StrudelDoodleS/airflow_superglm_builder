@@ -48,10 +48,12 @@ def _normalise_effective_from(value: Any) -> str:
         return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    if value is None or not str(value).strip():
+    if not isinstance(value, str):
+        raise ValueError("must be a date, datetime, or ISO date string")
+    if not value.strip():
         raise ValueError("is required")
 
-    cleaned = str(value).strip()
+    cleaned = value.strip()
     try:
         return datetime.fromisoformat(cleaned).date().isoformat()
     except ValueError:
@@ -93,6 +95,10 @@ class CompletedModelBuild(BaseModel):
     ) -> "CompletedModelBuild":
         if isinstance(value, cls):
             return value
+        if not isinstance(value, Mapping):
+            raise CompletedModelBuildError(
+                "invalid completed build payload: expected a mapping"
+            )
         data = dict(value)
         allowed = set(cls.model_fields)
         unknown = sorted(set(data) - allowed)

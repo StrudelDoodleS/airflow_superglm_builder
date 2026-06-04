@@ -107,6 +107,12 @@ def test_completed_model_build_missing_required_mapping_fields_raise_domain_erro
         CompletedModelBuild.from_mapping(payload)
 
 
+@pytest.mark.parametrize("payload", [None, "not-a-mapping", ["rating.xlsx"]])
+def test_completed_model_build_rejects_non_mapping_payload(payload):
+    with pytest.raises(CompletedModelBuildError, match="expected a mapping"):
+        CompletedModelBuild.from_mapping(payload)
+
+
 @pytest.mark.parametrize(
     ("field_name", "payload"),
     [
@@ -160,6 +166,15 @@ def test_completed_model_build_normalises_effective_from(raw_value, expected):
     assert build.to_dict()["effective_from"] == expected
 
 
+def test_completed_model_build_rejects_numeric_effective_from():
+    with pytest.raises(CompletedModelBuildError, match="effective_from"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from=20260603,
+        )
+
+
 @pytest.mark.parametrize(
     "field_name",
     [
@@ -192,6 +207,17 @@ def test_completed_model_build_rejects_string_metric():
             model_version="v1",
             effective_from="2026-06-03",
             metrics={"deviance": "12.5"},
+        )
+
+
+@pytest.mark.parametrize("bad_metric", [True, [12.5], {"nested": 12.5}])
+def test_completed_model_build_rejects_non_numeric_metric_values(bad_metric):
+    with pytest.raises(CompletedModelBuildError, match="deviance"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from="2026-06-03",
+            metrics={"deviance": bad_metric},
         )
 
 
