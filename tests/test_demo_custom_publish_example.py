@@ -27,13 +27,45 @@ def test_demo_effective_from_uses_run_date_not_hardcoded_string():
         == "2026-06-04"
     )
     assert (
-        run_key_for_value("manual__2026-06-04T23:15:00+00:00")
-        == "manual__20260604t2315000000"
+        run_key_for_value("manual__2026-06-04T23:15:00+00:00").startswith(
+            "manual__20260604t2315000000_"
+        )
     )
-    assert training_table_for_run("manual__20260604t2315000000").startswith(
-        "DEMO_CUSTOM_PUBLISH_TRAINING_manual__20260604t2315000000"
+    assert training_table_for_run("manual__2026-06-04T23:15:00+00:00").startswith(
+        "DEMO_CUSTOM_PUBLISH_TRAINING_manual__20260604t2315000000_"
     )
     assert len(training_table_for_run("x" * 200)) <= 128
+
+
+def test_demo_run_scoped_keys_are_collision_safe():
+    from pricing_models.demo_custom_publish.tasks import (
+        run_key_for_value,
+        training_table_for_run,
+    )
+
+    punctuation_keys = {
+        run_key_for_value("scheduled__2026-06-04T12:00:00+00:00"),
+        run_key_for_value("scheduled__20260604T1200000000"),
+    }
+    long_prefix_keys = {
+        run_key_for_value(("x" * 200) + "a"),
+        run_key_for_value(("x" * 200) + "b"),
+    }
+    punctuation_tables = {
+        training_table_for_run("scheduled__2026-06-04T12:00:00+00:00"),
+        training_table_for_run("scheduled__20260604T1200000000"),
+    }
+    long_prefix_tables = {
+        training_table_for_run(("x" * 200) + "a"),
+        training_table_for_run(("x" * 200) + "b"),
+    }
+
+    assert len(punctuation_keys) == 2
+    assert len(long_prefix_keys) == 2
+    assert len(punctuation_tables) == 2
+    assert len(long_prefix_tables) == 2
+    assert all(len(key) <= 99 for key in punctuation_keys | long_prefix_keys)
+    assert all(len(table) <= 128 for table in punctuation_tables | long_prefix_tables)
 
 
 def test_demo_dataset_spec_can_point_at_run_specific_training_table():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import pickle
 import re
 from datetime import date, datetime
@@ -31,6 +32,9 @@ SOURCE_SYSTEM = "demo_sql_server_staging"
 TARGET_COLUMN = "claim_count"
 WEIGHT_COLUMN = "exposure"
 TRAINING_TABLE = "DEMO_CUSTOM_PUBLISH_TRAINING"
+SQL_SERVER_IDENTIFIER_MAX_LENGTH = 128
+RUN_KEY_MAX_LENGTH = SQL_SERVER_IDENTIFIER_MAX_LENGTH - len(TRAINING_TABLE) - 1
+RUN_KEY_DIGEST_LENGTH = 10
 TRAINING_SQL_TEMPLATE = """
 SELECT
     policy_id,
@@ -56,13 +60,15 @@ def run_key_for_value(value: object | None) -> str:
     raw = "manual" if value is None else str(value).strip()
     compact = raw.replace("-", "").replace(":", "").replace("+", "")
     safe = _SAFE_RUN_KEY_PATTERN.sub("_", compact).strip("_").lower()
-    return safe or "manual"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:RUN_KEY_DIGEST_LENGTH]
+    suffix = f"_{digest}"
+    prefix_length = max(RUN_KEY_MAX_LENGTH - len(suffix), 1)
+    prefix = (safe or "manual")[:prefix_length].rstrip("_") or "manual"
+    return f"{prefix}{suffix}"
 
 
 def training_table_for_run(run_key: str) -> str:
-    safe = run_key_for_value(run_key)
-    max_suffix_len = 128 - len(TRAINING_TABLE) - 1
-    return f"{TRAINING_TABLE}_{safe[:max_suffix_len]}"
+    return f"{TRAINING_TABLE}_{run_key_for_value(run_key)}"
 
 
 def training_sql_for_table(table_name: str) -> str:
@@ -319,8 +325,9 @@ def prepare_training_data_task(
     def _prepare_training_data() -> dict[str, str | None]:
         runtime = get_runtime(runtime_module)
         context = get_current_context()
-        run_key = run_key_for_value(context.get("run_id") or _context_logical_date(context))
-        table_name = training_table_for_run(run_key)
+        run_value = context.get("run_id") or _context_logical_date(context)
+        run_key = run_key_for_value(run_value)
+        table_name = training_table_for_run(run_value)
         run_output_dir = Path(output_dir) / run_key
         frame = build_demo_training_frame(row_count=row_count, seed=seed)
         engine = runtime.get_engine()
@@ -373,9 +380,12 @@ def train_validate_export_task(
         context = get_current_context()
         model_version = next_trained_model_version(engine)
         effective_from = effective_from_for_run(_context_logical_date(context))
+        export_run_key = prepared_training.get("run_key") or run_key_for_value(
+            context.get("run_id") or model_version
+        )
         export_id = build_export_id(
             MODEL_KEY,
-            str(context.get("run_id") or prepared_training.get("run_key") or model_version),
+            str(export_run_key),
         )
         completed = export_superglm_completed_build(
             read_training_frame(str(prepared_training["training_frame_path"])),
