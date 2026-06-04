@@ -11,14 +11,27 @@ import pandas as pd
 from sqlalchemy import text
 from superglm import Categorical, Numeric, SuperGLM
 
+from pricing_pipeline.data.manifest import (
+    DatasetManifestResult,
+    create_dataset_manifest_with_split,
+    new_manifest_id,
+)
 from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import DatasetSpec
 from pricing_pipeline.models.spec import TrainingFrame
 from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
+from pricing_pipeline.publishing.model_registry import ensure_pricing_model
+from pricing_pipeline.publishing.rating_export import build_export_id
 
 
 MODEL_KEY = "DEMO_CUSTOM_FREQ"
+DATASET_NAME = "demo_custom_frequency_training"
+SOURCE_SYSTEM = "demo_sql_server_staging"
+TARGET_COLUMN = "claim_count"
+WEIGHT_COLUMN = "exposure"
 TRAINING_TABLE = "DEMO_CUSTOM_PUBLISH_TRAINING"
-TRAINING_SQL = f"""
+TRAINING_SQL_TEMPLATE = """
 SELECT
     policy_id,
     territory,
@@ -26,15 +39,46 @@ SELECT
     driver_age,
     exposure,
     claim_count
-FROM pricing_stg.{TRAINING_TABLE}
+FROM pricing_stg.{table_name}
 ORDER BY policy_id
 """
+TRAINING_SQL = TRAINING_SQL_TEMPLATE.format(table_name=TRAINING_TABLE)
 FEATURE_COLUMNS = ("territory", "vehicle_age_band", "driver_age")
 DEFAULT_OUTPUT_DIR = Path("state/demo_custom_publish")
 DEFAULT_ROW_COUNT = 240
 DEFAULT_SEED = 20260604
 
 _MODEL_VERSION_PATTERN = re.compile(r"^v(\d+)$")
+_SAFE_RUN_KEY_PATTERN = re.compile(r"[^A-Za-z0-9_]+")
+
+
+def run_key_for_value(value: object | None) -> str:
+    raw = "manual" if value is None else str(value).strip()
+    compact = raw.replace("-", "").replace(":", "").replace("+", "")
+    safe = _SAFE_RUN_KEY_PATTERN.sub("_", compact).strip("_").lower()
+    return safe or "manual"
+
+
+def training_table_for_run(run_key: str) -> str:
+    safe = run_key_for_value(run_key)
+    max_suffix_len = 128 - len(TRAINING_TABLE) - 1
+    return f"{TRAINING_TABLE}_{safe[:max_suffix_len]}"
+
+
+def training_sql_for_table(table_name: str) -> str:
+    return TRAINING_SQL_TEMPLATE.format(table_name=table_name)
+
+
+def dataset_spec_for_training_table(table_name: str) -> DatasetSpec:
+    return DatasetSpec(
+        dataset_name=DATASET_NAME,
+        source_system=SOURCE_SYSTEM,
+        manifest_sql=training_sql_for_table(table_name),
+        pk_columns=("policy_id",),
+        target_column=TARGET_COLUMN,
+        weight_column=WEIGHT_COLUMN,
+        raw_loader=None,
+    )
 
 
 def build_demo_training_frame(
@@ -89,11 +133,16 @@ def read_training_frame(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def materialize_training_source(engine, frame: pd.DataFrame) -> int:
+def materialize_training_source(
+    engine,
+    frame: pd.DataFrame,
+    *,
+    table_name: str = TRAINING_TABLE,
+) -> int:
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         frame.to_sql(
-            TRAINING_TABLE,
+            table_name,
             con,
             schema=schemas.pricing_staging,
             if_exists="replace",
@@ -159,6 +208,25 @@ def next_trained_model_version(engine, *, model_key: str = MODEL_KEY) -> str:
     return next_model_version_from_existing(versions)
 
 
+def create_manifest_for_training_table(
+    engine,
+    *,
+    table_name: str,
+    model_config: ModelBuildConfig,
+    validation_split_artifact_root: Path | None,
+    created_by: str,
+) -> DatasetManifestResult:
+    dataset = dataset_spec_for_training_table(table_name)
+    return create_dataset_manifest_with_split(
+        engine,
+        dataset=dataset,
+        manifest_id=new_manifest_id(dataset.dataset_name),
+        validation_split=model_config.validation_split,
+        validation_split_artifact_root=validation_split_artifact_root,
+        created_by=created_by,
+    )
+
+
 def effective_from_for_run(value: date | datetime | str | None = None) -> str:
     if value is None:
         return date.today().isoformat()
@@ -191,10 +259,14 @@ def export_superglm_completed_build(
     )
 
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    workbook_path = output_path / f"rating_tables_{model_version}_{effective_from}.xlsx"
-    model_path = output_path / "superglm_model.pkl"
-    summary_path = output_path / "model_summary.txt"
+    artifact_key = str(export_id).strip() if export_id else run_key_for_value(
+        f"{model_version}_{effective_from}"
+    )
+    artifact_dir = output_path / artifact_key
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = artifact_dir / f"rating_tables_{model_version}_{effective_from}.xlsx"
+    model_path = artifact_dir / "superglm_model.pkl"
+    summary_path = artifact_dir / "model_summary.txt"
 
     fitted.export_rating_tables(
         workbook_path,
@@ -232,21 +304,42 @@ def export_superglm_completed_build(
 
 def prepare_training_data_task(
     *,
+    model_config: ModelBuildConfig,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     row_count: int = DEFAULT_ROW_COUNT,
     seed: int = DEFAULT_SEED,
     runtime_module: str | None = None,
+    created_by: str = "airflow",
     task_id: str = "prepare_training_data",
 ):
-    from airflow.sdk import task
+    from airflow.sdk import get_current_context, task
     from scripts.pricing_db import get_runtime
 
     @task(task_id=task_id)
-    def _prepare_training_data() -> str:
+    def _prepare_training_data() -> dict[str, str | None]:
         runtime = get_runtime(runtime_module)
+        context = get_current_context()
+        run_key = run_key_for_value(context.get("run_id") or _context_logical_date(context))
+        table_name = training_table_for_run(run_key)
+        run_output_dir = Path(output_dir) / run_key
         frame = build_demo_training_frame(row_count=row_count, seed=seed)
-        materialize_training_source(runtime.get_engine(), frame)
-        return write_training_frame(frame, output_dir)
+        engine = runtime.get_engine()
+        materialize_training_source(engine, frame, table_name=table_name)
+        manifest = create_manifest_for_training_table(
+            engine,
+            table_name=table_name,
+            model_config=model_config,
+            validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
+            created_by=created_by,
+        )
+        return {
+            "training_frame_path": write_training_frame(frame, run_output_dir),
+            "training_table": table_name,
+            "manifest_id": manifest.manifest_id,
+            "split_set_id": manifest.split_set_id,
+            "output_dir": str(run_output_dir),
+            "run_key": run_key,
+        }
 
     return _prepare_training_data
 
@@ -274,18 +367,51 @@ def train_validate_export_task(
     from scripts.pricing_db import get_runtime
 
     @task(task_id=task_id)
-    def _train_validate_export(training_frame_path: str) -> dict[str, object]:
+    def _train_validate_export(prepared_training: dict[str, str | None]) -> dict[str, object]:
         runtime = get_runtime(runtime_module)
         engine = runtime.get_engine()
         context = get_current_context()
         model_version = next_trained_model_version(engine)
         effective_from = effective_from_for_run(_context_logical_date(context))
-        return export_superglm_completed_build(
-            read_training_frame(training_frame_path),
-            output_dir=output_dir,
+        export_id = build_export_id(
+            MODEL_KEY,
+            str(context.get("run_id") or prepared_training.get("run_key") or model_version),
+        )
+        completed = export_superglm_completed_build(
+            read_training_frame(str(prepared_training["training_frame_path"])),
+            output_dir=prepared_training.get("output_dir") or output_dir,
             model_version=model_version,
             effective_from=effective_from,
             created_by=created_by,
+            export_id=export_id,
         )
+        completed["manifest_id"] = prepared_training.get("manifest_id")
+        completed["split_set_id"] = prepared_training.get("split_set_id")
+        return completed
 
     return _train_validate_export
+
+
+def register_demo_model_task(
+    *,
+    model_config: ModelBuildConfig,
+    runtime_module: str | None = None,
+    created_by: str = "airflow",
+    task_id: str = "register_demo_model",
+):
+    from airflow.sdk import task
+    from scripts.pricing_db import get_runtime
+
+    @task(task_id=task_id)
+    def _register_demo_model() -> int:
+        runtime = get_runtime(runtime_module)
+        return ensure_pricing_model(
+            runtime.get_engine(),
+            model_key=model_config.model_key,
+            model_label=model_config.model_label,
+            target_name=model_config.target_name,
+            model_type=model_config.model_type,
+            created_by=created_by,
+        )
+
+    return _register_demo_model

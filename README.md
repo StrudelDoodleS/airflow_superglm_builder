@@ -404,10 +404,19 @@ A runnable example of this shape lives in:
   SQL staging materialization, SuperGLM fit, `model.summary(...)`, workbook
   export, and dynamic model-version/effective-date helpers.
 - `dags/demo_custom_publish.py`: Airflow TaskFlow DAG using custom model tasks
-  followed by `publish_completed_model_build_task(...)`.
+  followed by `publish_completed_model_build_task(...)`. The DAG explicitly
+  registers the demo model first, then prepares a run-scoped training source,
+  creates manifest/split metadata for that source, trains/exports, and publishes
+  by reusing the prepared manifest IDs.
 - `scripts/run_demo_custom_publish.py`: normal Python runner for the same path,
   useful when testing outside Airflow. Set `PRICING_DEMO_CUSTOM_OUTPUT_DIR`
   when a container or work runtime needs a writable artifact directory.
+
+For production DAGs, avoid shared mutable handoff paths like a fixed
+`training_frame.csv` or a fixed work table when separate Airflow runs can
+overlap. Materialize the model-ready frame to a run-specific table or filtered
+view, create the manifest from that same stable source, and write workbook/model
+artifacts under a run-specific directory.
 
 For a work SQL table or view that already exists, the dataset definition can be
 just metadata and SQL. It does not need a custom Python loader:

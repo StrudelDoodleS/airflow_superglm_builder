@@ -15,6 +15,7 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "model_version": "v7",
         "effective_from": "2026-06-04",
         "created_by": "pytest",
+        "export_id": "demo_custom_freq__python__v7__20260604",
     }
     publish_result = SimpleNamespace(
         to_dict=lambda: {
@@ -29,7 +30,7 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "get_runtime",
         lambda runtime_module=None: SimpleNamespace(
             get_engine=lambda: engine,
-            settings="settings",
+            settings=SimpleNamespace(validation_split_artifact_root=tmp_path / "splits"),
         ),
     )
     monkeypatch.setattr(
@@ -48,8 +49,8 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "materialize_training_source",
-        lambda engine_arg, frame: calls.append(
-            ("materialize_training_source", engine_arg, len(frame))
+        lambda engine_arg, frame, *, table_name=None: calls.append(
+            ("materialize_training_source", engine_arg, len(frame), table_name)
         )
         or len(frame),
     )
@@ -82,6 +83,14 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     )
     monkeypatch.setattr(
         runner,
+        "create_manifest_for_training_table",
+        lambda engine_arg, **kwargs: calls.append(
+            ("create_manifest_for_training_table", engine_arg, kwargs)
+        )
+        or SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1"),
+    )
+    monkeypatch.setattr(
+        runner,
         "publish_completed_model_build",
         lambda engine_arg, **kwargs: calls.append(
             ("publish_completed_model_build", engine_arg, kwargs)
@@ -97,20 +106,26 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     assert calls[0][2]["created_by"] == "pytest"
     assert [call[0] for call in calls] == [
         "ensure_pricing_model",
-        "materialize_training_source",
-        "write_training_frame",
         "next_trained_model_version",
         "effective_from_for_run",
+        "materialize_training_source",
+        "write_training_frame",
+        "create_manifest_for_training_table",
         "export_superglm_completed_build",
         "publish_completed_model_build",
     ]
+    materialize_call = calls[3]
+    assert materialize_call[3].startswith("DEMO_CUSTOM_PUBLISH_TRAINING_")
+    manifest_call = calls[-3]
+    assert manifest_call[2]["table_name"] == materialize_call[3]
     export_call = calls[-2]
     assert export_call[2]["model_version"] == "v7"
     assert export_call[2]["effective_from"] == "2026-06-04"
     assert export_call[2]["export_id"] == "demo_custom_freq__python__v7__20260604"
     publish_call = calls[-1]
-    assert publish_call[2]["settings"] == "settings"
-    assert publish_call[2]["completed_build"] == completed_build
+    assert publish_call[2]["settings"].validation_split_artifact_root == tmp_path / "splits"
+    assert publish_call[2]["completed_build"]["manifest_id"] == "manifest-1"
+    assert publish_call[2]["completed_build"]["split_set_id"] == "split-1"
     assert publish_call[2]["created_by"] == "pytest"
 
 

@@ -155,6 +155,7 @@ def test_demo_custom_publish_dag_uses_custom_tasks_and_publish_task(monkeypatch)
 
     assert hasattr(module, "demo_custom_publish")
     assert [output.task_id for output in task_outputs] == [
+        "register_demo_model",
         "prepare_training_data",
         "train_validate_export",
         "publish_completed_model_build",

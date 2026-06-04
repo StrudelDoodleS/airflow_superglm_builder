@@ -14,10 +14,12 @@ from pricing_models.demo_custom_publish.spec import DATASET_SPEC, MODEL_CONFIG  
 from pricing_models.demo_custom_publish.tasks import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
     build_demo_training_frame,
+    create_manifest_for_training_table,
     effective_from_for_run,
     export_superglm_completed_build,
     materialize_training_source,
     next_trained_model_version,
+    training_table_for_run,
     write_training_frame,
 )
 from pricing_pipeline.orchestration.publish_completed_build import (  # noqa: E402
@@ -52,13 +54,21 @@ def run_demo_custom_publish(
     )
 
     frame = build_demo_training_frame()
-    materialize_training_source(engine, frame)
-    write_training_frame(frame, resolved_output_dir)
     model_version = next_trained_model_version(engine)
     effective_from = effective_from_for_run()
     export_id = build_export_id(
         MODEL_CONFIG.model_key,
         f"python__{model_version}__{effective_from}",
+    )
+    table_name = training_table_for_run(export_id)
+    materialize_training_source(engine, frame, table_name=table_name)
+    write_training_frame(frame, resolved_output_dir / export_id)
+    manifest = create_manifest_for_training_table(
+        engine,
+        table_name=table_name,
+        model_config=MODEL_CONFIG,
+        validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
+        created_by=created_by,
     )
 
     completed_build = export_superglm_completed_build(
@@ -69,6 +79,8 @@ def run_demo_custom_publish(
         created_by=created_by,
         export_id=export_id,
     )
+    completed_build["manifest_id"] = manifest.manifest_id
+    completed_build["split_set_id"] = manifest.split_set_id
 
     return publish_completed_model_build(
         engine,

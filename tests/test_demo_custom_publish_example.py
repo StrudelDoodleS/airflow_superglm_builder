@@ -15,13 +15,37 @@ def test_demo_version_helper_increments_trained_model_versions_only():
 
 
 def test_demo_effective_from_uses_run_date_not_hardcoded_string():
-    from pricing_models.demo_custom_publish.tasks import effective_from_for_run
+    from pricing_models.demo_custom_publish.tasks import (
+        effective_from_for_run,
+        run_key_for_value,
+        training_table_for_run,
+    )
 
     assert effective_from_for_run(date(2026, 6, 4)) == "2026-06-04"
     assert (
         effective_from_for_run(datetime(2026, 6, 4, 23, 15, tzinfo=UTC))
         == "2026-06-04"
     )
+    assert (
+        run_key_for_value("manual__2026-06-04T23:15:00+00:00")
+        == "manual__20260604t2315000000"
+    )
+    assert training_table_for_run("manual__20260604t2315000000").startswith(
+        "DEMO_CUSTOM_PUBLISH_TRAINING_manual__20260604t2315000000"
+    )
+    assert len(training_table_for_run("x" * 200)) <= 128
+
+
+def test_demo_dataset_spec_can_point_at_run_specific_training_table():
+    from pricing_models.demo_custom_publish.tasks import dataset_spec_for_training_table
+
+    dataset = dataset_spec_for_training_table("DEMO_CUSTOM_PUBLISH_TRAINING_run_1")
+
+    assert dataset.dataset_name == "demo_custom_frequency_training"
+    assert "pricing_stg.DEMO_CUSTOM_PUBLISH_TRAINING_run_1" in dataset.manifest_sql
+    assert dataset.pk_columns == ("policy_id",)
+    assert dataset.target_column == "claim_count"
+    assert dataset.weight_column == "exposure"
 
 
 def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):
@@ -43,7 +67,8 @@ def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):
 
     workbook_path = Path(completed["rating_workbook_path"])
     model_path = Path(completed["model_artifact_path"])
-    summary_path = tmp_path / "model_summary.txt"
+    assert workbook_path.parent == tmp_path / "demo-custom-publish-test"
+    summary_path = workbook_path.parent / "model_summary.txt"
 
     assert completed["model_version"] == "v1"
     assert completed["effective_from"] == "2026-06-04"
