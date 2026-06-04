@@ -315,13 +315,15 @@ By default, the helper writes a custom-DAG starter:
 - `pricing_models/<model_name>/model.toml`: model identity and validation split
   config.
 - `pricing_models/<model_name>/spec.py`: loads `MODEL_CONFIG` only.
-- `pricing_models/<model_name>/data.py`: where you pull/transform/materialize
-  the final model-ready data and build the `DatasetSpec` for the manifest task.
-- `pricing_models/<model_name>/modeling.py`: where you fit/validate the model,
-  export the SuperGLM rating workbook, and return `CompletedModelBuild`.
+- `pricing_models/<model_name>/data.py`: where you read or stage source data
+  and return small run metadata such as output paths, `effective_from`, and
+  `data_as_of_date`.
+- `pricing_models/<model_name>/modeling.py`: where you build the final pandas
+  model frame, create the frame-backed manifest, fit/validate the model, export
+  the SuperGLM rating workbook, and return `CompletedModelBuild`.
 - `pricing_models/<model_name>/airflow_tasks.py`: thin TaskFlow wrappers around
   your data/modeling code.
-- `dags/<dag_id>.py`: register -> prepare -> manifest -> train/export -> publish.
+- `dags/<dag_id>.py`: register -> prepare -> train/export/create-manifest -> publish.
 
 It refuses to overwrite existing files unless `--force` is passed. Model configs
 are auto-discovered from `pricing_models/<model_name>/model.toml`; no registry
@@ -331,9 +333,10 @@ import edits are needed for normal use. The older all-in-one `ModelSpec` /
 
 - Global code in `pricing_pipeline/` owns database access, schema application,
   dataset manifests, MLflow setup, rating export publishing, and lineage writes.
-- `DatasetSpec` is only the manifest receipt for the final model-ready SQL
-  source. Shared dataset helpers can live in `pricing_pipeline/data/datasets.py`,
-  but custom DAGs usually build it from the prepared task payload.
+- `DatasetSpec.manifest_sql` is only a compatibility path for SQL-backed final
+  model frames and the older factory/demo flow. New custom DAGs should usually
+  create the manifest from the final pandas model frame instead of re-reading
+  source SQL.
 - `ModelSpec` is only needed for the older all-in-one factory path. Custom DAGs
   can ignore it.
 - `target_name` is the final training DataFrame column after your data/modeling
@@ -365,14 +368,10 @@ model package and import the common SQL lifecycle tasks from
 from airflow.sdk import dag
 
 from pricing_models.claim_freq.airflow_tasks import (
-    prepare_training_data,
+    prepare_source_data,
     train_and_export_rates,
 )
-from pricing_models.claim_freq.data import dataset_spec_from_prepared_training
 from pricing_models.claim_freq.spec import MODEL_CONFIG
-from pricing_pipeline.orchestration.manifest_tasks import (
-    create_prepared_dataset_manifest_task,
-)
 from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
 from pricing_pipeline.orchestration.publish_completed_build import (
     publish_completed_model_build_task,
@@ -382,15 +381,11 @@ from pricing_pipeline.orchestration.publish_completed_build import (
 @dag(dag_id="claim_freq_build", schedule=None, catchup=False)
 def claim_freq_build():
     registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
-    prepared = prepare_training_data()
-    manifested = create_prepared_dataset_manifest_task(
-        model_config=MODEL_CONFIG,
-        dataset_builder=dataset_spec_from_prepared_training,
-    )(prepared)
-    build = train_and_export_rates(manifested)
+    prepared = prepare_source_data()
+    build = train_and_export_rates(prepared)
 
     published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(build)
-    registered >> prepared >> manifested >> build >> published
+    registered >> prepared >> build >> published
 
 
 claim_freq_build()
@@ -404,7 +399,12 @@ come from the run context and SQL history, not hardcoded strings:
 ```python
 from airflow.sdk import get_current_context
 
+from pricing_models.claim_freq.data import DATASET_NAME, PK_COLUMNS, SOURCE_SYSTEM
 from pricing_models.claim_freq.modeling import trained_model_version_for_export
+from pricing_pipeline.data.manifest import (
+    ModelFrameManifestSpec,
+    create_model_frame_manifest_with_split,
+)
 from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
 from pricing_pipeline.publishing.rating_export import build_export_id
 
@@ -418,13 +418,29 @@ run_id = context["run_id"]
 # - same export_id reuses the already-published model_version on rerun
 # - new export_id gets the next vN from SQL package history
 # - effective_from from Airflow logical date, a DAG param, or business as-of date
+# - data_as_of_date from the source data snapshot/as-at date
 # - export_id from model_key + Airflow run_id, so reruns are idempotent
 effective_from = effective_from_for_run(logical_date)
+data_as_of_date = prepared["data_as_of_date"]
 export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
 model_version = trained_model_version_for_export(
     engine,
     model_key=MODEL_CONFIG.model_key,
     export_id=export_id,
+)
+manifest = create_model_frame_manifest_with_split(
+    engine,
+    frame=final_model_frame,
+    spec=ModelFrameManifestSpec(
+        dataset_name=DATASET_NAME,
+        source_system=SOURCE_SYSTEM,
+        data_as_of_date=data_as_of_date,
+        pk_columns=PK_COLUMNS,
+        target_column=MODEL_CONFIG.target_name,
+        weight_column="exposure",
+    ),
+    validation_split=MODEL_CONFIG.validation_split,
+    validation_split_artifact_root=settings.validation_split_artifact_root,
 )
 
 return CompletedModelBuild(
@@ -443,46 +459,48 @@ return CompletedModelBuild(
     mlflow_run_id=None,
     # Optional: path to the fitted model artifact, if you save one.
     model_artifact_path=str(model_path),
-    # Optional: include if the prior prepare/materialize task created these.
-    manifest_id=prepared.get("manifest_id"),
-    split_set_id=prepared.get("split_set_id"),
+    # Required in the recommended custom flow: create these from the final
+    # pandas model frame after feature engineering.
+    manifest_id=manifest.manifest_id,
+    split_set_id=manifest.split_set_id,
     # Optional: small numeric validation/training metrics for future review helpers.
     metrics={"deviance": float(model.result.deviance)},
 ).to_dict()
 ```
 
-The manifest task records the model-ready dataset and optional validation split
-metadata. The final publish task records model-run lineage and rate package rows
-to SQL. It does not deploy. It creates a deployable package candidate but does
-not move any deployment slot pointer. If MLflow is disabled or unavailable,
-leave `mlflow_run_id` blank or `None`.
+The model-owned train/export task creates the frame-backed manifest from the
+actual final pandas model frame and records optional validation split metadata.
+The final publish task records model-run lineage and rate package rows to SQL.
+It does not deploy. It creates a deployable package candidate but does not move
+any deployment slot pointer. If MLflow is disabled or unavailable, leave
+`mlflow_run_id` blank or `None`.
 
 A runnable example of this shape lives in:
 
-- `pricing_models/demo_custom_publish/data.py`: demo-only data generation,
-  run-scoped SQL staging materialization, and `DatasetSpec` construction.
+- `pricing_models/demo_custom_publish/data.py`: demo-only data/source helpers
+  and run-scoped handoff metadata.
 - `pricing_models/demo_custom_publish/modeling.py`: demo-only SuperGLM fit,
-  `model.summary(...)`, workbook export, and dynamic
-  model-version/effective-date helpers.
+  final model-frame manifest creation, `model.summary(...)`, workbook export,
+  and dynamic model-version/effective-date helpers.
 - `pricing_models/demo_custom_publish/airflow_tasks.py`: thin Airflow wrappers
   around the demo ETL/modeling functions.
 - `dags/demo_custom_publish.py`: Airflow TaskFlow DAG using custom model tasks
   plus global SQL lifecycle tasks from `pricing_pipeline.orchestration`. The
-  DAG explicitly registers the demo model first, then prepares a run-scoped
-  training source, creates manifest/split metadata for that source,
-  trains/exports, and publishes by reusing the prepared manifest IDs.
+  DAG explicitly registers the demo model first, then prepares source data,
+  trains/exports and creates manifest/split metadata from the final frame, and
+  publishes by using those manifest IDs.
 - `scripts/run_demo_custom_publish.py`: normal Python runner for the same path,
   useful when testing outside Airflow. Set `PRICING_DEMO_CUSTOM_OUTPUT_DIR`
   when a container or work runtime needs a writable artifact directory.
 
 For production DAGs, avoid shared mutable handoff paths like a fixed
 `training_frame.csv` or a fixed work table when separate Airflow runs can
-overlap. Materialize the model-ready frame to a run-specific table or filtered
-view, create the manifest from that same stable source, and write workbook/model
-artifacts under a run-specific directory.
+overlap. Write any temporary files/model artifacts under a run-specific
+directory. The frame-backed manifest records the final pandas model frame; it
+does not require writing engineered features back to SQL Server.
 
-For a work SQL table or view that already exists, the dataset definition can be
-just metadata and SQL. It does not need a custom Python loader:
+For a work SQL table or view that already contains the final model frame,
+`DatasetSpec.manifest_sql` remains available as a compatibility path:
 
 ```python
 DatasetSpec(
@@ -557,8 +575,9 @@ Open http://localhost:8088.
 ## Demo Data
 
 The repository includes a freMTPL-based demo dataset and model specs so local
-smoke tests have runnable data. Work deployments usually point `DatasetSpec`
-objects at approved source tables or views instead of loading demo data.
+smoke tests have runnable data. Work custom DAGs should use their own source
+read/stage code instead of loading demo data; `DatasetSpec` remains available
+only for SQL-backed final frames and the older factory/demo path.
 
 After the schema and bundled demo data are loaded, seed simulated model builds:
 

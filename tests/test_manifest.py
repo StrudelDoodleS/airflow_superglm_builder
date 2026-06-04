@@ -6,14 +6,17 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from pricing_pipeline.data import manifest
 from pricing_pipeline.data.manifest import (
+    ModelFrameManifestSpec,
     create_dataset_manifest_with_split,
     build_column_metadata,
     build_cv_split_set,
     compute_row_order_sha256,
     create_dataset_manifest,
+    create_model_frame_manifest_with_split,
     create_fremtpl_manifest,
     new_manifest_id,
     runtime_dependency_metadata,
@@ -118,9 +121,7 @@ def test_compute_row_order_sha256_depends_on_ordered_primary_keys():
 
 
 def test_compute_row_order_sha256_supports_composite_primary_keys():
-    first = pd.DataFrame(
-        {"PolicyID": [10, 10, 20], "Snapshot": ["2026-01", "2026-02", "2026-01"]}
-    )
+    first = pd.DataFrame({"PolicyID": [10, 10, 20], "Snapshot": ["2026-01", "2026-02", "2026-01"]})
     same = first.copy()
     changed_key_part = pd.DataFrame(
         {"PolicyID": [10, 10, 20], "Snapshot": ["2026-01", "2026-03", "2026-01"]}
@@ -211,6 +212,144 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
+def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
+    engine = FakeEngine()
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [2, 1, 3],
+            "LossCost": [3.4, 1.2, 0.0],
+            "ExposureYears": [1.0, 0.5, 0.25],
+            "BandedDriverAge": ["30-39", "18-29", "40-49"],
+        }
+    )
+    to_sql_calls = []
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append(
+            {
+                "name": name,
+                "schema": kwargs.get("schema"),
+                "frame": self.copy(),
+            }
+        )
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    result = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name="work_loss_cost_frame",
+            source_system="pricing_mart",
+            data_as_of_date="2026-06-04",
+            pk_columns=("PolicyID",),
+            target_column="LossCost",
+            weight_column="ExposureYears",
+        ),
+        manifest_id="manifest_frame_1",
+        validation_split=ValidationSplitConfig.train_test_split(
+            test_size=0.34,
+            random_state=42,
+        ),
+        created_by="unit-test",
+    )
+
+    assert result.manifest_id == "manifest_frame_1"
+    assert result.split_set_id == "manifest_frame_1__train_test_split_test_0_34_seed_42"
+    assert [(call["name"], call["schema"]) for call in to_sql_calls] == [
+        ("DATASET_MANIFEST", "pricing"),
+        ("DATASET_COLUMN", "pricing"),
+        ("CV_SPLIT_SET", "pricing"),
+        ("CV_FOLD", "pricing"),
+    ]
+
+    manifest_row = to_sql_calls[0]["frame"].iloc[0]
+    assert manifest_row["manifest_id"] == "manifest_frame_1"
+    assert manifest_row["dataset_name"] == "work_loss_cost_frame"
+    assert manifest_row["source_system"] == "pricing_mart"
+    assert manifest_row["data_as_of_date"] == date(2026, 6, 4)
+    assert manifest_row["row_count"] == 3
+    assert json.loads(manifest_row["pk_columns_json"]) == ["PolicyID"]
+    assert manifest_row["target_column"] == "LossCost"
+    assert manifest_row["weight_column"] == "ExposureYears"
+    assert manifest_row["created_by"] == "unit-test"
+
+    column_roles = dict(
+        zip(
+            to_sql_calls[1]["frame"]["column_name"],
+            to_sql_calls[1]["frame"]["column_role"],
+            strict=True,
+        )
+    )
+    assert column_roles == {
+        "PolicyID": "KEY",
+        "LossCost": "TARGET",
+        "ExposureYears": "WEIGHT",
+        "BandedDriverAge": "FEATURE",
+    }
+
+    split_row = to_sql_calls[2]["frame"].iloc[0]
+    assert split_row["row_order_sha256"] == compute_row_order_sha256(
+        frame,
+        pk_columns=("PolicyID",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("bad_frame", "match"),
+    [
+        (
+            pd.DataFrame([[1, 10.0], [2, 20.0]], columns=["PolicyID", "PolicyID"]),
+            "duplicate column",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, 2], " ": [10.0, 20.0]}),
+            "blank column",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, None], "LossCost": [10.0, 20.0]}),
+            "null",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, 1], "LossCost": [10.0, 20.0]}),
+            "duplicate",
+        ),
+    ],
+)
+def test_create_model_frame_manifest_rejects_invalid_frame(bad_frame, match):
+    with pytest.raises(ValueError, match=match):
+        create_model_frame_manifest_with_split(
+            FakeEngine(),
+            frame=bad_frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="unit",
+                source_system="unit",
+                data_as_of_date="2026-06-04",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+            ),
+            manifest_id="manifest_bad",
+            validation_split=ValidationSplitConfig.none(),
+        )
+
+
+def test_create_model_frame_manifest_rejects_bad_split_config():
+    with pytest.raises(ValueError, match="n_splits"):
+        create_model_frame_manifest_with_split(
+            FakeEngine(),
+            frame=pd.DataFrame({"PolicyID": [1, 2], "LossCost": [10.0, 20.0]}),
+            spec=ModelFrameManifestSpec(
+                dataset_name="unit",
+                source_system="unit",
+                data_as_of_date="2026-06-04",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+            ),
+            manifest_id="manifest_bad_split",
+            validation_split=ValidationSplitConfig.kfold(n_splits=3),
+        )
+
+
 def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(monkeypatch):
     engine = FakeEngine()
     raw_frame = pd.DataFrame(
@@ -254,9 +393,7 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
     )
 
     assert created == "manifest_1"
-    assert read_calls == [
-        ("SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol", engine)
-    ]
+    assert read_calls == [("SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol", engine)]
     assert engine.events == [
         "to_sql:DATASET_MANIFEST",
         "to_sql:DATASET_COLUMN",
@@ -264,7 +401,9 @@ def test_create_fremtpl_manifest_reads_raw_table_and_persists_manifest_sequence(
         "to_sql:CV_FOLD",
     ]
 
-    assert [(call["name"], call["schema"], call["if_exists"], call["index"]) for call in to_sql_calls] == [
+    assert [
+        (call["name"], call["schema"], call["if_exists"], call["index"]) for call in to_sql_calls
+    ] == [
         ("DATASET_MANIFEST", "pricing", "append", False),
         ("DATASET_COLUMN", "pricing", "append", False),
         ("CV_SPLIT_SET", "pricing", "append", False),
@@ -475,9 +614,7 @@ def test_create_dataset_manifest_uses_dataset_spec_without_fremtpl_assumptions(m
     )
 
     assert created == "work_manifest_1"
-    assert read_calls == [
-        ("SELECT * FROM actuarial.loss_cost ORDER BY PolicyID, Snapshot", engine)
-    ]
+    assert read_calls == [("SELECT * FROM actuarial.loss_cost ORDER BY PolicyID, Snapshot", engine)]
     manifest_row = to_sql_calls[0]["frame"].iloc[0]
     assert manifest_row["dataset_name"] == "work_loss_cost"
     assert manifest_row["source_system"] == "work_sql"

@@ -11,21 +11,27 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pricing_models.demo_custom_publish.data import (  # noqa: E402
+    DATASET_NAME,
     DEFAULT_OUTPUT_DIR,
+    PK_COLUMNS,
+    SOURCE_SYSTEM,
+    TARGET_COLUMN,
+    WEIGHT_COLUMN,
     build_demo_training_frame,
-    dataset_spec_for_training_table,
     materialize_training_source,
     training_table_for_run,
     write_training_frame,
 )
 from pricing_models.demo_custom_publish.modeling import (  # noqa: E402
+    build_final_model_frame,
     effective_from_for_run,
     export_superglm_completed_build,
     trained_model_version_for_export,
 )
 from pricing_models.demo_custom_publish.spec import MODEL_CONFIG  # noqa: E402
-from pricing_pipeline.orchestration.manifest_tasks import (  # noqa: E402
-    create_model_build_manifest,
+from pricing_pipeline.data.manifest import (  # noqa: E402
+    ModelFrameManifestSpec,
+    create_model_frame_manifest_with_split,
 )
 from pricing_pipeline.orchestration.publish_completed_build import (  # noqa: E402
     publish_completed_model_build,
@@ -59,6 +65,7 @@ def run_demo_custom_publish(
     )
 
     frame = build_demo_training_frame()
+    final_frame = build_final_model_frame(frame)
     effective_from = effective_from_for_run()
     export_id = build_export_id(
         MODEL_CONFIG.model_key,
@@ -71,23 +78,30 @@ def run_demo_custom_publish(
     )
     table_name = training_table_for_run(export_id)
     materialize_training_source(engine, frame, table_name=table_name)
-    write_training_frame(frame, resolved_output_dir / export_id)
-    dataset = dataset_spec_for_training_table(table_name)
-    manifest = create_model_build_manifest(
-        engine,
-        dataset=dataset,
-        model_config=MODEL_CONFIG,
-        validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
-        created_by=created_by,
-    )
+    write_training_frame(final_frame, resolved_output_dir / export_id)
 
     completed_build = export_superglm_completed_build(
-        frame,
+        final_frame,
         output_dir=resolved_output_dir,
         model_version=model_version,
         effective_from=effective_from,
         created_by=created_by,
         export_id=export_id,
+    )
+    manifest = create_model_frame_manifest_with_split(
+        engine,
+        frame=final_frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name=DATASET_NAME,
+            source_system=SOURCE_SYSTEM,
+            data_as_of_date=effective_from,
+            pk_columns=PK_COLUMNS,
+            target_column=TARGET_COLUMN,
+            weight_column=WEIGHT_COLUMN,
+        ),
+        validation_split=MODEL_CONFIG.validation_split,
+        validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
+        created_by=created_by,
     )
     completed_build["manifest_id"] = manifest.manifest_id
     completed_build["split_set_id"] = manifest.split_set_id

@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping
 
 import numpy as np
 import pandas as pd
 
 from pricing_pipeline.infra.schema import schema_names_from_connectable
-from pricing_pipeline.models.spec import DatasetSpec
 from pricing_pipeline.orchestration.run_context import scoped_identifier
 
 
-DATASET_NAME = "demo_custom_frequency_training"
+DATASET_NAME = "demo_custom_frequency_model_frame"
 SOURCE_SYSTEM = "demo_sql_server_staging"
 TARGET_COLUMN = "claim_count"
 WEIGHT_COLUMN = "exposure"
+PK_COLUMNS = ("policy_id",)
 TRAINING_TABLE = "DEMO_CUSTOM_PUBLISH_TRAINING"
 TRAINING_SQL_TEMPLATE = """
 SELECT
@@ -40,22 +39,6 @@ def training_table_for_run(run_key: object | None) -> str:
 
 def training_sql_for_table(table_name: str) -> str:
     return TRAINING_SQL_TEMPLATE.format(table_name=table_name)
-
-
-def dataset_spec_for_training_table(table_name: str) -> DatasetSpec:
-    return DatasetSpec(
-        dataset_name=DATASET_NAME,
-        source_system=SOURCE_SYSTEM,
-        manifest_sql=training_sql_for_table(table_name),
-        pk_columns=("policy_id",),
-        target_column=TARGET_COLUMN,
-        weight_column=WEIGHT_COLUMN,
-        raw_loader=None,
-    )
-
-
-def dataset_spec_from_prepared_training(prepared: Mapping[str, object]) -> DatasetSpec:
-    return dataset_spec_for_training_table(str(prepared["training_table"]))
 
 
 def build_demo_training_frame(

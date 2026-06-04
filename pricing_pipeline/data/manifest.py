@@ -7,7 +7,7 @@ import platform
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from importlib import metadata
 from pathlib import Path
 
@@ -39,6 +39,86 @@ class DatasetManifestResult:
             "split_set_id": self.split_set_id,
             "split_artifact_uri": self.split_artifact_uri,
         }
+
+
+def _normalise_date(value: date | datetime | str, *, field_name: str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a date, datetime, or ISO date string")
+
+    cleaned = value.strip()
+    try:
+        return datetime.fromisoformat(cleaned).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(cleaned)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a date, datetime, or ISO date string") from exc
+
+
+def _required_text(value: str | None, *, field_name: str) -> str:
+    if value is None or not str(value).strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return str(value).strip()
+
+
+def _optional_text(value: str | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must be a non-empty string or None")
+    return cleaned
+
+
+def _normalise_pk_columns(value: tuple[str, ...]) -> tuple[str, ...]:
+    if not value:
+        raise ValueError("pk_columns must contain at least one column")
+    cleaned = tuple(_required_text(column, field_name="pk_columns") for column in value)
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError("pk_columns must not contain duplicates")
+    return cleaned
+
+
+@dataclass(frozen=True)
+class ModelFrameManifestSpec:
+    dataset_name: str
+    source_system: str
+    data_as_of_date: date | datetime | str
+    pk_columns: tuple[str, ...]
+    target_column: str | None
+    weight_column: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "dataset_name",
+            _required_text(self.dataset_name, field_name="dataset_name"),
+        )
+        object.__setattr__(
+            self,
+            "source_system",
+            _required_text(self.source_system, field_name="source_system"),
+        )
+        object.__setattr__(
+            self,
+            "data_as_of_date",
+            _normalise_date(self.data_as_of_date, field_name="data_as_of_date"),
+        )
+        object.__setattr__(self, "pk_columns", _normalise_pk_columns(self.pk_columns))
+        object.__setattr__(
+            self,
+            "target_column",
+            _optional_text(self.target_column, field_name="target_column"),
+        )
+        object.__setattr__(
+            self,
+            "weight_column",
+            _optional_text(self.weight_column, field_name="weight_column"),
+        )
 
 
 def _package_version(package_name: str) -> str | None:
@@ -232,9 +312,7 @@ def build_validation_split_set(
             {
                 "split_set_id": split_set_id,
                 "manifest_id": manifest_id,
-                "split_mode": "MATERIALIZED"
-                if artifact_uri is not None
-                else "REPLAYABLE",
+                "split_mode": "MATERIALIZED" if artifact_uri is not None else "REPLAYABLE",
                 "splitter_class": splitter_class,
                 "splitter_params_json": json.dumps(params, sort_keys=True),
                 "row_order_sha256": compute_row_order_sha256(frame, pk_columns=pk_columns),
@@ -303,8 +381,7 @@ def validation_split_indices(
             random_state=validation_split.random_state,
         )
         return [
-            (np.asarray(train_idx), np.asarray(test_idx))
-            for train_idx, test_idx in kf.split(frame)
+            (np.asarray(train_idx), np.asarray(test_idx)) for train_idx, test_idx in kf.split(frame)
         ]
     if validation_split.method == "train_test_split":
         indices = np.arange(len(frame), dtype=np.int64)
@@ -350,28 +427,74 @@ def write_validation_split_npz(
     return file_sha256(output_path)
 
 
-def create_dataset_manifest_with_split(
+def _validate_model_frame(
+    frame: pd.DataFrame,
+    *,
+    spec: ModelFrameManifestSpec,
+    validation_split: ValidationSplitConfig,
+) -> None:
+    if frame.empty:
+        raise ValueError("model frame must not be empty")
+
+    column_names = [str(column).strip() for column in frame.columns]
+    if any(not column for column in column_names):
+        raise ValueError("model frame contains a blank column name")
+    if len(set(column_names)) != len(column_names):
+        raise ValueError("model frame contains duplicate column names")
+
+    required_columns = list(spec.pk_columns)
+    if spec.target_column is not None:
+        required_columns.append(spec.target_column)
+    if spec.weight_column is not None:
+        required_columns.append(spec.weight_column)
+    missing = [column for column in required_columns if column not in frame.columns]
+    if missing:
+        raise ValueError("model frame missing required columns: " + ", ".join(missing))
+
+    if frame.loc[:, list(spec.pk_columns)].isna().any().any():
+        raise ValueError("model frame primary key columns contain null values")
+    if frame.duplicated(subset=list(spec.pk_columns)).any():
+        raise ValueError("model frame primary key columns contain duplicate values")
+
+    if (
+        validation_split.stratify_column is not None
+        and validation_split.stratify_column not in frame.columns
+    ):
+        raise ValueError(
+            "validation_split.stratify_column is missing from model frame: "
+            f"{validation_split.stratify_column}"
+        )
+    if validation_split.method == "kfold":
+        n_splits = int(validation_split.n_splits or 5)
+        if n_splits > len(frame):
+            raise ValueError(
+                f"validation_split.n_splits ({n_splits}) must not exceed row count ({len(frame)})"
+            )
+
+
+def create_model_frame_manifest_with_split(
     engine: Engine,
     *,
-    dataset: DatasetSpec,
-    manifest_id: str,
+    frame: pd.DataFrame,
+    spec: ModelFrameManifestSpec,
+    manifest_id: str | None = None,
     validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
     validation_split_artifact_root: Path | None = None,
     created_by: str = "airflow",
 ) -> DatasetManifestResult:
-    frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
-
+    _validate_model_frame(frame, spec=spec, validation_split=validation_split)
+    manifest_id = manifest_id or new_manifest_id(spec.dataset_name)
     manifest_df = pd.DataFrame(
         [
             {
                 "manifest_id": manifest_id,
-                "dataset_name": dataset.dataset_name,
-                "source_system": dataset.source_system,
-                "data_as_of_date": date.today(),
+                "dataset_name": spec.dataset_name,
+                "source_system": spec.source_system,
+                "data_as_of_date": spec.data_as_of_date,
                 "row_count": int(len(frame)),
-                "pk_columns_json": json.dumps(list(dataset.pk_columns)),
-                "target_column": dataset.target_column,
-                "weight_column": dataset.weight_column,
+                "pk_columns_json": json.dumps(list(spec.pk_columns)),
+                "target_column": spec.target_column,
+                "weight_column": spec.weight_column,
                 "created_by": created_by,
             }
         ]
@@ -379,18 +502,16 @@ def create_dataset_manifest_with_split(
     column_df = build_column_metadata(
         frame,
         manifest_id=manifest_id,
-        pk_columns=dataset.pk_columns,
-        target_column=dataset.target_column,
-        weight_column=dataset.weight_column,
+        pk_columns=spec.pk_columns,
+        target_column=spec.target_column,
+        weight_column=spec.weight_column,
     )
     split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
     split_artifact_uri = None
     split_artifact_sha256 = None
     if validation_split.materialize and split_set_id is not None:
         if validation_split_artifact_root is None:
-            raise ValueError(
-                "validation_split_artifact_root is required when materialize=true"
-            )
+            raise ValueError("validation_split_artifact_root is required when materialize=true")
         artifact_path = Path(validation_split_artifact_root) / f"{split_set_id}.npz"
         split_artifact_sha256 = write_validation_split_npz(
             frame,
@@ -403,7 +524,7 @@ def create_dataset_manifest_with_split(
         frame,
         manifest_id=manifest_id,
         validation_split=validation_split,
-        pk_columns=dataset.pk_columns,
+        pk_columns=spec.pk_columns,
         created_by=created_by,
         artifact_uri=split_artifact_uri,
         artifact_sha256=split_artifact_sha256,
@@ -455,6 +576,34 @@ def create_dataset_manifest_with_split(
         manifest_id=manifest_id,
         split_set_id=split_set_id,
         split_artifact_uri=split_artifact_uri,
+    )
+
+
+def create_dataset_manifest_with_split(
+    engine: Engine,
+    *,
+    dataset: DatasetSpec,
+    manifest_id: str,
+    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
+    validation_split_artifact_root: Path | None = None,
+    created_by: str = "airflow",
+) -> DatasetManifestResult:
+    frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
+    return create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name=dataset.dataset_name,
+            source_system=dataset.source_system,
+            data_as_of_date=date.today(),
+            pk_columns=dataset.pk_columns,
+            target_column=dataset.target_column,
+            weight_column=dataset.weight_column,
+        ),
+        manifest_id=manifest_id,
+        validation_split=validation_split,
+        validation_split_artifact_root=validation_split_artifact_root,
+        created_by=created_by,
     )
 
 

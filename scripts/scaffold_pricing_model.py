@@ -181,70 +181,34 @@ def _custom_spec_template() -> str:
 
 
 def _custom_data_template(*, package_name: str) -> str:
-    table_prefix = f"{package_name.upper()}_MODEL_READY"
     return dedent(
         f"""\
         from __future__ import annotations
 
         from pathlib import Path
-        from typing import Any, Mapping
+        from typing import Any
 
-        from pricing_models.{package_name}.spec import MODEL_CONFIG
-        from pricing_pipeline.models.spec import DatasetSpec
-        from pricing_pipeline.orchestration.run_context import scoped_identifier
-
-
-        DATASET_NAME = "{package_name}_model_ready"
+        DATASET_NAME = "{package_name}_model_frame"
         SOURCE_SYSTEM = "sql_server"
-        MODEL_READY_SCHEMA = "REPLACE_ME_SCHEMA"
-        MODEL_READY_TABLE_PREFIX = "{table_prefix}"
         PK_COLUMNS = ("REPLACE_ME_ID",)
         WEIGHT_COLUMN: str | None = None
         DEFAULT_OUTPUT_ROOT = Path("state/{package_name}")
 
 
-        def model_ready_table_for_run(run_key: object | None) -> str:
-            return scoped_identifier(MODEL_READY_TABLE_PREFIX, run_key)
-
-
-        def manifest_sql_for_table(schema_name: str, table_name: str) -> str:
-            order_by = ", ".join(PK_COLUMNS)
-            return (
-                "SELECT *\\n"
-                f"FROM {{schema_name}}.{{table_name}}\\n"
-                f"ORDER BY {{order_by}}"
-            )
-
-
-        def dataset_spec_from_prepared(prepared: Mapping[str, Any]) -> DatasetSpec:
-            schema_name = str(prepared.get("modeling_schema") or MODEL_READY_SCHEMA)
-            table_name = str(prepared["modeling_table"])
-            return DatasetSpec(
-                dataset_name=DATASET_NAME,
-                source_system=SOURCE_SYSTEM,
-                manifest_sql=manifest_sql_for_table(schema_name, table_name),
-                pk_columns=PK_COLUMNS,
-                target_column=MODEL_CONFIG.target_name,
-                weight_column=WEIGHT_COLUMN,
-                raw_loader=None,
-            )
-
-
-        def prepare_model_ready_data(
+        def prepare_source_data(
             engine,
             *,
             run_key: str,
             output_root: str | Path = DEFAULT_OUTPUT_ROOT,
-        ) -> dict[str, str]:
+        ) -> dict[str, Any]:
             output_dir = Path(output_root) / run_key
             output_dir.mkdir(parents=True, exist_ok=True)
-            table_name = model_ready_table_for_run(run_key)
 
             raise NotImplementedError(
-                "Load source data, build final model-ready features, write a "
-                f"run-specific table/file for {{table_name}} under {{output_dir}}, "
-                "then return modeling_schema, "
-                "modeling_table, training_frame_path, output_dir, and run_key."
+                "Read or stage source data for this run, write any temporary "
+                f"artifacts under {{output_dir}}, then return run_key, output_dir, "
+                "effective_from, data_as_of_date, and any paths/IDs needed by "
+                "modeling.py."
             )
         """
     )
@@ -259,9 +223,21 @@ def _custom_modeling_template(*, package_name: str) -> str:
         from pathlib import Path
         from typing import Any, Mapping
 
+        import pandas as pd
         from sqlalchemy import text
 
+        from pricing_models.{package_name}.data import (
+            DATASET_NAME,
+            PK_COLUMNS,
+            SOURCE_SYSTEM,
+            WEIGHT_COLUMN,
+        )
         from pricing_models.{package_name}.spec import MODEL_CONFIG
+        from pricing_pipeline.data.manifest import (
+            ModelFrameManifestSpec,
+            create_model_frame_manifest_with_split,
+            validation_split_indices,
+        )
         from pricing_pipeline.infra.schema import schema_names_from_connectable
         from pricing_pipeline.orchestration.publish_completed_build import (
             CompletedModelBuild,
@@ -280,6 +256,13 @@ def _custom_modeling_template(*, package_name: str) -> str:
             if not cleaned:
                 return date.today().isoformat()
             return cleaned[:10]
+
+
+        def _required_payload_text(prepared: Mapping[str, Any], field_name: str) -> str:
+            value = prepared.get(field_name)
+            if value is None or not str(value).strip():
+                raise ValueError(f"prepared payload field {{field_name!r}} is required")
+            return str(value).strip()
 
 
         def existing_model_version_for_export(
@@ -344,6 +327,34 @@ def _custom_modeling_template(*, package_name: str) -> str:
             return next_model_version(engine, model_key=model_key)
 
 
+        def read_prepared_source(prepared: Mapping[str, Any]) -> pd.DataFrame:
+            raise NotImplementedError(
+                "Read the source artifact/table identified by prepared and return a "
+                "pandas DataFrame."
+            )
+
+
+        def build_final_model_frame(raw: pd.DataFrame) -> pd.DataFrame:
+            # Add target construction, pd.cut/binning, feature engineering, filtering,
+            # and final feature selection here.
+            return raw.copy()
+
+
+        def fit_validate_export_rating_tables(
+            frame: pd.DataFrame,
+            *,
+            split_indices: list[tuple[Any, Any]],
+            output_dir: str | Path,
+            model_version: str,
+            effective_from: str,
+        ) -> tuple[str | Path, str | Path | None, dict[str, float]]:
+            raise NotImplementedError(
+                "Fit/validate the model using split_indices, export the rating "
+                "workbook, optionally persist the model artifact, and return "
+                "(rating_workbook_path, model_artifact_path, metrics)."
+            )
+
+
         def completed_model_build_payload(
             prepared: Mapping[str, Any],
             *,
@@ -352,6 +363,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
             effective_from: str,
             export_id: str,
             created_by: str,
+            manifest_id: str,
+            split_set_id: str | None,
             model_artifact_path: str | Path | None = None,
             metrics: dict[str, float] | None = None,
         ) -> dict[str, Any]:
@@ -361,8 +374,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
                 effective_from=effective_from,
                 created_by=created_by,
                 export_id=export_id,
-                manifest_id=prepared.get("manifest_id"),
-                split_set_id=prepared.get("split_set_id"),
+                manifest_id=manifest_id,
+                split_set_id=split_set_id,
                 mlflow_run_id=None,
                 model_artifact_path=(
                     str(model_artifact_path) if model_artifact_path is not None else None
@@ -375,6 +388,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
             prepared: Mapping[str, Any],
             *,
             engine,
+            settings,
             created_by: str = "airflow",
         ) -> dict[str, Any]:
             run_key = str(prepared.get("run_key") or "manual")
@@ -384,13 +398,51 @@ def _custom_modeling_template(*, package_name: str) -> str:
                 model_key=MODEL_CONFIG.model_key,
                 export_id=export_id,
             )
-            effective_from = effective_from_for_run(prepared.get("effective_from"))
+            effective_from = effective_from_for_run(
+                _required_payload_text(prepared, "effective_from")
+            )
+            data_as_of_date = _required_payload_text(prepared, "data_as_of_date")
 
-            raise NotImplementedError(
-                "Read the prepared model-ready data, fit/validate SuperGLM, export "
-                "the rating workbook, then return completed_model_build_payload(...) "
-                f"with export_id={{export_id!r}}, model_version={{model_version!r}}, "
-                f"and effective_from={{effective_from!r}}."
+            raw = read_prepared_source(prepared)
+            frame = build_final_model_frame(raw)
+            frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
+            split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
+            rating_workbook_path, model_artifact_path, metrics = (
+                fit_validate_export_rating_tables(
+                    frame,
+                    split_indices=split_indices,
+                    output_dir=prepared.get("output_dir") or Path("state") / run_key,
+                    model_version=model_version,
+                    effective_from=effective_from,
+                )
+            )
+            manifest = create_model_frame_manifest_with_split(
+                engine,
+                frame=frame,
+                spec=ModelFrameManifestSpec(
+                    dataset_name=DATASET_NAME,
+                    source_system=SOURCE_SYSTEM,
+                    data_as_of_date=data_as_of_date,
+                    pk_columns=PK_COLUMNS,
+                    target_column=MODEL_CONFIG.target_name,
+                    weight_column=WEIGHT_COLUMN,
+                ),
+                validation_split=MODEL_CONFIG.validation_split,
+                validation_split_artifact_root=settings.validation_split_artifact_root,
+                created_by=created_by,
+            )
+
+            return completed_model_build_payload(
+                prepared,
+                rating_workbook_path=rating_workbook_path,
+                model_version=model_version,
+                effective_from=effective_from,
+                export_id=export_id,
+                created_by=created_by,
+                manifest_id=manifest.manifest_id,
+                split_set_id=manifest.split_set_id,
+                model_artifact_path=model_artifact_path,
+                metrics=metrics,
             )
         """
     )
@@ -406,38 +458,48 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
 
         from pricing_models.{package_name}.data import (
             DEFAULT_OUTPUT_ROOT,
-            prepare_model_ready_data,
+            prepare_source_data,
         )
-        from pricing_models.{package_name}.modeling import train_validate_export_model
+        from pricing_models.{package_name}.modeling import (
+            effective_from_for_run,
+            train_validate_export_model,
+        )
         from pricing_pipeline.orchestration.run_context import run_key_for_value
 
 
-        def prepare_model_ready_data_task(
+        def prepare_source_data_task(
             *,
             output_root: str | Path = DEFAULT_OUTPUT_ROOT,
             runtime_module: str | None = None,
-            task_id: str = "prepare_model_ready_data",
+            task_id: str = "prepare_source_data",
         ):
             from airflow.sdk import get_current_context, task
             from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 
             @task(task_id=task_id)
-            def _prepare_model_ready_data() -> dict[str, str]:
+            def _prepare_source_data() -> dict[str, Any]:
                 runtime = runtime_from_env_or_module(runtime_module)
                 context = get_current_context()
+                logical_date = _context_logical_date(context)
                 run_value = (
                     context.get("run_id")
-                    or _context_logical_date(context)
+                    or logical_date
                     or "manual"
                 )
                 run_key = run_key_for_value(run_value)
-                return prepare_model_ready_data(
+                payload = prepare_source_data(
                     runtime.get_engine(),
                     run_key=run_key,
                     output_root=output_root,
                 )
+                stable_effective_from = effective_from_for_run(logical_date)
+                payload.setdefault("run_key", run_key)
+                payload.setdefault("output_dir", str(Path(output_root) / run_key))
+                payload.setdefault("effective_from", stable_effective_from)
+                payload.setdefault("data_as_of_date", stable_effective_from)
+                return payload
 
-            return _prepare_model_ready_data
+            return _prepare_source_data
 
 
         def train_validate_export_task(
@@ -455,10 +517,9 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
                 payload = train_validate_export_model(
                     dict(prepared),
                     engine=runtime.get_engine(),
+                    settings=runtime.settings,
                     created_by=created_by,
                 )
-                payload.setdefault("manifest_id", prepared.get("manifest_id"))
-                payload.setdefault("split_set_id", prepared.get("split_set_id"))
                 return payload
 
             return _train_validate_export
@@ -487,14 +548,10 @@ def _custom_dag_template(*, package_name: str, dag_id: str) -> str:
         from airflow.sdk import dag
 
         from pricing_models.{package_name}.airflow_tasks import (
-            prepare_model_ready_data_task,
+            prepare_source_data_task,
             train_validate_export_task,
         )
-        from pricing_models.{package_name}.data import dataset_spec_from_prepared
         from pricing_models.{package_name}.spec import MODEL_CONFIG
-        from pricing_pipeline.orchestration.manifest_tasks import (
-            create_prepared_dataset_manifest_task,
-        )
         from pricing_pipeline.orchestration.model_registry_tasks import (
             register_pricing_model_task,
         )
@@ -511,17 +568,13 @@ def _custom_dag_template(*, package_name: str, dag_id: str) -> str:
         )
         def {dag_id}():
             registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
-            prepared = prepare_model_ready_data_task()()
-            manifested = create_prepared_dataset_manifest_task(
-                model_config=MODEL_CONFIG,
-                dataset_builder=dataset_spec_from_prepared,
-            )(prepared)
-            completed = train_validate_export_task()(manifested)
+            prepared = prepare_source_data_task()()
+            completed = train_validate_export_task()(prepared)
             published = publish_completed_model_build_task(
                 model_config=MODEL_CONFIG,
             )(completed)
 
-            registered >> prepared >> manifested >> completed >> published
+            registered >> prepared >> completed >> published
 
 
         {dag_id}()

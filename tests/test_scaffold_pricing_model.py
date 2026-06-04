@@ -48,25 +48,29 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "FEATURE_COLUMNS" not in spec
 
     data = (package_dir / "data.py").read_text(encoding="utf-8")
-    assert "def prepare_model_ready_data" in data
-    assert "def dataset_spec_from_prepared" in data
-    assert "DatasetSpec(" in data
-    assert "modeling_table" in data
-    assert "target_column=MODEL_CONFIG.target_name" in data
+    assert "def prepare_source_data" in data
+    assert "DatasetSpec" not in data
+    assert "dataset_spec_from_prepared" not in data
+    assert "manifest_sql" not in data
 
     modeling = (package_dir / "modeling.py").read_text(encoding="utf-8")
     assert "def train_validate_export_model" in modeling
     assert "CompletedModelBuild(" in modeling
+    assert "ModelFrameManifestSpec" in modeling
+    assert "create_model_frame_manifest_with_split" in modeling
+    assert "manifest_id=manifest.manifest_id" in modeling
+    assert "split_set_id=manifest.split_set_id" in modeling
     assert "def resolve_model_version" in modeling
 
     airflow_tasks = (package_dir / "airflow_tasks.py").read_text(encoding="utf-8")
-    assert "def prepare_model_ready_data_task" in airflow_tasks
+    assert "def prepare_source_data_task" in airflow_tasks
     assert "def train_validate_export_task" in airflow_tasks
 
     dag = dag_path.read_text(encoding="utf-8")
     assert "from pricing_models.my_model.spec import MODEL_CONFIG" in dag
     assert "register_pricing_model_task" in dag
-    assert "create_prepared_dataset_manifest_task" in dag
+    assert "create_prepared_dataset_manifest_task" not in dag
+    assert "dataset_spec_from_prepared" not in dag
     assert "publish_completed_model_build_task" in dag
     assert 'dag_id="pricing_my_model"' in dag
     assert "build_pricing_model_dag" not in dag
