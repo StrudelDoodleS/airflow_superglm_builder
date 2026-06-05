@@ -24,17 +24,21 @@ from pricing_models.demo_custom_publish.data import (  # noqa: E402
 )
 from pricing_models.demo_custom_publish.modeling import (  # noqa: E402
     build_final_model_frame,
-    effective_from_for_run,
     export_superglm_completed_build,
-    trained_model_version_for_export,
 )
 from pricing_models.demo_custom_publish.spec import MODEL_CONFIG  # noqa: E402
 from pricing_pipeline.data.manifest import (  # noqa: E402
     ModelFrameManifestSpec,
     create_model_frame_manifest_with_split,
 )
+from pricing_pipeline.orchestration.completed_build_helpers import (  # noqa: E402
+    effective_from_for_run,
+)
 from pricing_pipeline.orchestration.publish_completed_build import (  # noqa: E402
     publish_completed_model_build,
+)
+from pricing_pipeline.publishing.model_versions import (  # noqa: E402
+    resolve_model_version_for_export,
 )
 from pricing_pipeline.publishing.rating_export import build_export_id  # noqa: E402
 from pricing_pipeline.publishing.model_registry import ensure_pricing_model  # noqa: E402
@@ -71,7 +75,7 @@ def run_demo_custom_publish(
         MODEL_CONFIG.model_key,
         f"python__{effective_from}",
     )
-    model_version = trained_model_version_for_export(
+    model_version = resolve_model_version_for_export(
         engine,
         model_key=MODEL_CONFIG.model_key,
         export_id=export_id,
@@ -80,14 +84,6 @@ def run_demo_custom_publish(
     materialize_training_source(engine, frame, table_name=table_name)
     write_training_frame(final_frame, resolved_output_dir / export_id)
 
-    completed_build = export_superglm_completed_build(
-        final_frame,
-        output_dir=resolved_output_dir,
-        model_version=model_version,
-        effective_from=effective_from,
-        created_by=created_by,
-        export_id=export_id,
-    )
     manifest = create_model_frame_manifest_with_split(
         engine,
         frame=final_frame,
@@ -103,8 +99,16 @@ def run_demo_custom_publish(
         validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
         created_by=created_by,
     )
-    completed_build["manifest_id"] = manifest.manifest_id
-    completed_build["split_set_id"] = manifest.split_set_id
+    completed_build = export_superglm_completed_build(
+        final_frame,
+        output_dir=resolved_output_dir,
+        model_version=model_version,
+        effective_from=effective_from,
+        created_by=created_by,
+        export_id=export_id,
+        manifest_id=manifest.manifest_id,
+        split_set_id=manifest.split_set_id,
+    )
 
     return publish_completed_model_build(
         engine,

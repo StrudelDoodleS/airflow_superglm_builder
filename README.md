@@ -400,12 +400,15 @@ come from the run context and SQL history, not hardcoded strings:
 from airflow.sdk import get_current_context
 
 from pricing_models.claim_freq.data import DATASET_NAME, PK_COLUMNS, SOURCE_SYSTEM
-from pricing_models.claim_freq.modeling import trained_model_version_for_export
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
     create_model_frame_manifest_with_split,
 )
-from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
+from pricing_pipeline.orchestration.completed_build_helpers import (
+    completed_model_build_payload,
+    effective_from_for_run,
+)
+from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
 from pricing_pipeline.publishing.rating_export import build_export_id
 
 
@@ -423,7 +426,7 @@ run_id = context["run_id"]
 effective_from = effective_from_for_run(logical_date)
 data_as_of_date = prepared["data_as_of_date"]
 export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
-model_version = trained_model_version_for_export(
+model_version = resolve_model_version_for_export(
     engine,
     model_key=MODEL_CONFIG.model_key,
     export_id=export_id,
@@ -443,7 +446,7 @@ manifest = create_model_frame_manifest_with_split(
     validation_split_artifact_root=settings.validation_split_artifact_root,
 )
 
-return CompletedModelBuild(
+return completed_model_build_payload(
     # Required: the SuperGLM workbook exported by this task. It must be readable
     # by the worker running the downstream publish task.
     rating_workbook_path=str(workbook_path),
@@ -481,9 +484,9 @@ A runnable example of this shape lives in:
   and run-scoped handoff metadata.
 - `pricing_models/demo_custom_publish/modeling.py`: demo-only SuperGLM fit,
   final model-frame manifest creation, `model.summary(...)`, workbook export,
-  and dynamic model-version/effective-date helpers.
+  and completed-build payload construction.
 - `pricing_models/demo_custom_publish/airflow_tasks.py`: thin Airflow wrappers
-  around the demo ETL/modeling functions.
+  around the demo ETL/modeling functions using shared run metadata helpers.
 - `dags/demo_custom_publish.py`: Airflow TaskFlow DAG using custom model tasks
   plus global SQL lifecycle tasks from `pricing_pipeline.orchestration`. The
   DAG explicitly registers the demo model first, then prepares source data,

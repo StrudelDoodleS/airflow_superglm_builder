@@ -49,22 +49,38 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
 
     data = (package_dir / "data.py").read_text(encoding="utf-8")
     assert "def prepare_source_data" in data
+    assert "output_dir: str | Path" in data
+    assert "output_root" not in data
     assert "DatasetSpec" not in data
     assert "dataset_spec_from_prepared" not in data
     assert "manifest_sql" not in data
 
     modeling = (package_dir / "modeling.py").read_text(encoding="utf-8")
     assert "def train_validate_export_model" in modeling
-    assert "CompletedModelBuild(" in modeling
+    assert "def read_prepared_source" in modeling
+    assert "def build_final_model_frame" in modeling
+    assert "def fit_validate_export_rating_tables" in modeling
+    assert "completed_build_helpers import" in modeling
+    assert "completed_model_build_payload(" in modeling
+    assert "resolve_model_version_for_export" in modeling
     assert "ModelFrameManifestSpec" in modeling
     assert "create_model_frame_manifest_with_split" in modeling
     assert "manifest_id=manifest.manifest_id" in modeling
     assert "split_set_id=manifest.split_set_id" in modeling
-    assert "def resolve_model_version" in modeling
+    assert "CompletedModelBuild(" not in modeling
+    assert "def effective_from_for_run" not in modeling
+    assert "def existing_model_version_for_export" not in modeling
+    assert "def next_model_version" not in modeling
+    assert "def resolve_model_version" not in modeling
+    assert "def completed_model_build_payload" not in modeling
 
     airflow_tasks = (package_dir / "airflow_tasks.py").read_text(encoding="utf-8")
     assert "def prepare_source_data_task" in airflow_tasks
     assert "def train_validate_export_task" in airflow_tasks
+    assert "airflow_run_metadata import" in airflow_tasks
+    assert "task_run_metadata(" in airflow_tasks
+    assert "merge_prepared_payload_metadata(" in airflow_tasks
+    assert "def _context_logical_date" not in airflow_tasks
 
     dag = dag_path.read_text(encoding="utf-8")
     assert "from pricing_models.my_model.spec import MODEL_CONFIG" in dag

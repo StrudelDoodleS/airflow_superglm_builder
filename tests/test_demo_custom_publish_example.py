@@ -1,97 +1,32 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
 
 
-def test_demo_version_helper_increments_trained_model_versions_only():
-    from pricing_models.demo_custom_publish.modeling import next_model_version_from_existing
-
-    assert next_model_version_from_existing([]) == "v1"
-    assert next_model_version_from_existing(["v1", "v2"]) == "v3"
-    assert next_model_version_from_existing(["manual-v99", "v4", "20260604"]) == "v5"
-
-
-def test_demo_version_for_existing_export_reuses_existing_model_version(monkeypatch):
-    from pricing_models.demo_custom_publish import modeling
-
-    engine = object()
-    calls = []
-
-    monkeypatch.setattr(
-        modeling,
-        "existing_model_version_for_export",
-        lambda engine_arg, *, model_key, export_id: (
-            calls.append(("existing", engine_arg, model_key, export_id)) or "v7"
-        ),
+def test_demo_custom_publish_uses_shared_version_and_payload_helpers():
+    modeling = Path("pricing_models/demo_custom_publish/modeling.py").read_text(encoding="utf-8")
+    airflow_tasks = Path("pricing_models/demo_custom_publish/airflow_tasks.py").read_text(
+        encoding="utf-8"
     )
-    monkeypatch.setattr(
-        modeling,
-        "next_trained_model_version",
-        lambda engine_arg, *, model_key=modeling.MODEL_KEY: (
-            calls.append(("next", engine_arg, model_key)) or "v8"
-        ),
-    )
+    runner = Path("scripts/run_demo_custom_publish.py").read_text(encoding="utf-8")
 
-    assert (
-        modeling.trained_model_version_for_export(
-            engine,
-            model_key="DEMO_MODEL",
-            export_id="demo-export-1",
-        )
-        == "v7"
-    )
-    assert calls == [("existing", engine, "DEMO_MODEL", "demo-export-1")]
-
-
-def test_demo_version_for_new_export_uses_next_trained_version(monkeypatch):
-    from pricing_models.demo_custom_publish import modeling
-
-    engine = object()
-    calls = []
-
-    monkeypatch.setattr(
-        modeling,
-        "existing_model_version_for_export",
-        lambda engine_arg, *, model_key, export_id: (
-            calls.append(("existing", engine_arg, model_key, export_id)) or None
-        ),
-    )
-    monkeypatch.setattr(
-        modeling,
-        "next_trained_model_version",
-        lambda engine_arg, *, model_key=modeling.MODEL_KEY: (
-            calls.append(("next", engine_arg, model_key)) or "v8"
-        ),
-    )
-
-    assert (
-        modeling.trained_model_version_for_export(
-            engine,
-            model_key="DEMO_MODEL",
-            export_id="demo-export-2",
-        )
-        == "v8"
-    )
-    assert calls == [
-        ("existing", engine, "DEMO_MODEL", "demo-export-2"),
-        ("next", engine, "DEMO_MODEL"),
-    ]
+    assert "completed_build_helpers import" in modeling
+    assert "completed_model_build_payload(" in modeling
+    assert "def existing_model_version_for_export" not in modeling
+    assert "def next_trained_model_version" not in modeling
+    assert "def effective_from_for_run" not in modeling
+    assert "resolve_model_version_for_export" in airflow_tasks
+    assert "resolve_model_version_for_export" in runner
 
 
 def test_demo_effective_from_uses_run_date_not_hardcoded_string():
     from pricing_models.demo_custom_publish.data import training_table_for_run
-    from pricing_models.demo_custom_publish.modeling import (
-        effective_from_for_run,
-    )
     from pricing_pipeline.orchestration.run_context import (
         run_key_for_value,
     )
 
-    assert effective_from_for_run(date(2026, 6, 4)) == "2026-06-04"
-    assert effective_from_for_run(datetime(2026, 6, 4, 23, 15, tzinfo=UTC)) == "2026-06-04"
     assert run_key_for_value("manual__2026-06-04T23:15:00+00:00").startswith(
         "manual__20260604t2315000000_"
     )
@@ -163,6 +98,8 @@ def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):
         effective_from="2026-06-04",
         created_by="pytest",
         export_id="demo-custom-publish-test",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
     )
 
     workbook_path = Path(completed["rating_workbook_path"])
@@ -174,6 +111,8 @@ def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):
     assert completed["effective_from"] == "2026-06-04"
     assert completed["created_by"] == "pytest"
     assert completed["export_id"] == "demo-custom-publish-test"
+    assert completed["manifest_id"] == "manifest-1"
+    assert completed["split_set_id"] == "split-1"
     assert completed["mlflow_run_id"] is None
     assert completed["metrics"]["row_count"] == 180
     assert completed["metrics"]["deviance"] > 0
