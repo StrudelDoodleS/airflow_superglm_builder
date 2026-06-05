@@ -289,8 +289,11 @@ model development, most edits should be under `pricing_models/`.
 ```text
 pricing_models/<model_name>/
   model.toml   # model key, label, target, deployment slot, validation split
-  spec.py       # model key, model metadata, dataset choice, feature list
-  training.py   # model-specific SQL, feature prep, and SuperGLM construction
+  spec.py       # loads MODEL_CONFIG from model.toml
+  sql/          # optional model-local SQL scripts used by data.py
+  data.py       # source reads/staging and small run metadata
+  modeling.py   # final frame construction, fit/validate/export, manifest payload
+  airflow_tasks.py # thin TaskFlow wrappers around data/modeling code
 
 pricing_pipeline/
   data/          # dataset specs, raw loaders, manifests, CV split metadata
@@ -315,6 +318,9 @@ By default, the helper writes a custom-DAG starter:
 - `pricing_models/<model_name>/model.toml`: model identity and validation split
   config.
 - `pricing_models/<model_name>/spec.py`: loads `MODEL_CONFIG` only.
+- `pricing_models/<model_name>/sql/source_data.sql`: a comment-only placeholder
+  for model-local source SQL. Use it when useful, or ignore it and call your
+  team's existing data-access helper from `data.py`.
 - `pricing_models/<model_name>/data.py`: where you read or stage source data
   and return small run metadata such as output paths, `effective_from`, and
   `data_as_of_date`.
@@ -331,8 +337,9 @@ import edits are needed for normal use. The older all-in-one `ModelSpec` /
 `build_pricing_model_dag(...)` scaffold is still available with
 `--template factory`.
 
-- Global code in `pricing_pipeline/` owns database access, schema application,
-  dataset manifests, MLflow setup, rating export publishing, and lineage writes.
+- Global code in `pricing_pipeline/` owns SQL lifecycle access for schema
+  application, dataset manifests, rating export publishing, and lineage writes.
+  Source data access stays model/team-owned in `data.py`.
 - `DatasetSpec.manifest_sql` is only a compatibility path for SQL-backed final
   model frames and the older factory/demo flow. New custom DAGs should usually
   create the manifest from the final pandas model frame instead of re-reading

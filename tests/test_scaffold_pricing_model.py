@@ -25,6 +25,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert result.created_files == (
         package_dir / "__init__.py",
         package_dir / "model.toml",
+        package_dir / "sql" / "source_data.sql",
         package_dir / "spec.py",
         package_dir / "data.py",
         package_dir / "modeling.py",
@@ -42,12 +43,21 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "test_size = 0.20" in model_toml
 
     spec = (package_dir / "spec.py").read_text(encoding="utf-8")
+    assert '"""Load the TOML model configuration for this pricing model."""' in spec
     assert "MODEL_CONFIG = load_model_build_config" in spec
     assert "ModelSpec" not in spec
     assert "TRAINING_SQL" not in spec
     assert "FEATURE_COLUMNS" not in spec
 
+    sql = (package_dir / "sql" / "source_data.sql").read_text(encoding="utf-8")
+    assert "Source-data query placeholder for MY_MODEL." in sql
+    assert "data.py" in sql
+    assert "SELECT" in sql
+
     data = (package_dir / "data.py").read_text(encoding="utf-8")
+    assert '"""Read or stage source data for this pricing model.' in data
+    assert 'SQL_DIR = Path(__file__).with_name("sql")' in data
+    assert 'SOURCE_DATA_SQL = SQL_DIR / "source_data.sql"' in data
     assert "def prepare_source_data" in data
     assert "output_dir: str | Path" in data
     assert "output_root" not in data
@@ -56,6 +66,9 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "manifest_sql" not in data
 
     modeling = (package_dir / "modeling.py").read_text(encoding="utf-8")
+    assert (
+        '"""Build the final model frame, fit/export the model, and create lineage."""' in modeling
+    )
     assert "def train_validate_export_model" in modeling
     assert "def read_prepared_source" in modeling
     assert "def build_final_model_frame" in modeling
@@ -75,6 +88,8 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "def completed_model_build_payload" not in modeling
 
     airflow_tasks = (package_dir / "airflow_tasks.py").read_text(encoding="utf-8")
+    assert '"""Airflow TaskFlow wrappers for this model package.' in airflow_tasks
+    assert "Keep business logic in data.py and modeling.py" in airflow_tasks
     assert "def prepare_source_data_task" in airflow_tasks
     assert "def train_validate_export_task" in airflow_tasks
     assert "airflow_run_metadata import" in airflow_tasks
@@ -83,6 +98,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "def _context_logical_date" not in airflow_tasks
 
     dag = dag_path.read_text(encoding="utf-8")
+    assert '"""Airflow DAG for the MY_MODEL pricing model build."""' in dag
     assert "from pricing_models.my_model.spec import MODEL_CONFIG" in dag
     assert "register_pricing_model_task" in dag
     assert "create_prepared_dataset_manifest_task" not in dag
@@ -211,6 +227,8 @@ def test_scaffold_pricing_model_accepts_explicit_names(tmp_path):
     assert 'model_type = "superglm_tweedie"' in model_toml
     assert 'deployment_slot = "WORK_FREQ_PROD"' in model_toml
     assert "pricing-work-frequency-prod" not in model_toml
+    dag = (tmp_path / "dags" / "price_work_frequency.py").read_text(encoding="utf-8")
+    assert '"""Airflow DAG for the WORK_FREQ pricing model build."""' in dag
 
 
 def test_scaffold_pricing_model_script_help_runs_without_pythonpath():
