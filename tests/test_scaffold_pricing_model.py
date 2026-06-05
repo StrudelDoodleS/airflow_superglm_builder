@@ -119,6 +119,34 @@ def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
     assert "pricing_my_model = build_pricing_model_dag" in dag
 
 
+def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_key="CUSTOM_MODEL",
+            model_label="Custom model",
+            target_name="target",
+            root=tmp_path,
+        )
+    )
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_key="FACTORY_MODEL",
+            model_label="Factory model",
+            target_name="target",
+            root=tmp_path,
+            template="factory",
+        )
+    )
+
+    from pricing_models.registry import get_model_config, model_keys, model_spec_keys
+
+    models_root = tmp_path / "pricing_models"
+
+    assert model_keys(models_root=models_root) == ("CUSTOM_MODEL", "FACTORY_MODEL")
+    assert get_model_config("CUSTOM_MODEL", models_root=models_root).model_key == "CUSTOM_MODEL"
+    assert model_spec_keys(models_root=models_root) == ("FACTORY_MODEL",)
+
+
 def test_scaffold_pricing_model_refuses_to_overwrite_existing_files(tmp_path):
     options = ScaffoldOptions(
         model_key="MY_MODEL",

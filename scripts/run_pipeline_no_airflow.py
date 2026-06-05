@@ -18,7 +18,11 @@ from pricing_pipeline.data.manifest import (  # noqa: E402
 from pricing_pipeline.data.manifest import new_manifest_id  # noqa: E402
 from pricing_pipeline.infra.migrations import apply_migrations  # noqa: E402
 from pricing_pipeline.orchestration.pipeline import run_training_export_publish  # noqa: E402
-from pricing_models.registry import get_model_config, get_model_spec, model_keys  # noqa: E402
+from pricing_models.registry import (  # noqa: E402
+    get_model_config,
+    get_model_spec,
+    model_spec_keys,
+)
 
 
 def _schema_dir() -> Path:
@@ -69,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-key",
         default="MTPL_FREQ",
-        choices=model_keys(),
+        choices=model_spec_keys(),
         help="Registered model spec to train and publish.",
     )
     parser.add_argument("--dag-id", default="no_docker_local")

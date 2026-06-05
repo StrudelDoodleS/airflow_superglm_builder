@@ -201,11 +201,13 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
     monkeypatch.setattr(
         run_pipeline_no_airflow,
         "create_dataset_manifest",
-        lambda engine_arg, **kwargs: calls.append(("manifest", engine_arg, kwargs))
-        or DatasetManifestResult(
-            manifest_id=kwargs["manifest_id"],
-            split_set_id="manifest-1__train_test_split_test_0_2_seed_99",
-            split_artifact_uri="/tmp/splits/manifest-1.npz",
+        lambda engine_arg, **kwargs: (
+            calls.append(("manifest", engine_arg, kwargs))
+            or DatasetManifestResult(
+                manifest_id=kwargs["manifest_id"],
+                split_set_id="manifest-1__train_test_split_test_0_2_seed_99",
+                split_artifact_uri="/tmp/splits/manifest-1.npz",
+            )
         ),
     )
 
@@ -232,6 +234,31 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
         "rate_package_id": "123",
         "package_version": "4",
     }
+
+
+def test_no_airflow_runner_model_key_choices_are_spec_runnable_only(monkeypatch):
+    from scripts import run_pipeline_no_airflow
+
+    monkeypatch.setattr(
+        run_pipeline_no_airflow,
+        "model_spec_keys",
+        lambda: ("FACTORY_MODEL",),
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_pipeline_no_airflow.py", "--model-key", "CUSTOM_MODEL"],
+    )
+    with pytest.raises(SystemExit):
+        run_pipeline_no_airflow.parse_args()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_pipeline_no_airflow.py", "--model-key", "FACTORY_MODEL"],
+    )
+    assert run_pipeline_no_airflow.parse_args().model_key == "FACTORY_MODEL"
 
 
 def test_no_docker_service_picker_lists_available_services_without_pythonpath():
@@ -373,9 +400,7 @@ def test_runtime_manager_runs_one_shot_service_to_log(tmp_path):
 
     assert manager.status("apply-schema") == "succeeded"
     assert calls[0][0] == ["python", "apply_schema.py"]
-    assert (tmp_path / "apply-schema.log").read_text(encoding="utf-8").endswith(
-        "schema ok\n"
-    )
+    assert (tmp_path / "apply-schema.log").read_text(encoding="utf-8").endswith("schema ok\n")
 
 
 def test_runtime_manager_marks_missing_command_as_failed(tmp_path):
@@ -522,9 +547,7 @@ def test_runtime_tui_mouse_wheel_down_moves_one_selector_row(monkeypatch, tmp_pa
     monkeypatch.setattr(
         no_docker_services,
         "_draw_runtime_screen",
-        lambda _screen, _manager, *, cursor_index, show_logs: cursor_indexes.append(
-            cursor_index
-        ),
+        lambda _screen, _manager, *, cursor_index, show_logs: cursor_indexes.append(cursor_index),
     )
 
     no_docker_services.run_runtime_tui(manager=manager)
