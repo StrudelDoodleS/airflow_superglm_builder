@@ -156,6 +156,7 @@ def build_column_metadata(
     pk_columns: tuple[str, ...] = ("IDpol",),
     target_column: str | None = "ClaimNb",
     weight_column: str | None = "Exposure",
+    split_column: str | None = None,
 ) -> pd.DataFrame:
     column_df = pd.DataFrame(
         {
@@ -174,6 +175,8 @@ def build_column_metadata(
         column_df.loc[column_df["column_name"].eq(target_column), "column_role"] = "TARGET"
     if weight_column is not None:
         column_df.loc[column_df["column_name"].eq(weight_column), "column_role"] = "WEIGHT"
+    if split_column is not None:
+        column_df.loc[column_df["column_name"].eq(split_column), "column_role"] = "SPLIT"
     return column_df
 
 
@@ -227,7 +230,66 @@ def split_set_id_for_validation_split(
             f"{_format_split_float(float(validation_split.test_size or 0.2))}"
             f"_seed_{validation_split.random_state}"
         )
+    if validation_split.method in {"column_kfold", "column_holdout"}:
+        column_token = re.sub(r"[^A-Za-z0-9_]+", "_", str(validation_split.column)).strip("_")
+        column_token = column_token or "source_column"
+        return f"{manifest_id}__{validation_split.method}_{column_token}"
     raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+
+def validation_split_source_column(validation_split: ValidationSplitConfig) -> str | None:
+    if validation_split.method in {"column_kfold", "column_holdout"}:
+        return _required_text(validation_split.column, field_name="validation_split.column")
+    return None
+
+
+def _json_clean_value(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    return value
+
+
+def _ordered_unique_non_null_values(series: pd.Series, *, column: str) -> list:
+    if series.isna().any():
+        raise ValueError(f"validation split column {column!r} contains null values")
+    values = list(pd.unique(series))
+    return sorted(values, key=lambda value: str(_json_clean_value(value)))
+
+
+def _source_column_splitter_params(
+    frame: pd.DataFrame,
+    validation_split: ValidationSplitConfig,
+) -> dict[str, object]:
+    column = validation_split_source_column(validation_split)
+    if column is None:
+        raise ValueError("validation split is not source-column based")
+    if column not in frame.columns:
+        raise ValueError(f"validation split column is missing from model frame: {column}")
+
+    if validation_split.method == "column_kfold":
+        return {
+            "method": validation_split.method,
+            "column": column,
+            "fold_values": [
+                _json_clean_value(value)
+                for value in _ordered_unique_non_null_values(frame[column], column=column)
+            ],
+        }
+    if validation_split.method == "column_holdout":
+        return {
+            "method": validation_split.method,
+            "column": column,
+            "train_values": [_json_clean_value(value) for value in validation_split.train_values],
+            "test_values": [_json_clean_value(value) for value in validation_split.test_values],
+            "unexpected_values": "error",
+        }
+    raise ValueError(
+        f"Unsupported source-column validation split method: {validation_split.method}"
+    )
 
 
 def build_cv_split_set(
@@ -304,6 +366,10 @@ def build_validation_split_set(
         if validation_split.stratify_column is not None:
             params["stratify_column"] = validation_split.stratify_column
         fold_count = 1
+    elif validation_split.method in {"column_kfold", "column_holdout"}:
+        splitter_class = "source_column"
+        params = _source_column_splitter_params(frame, validation_split)
+        fold_count = len(params["fold_values"]) if validation_split.method == "column_kfold" else 1
     else:
         raise ValueError(f"Unsupported validation split method: {validation_split.method}")
 
@@ -319,7 +385,11 @@ def build_validation_split_set(
                 "row_count": int(len(frame)),
                 "fold_count": fold_count,
                 "groups_column": None,
-                "stratify_column": validation_split.stratify_column,
+                "stratify_column": (
+                    validation_split.stratify_column
+                    if validation_split.method == "train_test_split"
+                    else None
+                ),
                 "artifact_uri": artifact_uri,
                 "artifact_sha256": artifact_sha256,
                 "runtime_metadata_json": runtime_dependency_metadata(),
@@ -398,6 +468,61 @@ def validation_split_indices(
             stratify=stratify,
         )
         return [(np.asarray(train_idx), np.asarray(test_idx))]
+    if validation_split.method == "column_kfold":
+        column = validation_split_source_column(validation_split)
+        if column not in frame.columns:
+            raise ValueError(f"validation split column is missing from model frame: {column}")
+        fold_values = _ordered_unique_non_null_values(frame[column], column=column)
+        if len(fold_values) < 2:
+            raise ValueError("validation split column must contain at least two fold values")
+
+        folds: list[tuple[np.ndarray, np.ndarray]] = []
+        for fold_value in fold_values:
+            test_mask = frame[column].eq(fold_value)
+            train_mask = ~test_mask
+            train_idx = np.flatnonzero(train_mask.to_numpy())
+            test_idx = np.flatnonzero(test_mask.to_numpy())
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                raise ValueError("validation split column produced an empty train or test fold")
+            folds.append((train_idx, test_idx))
+        return folds
+    if validation_split.method == "column_holdout":
+        column = validation_split_source_column(validation_split)
+        if column not in frame.columns:
+            raise ValueError(f"validation split column is missing from model frame: {column}")
+        if not validation_split.train_values:
+            raise ValueError("validation_split.train_values must not be empty")
+        if not validation_split.test_values:
+            raise ValueError("validation_split.test_values must not be empty")
+        if any(
+            train_value == test_value
+            for train_value in validation_split.train_values
+            for test_value in validation_split.test_values
+        ):
+            raise ValueError("validation_split.train_values and test_values must not overlap")
+        series = frame[column]
+        if series.isna().any():
+            raise ValueError(f"validation split column {column!r} contains null values")
+
+        train_mask = series.isin(validation_split.train_values)
+        test_mask = series.isin(validation_split.test_values)
+        unexpected_values = _ordered_unique_non_null_values(
+            series.loc[~(train_mask | test_mask)],
+            column=column,
+        )
+        if unexpected_values:
+            raise ValueError(
+                "validation split column contains unexpected values: "
+                + ", ".join(str(value) for value in unexpected_values)
+            )
+
+        train_idx = np.flatnonzero(train_mask.to_numpy())
+        test_idx = np.flatnonzero(test_mask.to_numpy())
+        if len(train_idx) == 0:
+            raise ValueError("validation split column produced no train rows")
+        if len(test_idx) == 0:
+            raise ValueError("validation split column produced no test rows")
+        return [(train_idx, test_idx)]
     raise ValueError(f"Unsupported validation split method: {validation_split.method}")
 
 
@@ -470,6 +595,15 @@ def _validate_model_frame(
             raise ValueError(
                 f"validation_split.n_splits ({n_splits}) must not exceed row count ({len(frame)})"
             )
+    split_column = validation_split_source_column(validation_split)
+    if split_column is not None:
+        if split_column in spec.pk_columns:
+            raise ValueError("validation split column must not be a primary key column")
+        if split_column == spec.target_column:
+            raise ValueError("validation split column must not be the target column")
+        if split_column == spec.weight_column:
+            raise ValueError("validation split column must not be the weight column")
+        validation_split_indices(frame, validation_split)
 
 
 def create_model_frame_manifest_with_split(
@@ -505,6 +639,7 @@ def create_model_frame_manifest_with_split(
         pk_columns=spec.pk_columns,
         target_column=spec.target_column,
         weight_column=spec.weight_column,
+        split_column=validation_split_source_column(validation_split),
     )
     split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
     split_artifact_uri = None

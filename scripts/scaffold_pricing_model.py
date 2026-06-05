@@ -339,6 +339,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
             frame = build_final_model_frame(raw)
             frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
             split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
+            # If validation_split uses a source split column, do not include that
+            # column as a rating feature unless this is an intentional model decision.
             rating_workbook_path, model_artifact_path, metrics = (
                 fit_validate_export_rating_tables(
                     frame,

@@ -14,12 +14,14 @@ from pricing_pipeline.data.manifest import (
     create_dataset_manifest_with_split,
     build_column_metadata,
     build_cv_split_set,
+    build_validation_split_set,
     compute_row_order_sha256,
     create_dataset_manifest,
     create_model_frame_manifest_with_split,
     create_fremtpl_manifest,
     new_manifest_id,
     runtime_dependency_metadata,
+    validation_split_indices,
 )
 from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec
@@ -293,6 +295,262 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
         frame,
         pk_columns=("PolicyID",),
     )
+
+
+def test_column_kfold_validation_split_uses_positional_indices_and_stable_fold_order():
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 2.0, 0.0, 3.0],
+            "fold_number": [2, 1, 2, 1],
+        },
+        index=[10, 20, 30, 40],
+    )
+
+    folds = validation_split_indices(
+        frame,
+        ValidationSplitConfig.column_kfold(column="fold_number"),
+    )
+
+    assert [(train.tolist(), test.tolist()) for train, test in folds] == [
+        ([0, 2], [1, 3]),
+        ([1, 3], [0, 2]),
+    ]
+
+
+def test_column_holdout_validation_split_supports_numeric_values():
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 2.0, 0.0, 3.0],
+            "holdout_flag": [0, 0, 1, 0],
+        },
+        index=[10, 20, 30, 40],
+    )
+
+    folds = validation_split_indices(
+        frame,
+        ValidationSplitConfig.column_holdout(
+            column="holdout_flag",
+            train_values=(0,),
+            test_values=(1,),
+        ),
+    )
+
+    assert [(train.tolist(), test.tolist()) for train, test in folds] == [([0, 1, 3], [2])]
+
+
+@pytest.mark.parametrize(
+    ("frame", "config_factory", "match"),
+    [
+        (
+            pd.DataFrame({"PolicyID": [1, 2], "fold": [1, None]}),
+            lambda: ValidationSplitConfig.column_kfold(column="fold"),
+            "null",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, 2], "fold": [1, 1]}),
+            lambda: ValidationSplitConfig.column_kfold(column="fold"),
+            "at least two",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, 2], "split": ["train", "unknown"]}),
+            lambda: ValidationSplitConfig.column_holdout(
+                column="split",
+                train_values=("train",),
+                test_values=("holdout",),
+            ),
+            "unexpected",
+        ),
+        (
+            pd.DataFrame({"PolicyID": [1, 2], "split": ["train", "train"]}),
+            lambda: ValidationSplitConfig.column_holdout(
+                column="split",
+                train_values=("train",),
+                test_values=("holdout",),
+            ),
+            "test",
+        ),
+    ],
+)
+def test_source_column_validation_split_rejects_invalid_frame_values(
+    frame,
+    config_factory,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        validation_split_indices(frame, config_factory())
+
+
+def test_create_model_frame_manifest_records_source_column_split_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    engine = FakeEngine()
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 2.0, 0.0, 3.0],
+            "ExposureYears": [1.0, 1.0, 0.5, 0.25],
+            "Segment": ["A", "B", "A", "C"],
+            "fold_number": [2, 1, 2, 1],
+        }
+    )
+    to_sql_calls = []
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append({"name": name, "frame": self.copy()})
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    result = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name="work_loss_cost_frame",
+            source_system="pricing_mart",
+            data_as_of_date="2026-06-04",
+            pk_columns=("PolicyID",),
+            target_column="LossCost",
+            weight_column="ExposureYears",
+        ),
+        manifest_id="manifest_column_kfold",
+        validation_split=ValidationSplitConfig.column_kfold(
+            column="fold_number",
+            materialize=True,
+        ),
+        validation_split_artifact_root=tmp_path,
+        created_by="unit-test",
+    )
+
+    assert result.split_set_id == "manifest_column_kfold__column_kfold_fold_number"
+    assert result.split_artifact_uri == str(
+        tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz"
+    )
+
+    column_roles = dict(
+        zip(
+            to_sql_calls[1]["frame"]["column_name"],
+            to_sql_calls[1]["frame"]["column_role"],
+            strict=True,
+        )
+    )
+    assert column_roles["fold_number"] == "SPLIT"
+
+    split_set = to_sql_calls[2]["frame"].iloc[0]
+    assert split_set["splitter_class"] == "source_column"
+    assert split_set["fold_count"] == 2
+    assert split_set["artifact_uri"] == result.split_artifact_uri
+    assert len(split_set["artifact_sha256"]) == 64
+    assert json.loads(split_set["splitter_params_json"]) == {
+        "column": "fold_number",
+        "fold_values": [1, 2],
+        "method": "column_kfold",
+    }
+
+    folds = to_sql_calls[3]["frame"]
+    assert folds["fold_no"].tolist() == [1, 2]
+    assert folds["n_train"].tolist() == [2, 2]
+    assert folds["n_test"].tolist() == [2, 2]
+
+    loaded = np.load(tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz")
+    assert sorted(loaded.files) == [
+        "fold_1_test_idx",
+        "fold_1_train_idx",
+        "fold_2_test_idx",
+        "fold_2_train_idx",
+    ]
+    assert loaded["fold_1_train_idx"].tolist() == [0, 2]
+    assert loaded["fold_1_test_idx"].tolist() == [1, 3]
+
+
+def test_build_validation_split_set_records_column_holdout_params():
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 2.0, 0.0, 3.0],
+            "holdout_flag": [0, 0, 1, 0],
+        }
+    )
+
+    split_set = build_validation_split_set(
+        frame,
+        manifest_id="manifest_holdout",
+        validation_split=ValidationSplitConfig.column_holdout(
+            column="holdout_flag",
+            train_values=(0,),
+            test_values=(1,),
+        ),
+        pk_columns=("PolicyID",),
+        created_by="unit-test",
+    )
+
+    row = split_set.iloc[0]
+    assert row["split_set_id"] == "manifest_holdout__column_holdout_holdout_flag"
+    assert row["splitter_class"] == "source_column"
+    assert row["fold_count"] == 1
+    assert json.loads(row["splitter_params_json"]) == {
+        "column": "holdout_flag",
+        "method": "column_holdout",
+        "test_values": [1],
+        "train_values": [0],
+        "unexpected_values": "error",
+    }
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        (
+            ModelFrameManifestSpec(
+                dataset_name="unit",
+                source_system="unit",
+                data_as_of_date="2026-06-04",
+                pk_columns=("split_column",),
+                target_column="LossCost",
+            ),
+            "primary key",
+        ),
+        (
+            ModelFrameManifestSpec(
+                dataset_name="unit",
+                source_system="unit",
+                data_as_of_date="2026-06-04",
+                pk_columns=("PolicyID",),
+                target_column="split_column",
+            ),
+            "target",
+        ),
+        (
+            ModelFrameManifestSpec(
+                dataset_name="unit",
+                source_system="unit",
+                data_as_of_date="2026-06-04",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+                weight_column="split_column",
+            ),
+            "weight",
+        ),
+    ],
+)
+def test_create_model_frame_manifest_rejects_split_column_role_overlap(spec, match):
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2, 3, 4],
+            "LossCost": [1.0, 0.0, 2.0, 1.5],
+            "split_column": [1, 2, 1, 2],
+        }
+    )
+
+    with pytest.raises(ValueError, match=match):
+        create_model_frame_manifest_with_split(
+            FakeEngine(),
+            frame=frame,
+            spec=spec,
+            manifest_id="manifest_split_overlap",
+            validation_split=ValidationSplitConfig.column_kfold(column="split_column"),
+        )
 
 
 @pytest.mark.parametrize(
