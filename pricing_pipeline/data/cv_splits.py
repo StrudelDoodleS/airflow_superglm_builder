@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -90,6 +91,126 @@ def resolve_splitter(split_set: CVSplitSet):
     raise ValueError(f"Unsupported splitter_class: {split_set.splitter_class}")
 
 
+def _json_clean_value(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    return value
+
+
+def _values_equal(left, right) -> bool:
+    return bool(_json_clean_value(left) == _json_clean_value(right))
+
+
+def _deduplicate_values(values: list, *, field_name: str) -> None:
+    for index, value in enumerate(values):
+        if any(_values_equal(value, previous) for previous in values[:index]):
+            raise ValueError(f"{field_name} must not contain duplicate values")
+
+
+def _source_column_series(frame: pd.DataFrame, params: dict[str, object]) -> tuple[str, pd.Series]:
+    column = params.get("column")
+    if not isinstance(column, str) or not column.strip():
+        raise ValueError("source_column splitter params must include column")
+    column = column.strip()
+    if column not in frame.columns:
+        raise ValueError(f"validation split column is missing from model frame: {column}")
+
+    series = frame[column]
+    if series.isna().any():
+        raise ValueError(f"validation split column {column!r} contains null values")
+    return column, series.map(_json_clean_value)
+
+
+def _required_param_values(
+    params: dict[str, object],
+    *,
+    field_name: str,
+    min_length: int,
+) -> list:
+    value = params.get(field_name)
+    if not isinstance(value, list) or len(value) < min_length:
+        raise ValueError(
+            f"source_column splitter params must include at least {min_length} {field_name}"
+        )
+    cleaned = [_json_clean_value(item) for item in value]
+    _deduplicate_values(cleaned, field_name=field_name)
+    return cleaned
+
+
+def _unexpected_source_values(series: pd.Series, allowed_values: list) -> list:
+    observed_values = [_json_clean_value(value) for value in pd.unique(series)]
+    return sorted(
+        [
+            value
+            for value in observed_values
+            if not any(_values_equal(value, allowed) for allowed in allowed_values)
+        ],
+        key=lambda value: str(value),
+    )
+
+
+def _source_column_replay_folds(
+    frame: pd.DataFrame,
+    *,
+    params: dict[str, object],
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    method = params.get("method")
+    _, series = _source_column_series(frame, params)
+
+    if method == "column_kfold":
+        fold_values = _required_param_values(params, field_name="fold_values", min_length=2)
+        unexpected_values = _unexpected_source_values(series, fold_values)
+        if unexpected_values:
+            raise ValueError(
+                "validation split column contains unexpected values: "
+                + ", ".join(str(value) for value in unexpected_values)
+            )
+
+        folds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for fold_no, fold_value in enumerate(fold_values, start=1):
+            test_mask = series.eq(fold_value)
+            train_mask = ~test_mask
+            train_idx = np.flatnonzero(train_mask.to_numpy())
+            test_idx = np.flatnonzero(test_mask.to_numpy())
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                raise ValueError("source_column replay produced an empty train or test fold")
+            folds[fold_no] = (train_idx, test_idx)
+        return folds
+
+    if method == "column_holdout":
+        train_values = _required_param_values(params, field_name="train_values", min_length=1)
+        test_values = _required_param_values(params, field_name="test_values", min_length=1)
+        if any(
+            _values_equal(train_value, test_value)
+            for train_value in train_values
+            for test_value in test_values
+        ):
+            raise ValueError("source_column train_values and test_values must not overlap")
+
+        train_mask = series.isin(train_values)
+        test_mask = series.isin(test_values)
+        unexpected_values = _unexpected_source_values(series, [*train_values, *test_values])
+        if unexpected_values:
+            raise ValueError(
+                "validation split column contains unexpected values: "
+                + ", ".join(str(value) for value in unexpected_values)
+            )
+
+        train_idx = np.flatnonzero(train_mask.to_numpy())
+        test_idx = np.flatnonzero(test_mask.to_numpy())
+        if len(train_idx) == 0:
+            raise ValueError("source_column replay produced no train rows")
+        if len(test_idx) == 0:
+            raise ValueError("source_column replay produced no test rows")
+        return {1: (train_idx, test_idx)}
+
+    raise ValueError(f"Unsupported source_column split method: {method!r}")
+
+
 def replay_cv_folds(
     split_set: CVSplitSet,
     frame: pd.DataFrame,
@@ -118,6 +239,8 @@ def replay_cv_folds(
             **params,
         )
         return {1: (np.asarray(train_idx), np.asarray(test_idx))}
+    if split_set.splitter_class == "source_column":
+        return _source_column_replay_folds(frame, params=params)
 
     cv = resolve_splitter(split_set)
     return {
