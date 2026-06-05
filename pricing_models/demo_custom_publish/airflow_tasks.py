@@ -16,12 +16,14 @@ from pricing_models.demo_custom_publish.modeling import (
     MODEL_KEY,
     build_final_model_frame,
     create_demo_model_frame_manifest,
-    effective_from_for_run,
     export_superglm_completed_build,
-    trained_model_version_for_export,
 )
 from pricing_models.demo_custom_publish.spec import MODEL_CONFIG
-from pricing_pipeline.orchestration.run_context import run_key_for_value
+from pricing_pipeline.orchestration.airflow_run_metadata import (
+    merge_prepared_payload_metadata,
+    task_run_metadata,
+)
+from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
 from pricing_pipeline.publishing.rating_export import build_export_id
 
 
@@ -39,37 +41,19 @@ def prepare_training_data_task(
     @task(task_id=task_id)
     def _prepare_training_data() -> dict[str, str]:
         runtime = runtime_from_env_or_module(runtime_module)
-        context = get_current_context()
-        logical_date = _context_logical_date(context)
-        run_value = context.get("run_id") or logical_date
-        run_key = run_key_for_value(run_value)
-        table_name = training_table_for_run(run_value)
-        run_output_dir = Path(output_dir) / run_key
+        metadata = task_run_metadata(get_current_context(), output_root=output_dir)
+        run_key = metadata["run_key"]
+        table_name = training_table_for_run(run_key)
+        run_output_dir = Path(metadata["output_dir"])
         frame = build_demo_training_frame(row_count=row_count, seed=seed)
         materialize_training_source(runtime.get_engine(), frame, table_name=table_name)
-        stable_effective_from = effective_from_for_run(logical_date)
-        return {
+        payload = {
             "training_frame_path": write_training_frame(frame, run_output_dir),
             "training_table": table_name,
-            "output_dir": str(run_output_dir),
-            "run_key": run_key,
-            "effective_from": stable_effective_from,
-            "data_as_of_date": stable_effective_from,
         }
+        return merge_prepared_payload_metadata(metadata, payload)
 
     return _prepare_training_data
-
-
-def _context_logical_date(context: dict[str, object]) -> object | None:
-    value = context.get("logical_date")
-    if value is not None:
-        return value
-    dag_run = context.get("dag_run")
-    return (
-        getattr(dag_run, "logical_date", None)
-        or getattr(dag_run, "run_after", None)
-        or getattr(dag_run, "execution_date", None)
-    )
 
 
 def train_validate_export_task(
@@ -79,40 +63,26 @@ def train_validate_export_task(
     created_by: str = "airflow",
     task_id: str = "train_validate_export",
 ):
-    from airflow.sdk import get_current_context, task
+    from airflow.sdk import task
     from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 
     @task(task_id=task_id)
     def _train_validate_export(prepared_training: dict[str, str | None]) -> dict[str, object]:
         runtime = runtime_from_env_or_module(runtime_module)
-        context = get_current_context()
-        effective_from = str(
-            prepared_training.get("effective_from")
-            or effective_from_for_run(_context_logical_date(context))
-        )
+        effective_from = str(prepared_training["effective_from"])
         data_as_of_date = str(prepared_training.get("data_as_of_date") or effective_from)
-        export_run_key = prepared_training.get("run_key") or run_key_for_value(
-            context.get("run_id") or _context_logical_date(context) or "manual"
-        )
+        export_run_key = prepared_training.get("run_key") or "manual"
         export_id = build_export_id(
             MODEL_KEY,
             str(export_run_key),
         )
-        model_version = trained_model_version_for_export(
+        model_version = resolve_model_version_for_export(
             runtime.get_engine(),
             model_key=MODEL_KEY,
             export_id=export_id,
         )
         frame = read_training_frame(str(prepared_training["training_frame_path"]))
         final_frame = build_final_model_frame(frame)
-        completed = export_superglm_completed_build(
-            final_frame,
-            output_dir=prepared_training.get("output_dir") or output_dir,
-            model_version=model_version,
-            effective_from=effective_from,
-            created_by=created_by,
-            export_id=export_id,
-        )
         manifest = create_demo_model_frame_manifest(
             runtime.get_engine(),
             frame=final_frame,
@@ -121,8 +91,16 @@ def train_validate_export_task(
             validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
             created_by=created_by,
         )
-        completed["manifest_id"] = manifest.manifest_id
-        completed["split_set_id"] = manifest.split_set_id
+        completed = export_superglm_completed_build(
+            final_frame,
+            output_dir=prepared_training.get("output_dir") or output_dir,
+            model_version=model_version,
+            effective_from=effective_from,
+            created_by=created_by,
+            export_id=export_id,
+            manifest_id=manifest.manifest_id,
+            split_set_id=manifest.split_set_id,
+        )
         return completed
 
     return _train_validate_export

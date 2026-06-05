@@ -199,14 +199,14 @@ def _custom_data_template(*, package_name: str) -> str:
             engine,
             *,
             run_key: str,
-            output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+            output_dir: str | Path,
         ) -> dict[str, Any]:
-            output_dir = Path(output_root) / run_key
-            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
 
             raise NotImplementedError(
                 "Read or stage source data for this run, write any temporary "
-                f"artifacts under {{output_dir}}, then return run_key, output_dir, "
+                f"artifacts under {{output_path}}, then return output_dir, "
                 "effective_from, data_as_of_date, and any paths/IDs needed by "
                 "modeling.py."
             )
@@ -219,12 +219,10 @@ def _custom_modeling_template(*, package_name: str) -> str:
         f"""\
         from __future__ import annotations
 
-        from datetime import date, datetime
         from pathlib import Path
         from typing import Any, Mapping
 
         import pandas as pd
-        from sqlalchemy import text
 
         from pricing_models.{package_name}.data import (
             DATASET_NAME,
@@ -238,93 +236,15 @@ def _custom_modeling_template(*, package_name: str) -> str:
             create_model_frame_manifest_with_split,
             validation_split_indices,
         )
-        from pricing_pipeline.infra.schema import schema_names_from_connectable
-        from pricing_pipeline.orchestration.publish_completed_build import (
-            CompletedModelBuild,
+        from pricing_pipeline.orchestration.completed_build_helpers import (
+            completed_model_build_payload,
+            effective_from_for_run,
+            required_payload_text,
+        )
+        from pricing_pipeline.publishing.model_versions import (
+            resolve_model_version_for_export,
         )
         from pricing_pipeline.publishing.rating_export import build_export_id
-
-
-        def effective_from_for_run(value: date | datetime | str | None = None) -> str:
-            if value is None:
-                return date.today().isoformat()
-            if isinstance(value, datetime):
-                return value.date().isoformat()
-            if isinstance(value, date):
-                return value.isoformat()
-            cleaned = str(value).strip()
-            if not cleaned:
-                return date.today().isoformat()
-            return cleaned[:10]
-
-
-        def _required_payload_text(prepared: Mapping[str, Any], field_name: str) -> str:
-            value = prepared.get(field_name)
-            if value is None or not str(value).strip():
-                raise ValueError(f"prepared payload field {{field_name!r}} is required")
-            return str(value).strip()
-
-
-        def existing_model_version_for_export(
-            engine,
-            *,
-            model_key: str,
-            export_id: str,
-        ) -> str | None:
-            schemas = schema_names_from_connectable(engine)
-            with engine.begin() as con:
-                version = con.execute(
-                    text(
-                        f\"\"\"
-                        SELECT TOP (1) rp.model_version
-                        FROM {{schemas.pricing}}.PRICING_RATE_PACKAGE AS rp
-                        JOIN {{schemas.pricing}}.PRICING_MODEL AS pm
-                          ON pm.model_id = rp.model_id
-                        WHERE pm.model_key = :model_key
-                          AND rp.source_export_id = :export_id
-                        ORDER BY rp.rate_package_id DESC
-                        \"\"\"
-                    ),
-                    {{"model_key": model_key, "export_id": export_id}},
-                ).scalar()
-            return None if version is None else str(version)
-
-
-        def next_model_version(engine, *, model_key: str) -> str:
-            schemas = schema_names_from_connectable(engine)
-            with engine.begin() as con:
-                versions = list(
-                    con.execute(
-                        text(
-                            f\"\"\"
-                            SELECT rp.model_version
-                            FROM {{schemas.pricing}}.PRICING_RATE_PACKAGE AS rp
-                            JOIN {{schemas.pricing}}.PRICING_MODEL AS pm
-                              ON pm.model_id = rp.model_id
-                            WHERE pm.model_key = :model_key
-                              AND rp.parent_rate_package_id IS NULL
-                            \"\"\"
-                        ),
-                        {{"model_key": model_key}},
-                    ).scalars()
-                )
-            version_numbers = [
-                int(str(value).removeprefix("v"))
-                for value in versions
-                if str(value).startswith("v") and str(value).removeprefix("v").isdigit()
-            ]
-            return f"v{{max(version_numbers, default=0) + 1}}"
-
-
-        def resolve_model_version(engine, *, model_key: str, export_id: str) -> str:
-            existing = existing_model_version_for_export(
-                engine,
-                model_key=model_key,
-                export_id=export_id,
-            )
-            if existing is not None:
-                return existing
-            return next_model_version(engine, model_key=model_key)
 
 
         def read_prepared_source(prepared: Mapping[str, Any]) -> pd.DataFrame:
@@ -355,35 +275,6 @@ def _custom_modeling_template(*, package_name: str) -> str:
             )
 
 
-        def completed_model_build_payload(
-            prepared: Mapping[str, Any],
-            *,
-            rating_workbook_path: str | Path,
-            model_version: str,
-            effective_from: str,
-            export_id: str,
-            created_by: str,
-            manifest_id: str,
-            split_set_id: str | None,
-            model_artifact_path: str | Path | None = None,
-            metrics: dict[str, float] | None = None,
-        ) -> dict[str, Any]:
-            return CompletedModelBuild(
-                rating_workbook_path=str(rating_workbook_path),
-                model_version=model_version,
-                effective_from=effective_from,
-                created_by=created_by,
-                export_id=export_id,
-                manifest_id=manifest_id,
-                split_set_id=split_set_id,
-                mlflow_run_id=None,
-                model_artifact_path=(
-                    str(model_artifact_path) if model_artifact_path is not None else None
-                ),
-                metrics=metrics or {{}},
-            ).to_dict()
-
-
         def train_validate_export_model(
             prepared: Mapping[str, Any],
             *,
@@ -393,15 +284,15 @@ def _custom_modeling_template(*, package_name: str) -> str:
         ) -> dict[str, Any]:
             run_key = str(prepared.get("run_key") or "manual")
             export_id = build_export_id(MODEL_CONFIG.model_key, run_key)
-            model_version = resolve_model_version(
+            model_version = resolve_model_version_for_export(
                 engine,
                 model_key=MODEL_CONFIG.model_key,
                 export_id=export_id,
             )
             effective_from = effective_from_for_run(
-                _required_payload_text(prepared, "effective_from")
+                required_payload_text(prepared, "effective_from")
             )
-            data_as_of_date = _required_payload_text(prepared, "data_as_of_date")
+            data_as_of_date = required_payload_text(prepared, "data_as_of_date")
 
             raw = read_prepared_source(prepared)
             frame = build_final_model_frame(raw)
@@ -433,7 +324,6 @@ def _custom_modeling_template(*, package_name: str) -> str:
             )
 
             return completed_model_build_payload(
-                prepared,
                 rating_workbook_path=rating_workbook_path,
                 model_version=model_version,
                 effective_from=effective_from,
@@ -461,10 +351,12 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
             prepare_source_data,
         )
         from pricing_models.{package_name}.modeling import (
-            effective_from_for_run,
             train_validate_export_model,
         )
-        from pricing_pipeline.orchestration.run_context import run_key_for_value
+        from pricing_pipeline.orchestration.airflow_run_metadata import (
+            merge_prepared_payload_metadata,
+            task_run_metadata,
+        )
 
 
         def prepare_source_data_task(
@@ -479,25 +371,16 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
             @task(task_id=task_id)
             def _prepare_source_data() -> dict[str, Any]:
                 runtime = runtime_from_env_or_module(runtime_module)
-                context = get_current_context()
-                logical_date = _context_logical_date(context)
-                run_value = (
-                    context.get("run_id")
-                    or logical_date
-                    or "manual"
-                )
-                run_key = run_key_for_value(run_value)
-                payload = prepare_source_data(
-                    runtime.get_engine(),
-                    run_key=run_key,
+                metadata = task_run_metadata(
+                    get_current_context(),
                     output_root=output_root,
                 )
-                stable_effective_from = effective_from_for_run(logical_date)
-                payload.setdefault("run_key", run_key)
-                payload.setdefault("output_dir", str(Path(output_root) / run_key))
-                payload.setdefault("effective_from", stable_effective_from)
-                payload.setdefault("data_as_of_date", stable_effective_from)
-                return payload
+                payload = prepare_source_data(
+                    runtime.get_engine(),
+                    run_key=metadata["run_key"],
+                    output_dir=Path(metadata["output_dir"]),
+                )
+                return merge_prepared_payload_metadata(metadata, payload)
 
             return _prepare_source_data
 
@@ -524,17 +407,6 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
 
             return _train_validate_export
 
-
-        def _context_logical_date(context: Mapping[str, Any]) -> object | None:
-            value = context.get("logical_date")
-            if value is not None:
-                return value
-            dag_run = context.get("dag_run")
-            return (
-                getattr(dag_run, "logical_date", None)
-                or getattr(dag_run, "run_after", None)
-                or getattr(dag_run, "execution_date", None)
-            )
         """
     )
 
