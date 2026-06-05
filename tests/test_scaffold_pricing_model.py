@@ -25,8 +25,10 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert result.created_files == (
         package_dir / "__init__.py",
         package_dir / "model.toml",
-        package_dir / "training.py",
         package_dir / "spec.py",
+        package_dir / "data.py",
+        package_dir / "modeling.py",
+        package_dir / "airflow_tasks.py",
         dag_path,
     )
     assert not hasattr(result, "registry_instructions")
@@ -39,24 +41,110 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert 'method = "train_test_split"' in model_toml
     assert "test_size = 0.20" in model_toml
 
+    spec = (package_dir / "spec.py").read_text(encoding="utf-8")
+    assert "MODEL_CONFIG = load_model_build_config" in spec
+    assert "ModelSpec" not in spec
+    assert "TRAINING_SQL" not in spec
+    assert "FEATURE_COLUMNS" not in spec
+
+    data = (package_dir / "data.py").read_text(encoding="utf-8")
+    assert "def prepare_source_data" in data
+    assert "DatasetSpec" not in data
+    assert "dataset_spec_from_prepared" not in data
+    assert "manifest_sql" not in data
+
+    modeling = (package_dir / "modeling.py").read_text(encoding="utf-8")
+    assert "def train_validate_export_model" in modeling
+    assert "CompletedModelBuild(" in modeling
+    assert "ModelFrameManifestSpec" in modeling
+    assert "create_model_frame_manifest_with_split" in modeling
+    assert "manifest_id=manifest.manifest_id" in modeling
+    assert "split_set_id=manifest.split_set_id" in modeling
+    assert "def resolve_model_version" in modeling
+
+    airflow_tasks = (package_dir / "airflow_tasks.py").read_text(encoding="utf-8")
+    assert "def prepare_source_data_task" in airflow_tasks
+    assert "def train_validate_export_task" in airflow_tasks
+
+    dag = dag_path.read_text(encoding="utf-8")
+    assert "from pricing_models.my_model.spec import MODEL_CONFIG" in dag
+    assert "register_pricing_model_task" in dag
+    assert "create_prepared_dataset_manifest_task" not in dag
+    assert "dataset_spec_from_prepared" not in dag
+    assert "publish_completed_model_build_task" in dag
+    assert 'dag_id="pricing_my_model"' in dag
+    assert "build_pricing_model_dag" not in dag
+    assert "MODEL_SPEC" not in dag
+
+
+def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
+    result = scaffold_pricing_model(
+        ScaffoldOptions(
+            model_key="MY_MODEL",
+            model_label="My model",
+            target_name="derived_target",
+            root=tmp_path,
+            template="factory",
+        )
+    )
+
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    dag_path = tmp_path / "dags" / "pricing_my_model.py"
+
+    assert result.created_files == (
+        package_dir / "__init__.py",
+        package_dir / "model.toml",
+        package_dir / "training.py",
+        package_dir / "spec.py",
+        dag_path,
+    )
+
     training = (package_dir / "training.py").read_text(encoding="utf-8")
     assert "TRAINING_SQL" in training
     assert "FEATURE_COLUMNS" in training
     assert "def build_training_frame" in training
     assert "def build_model" in training
-    assert "df[\"derived_target\"]" in training
+    assert 'df["derived_target"]' in training
 
     spec = (package_dir / "spec.py").read_text(encoding="utf-8")
     assert "MODEL_CONFIG = load_model_build_config" in spec
     assert 'dataset_name="my_model_training"' in spec
     assert 'pk_columns=("REPLACE_ME_ID",)' in spec
     assert "target_column=MODEL_CONFIG.target_name" in spec
-    assert "experiment_name=\"pricing-my-model\"" in spec
+    assert 'experiment_name="pricing-my-model"' in spec
 
     dag = dag_path.read_text(encoding="utf-8")
     assert "from pricing_models.my_model.spec import MODEL_CONFIG, MODEL_SPEC" in dag
     assert 'dag_id="pricing_my_model"' in dag
     assert "pricing_my_model = build_pricing_model_dag" in dag
+
+
+def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_key="CUSTOM_MODEL",
+            model_label="Custom model",
+            target_name="target",
+            root=tmp_path,
+        )
+    )
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_key="FACTORY_MODEL",
+            model_label="Factory model",
+            target_name="target",
+            root=tmp_path,
+            template="factory",
+        )
+    )
+
+    from pricing_models.registry import get_model_config, model_keys, model_spec_keys
+
+    models_root = tmp_path / "pricing_models"
+
+    assert model_keys(models_root=models_root) == ("CUSTOM_MODEL", "FACTORY_MODEL")
+    assert get_model_config("CUSTOM_MODEL", models_root=models_root).model_key == "CUSTOM_MODEL"
+    assert model_spec_keys(models_root=models_root) == ("FACTORY_MODEL",)
 
 
 def test_scaffold_pricing_model_refuses_to_overwrite_existing_files(tmp_path):
@@ -101,9 +189,9 @@ def test_scaffold_pricing_model_accepts_explicit_names(tmp_path):
 
     assert result.package_name == "work_frequency"
     assert result.dag_id == "price_work_frequency"
-    model_toml = (
-        tmp_path / "pricing_models" / "work_frequency" / "model.toml"
-    ).read_text(encoding="utf-8")
+    model_toml = (tmp_path / "pricing_models" / "work_frequency" / "model.toml").read_text(
+        encoding="utf-8"
+    )
     assert 'model_type = "superglm_tweedie"' in model_toml
     assert 'deployment_slot = "WORK_FREQ_PROD"' in model_toml
     assert "pricing-work-frequency-prod" not in model_toml
@@ -124,6 +212,7 @@ def test_scaffold_pricing_model_script_help_runs_without_pythonpath():
     assert result.returncode == 0
     assert "--model-key" in result.stdout
     assert "--target-name" in result.stdout
+    assert "--template" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
 

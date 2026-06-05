@@ -1,339 +1,443 @@
-# Post-Modeling Dataset Manifest Design
+# Model-Frame Dataset Manifest Design
 
 ## Problem
 
-Every model build needs dataset lineage, but the current demo makes users write a
-small `DatasetSpec(...)` wrapper per model. The wrapper is mostly boilerplate,
-yet the metadata it creates is important: without it the SQL catalog cannot
-track which model-ready data produced a rate package.
+The current custom DAG/scaffold direction still assumes a dataset manifest can be
+created by reading `DatasetSpec.manifest_sql`. That is too SQL-first for real
+model builds.
 
-The manifest is an audit record for the data used by a model build. It should
-tell an auditor, performance analyst, or future modeler which final model-ready
-SQL source the model trained on, when that source was current as of, how many
-rows were present, and which columns were present in that final modeling frame.
+A production model DAG may read source data from SQL, create targets or derived
+features in Python, filter rows, select final model features, and never write the
+final model-ready frame back to SQL Server. In that workflow, the original SQL
+source does not contain the final engineered feature columns. Creating
+`DATASET_MANIFEST` and `DATASET_COLUMN` from the original source query would
+record the wrong row set and the wrong columns.
 
-The existing name `training_table` is also misleading. The final model trains on
-the full model-ready data, and validation may happen separately. The lineage
-manifest should describe the final model-ready source used for the package, not
-necessarily an early raw/candidate training table.
+The manifest should describe the exact final model frame used for validation,
+training, and rating-table export. Source provenance remains important, but for
+v1 it should stay simple: track the logical source and source-data as-of date
+using the fields the schema already has.
 
-Raw source tables may have 100-200 columns. The final model-ready source may have
-50 selected or derived columns. `DATASET_COLUMN` should describe the final
-model-ready source captured by the manifest. It is not the raw source schema, and
-it is not the authoritative list of rate-package terms. Rate-package feature,
-term, and cell tables remain the source of truth for what was exported into the
-package.
+This design is about build audit metadata, not runtime scoring.
 
-## Goals
+## Decision
 
-- Make dataset manifest housekeeping easy enough that users do not skip it.
-- Keep SQL execution, source joins, and feature engineering in user-owned DAG
-  tasks.
-- Treat the post-modeling final model-ready source as the default manifest
-  target.
-- Record the final manifest source identity and data as-of date clearly enough
-  for audit/review.
-- Keep TOML focused on stable metadata, not volatile SQL files or feature lists.
-- Preserve the current publish/deploy separation.
+For v1, do not add a raw source view requirement and do not add new SQL columns.
+
+Add a frame-backed manifest API that writes to the existing tables:
+
+- `pricing.DATASET_MANIFEST`
+- `pricing.DATASET_COLUMN`
+- `pricing.CV_SPLIT_SET`
+- `pricing.CV_FOLD`
+
+`DATASET_MANIFEST.source_system` records the logical source/provenance label,
+such as `policy_admin`, `pricing_mart`, or `actuarial_workbench`.
+`DATASET_MANIFEST.data_as_of_date` records the as-at/as-of date for the source
+data used to build the model frame. `DATASET_COLUMN`, `row_count`, row-order
+hashes, and split metadata describe the final post-ETL model frame, not the raw
+source table.
+
+This avoids pretending engineered features exist in the source SQL and avoids
+forcing every model build to materialize a model-ready table back to SQL Server.
 
 ## Non-Goals
 
-- Do not put connection strings, auth, or Azure credential logic in TOML.
-- Do not put SQL files or SQL execution instructions in `[dataset]`.
-- Do not require final feature columns in TOML.
-- Do not make the publish task infer or create dataset manifests implicitly.
-- Do not change rate-package deployment semantics.
-- Do not claim `DATASET_COLUMN` is the same thing as the rate-package feature
-  list.
+This design does not generate runtime scoring SQL.
 
-## Recommended Shape
+It does not create SQL views, stored procedures, table-valued functions, or
+application feature code for engineered model inputs. A published package may
+depend on banded or derived features, such as values produced by `pd.cut()` in
+the training task or by equivalent SQL in the scoring path. The scoring layer is
+responsible for supplying feature values compatible with the published package.
 
-`model.toml` owns stable dataset housekeeping:
+This design records the final model frame and publishes the rating package. It
+does not attempt to make every Python feature-engineering step executable in SQL
+Server.
 
-```toml
-[dataset]
-dataset_name = "claim_frequency_modeling"
-source_system = "policy_admin"
-manifest_data_source = "pricing_work"
-pk_columns = ["policy_id"]
-target_column = "claim_count"
-weight_column = "earned_exposure"
+## Approaches Considered
+
+The recommended approach is frame-backed manifest creation with source as-of
+metadata. It fits the custom DAG shape: user code owns extraction, transforms,
+feature engineering, and model fitting; the library records the final frame
+metadata and publishes the package.
+
+Forcing users to persist a model-ready SQL table would keep the current
+`manifest_sql` path, but it creates unnecessary writeback requirements and makes
+the scaffold hard to use when features only exist in Python.
+
+Adding raw source view/query metadata to the SQL schema would add audit detail,
+but it does not solve the actual problem: the source query still does not
+contain engineered features. It also creates migration/re-seed churn before the
+model build problem is fixed.
+
+## Definitions
+
+**Source data** is what the model task read before feature engineering. For v1,
+the catalog tracks this with `source_system` and `data_as_of_date`.
+
+**Model frame** is the final pandas `DataFrame` after source reads, joins,
+filters, target construction, feature engineering, and feature selection. This
+is the frame used for validation/training and rating-table export.
+
+**Dataset manifest** is the SQL catalog receipt for the model frame. It records
+row count, PK columns, target/weight columns, data as-of date, column metadata,
+and optional validation split metadata.
+
+**Rate package** is the exported pricing/rating structure. Its feature, term,
+level, cell, and compiled tables remain the source of truth for what was
+published into the rate package.
+
+`DATASET_COLUMN` records all final model-frame columns, including PK, target,
+and weight columns. The rate package tables remain the source of truth for
+published rating inputs. PK, target, and weight columns should not become rating
+features unless the model author explicitly includes them, which should normally
+be treated as an export-layer error.
+
+## Audit Coverage
+
+For v1, the build audit trail is:
+
+```text
+DATASET_MANIFEST
+  manifest_id, dataset_name, source_system, data_as_of_date, row_count,
+  pk_columns_json, target_column, weight_column, created_ts, created_by
+
+DATASET_COLUMN
+  final model-frame columns, roles, pandas dtype, null counts, distinct counts
+
+CV_SPLIT_SET / CV_FOLD
+  split config, row-order hash, fold counts, optional materialized split artifact
+
+MODEL_RUN / related lineage tables
+  model_id, model_version, manifest_id, split_set_id, export_id,
+  rate_package_id, workbook/model artifact paths, Airflow IDs when available
+
+PRICING_RATE_PACKAGE and normalized package tables
+  actual published rating structure
 ```
 
-The user-owned ETL/modeling task owns SQL execution and materialization. After
-feature selection/modeling, it returns a small payload pointing at the final
-stable model-ready source:
+This answers:
+
+- what model was built;
+- which final frame it trained/exported from;
+- what rows and columns were present;
+- what split was used;
+- what workbook was published;
+- what SQL rate package was created;
+- whether a rerun reused an existing package through the export ID.
+
+It does not answer how production scoring computes every engineered feature.
+That is a separate scoring integration project.
+
+## Public API
+
+Add a small frame manifest spec:
 
 ```python
-return {
-    "modeling_schema": "pricing_work",
-    "modeling_table": final_modeling_table,
-    "data_as_of_date": data_as_of_date,
-    "rating_workbook_path": str(workbook_path),
-    "model_version": model_version,
-    "effective_from": effective_from,
-    "export_id": export_id,
-}
+@dataclass(frozen=True)
+class ModelFrameManifestSpec:
+    dataset_name: str
+    source_system: str
+    data_as_of_date: date | datetime | str
+    pk_columns: tuple[str, ...]
+    target_column: str | None
+    weight_column: str | None = None
 ```
 
-For relation-based sources, the library builds manifest SQL from the final
-relation:
+Use the same boundary-hardening style as `CompletedModelBuild`: required strings
+must be non-empty, optional strings normalize cleanly, `data_as_of_date`
+normalizes to a date, and `pk_columns` must be a non-empty tuple of unique
+non-empty strings.
 
-```sql
-SELECT *
-FROM pricing_work.<modeling_table>
-ORDER BY policy_id
-```
-
-For edge cases, the user task may return `manifest_sql` directly:
+Add a frame-backed writer:
 
 ```python
-return {
-    "manifest_sql": final_manifest_sql,
+def create_model_frame_manifest_with_split(
+    engine: Engine,
+    *,
+    frame: pd.DataFrame,
+    spec: ModelFrameManifestSpec,
+    manifest_id: str | None = None,
+    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
+    validation_split_artifact_root: Path | None = None,
+    created_by: str = "airflow",
+) -> DatasetManifestResult:
     ...
-}
 ```
 
-That escape hatch is for final model-ready queries only. SQL still lives in the
-task or imported task code, not in TOML.
+The function creates a manifest ID when one is not supplied, writes
+`DATASET_MANIFEST`, writes final-frame `DATASET_COLUMN`, and writes validation
+split metadata using the existing split logic. If `validation_split.materialize`
+is true, it writes the compressed `.npz` split index artifact exactly as the
+current SQL-backed manifest path does.
 
-## DAG Flow
+The existing SQL-backed API stays available:
 
-The production-style DAG default becomes:
+```python
+def create_dataset_manifest_with_split(..., dataset: DatasetSpec, ...):
+    frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
+    return create_model_frame_manifest_with_split(..., frame=frame, ...)
+```
+
+`DatasetSpec.manifest_sql` is a compatibility path for SQL-backed final model
+frames and old factory/demo flows. It is not required for new custom DAGs and
+should not be used merely to re-read raw source data for manifesting.
+
+## Custom DAG Flow
+
+The production-style DAG should be:
 
 ```text
 register model
--> pull/transform candidate data
--> train/select features/materialize final model-ready source
--> create manifest from final model-ready source
+-> prepare source data
+-> train/validate/export and create model-frame manifest
 -> publish completed build
 -> deploy separately after review
 ```
 
-The publish task does not need dataset columns. It receives
-`CompletedModelBuild` plus `manifest_id` / `split_set_id` from the manifest task.
-Deployment remains a separate DAG/task that moves the model deployment slot.
-
-The preferred post-modeling flow creates the manifest before publish and passes
-`manifest_id` / `split_set_id` into `publish_completed_model_build_task(...)`.
-The v1 publish helper keeps its `dataset` fallback for compatibility and simple
-demos, but new production examples should use the separate manifest task.
-
-The model/rate-package audit path should read as:
-
-```text
-PRICING_RATE_PACKAGE
--> MODEL_RUN.rate_package_id
--> MODEL_RUN.manifest_id
--> DATASET_MANIFEST.data_as_of_date and source identity
--> DATASET_COLUMN final modeling columns
-```
-
-For manual revisions, the child package inherits the trained-data lineage through
-`parent_rate_package_id` back to the nearest trained package. A lineage view
-should make that easy to see without requiring users to hand-write recursive
-queries.
-
-## Components
-
-### Dataset Config
-
-Add an optional `DatasetBuildConfig` to the loaded model config:
-
-- `dataset_name`
-- `source_system`
-- `manifest_data_source`
-- `pk_columns`
-- `target_column`
-- `weight_column`
-
-The config should validate required strings, non-empty PK columns, and optional
-weight column. It should not contain `columns`, `sql_file`, or credentials.
-
-`manifest_data_source` is a logical key. If teams want a server/database lookup,
-that lookup should map logical names to metadata such as server, database, and
-default schema. It should not contain connection strings or auth code.
-
-As-of and period derivation should stay mostly out of TOML. The default should be
-explicit payload fields from the user task, with optional Python helper
-strategies for repetitive cases.
-
-### Manifest Source Metadata
-
-`pricing.DATASET_MANIFEST` already has `data_as_of_date`. That field should mean
-the as-at/as-of date for the final model-ready data source, not the date the
-manifest job happened to run. The manifest helper should accept it from the
-payload and only fall back to the current date for demos or legacy callers.
-
-The current table does not explicitly store the final source relation or query.
-Add source identity fields so the manifest can answer "what data did this model
-train on?" without relying on a naming convention:
-
-- `manifest_source_type`: `RELATION` or `SQL`.
-- `manifest_source_name`: display name for the final source, such as
-  `pricing_work.CLAIM_FREQ_MODELING_RUN_123`.
-- `source_server`: nullable logical/physical SQL Server name.
-- `source_database`: nullable database name.
-- `source_schema`: nullable schema name.
-- `source_object`: nullable table/view name.
-- `manifest_sql_sha256`: hash of the SQL used to read the final modeling frame.
-- `manifest_sql_text`: optional SQL text used to create the manifest. For
-  relation sources this is the generated `SELECT * ... ORDER BY ...`; for SQL
-  sources it is the user-supplied final manifest SQL.
-
-Add optional data-period fields:
-
-- `data_period_start_date`: nullable start of the observation/experience period.
-- `data_period_end_date`: nullable end of the observation/experience period.
-
-These are different from `data_as_of_date`. `data_as_of_date` says how current
-the modeled data was. The period fields say what date range the observations
-cover.
-
-These fields are metadata. They do not turn SQL Server into a row-level artifact
-store.
-
-### Dataset Spec Builder
-
-Add a generic builder that converts:
-
-- `DatasetBuildConfig`
-- prepared/completed payload from the user task
-
-into `DatasetSpec`.
-
-Supported payload forms:
-
-1. Relation form:
+The DAG code stays small:
 
 ```python
-{
-    "modeling_schema": "pricing_work",
-    "modeling_table": "CLAIM_FREQ_MODELING_RUN_123",
-    "data_as_of_date": "2026-06-04",
-    "data_period_start_date": "2025-01-01",
-    "data_period_end_date": "2026-03-31",
-}
+registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
+prepared = prepare_source_data_task()()
+completed = train_validate_export_task()(prepared)
+published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(completed)
+
+registered >> prepared >> completed >> published
 ```
 
-2. SQL form:
+Inside the model-owned training/export task:
 
 ```python
-{
-    "manifest_sql": "SELECT ... ORDER BY policy_id",
-    "data_as_of_date": "2026-06-04",
-    "data_period_start_date": "2025-01-01",
-    "data_period_end_date": "2026-03-31",
-}
-```
+raw = read_prepared_source(prepared)
+frame = build_final_model_frame(raw)
+frame = frame.sort_values("policy_id").reset_index(drop=True)
 
-The relation form should build `SELECT * FROM schema.table ORDER BY pk_columns`.
-The SQL form should use the supplied SQL as-is.
-
-Payload date fields are the primary API. For common cases where teams do not
-want to compute the dates manually, provide Python helper strategies instead of
-TOML-heavy configuration:
-
-```python
-dataset_builder = dataset_spec_from_model_config(
-    MODEL_CONFIG,
-    data_as_of=DataAsOf.max_column("snapshot_date"),
-    data_period=DataPeriod.date_range("policy_effective_date"),
+split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
+model, metrics, model_path = fit_model(frame, split_indices=split_indices)
+workbook_path = export_rating_tables(model, frame)
+manifest = create_model_frame_manifest_with_split(
+    runtime.get_engine(),
+    frame=frame,
+    spec=ModelFrameManifestSpec(
+        dataset_name="claim_frequency_model_frame",
+        source_system="policy_admin",
+        data_as_of_date=prepared["data_as_of_date"],
+        pk_columns=("policy_id",),
+        target_column=MODEL_CONFIG.target_name,
+        weight_column="earned_exposure",
+    ),
+    validation_split=MODEL_CONFIG.validation_split,
+    validation_split_artifact_root=runtime.settings.validation_split_artifact_root,
+    created_by="airflow",
 )
+
+return CompletedModelBuild(
+    rating_workbook_path=str(workbook_path),
+    model_version=model_version,
+    effective_from=effective_from,
+    created_by="airflow",
+    export_id=export_id,
+    model_artifact_path=str(model_path),
+    metrics=metrics,
+    manifest_id=manifest.manifest_id,
+    split_set_id=manifest.split_set_id,
+).to_dict()
 ```
 
-Supported helper strategies:
+The publish task then uses the supplied `manifest_id` and `split_set_id`. It does
+not need a `DatasetSpec` and it should not create a manifest implicitly in the
+recommended custom DAG path.
 
-- `DataAsOf.payload("data_as_of_date")`
-- `DataAsOf.today()`
-- `DataAsOf.max_column("snapshot_date")`
-- `DataPeriod.none()`
-- `DataPeriod.payload("data_period_start_date", "data_period_end_date")`
-- `DataPeriod.date_range("policy_effective_date")`
+A frame-backed manifest is an audit receipt for the frame supplied by the model
+task. It does not persist the full frame unless the model task chooses to write a
+frame artifact separately. Reproducibility depends on the source data, model
+code, artifact paths, and recorded metadata being sufficient for the team's
+audit standard.
 
-The column-based strategies run against the final model-ready source, not the raw
-source tables.
+## Split, Row Order, and Retry Semantics
 
-### Manifest Task
+The manifest writer treats the supplied frame order as the canonical model-frame
+order. Model tasks should sort the final frame by PK or another deterministic
+business key before calling `create_model_frame_manifest_with_split(...)`, unless
+the training method deliberately requires a different order. The writer should
+not silently sort the frame, because that could change what the model trained on.
 
-Keep `create_prepared_dataset_manifest_task(...)` as the generic orchestration
-task, but allow a standard dataset-builder factory so users do not hand-write a
-per-model function:
+If validation metrics are reported, the recorded split metadata must describe
+the split actually used to produce those metrics. Model code should either use
+the same deterministic split helper/config that the manifest writer records, or
+pass/reuse its own split metadata when that API exists. Do not record default
+k-fold metadata merely because a default split config exists.
+
+A frame manifest is append-only unless a `manifest_id` is explicitly supplied.
+For idempotent reruns of the same export, model tasks may derive a stable
+manifest ID from the export/run key or look up and reuse an existing manifest.
+V1 does not require manifest de-duplication; package idempotency remains enforced
+by `source_export_id`.
+
+A manifest may exist even if a later fit, export, or publish step fails.
+Successful published builds are tied to the manifest through
+`CompletedModelBuild.manifest_id` and model-run lineage.
+
+## Data As-Of Handling
+
+The data as-of date is required for the frame manifest spec. It should come from
+the model task or upstream prepared payload, not from TOML by default.
+
+Examples:
 
 ```python
-manifested = create_prepared_dataset_manifest_task(
-    model_config=MODEL_CONFIG,
-    dataset_builder=dataset_spec_from_model_config(MODEL_CONFIG),
-)(completed_or_prepared)
+data_as_of_date = prepared["data_as_of_date"]
+data_as_of_date = frame["snapshot_date"].max().date()
+data_as_of_date = date.today()  # acceptable for demos/manual runs only
 ```
 
-The standard builder should require `data_as_of_date` by default. Demo or legacy
-callers may opt out explicitly with `require_data_as_of_date=False`, in which
-case the current date fallback is allowed.
+Optional helper functions can make repetitive cases nicer:
 
-The task adds `manifest_id` and `split_set_id` to the payload and returns the
-enriched payload for `publish_completed_model_build_task(...)`.
+```python
+data_as_of_date = data_as_of_from_column(frame, "snapshot_date")
+data_as_of_date = data_as_of_from_payload(prepared, "data_as_of_date")
+```
 
-### Naming
+These helpers are convenience functions only. They should not introduce a TOML
+DSL for source SQL, server/database routing, or feature lists.
 
-User-facing examples should prefer `modeling_table`, `modeling_schema`,
-`modeling_dataset`, or `manifest_source`. Avoid `training_table` in new docs and
-new demos except where it is existing compatibility code.
+## Model Config and Old Factory Boundary
+
+`ModelBuildConfig` / `model.toml` remains stable housekeeping for model registry
+and publish defaults:
+
+- `model_key`
+- `model_name`
+- `target_name`
+- `model_type`
+- `deployment_slot`
+- validation split defaults
+- default package status
+
+The custom DAG path should not require `ModelSpec`, `DatasetSpec`,
+`TRAINING_SQL`, or `feature_columns`. Those are factory-era conveniences and may
+remain for backwards compatibility, but they should not appear as required
+pieces in the default custom scaffold.
+
+New scaffolded custom models should make this clear:
+
+- `spec.py` loads `MODEL_CONFIG` from TOML only.
+- `data.py` contains optional source-read/prep helpers.
+- `modeling.py` builds the final model frame, creates the frame manifest, fits
+  the model, exports rating tables, and returns `CompletedModelBuild.to_dict()`.
+- the DAG imports reusable registry/publish tasks plus model-owned source and
+  train/export tasks.
 
 ## Error Handling
 
-The dataset builder should raise clear domain errors when:
+`create_model_frame_manifest_with_split(...)` should raise clear errors when:
 
-- `[dataset]` is missing but the standard builder is used.
-- Neither `manifest_sql` nor relation fields are supplied.
-- Only one of `modeling_schema` / `modeling_table` is supplied.
-- `data_as_of_date` is missing while `require_data_as_of_date=True`, blank, or
-  not a valid date.
-- Data period start/end values are invalid dates or start is after end.
-- PK columns are missing or blank.
-- Relation identifiers are blank.
+- the frame is empty;
+- the frame has duplicate column names;
+- the frame has blank or whitespace-only column names;
+- `pk_columns` is empty;
+- `pk_columns` contains duplicates;
+- required PK columns are missing;
+- target or weight columns are missing when supplied;
+- PK columns contain nulls;
+- PK column values are duplicated;
+- `data_as_of_date` is blank or not date-like;
+- `dataset_name` or `source_system` is blank;
+- `validation_split.stratify_column` is supplied but missing from the frame;
+- k-fold `n_splits` is greater than the frame row count;
+- `validation_split.materialize=True` and no artifact root is supplied.
 
-It should not validate database connectivity. The manifest task already validates
-the final SQL by executing it when creating `DATASET_MANIFEST` and
-`DATASET_COLUMN`.
+The function should not validate the original SQL source or connection logic.
+At this point the model task has already built the final frame.
+
+The DataFrame index is not part of row identity. A non-unique index is allowed
+and ignored; PK columns define row identity and row-order hashing.
 
 ## Testing
 
-Add focused tests for:
+Add focused tests for the new frame-backed manifest writer:
 
-- TOML dataset config parsing.
-- Relation payload builds expected `DatasetSpec.manifest_sql`.
-- SQL payload passes explicit `manifest_sql` through.
-- Payload `data_as_of_date` is written to `DATASET_MANIFEST`.
-- Payload data period start/end dates are written to `DATASET_MANIFEST`.
-- `DataAsOf.max_column(...)` computes the max date from the final model-ready
-  source.
-- `DataPeriod.date_range(...)` computes min/max dates from the final model-ready
-  source.
-- Manifest source relation/query metadata is written to `DATASET_MANIFEST`.
-- Missing relation/SQL payload raises a clear error.
-- Missing/invalid `data_as_of_date` raises when `require_data_as_of_date=True`.
-- Manifest task can use the standard builder and pass the enriched payload to
-  publish.
-- A package lineage view exposes package id/version, model run completed time,
-  manifest id, manifest source identity, and `data_as_of_date`.
-- Demo DAG uses post-modeling manifest naming in comments/docs.
+- writes `DATASET_MANIFEST` from an in-memory frame;
+- writes `data_as_of_date` from the supplied spec instead of `date.today()`;
+- writes `DATASET_COLUMN` for engineered features that do not exist in source
+  SQL;
+- writes target and weight column roles correctly;
+- writes replayable k-fold split metadata;
+- writes materialized train/test split `.npz` metadata when configured;
+- records the supplied frame order consistently in the row-order hash;
+- rejects duplicate final-frame column names;
+- rejects blank final-frame column names;
+- rejects empty `pk_columns`;
+- rejects duplicate `pk_columns`;
+- rejects missing PK columns;
+- rejects missing target/weight columns when configured;
+- rejects null or duplicate PK values;
+- rejects missing stratify columns when configured;
+- rejects k-fold splits where `n_splits > row_count`;
+- rejects invalid `data_as_of_date`;
+- leaves the existing SQL-backed `create_dataset_manifest_with_split(...)`
+  working by delegating to the frame-backed writer.
 
-Regression tests should confirm `publish_completed_model_build_task(...)` remains
-unchanged: it should publish from supplied manifest IDs and should not deploy.
+Add scaffold/demo tests:
+
+- default custom scaffold does not import `ModelSpec`;
+- default custom scaffold does not require `DatasetSpec` or `TRAINING_SQL`;
+- default custom DAG does not call `create_prepared_dataset_manifest_task(...)`;
+- default custom train/export task returns `CompletedModelBuild` with
+  `manifest_id` and `split_set_id`;
+- custom train/export example creates the manifest from the final engineered
+  frame, not the prepared raw frame;
+- `publish_completed_model_build_task(...)` still publishes from supplied
+  manifest IDs and does not deploy.
+
+Run the normal no-Docker checks after implementation:
+
+```bash
+rtk uv run pytest -q
+rtk uv run ruff check ...
+rtk uv run ruff format --check ...
+rtk uv run python scripts/no_docker_services.py menu --dry-run
+rtk uv run pytest -q tests/test_sql_server_syntax.py
+rtk uv run sqlfluff parse --dialect tsql db/migrations
+```
 
 ## Migration Impact
 
-A SQL migration is required to add manifest source identity fields and optional
-data-period fields to `pricing.DATASET_MANIFEST`. The `data_as_of_date` column
-already exists; the implementation should change how it is populated, not add a
-second as-of field.
+No SQL migration is required for v1.
 
-The existing `pricing.MODEL_RUN` table already has `started_ts`, `completed_ts`,
-`manifest_id`, and `rate_package_id`, which is enough to relate a trained package
-to the data manifest and the model build time. Add or update a convenience view
-for analysts so they can see package lineage without manually joining model run,
-manifest, package, and parent-package tables.
+The existing schema already has the necessary fields:
 
-Existing model folders may keep custom `dataset_builder` functions. The new
-standard builder is a convenience path, not a forced replacement.
+- `DATASET_MANIFEST.source_system`
+- `DATASET_MANIFEST.data_as_of_date`
+- `DATASET_MANIFEST.row_count`
+- `DATASET_MANIFEST.pk_columns_json`
+- `DATASET_COLUMN`
+- `CV_SPLIT_SET`
+- `CV_FOLD`
+
+The implementation changes how manifest rows are created, not the table shape.
+That means no re-seed is required solely for this fix.
+
+Future richer audit fields, such as source database, source object, source SQL
+hash, or observation-period dates, can be added later if the team needs them.
+They are not required to unblock model builds.
+
+## Implementation Notes
+
+Most of the existing logic in `pricing_pipeline.data.manifest` can be reused.
+The code already knows how to:
+
+- build column metadata from a pandas frame;
+- compute row-order hashes from PK columns;
+- build replayable and materialized split metadata;
+- write compressed split index artifacts.
+
+The implementation should extract the common write path from
+`create_dataset_manifest_with_split(...)` into the new frame-backed function.
+The SQL-backed function should become a thin adapter that reads `manifest_sql`
+into a frame and passes it to the new function.
+
+Default custom scaffold examples should align with this spec before being
+promoted as the recommended production pattern.

@@ -132,16 +132,18 @@ def test_demo_run_scoped_keys_are_collision_safe():
     assert all(len(table) <= 128 for table in punctuation_tables | long_prefix_tables)
 
 
-def test_demo_dataset_spec_can_point_at_run_specific_training_table():
-    from pricing_models.demo_custom_publish.data import dataset_spec_for_training_table
+def test_demo_data_constants_describe_frame_manifest():
+    from pricing_models.demo_custom_publish.data import (
+        DATASET_NAME,
+        PK_COLUMNS,
+        SOURCE_SYSTEM,
+        WEIGHT_COLUMN,
+    )
 
-    dataset = dataset_spec_for_training_table("DEMO_CUSTOM_PUBLISH_TRAINING_run_1")
-
-    assert dataset.dataset_name == "demo_custom_frequency_training"
-    assert "pricing_stg.DEMO_CUSTOM_PUBLISH_TRAINING_run_1" in dataset.manifest_sql
-    assert dataset.pk_columns == ("policy_id",)
-    assert dataset.target_column == "claim_count"
-    assert dataset.weight_column == "exposure"
+    assert DATASET_NAME == "demo_custom_frequency_model_frame"
+    assert SOURCE_SYSTEM == "demo_sql_server_staging"
+    assert PK_COLUMNS == ("policy_id",)
+    assert WEIGHT_COLUMN == "exposure"
 
 
 def test_demo_training_export_returns_completed_build_payload(tmp_path: Path):

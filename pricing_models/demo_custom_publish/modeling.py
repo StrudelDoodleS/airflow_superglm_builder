@@ -11,7 +11,20 @@ import pandas as pd
 from sqlalchemy import text
 from superglm import Categorical, Numeric, SuperGLM
 
-from pricing_models.demo_custom_publish.data import FEATURE_COLUMNS
+from pricing_models.demo_custom_publish.data import (
+    DATASET_NAME,
+    FEATURE_COLUMNS,
+    PK_COLUMNS,
+    SOURCE_SYSTEM,
+    TARGET_COLUMN,
+    WEIGHT_COLUMN,
+)
+from pricing_pipeline.data.manifest import (
+    DatasetManifestResult,
+    ModelFrameManifestSpec,
+    create_model_frame_manifest_with_split,
+)
+from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import TrainingFrame
 from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
 from pricing_pipeline.orchestration.run_context import run_key_for_value
@@ -21,17 +34,22 @@ MODEL_KEY = "DEMO_CUSTOM_FREQ"
 _MODEL_VERSION_PATTERN = re.compile(r"^v(\d+)$")
 
 
-def build_training_frame(raw: pd.DataFrame) -> TrainingFrame:
-    required = [*FEATURE_COLUMNS, "claim_count", "exposure"]
+def build_final_model_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    required = [*PK_COLUMNS, *FEATURE_COLUMNS, TARGET_COLUMN, WEIGHT_COLUMN]
     missing = [column for column in required if column not in raw.columns]
     if missing:
         raise ValueError(f"missing columns: {', '.join(missing)}")
 
-    training = raw.loc[raw["exposure"].astype(float) > 0, required].copy()
-    exposure = training["exposure"].to_numpy(dtype=float)
+    frame = raw.loc[raw[WEIGHT_COLUMN].astype(float) > 0, required].copy()
+    return frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
+
+
+def build_training_frame(raw: pd.DataFrame) -> TrainingFrame:
+    frame = build_final_model_frame(raw)
+    exposure = frame[WEIGHT_COLUMN].to_numpy(dtype=float)
     return TrainingFrame(
-        X=training.loc[:, FEATURE_COLUMNS].copy(),
-        y=training["claim_count"].to_numpy(dtype=float),
+        X=frame.loc[:, FEATURE_COLUMNS].copy(),
+        y=frame[TARGET_COLUMN].to_numpy(dtype=float),
         exposure=exposure,
         offset=np.log(exposure),
     )
@@ -193,3 +211,30 @@ def export_superglm_completed_build(
         model_artifact_path=str(model_path),
         metrics=metrics,
     ).to_dict()
+
+
+def create_demo_model_frame_manifest(
+    engine,
+    *,
+    frame: pd.DataFrame,
+    data_as_of_date: str,
+    validation_split: ValidationSplitConfig,
+    validation_split_artifact_root: Path | None,
+    created_by: str,
+) -> DatasetManifestResult:
+    final_frame = build_final_model_frame(frame)
+    return create_model_frame_manifest_with_split(
+        engine,
+        frame=final_frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name=DATASET_NAME,
+            source_system=SOURCE_SYSTEM,
+            data_as_of_date=data_as_of_date,
+            pk_columns=PK_COLUMNS,
+            target_column=TARGET_COLUMN,
+            weight_column=WEIGHT_COLUMN,
+        ),
+        validation_split=validation_split,
+        validation_split_artifact_root=validation_split_artifact_root,
+        created_by=created_by,
+    )

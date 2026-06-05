@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 from dataclasses import dataclass
@@ -61,6 +62,51 @@ def _entries_by_key(models_root: Path | None = None) -> dict[str, ModelRegistryE
 
 def model_keys(*, models_root: Path | None = None) -> tuple[str, ...]:
     return tuple(sorted(_entries_by_key(models_root)))
+
+
+def _target_defines_name(target: ast.AST, name: str) -> bool:
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(_target_defines_name(item, name) for item in target.elts)
+    return False
+
+
+def _spec_file_defines_model_spec(spec_path: Path) -> bool:
+    try:
+        source = spec_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    try:
+        tree = ast.parse(source, filename=spec_path.as_posix())
+    except SyntaxError:
+        return False
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            _target_defines_name(target, "MODEL_SPEC") for target in node.targets
+        ):
+            return True
+        if isinstance(node, ast.AnnAssign) and _target_defines_name(node.target, "MODEL_SPEC"):
+            return True
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported_name = alias.asname or alias.name
+                if imported_name == "MODEL_SPEC":
+                    return True
+    return False
+
+
+def model_spec_keys(*, models_root: Path | None = None) -> tuple[str, ...]:
+    """Return model keys that can be run through ModelSpec-based tooling."""
+    return tuple(
+        sorted(
+            entry.config.model_key
+            for entry in _discover_entries(models_root)
+            if _spec_file_defines_model_spec(entry.spec_path)
+        )
+    )
 
 
 def _unknown_model_error(model_key: str, models_root: Path | None = None) -> ValueError:

@@ -45,6 +45,7 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "build_demo_training_frame",
         lambda: pd.DataFrame({"policy_id": [1], "claim_count": [0], "exposure": [1.0]}),
     )
+    monkeypatch.setattr(runner, "build_final_model_frame", lambda frame: frame)
     monkeypatch.setattr(
         runner,
         "materialize_training_source",
@@ -90,9 +91,9 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     )
     monkeypatch.setattr(
         runner,
-        "create_model_build_manifest",
+        "create_model_frame_manifest_with_split",
         lambda engine_arg, **kwargs: (
-            calls.append(("create_model_build_manifest", engine_arg, kwargs))
+            calls.append(("create_model_frame_manifest_with_split", engine_arg, kwargs))
             or SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1")
         ),
     )
@@ -116,18 +117,22 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
         "trained_model_version_for_export",
         "materialize_training_source",
         "write_training_frame",
-        "create_model_build_manifest",
         "export_superglm_completed_build",
+        "create_model_frame_manifest_with_split",
         "publish_completed_model_build",
     ]
     materialize_call = calls[3]
     assert materialize_call[3].startswith("DEMO_CUSTOM_PUBLISH_TRAINING_")
-    manifest_call = calls[-3]
-    assert "DEMO_CUSTOM_PUBLISH_TRAINING_" in manifest_call[2]["dataset"].manifest_sql
+    manifest_call = calls[-2]
+    assert manifest_call[2]["frame"].equals(
+        pd.DataFrame({"policy_id": [1], "claim_count": [0], "exposure": [1.0]})
+    )
+    assert manifest_call[2]["spec"].dataset_name == "demo_custom_frequency_model_frame"
+    assert manifest_call[2]["spec"].data_as_of_date.isoformat() == "2026-06-04"
     version_call = calls[2]
     assert version_call[2] == "DEMO_CUSTOM_FREQ"
     assert version_call[3] == "demo_custom_freq__python__20260604"
-    export_call = calls[-2]
+    export_call = calls[-3]
     assert export_call[2]["model_version"] == "v7"
     assert export_call[2]["effective_from"] == "2026-06-04"
     assert export_call[2]["export_id"] == "demo_custom_freq__python__20260604"
