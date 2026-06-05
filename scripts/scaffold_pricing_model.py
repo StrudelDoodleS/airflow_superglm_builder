@@ -92,6 +92,9 @@ def _model_toml_template(
 ) -> str:
     return dedent(
         f"""\
+        # Model housekeeping config. Keep model identity, deployment lane, and
+        # validation split settings here; keep source SQL and Python model code
+        # in the neighboring package files.
         model_key = {_toml_string(model_key)}
         model_label = {_toml_string(model_label)}
         target_name = {_toml_string(target_name)}
@@ -107,6 +110,10 @@ def _model_toml_template(
         materialize = true
         """
     )
+
+
+def _package_init_template(*, package_name: str) -> str:
+    return f'"""Pricing model package for {package_name}."""\n'
 
 
 def _training_template(*, target_name: str) -> str:
@@ -168,6 +175,8 @@ def _training_template(*, target_name: str) -> str:
 def _custom_spec_template() -> str:
     return dedent(
         """\
+        \"\"\"Load the TOML model configuration for this pricing model.\"\"\"
+
         from __future__ import annotations
 
         from pathlib import Path
@@ -180,9 +189,37 @@ def _custom_spec_template() -> str:
     )
 
 
+def _custom_source_sql_template(*, model_key: str) -> str:
+    return dedent(
+        f"""\
+        -- Source-data query placeholder for {model_key}.
+        --
+        -- Put model-local source SQL here when that is convenient, then read it
+        -- from data.py. You can also ignore this file and call your team's
+        -- existing Python data-access helper from data.py instead.
+        --
+        -- Keep this query focused on source/prepared data. Target construction,
+        -- feature engineering, filtering, and final feature selection can still
+        -- happen in modeling.py.
+        --
+        -- Example:
+        -- SELECT *
+        -- FROM some_schema.some_source_view;
+        """
+    )
+
+
 def _custom_data_template(*, package_name: str) -> str:
     return dedent(
         f"""\
+        \"\"\"Read or stage source data for this pricing model.
+
+        This file is model-owned. Define how the DAG obtains source data here:
+        read SQL from sql/source_data.sql, call your team's existing connection
+        helper, copy a run-scoped extract, or delegate to another local module.
+        Return only small run metadata for downstream modeling tasks.
+        \"\"\"
+
         from __future__ import annotations
 
         from pathlib import Path
@@ -193,6 +230,8 @@ def _custom_data_template(*, package_name: str) -> str:
         PK_COLUMNS = ("REPLACE_ME_ID",)
         WEIGHT_COLUMN: str | None = None
         DEFAULT_OUTPUT_ROOT = Path("state/{package_name}")
+        SQL_DIR = Path(__file__).with_name("sql")
+        SOURCE_DATA_SQL = SQL_DIR / "source_data.sql"
 
 
         def prepare_source_data(
@@ -217,6 +256,8 @@ def _custom_data_template(*, package_name: str) -> str:
 def _custom_modeling_template(*, package_name: str) -> str:
     return dedent(
         f"""\
+        \"\"\"Build the final model frame, fit/export the model, and create lineage.\"\"\"
+
         from __future__ import annotations
 
         from pathlib import Path
@@ -341,6 +382,13 @@ def _custom_modeling_template(*, package_name: str) -> str:
 def _custom_airflow_tasks_template(*, package_name: str) -> str:
     return dedent(
         f"""\
+        \"\"\"Airflow TaskFlow wrappers for this model package.
+
+        Keep business logic in data.py and modeling.py. This file should stay
+        thin: load runtime config, attach @task decorators, and pass small
+        dictionaries between Airflow tasks.
+        \"\"\"
+
         from __future__ import annotations
 
         from pathlib import Path
@@ -411,10 +459,12 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
     )
 
 
-def _custom_dag_template(*, package_name: str, dag_id: str) -> str:
+def _custom_dag_template(*, package_name: str, dag_id: str, model_key: str) -> str:
     tag = package_name.replace("_", "-")
     return dedent(
         f"""\
+        \"\"\"Airflow DAG for the {model_key} pricing model build.\"\"\"
+
         from __future__ import annotations
 
         from airflow.sdk import dag
@@ -568,6 +618,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         files = (
             package_dir / "__init__.py",
             package_dir / "model.toml",
+            package_dir / "sql" / "source_data.sql",
             package_dir / "spec.py",
             package_dir / "data.py",
             package_dir / "modeling.py",
@@ -584,7 +635,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     dag_path.parent.mkdir(parents=True, exist_ok=True)
 
     content_by_path = {
-        package_dir / "__init__.py": "",
+        package_dir / "__init__.py": _package_init_template(package_name=package_name),
         package_dir / "model.toml": _model_toml_template(
             model_key=model_key,
             model_label=model_label,
@@ -607,6 +658,9 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     else:
         content_by_path.update(
             {
+                package_dir / "sql" / "source_data.sql": _custom_source_sql_template(
+                    model_key=model_key
+                ),
                 package_dir / "spec.py": _custom_spec_template(),
                 package_dir / "data.py": _custom_data_template(package_name=package_name),
                 package_dir / "modeling.py": _custom_modeling_template(
@@ -615,10 +669,15 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
                 package_dir / "airflow_tasks.py": _custom_airflow_tasks_template(
                     package_name=package_name,
                 ),
-                dag_path: _custom_dag_template(package_name=package_name, dag_id=dag_id),
+                dag_path: _custom_dag_template(
+                    package_name=package_name,
+                    dag_id=dag_id,
+                    model_key=model_key,
+                ),
             }
         )
     for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content_by_path[path], encoding="utf-8")
 
     return ScaffoldResult(
