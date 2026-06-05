@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -17,6 +18,25 @@ from pricing_pipeline.orchestration.publish_completed_build import (
     CompletedModelPublishResult,
     publish_completed_model_build,
 )
+
+
+def _install_fake_airflow_taskflow(monkeypatch, context):
+    airflow_module = SimpleNamespace()
+    airflow_sdk_module = SimpleNamespace()
+
+    def task(func=None, **task_kwargs):
+        def decorator(inner):
+            return SimpleNamespace(function=inner, task_id=task_kwargs.get("task_id"))
+
+        if func is None:
+            return decorator
+        return decorator(func)
+
+    airflow_sdk_module.get_current_context = lambda: context
+    airflow_sdk_module.task = task
+    airflow_module.sdk = airflow_sdk_module
+    monkeypatch.setitem(sys.modules, "airflow", airflow_module)
+    monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
 
 
 def _config() -> ModelBuildConfig:
@@ -490,9 +510,9 @@ def test_publish_completed_model_build_task_fills_airflow_context(
         "pricing_pipeline.orchestration.publish_completed_build.runtime_from_env_or_module",
         lambda runtime_module=None, *, env=None: FakeRuntime(),
     )
-    monkeypatch.setattr(
-        "pricing_pipeline.orchestration.publish_completed_build.get_current_context",
-        lambda: {
+    _install_fake_airflow_taskflow(
+        monkeypatch,
+        {
             "dag": FakeDag("claim_freq_build"),
             "run_id": "manual__20260603",
         },
@@ -564,9 +584,9 @@ def test_publish_completed_model_build_task_allows_dataset_none_with_manifest(
         "pricing_pipeline.orchestration.publish_completed_build.runtime_from_env_or_module",
         lambda runtime_module=None, *, env=None: FakeRuntime(),
     )
-    monkeypatch.setattr(
-        "pricing_pipeline.orchestration.publish_completed_build.get_current_context",
-        lambda: {
+    _install_fake_airflow_taskflow(
+        monkeypatch,
+        {
             "dag": FakeDag("claim_freq_build"),
             "run_id": "manual__20260603",
         },

@@ -47,7 +47,7 @@ def completed_model_build_payload(
     model_artifact_path: str | Path | None = None,
     metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    if not str(manifest_id).strip():
+    if manifest_id is None or not str(manifest_id).strip():
         raise ValueError("manifest_id is required")
 
     return CompletedModelBuild(

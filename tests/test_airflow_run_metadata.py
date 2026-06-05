@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-import builtins
-import importlib
+import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
-from pricing_pipeline.orchestration.airflow_run_metadata import (
-    context_logical_date,
-    merge_prepared_payload_metadata,
-    task_run_metadata,
-)
 from pricing_pipeline.orchestration.run_context import run_key_for_value
 
 
@@ -22,23 +16,43 @@ class FakeDagRun:
             setattr(self, name, value)
 
 
-def test_airflow_run_metadata_module_does_not_import_airflow(monkeypatch):
-    sys.modules.pop("pricing_pipeline.orchestration.airflow_run_metadata", None)
-    original_import = builtins.__import__
+def test_airflow_run_metadata_module_does_not_import_airflow():
+    code = """
+import builtins
+import importlib
+import sys
 
-    def import_without_airflow(name, *args, **kwargs):
-        if name == "airflow" or name.startswith("airflow."):
-            raise AssertionError("airflow must not be imported")
-        return original_import(name, *args, **kwargs)
+for module_name in [
+    "pricing_pipeline.orchestration.airflow_run_metadata",
+    "pricing_pipeline.orchestration.completed_build_helpers",
+    "pricing_pipeline.orchestration.publish_completed_build",
+]:
+    sys.modules.pop(module_name, None)
 
-    monkeypatch.setattr(builtins, "__import__", import_without_airflow)
+original_import = builtins.__import__
 
-    module = importlib.import_module("pricing_pipeline.orchestration.airflow_run_metadata")
+def import_without_airflow(name, *args, **kwargs):
+    if name == "airflow" or name.startswith("airflow."):
+        raise AssertionError("airflow must not be imported")
+    return original_import(name, *args, **kwargs)
 
-    assert module.task_run_metadata
+builtins.__import__ = import_without_airflow
+module = importlib.import_module("pricing_pipeline.orchestration.airflow_run_metadata")
+assert module.task_run_metadata
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_context_logical_date_prefers_direct_context_value():
+    from pricing_pipeline.orchestration.airflow_run_metadata import context_logical_date
+
     assert context_logical_date(
         {
             "logical_date": date(2026, 6, 5),
@@ -49,12 +63,16 @@ def test_context_logical_date_prefers_direct_context_value():
 
 @pytest.mark.parametrize("attr_name", ["logical_date", "run_after", "execution_date"])
 def test_context_logical_date_reads_dag_run_fallbacks(attr_name):
+    from pricing_pipeline.orchestration.airflow_run_metadata import context_logical_date
+
     expected = datetime(2026, 6, 5, 14, 30)
 
     assert context_logical_date({"dag_run": FakeDagRun(**{attr_name: expected})}) == expected
 
 
 def test_task_run_metadata_uses_run_id_for_key_and_logical_date_for_dates(tmp_path):
+    from pricing_pipeline.orchestration.airflow_run_metadata import task_run_metadata
+
     metadata = task_run_metadata(
         {
             "run_id": "scheduled__2026-06-05T00:00:00+00:00",
@@ -73,6 +91,8 @@ def test_task_run_metadata_uses_run_id_for_key_and_logical_date_for_dates(tmp_pa
 
 
 def test_task_run_metadata_is_stable_for_airflow_retry(tmp_path):
+    from pricing_pipeline.orchestration.airflow_run_metadata import task_run_metadata
+
     context = {
         "run_id": "scheduled__2026-06-05T00:00:00+00:00",
         "logical_date": datetime(2026, 6, 4, 23, 0),
@@ -85,6 +105,8 @@ def test_task_run_metadata_is_stable_for_airflow_retry(tmp_path):
 
 
 def test_task_run_metadata_falls_back_to_manual_when_context_is_empty(tmp_path):
+    from pricing_pipeline.orchestration.airflow_run_metadata import task_run_metadata
+
     metadata = task_run_metadata({}, output_root=tmp_path)
 
     assert metadata["run_key"] == run_key_for_value("manual")
@@ -94,6 +116,10 @@ def test_task_run_metadata_falls_back_to_manual_when_context_is_empty(tmp_path):
 
 
 def test_merge_prepared_payload_metadata_rejects_run_key_mismatch():
+    from pricing_pipeline.orchestration.airflow_run_metadata import (
+        merge_prepared_payload_metadata,
+    )
+
     with pytest.raises(ValueError, match="run_key"):
         merge_prepared_payload_metadata(
             {
@@ -107,6 +133,10 @@ def test_merge_prepared_payload_metadata_rejects_run_key_mismatch():
 
 
 def test_merge_prepared_payload_metadata_allows_selected_payload_overrides():
+    from pricing_pipeline.orchestration.airflow_run_metadata import (
+        merge_prepared_payload_metadata,
+    )
+
     result = merge_prepared_payload_metadata(
         {
             "run_key": "run-1",
@@ -133,6 +163,8 @@ def test_merge_prepared_payload_metadata_allows_selected_payload_overrides():
 
 
 def test_prepare_source_payload_path_can_be_formed_from_metadata(tmp_path):
+    from pricing_pipeline.orchestration.airflow_run_metadata import task_run_metadata
+
     metadata = task_run_metadata(
         {"run_id": "manual__1", "logical_date": date(2026, 6, 5)},
         output_root=tmp_path,

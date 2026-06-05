@@ -64,7 +64,8 @@ def test_completed_model_build_payload_includes_optional_mlflow_run_id():
     }
 
 
-def test_completed_model_build_payload_requires_manifest_id():
+@pytest.mark.parametrize("manifest_id", [None, "", "   "])
+def test_completed_model_build_payload_requires_manifest_id(manifest_id):
     with pytest.raises(ValueError, match="manifest_id"):
         completed_model_build_payload(
             rating_workbook_path="/tmp/rating.xlsx",
@@ -72,6 +73,6 @@ def test_completed_model_build_payload_requires_manifest_id():
             effective_from="2026-06-05",
             export_id="model__run_1",
             created_by="airflow",
-            manifest_id="",
+            manifest_id=manifest_id,
             split_set_id=None,
         )

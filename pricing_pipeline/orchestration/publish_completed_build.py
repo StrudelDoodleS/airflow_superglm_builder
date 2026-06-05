@@ -8,7 +8,6 @@ from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
-from airflow.sdk import get_current_context, task
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import text
 
@@ -96,9 +95,7 @@ class CompletedModelBuild(BaseModel):
         if isinstance(value, cls):
             return value
         if not isinstance(value, Mapping):
-            raise CompletedModelBuildError(
-                "invalid completed build payload: expected a mapping"
-            )
+            raise CompletedModelBuildError("invalid completed build payload: expected a mapping")
         data = dict(value)
         allowed = set(cls.model_fields)
         unknown = sorted(set(data) - allowed)
@@ -193,9 +190,7 @@ def _required_text(value: str | None, field_name: str) -> str:
 def _existing_workbook(path_value: str | None) -> str:
     path = Path(_required_text(path_value, "rating_workbook_path"))
     if not path.exists():
-        raise CompletedModelBuildError(
-            f"rating_workbook_path does not exist: {path.as_posix()}"
-        )
+        raise CompletedModelBuildError(f"rating_workbook_path does not exist: {path.as_posix()}")
     return str(path)
 
 
@@ -263,9 +258,7 @@ def publish_completed_model_build(
     )
 
     if build.manifest_id is None and dataset is None:
-        raise CompletedModelBuildError(
-            "dataset is required when manifest_id is not supplied"
-        )
+        raise CompletedModelBuildError("dataset is required when manifest_id is not supplied")
 
     model_id = validate_model_on_engine(engine, model_config)
     if build.manifest_id is None:
@@ -325,8 +318,7 @@ def publish_completed_model_build(
         rating_workbook_path=str(
             publish_result.get("rating_workbook_path") or rating_workbook_path
         ),
-        mlflow_run_id=str(publish_result.get("mlflow_run_id") or build.mlflow_run_id or "")
-        or None,
+        mlflow_run_id=str(publish_result.get("mlflow_run_id") or build.mlflow_run_id or "") or None,
         was_existing=bool(publish_result.get("was_existing", False)),
     )
 
@@ -339,6 +331,8 @@ def publish_completed_model_build_task(
     created_by: str = "airflow",
     task_id: str = "publish_completed_model_build",
 ):
+    from airflow.sdk import get_current_context, task
+
     @task(task_id=task_id)
     def _publish(completed_build: Mapping[str, Any]) -> dict[str, Any]:
         context = get_current_context()
