@@ -80,6 +80,8 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "create_model_frame_manifest_with_split" in modeling
     assert "manifest_id=manifest.manifest_id" in modeling
     assert "split_set_id=manifest.split_set_id" in modeling
+    assert "If validation_split uses a source split column" in modeling
+    assert "column as a rating feature unless this is an intentional model decision" in modeling
     assert "CompletedModelBuild(" not in modeling
     assert "def effective_from_for_run" not in modeling
     assert "def existing_model_version_for_export" not in modeling

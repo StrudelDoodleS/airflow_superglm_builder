@@ -70,6 +70,66 @@ def train_test_split_set() -> CVSplitSet:
     )
 
 
+def source_column_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "IDpol": [10, 20, 30, 40],
+            "ClaimNb": [0, 1, 0, 2],
+            "fold_number": [2, 1, 2, 1],
+            "holdout_flag": [0, 0, 1, 0],
+        },
+        index=[100, 200, 300, 400],
+    )
+
+
+def source_column_kfold_split_set() -> CVSplitSet:
+    rows = source_column_frame()
+    return CVSplitSet(
+        split_set_id="manifest_1__column_kfold_fold_number",
+        manifest_id="manifest_1",
+        split_mode="REPLAYABLE",
+        splitter_class="source_column",
+        splitter_params_json=json.dumps(
+            {
+                "method": "column_kfold",
+                "column": "fold_number",
+                "fold_values": [1, 2],
+            },
+            sort_keys=True,
+        ),
+        row_order_sha256=compute_row_order_sha256(rows, pk_column="IDpol"),
+        row_count=4,
+        fold_count=2,
+        artifact_uri=None,
+        artifact_sha256=None,
+    )
+
+
+def source_column_holdout_split_set() -> CVSplitSet:
+    rows = source_column_frame()
+    return CVSplitSet(
+        split_set_id="manifest_1__column_holdout_holdout_flag",
+        manifest_id="manifest_1",
+        split_mode="REPLAYABLE",
+        splitter_class="source_column",
+        splitter_params_json=json.dumps(
+            {
+                "method": "column_holdout",
+                "column": "holdout_flag",
+                "train_values": [0],
+                "test_values": [1],
+                "unexpected_values": "error",
+            },
+            sort_keys=True,
+        ),
+        row_order_sha256=compute_row_order_sha256(rows, pk_column="IDpol"),
+        row_count=4,
+        fold_count=1,
+        artifact_uri=None,
+        artifact_sha256=None,
+    )
+
+
 def test_resolve_splitter_recreates_supported_splitter():
     cv = resolve_splitter(split_set())
 
@@ -96,6 +156,37 @@ def test_replay_cv_folds_supports_train_test_split_metadata():
     assert len(folds[1][0]) == 3
     assert len(folds[1][1]) == 2
     assert sorted(folds[1][0].tolist() + folds[1][1].tolist()) == [0, 1, 2, 3, 4]
+
+
+def test_replay_cv_folds_supports_source_column_kfold_metadata():
+    folds = replay_cv_folds(
+        source_column_kfold_split_set(),
+        source_column_frame(),
+    )
+
+    assert sorted(folds) == [1, 2]
+    assert folds[1][0].tolist() == [0, 2]
+    assert folds[1][1].tolist() == [1, 3]
+    assert folds[2][0].tolist() == [1, 3]
+    assert folds[2][1].tolist() == [0, 2]
+
+
+def test_replay_cv_folds_supports_source_column_holdout_metadata():
+    folds = replay_cv_folds(
+        source_column_holdout_split_set(),
+        source_column_frame(),
+    )
+
+    assert sorted(folds) == [1]
+    assert folds[1][0].tolist() == [0, 1, 3]
+    assert folds[1][1].tolist() == [2]
+
+
+def test_replay_cv_folds_rejects_missing_source_column():
+    changed = source_column_frame().drop(columns=["fold_number"])
+
+    with pytest.raises(ValueError, match="fold_number"):
+        replay_cv_folds(source_column_kfold_split_set(), changed)
 
 
 def test_replay_cv_folds_rejects_changed_row_order():
@@ -213,6 +304,43 @@ def test_materialize_cv_folds_writes_all_folds_updates_split_set_and_hashes_arti
     assert params["artifact_uri"] == str(output_path)
     assert len(params["artifact_sha256"]) == 64
     assert "runtime_metadata_json" in params
+
+
+def test_materialize_cv_folds_supports_replayable_source_column_split_set(
+    tmp_path: Path,
+):
+    executed = []
+
+    class Connection:
+        def execute(self, statement, params=None):
+            executed.append((str(statement), params))
+
+    class Engine:
+        def begin(self):
+            return self
+
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    output_path = tmp_path / "manifest_1__column_kfold_fold_number.npz"
+
+    result = materialize_cv_folds(
+        Engine(),
+        source_column_kfold_split_set(),
+        source_column_frame(),
+        output_path=output_path,
+    )
+
+    assert result == output_path
+    loaded = np.load(output_path)
+    assert loaded["fold_1_train_idx"].tolist() == [0, 2]
+    assert loaded["fold_1_test_idx"].tolist() == [1, 3]
+    assert loaded["fold_2_train_idx"].tolist() == [1, 3]
+    assert loaded["fold_2_test_idx"].tolist() == [0, 2]
+    assert executed[0][1]["split_set_id"] == "manifest_1__column_kfold_fold_number"
 
 
 def test_load_materialized_cv_folds_checks_artifact_hash(tmp_path: Path):

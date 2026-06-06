@@ -354,9 +354,14 @@ import edits are needed for normal use. The older all-in-one `ModelSpec` /
   published model still trains on the full dataset; the split is retained for
   review/validation lineage. Use `method = "train_test_split"` for a holdout,
   `method = "kfold"` for cross-validation, or `method = "none"` for no
-  validation split. Set `materialize = true` to write compressed `.npz` fold
-  indexes under `VALIDATION_SPLIT_ARTIFACT_ROOT`; SQL stores only the artifact
-  path, artifact SHA256, and dataset row-order SHA256.
+  validation split. If your final model frame already has source-provided split
+  assignment, use `method = "column_kfold"` with `column = "fold_number"` or
+  `method = "column_holdout"` with `column`, `train_values`, and `test_values`.
+  Source split columns are recorded for validation metadata and should not be
+  exported as rating features unless that is an intentional model decision. Set
+  `materialize = true` to write compressed `.npz` fold indexes under
+  `VALIDATION_SPLIT_ARTIFACT_ROOT`; SQL stores only the artifact path, artifact
+  SHA256, and dataset row-order SHA256.
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.

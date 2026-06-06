@@ -15,6 +15,9 @@ class ValidationSplitConfig:
     shuffle: bool = True
     stratify_column: str | None = None
     materialize: bool = False
+    column: str | None = None
+    train_values: tuple[Any, ...] = ()
+    test_values: tuple[Any, ...] = ()
 
     @classmethod
     def kfold(
@@ -64,6 +67,46 @@ class ValidationSplitConfig:
             materialize=False,
         )
 
+    @classmethod
+    def column_kfold(
+        cls,
+        *,
+        column: str,
+        materialize: bool = False,
+    ) -> "ValidationSplitConfig":
+        return cls(
+            method="column_kfold",
+            n_splits=None,
+            test_size=None,
+            random_state=None,
+            shuffle=False,
+            stratify_column=None,
+            materialize=materialize,
+            column=column,
+        )
+
+    @classmethod
+    def column_holdout(
+        cls,
+        *,
+        column: str,
+        train_values: tuple[Any, ...],
+        test_values: tuple[Any, ...],
+        materialize: bool = False,
+    ) -> "ValidationSplitConfig":
+        return cls(
+            method="column_holdout",
+            n_splits=None,
+            test_size=None,
+            random_state=None,
+            shuffle=False,
+            stratify_column=None,
+            materialize=materialize,
+            column=column,
+            train_values=train_values,
+            test_values=test_values,
+        )
+
 
 @dataclass(frozen=True)
 class ModelBuildConfig:
@@ -102,6 +145,13 @@ def _optional_string(data: dict[str, Any], field: str) -> str | None:
     return value.strip()
 
 
+def _required_optional_table_string(data: dict[str, Any], field: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"validation_split.{field} must be a non-empty string")
+    return value.strip()
+
+
 def _bool_value(data: dict[str, Any], field: str, default: bool) -> bool:
     value = data.get(field, default)
     if not isinstance(value, bool):
@@ -127,6 +177,35 @@ def _float_value(data: dict[str, Any], field: str, default: float | None) -> flo
     return float(value)
 
 
+def _reject_validation_split_fields(
+    split: dict[str, Any],
+    *,
+    method: str,
+    fields: set[str],
+) -> None:
+    present = sorted(field for field in fields if field in split)
+    if present:
+        joined = ", ".join(f"validation_split.{field}" for field in present)
+        raise ValueError(f"{joined} is not valid for validation_split.method={method!r}")
+
+
+def _split_values(data: dict[str, Any], field: str) -> tuple[Any, ...]:
+    value = data.get(field)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"validation_split.{field} must be a non-empty array")
+
+    cleaned: list[Any] = []
+    for item in value:
+        if isinstance(item, str):
+            item = item.strip()
+            if not item:
+                raise ValueError(f"validation_split.{field} values must be non-empty")
+        if any(item == existing for existing in cleaned):
+            raise ValueError(f"validation_split.{field} must not contain duplicate values")
+        cleaned.append(item)
+    return tuple(cleaned)
+
+
 def _validation_split_config(data: dict[str, Any]) -> ValidationSplitConfig:
     split = data.get("validation_split", {})
     if not split:
@@ -136,8 +215,29 @@ def _validation_split_config(data: dict[str, Any]) -> ValidationSplitConfig:
 
     method = _require_non_empty_string(split, "method")
     if method == "none":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={
+                "column",
+                "train_values",
+                "test_values",
+                "stratify_column",
+                "n_splits",
+                "test_size",
+                "random_state",
+                "shuffle",
+            },
+        )
+        if _bool_value(split, "materialize", False):
+            raise ValueError("validation_split.materialize is not valid for method='none'")
         return ValidationSplitConfig.none()
     if method == "kfold":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={"column", "train_values", "test_values", "stratify_column", "test_size"},
+        )
         n_splits = _int_value(split, "n_splits", 5)
         if n_splits is None or n_splits < 2:
             raise ValueError("validation_split.n_splits must be at least 2")
@@ -148,6 +248,11 @@ def _validation_split_config(data: dict[str, Any]) -> ValidationSplitConfig:
             materialize=_bool_value(split, "materialize", False),
         )
     if method == "train_test_split":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={"column", "train_values", "test_values", "n_splits"},
+        )
         test_size = _float_value(split, "test_size", 0.2)
         if test_size is None or not 0 < test_size < 1:
             raise ValueError("validation_split.test_size must be between 0 and 1")
@@ -158,9 +263,53 @@ def _validation_split_config(data: dict[str, Any]) -> ValidationSplitConfig:
             stratify_column=_optional_string(split, "stratify_column"),
             materialize=_bool_value(split, "materialize", False),
         )
+    if method == "column_kfold":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={
+                "n_splits",
+                "test_size",
+                "random_state",
+                "shuffle",
+                "stratify_column",
+                "train_values",
+                "test_values",
+            },
+        )
+        return ValidationSplitConfig.column_kfold(
+            column=_required_optional_table_string(split, "column"),
+            materialize=_bool_value(split, "materialize", False),
+        )
+    if method == "column_holdout":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={
+                "n_splits",
+                "test_size",
+                "random_state",
+                "shuffle",
+                "stratify_column",
+            },
+        )
+        train_values = _split_values(split, "train_values")
+        test_values = _split_values(split, "test_values")
+        overlapping = [
+            value for value in train_values if any(value == item for item in test_values)
+        ]
+        if overlapping:
+            raise ValueError("validation_split.train_values and test_values must not overlap")
+        return ValidationSplitConfig.column_holdout(
+            column=_required_optional_table_string(split, "column"),
+            train_values=train_values,
+            test_values=test_values,
+            materialize=_bool_value(split, "materialize", False),
+        )
 
     raise ValueError(
-        "validation_split.method must be one of: kfold, train_test_split, none"
+        "validation_split.method must be one of: "
+        "kfold, train_test_split, column_kfold, column_holdout, none"
     )
 
 
