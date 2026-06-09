@@ -237,6 +237,72 @@ def test_load_cv_folds_hides_sql_and_dataset_loader():
     assert folds[2][1].tolist() == [0, 2]
 
 
+def test_load_cv_folds_reconstructs_materialized_compact_artifact_from_dataset_loader(
+    tmp_path: Path,
+):
+    rows = frame()
+    artifact = tmp_path / "compact_kfold.npz"
+    artifact_sha = write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+            3: (np.array([0, 1, 2, 4]), np.array([3])),
+        },
+        validation_split=ValidationSplitConfig.kfold(n_splits=3, materialize=True),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": artifact_sha,
+        }
+    )
+    loaded_manifest_ids = []
+
+    class ScalarResult:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return materialized.__dict__
+
+    class Connection:
+        def execute(self, statement, params=None):
+            assert "FROM pricing.CV_SPLIT_SET" in str(statement)
+            assert params == {"split_set_id": materialized.split_set_id}
+            return ScalarResult()
+
+    class Engine:
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def dataset_loader(manifest_id: str) -> pd.DataFrame:
+        loaded_manifest_ids.append(manifest_id)
+        return rows
+
+    folds = load_cv_folds(
+        Engine(),
+        materialized.split_set_id,
+        dataset_loader=dataset_loader,
+        pk_columns=("IDpol",),
+    )
+
+    assert loaded_manifest_ids == ["manifest_1"]
+    assert folds[1][1].tolist() == [1, 4]
+    assert folds[2][1].tolist() == [0, 2]
+    assert folds[3][1].tolist() == [3]
+
+
 def test_export_cv_indices_writes_requested_fold(tmp_path: Path):
     folds = {
         1: (np.array([0, 2, 3]), np.array([1, 4])),
@@ -265,6 +331,43 @@ def test_export_cv_indices_writes_all_folds_artifact(tmp_path: Path):
     assert loaded["fold_1_test_idx"].tolist() == [1, 4]
     assert loaded["fold_2_train_idx"].tolist() == [1, 3, 4]
     assert loaded["fold_2_test_idx"].tolist() == [0, 2]
+
+
+def test_materialize_cv_folds_writes_compact_artifact_for_replayable_kfold(
+    tmp_path: Path,
+):
+    executed = []
+
+    class Connection:
+        def execute(self, statement, params=None):
+            executed.append((str(statement), params))
+
+    class Engine:
+        def begin(self):
+            return self
+
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    output_path = tmp_path / "manifest_1__kfold_3_seed_42.npz"
+
+    result = materialize_cv_folds(
+        Engine(),
+        split_set(),
+        frame(),
+        output_path=output_path,
+        pk_columns=("IDpol",),
+    )
+
+    assert result == output_path
+    loaded = np.load(output_path, allow_pickle=False)
+    assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
+    assert loaded["test_fold"].tolist() == [2, 1, 2, 3, 1]
+    assert executed[0][1]["artifact_uri"] == str(output_path)
+    assert len(executed[0][1]["artifact_sha256"]) == 64
 
 
 def test_materialize_cv_folds_writes_all_folds_updates_split_set_and_hashes_artifact(
@@ -296,11 +399,9 @@ def test_materialize_cv_folds_writes_all_folds_updates_split_set_and_hashes_arti
     )
 
     assert result == output_path
-    loaded = np.load(output_path)
-    assert loaded["fold_1_train_idx"].tolist() == [0, 2, 3]
-    assert loaded["fold_1_test_idx"].tolist() == [1, 4]
-    assert loaded["fold_3_train_idx"].tolist() == [0, 1, 2, 4]
-    assert loaded["fold_3_test_idx"].tolist() == [3]
+    loaded = np.load(output_path, allow_pickle=False)
+    assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
+    assert loaded["test_fold"].tolist() == [2, 1, 2, 3, 1]
     assert executed
     statement, params = executed[0]
     assert "UPDATE pricing.CV_SPLIT_SET" in statement
@@ -340,11 +441,9 @@ def test_materialize_cv_folds_supports_replayable_source_column_split_set(
     )
 
     assert result == output_path
-    loaded = np.load(output_path)
-    assert loaded["fold_1_train_idx"].tolist() == [0, 2]
-    assert loaded["fold_1_test_idx"].tolist() == [1, 3]
-    assert loaded["fold_2_train_idx"].tolist() == [1, 3]
-    assert loaded["fold_2_test_idx"].tolist() == [0, 2]
+    loaded = np.load(output_path, allow_pickle=False)
+    assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
+    assert loaded["test_fold"].tolist() == [2, 1, 2, 1]
     assert executed[0][1]["split_set_id"] == "manifest_1__column_kfold_fold_number"
 
 
