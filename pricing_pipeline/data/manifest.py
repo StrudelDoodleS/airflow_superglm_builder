@@ -17,6 +17,8 @@ from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from pricing_pipeline.data.row_identity import compute_row_order_sha256
+from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec
@@ -178,24 +180,6 @@ def build_column_metadata(
     if split_column is not None:
         column_df.loc[column_df["column_name"].eq(split_column), "column_role"] = "SPLIT"
     return column_df
-
-
-def compute_row_order_sha256(
-    frame: pd.DataFrame,
-    *,
-    pk_column: str | None = None,
-    pk_columns: tuple[str, ...] | None = None,
-) -> str:
-    if pk_columns is None:
-        if pk_column is None:
-            raise ValueError("pk_column or pk_columns is required")
-        pk_columns = (pk_column,)
-
-    digest = hashlib.sha256()
-    for row in frame.loc[:, list(pk_columns)].itertuples(index=False, name=None):
-        digest.update(json.dumps(row, default=str, separators=(",", ":")).encode("utf-8"))
-        digest.update(b"\n")
-    return digest.hexdigest()
 
 
 def split_set_id_for_manifest(
@@ -539,17 +523,22 @@ def write_validation_split_npz(
     *,
     validation_split: ValidationSplitConfig,
     output_path: Path,
+    pk_columns: tuple[str, ...] = ("IDpol",),
 ) -> str:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    arrays: dict[str, np.ndarray] = {}
-    for fold_no, (train_idx, test_idx) in enumerate(
-        validation_split_indices(frame, validation_split),
-        start=1,
-    ):
-        arrays[f"fold_{fold_no}_train_idx"] = train_idx.astype(np.int64, copy=False)
-        arrays[f"fold_{fold_no}_test_idx"] = test_idx.astype(np.int64, copy=False)
-    np.savez_compressed(output_path, **arrays)
-    return file_sha256(output_path)
+    folds = {
+        fold_no: (train_idx, test_idx)
+        for fold_no, (train_idx, test_idx) in enumerate(
+            validation_split_indices(frame, validation_split),
+            start=1,
+        )
+    }
+    return write_split_artifact_npz(
+        folds,
+        validation_split=validation_split,
+        pk_columns=pk_columns,
+        row_count=len(frame),
+        output_path=output_path,
+    )
 
 
 def _validate_model_frame(
@@ -652,6 +641,7 @@ def create_model_frame_manifest_with_split(
             frame,
             validation_split=validation_split,
             output_path=artifact_path,
+            pk_columns=spec.pk_columns,
         )
         split_artifact_uri = str(artifact_path)
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-import hashlib
 import json
 from pathlib import Path
 
@@ -12,8 +11,10 @@ from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline.data.manifest import compute_row_order_sha256
 from pricing_pipeline.data.manifest import runtime_dependency_metadata
+from pricing_pipeline.data.row_identity import compute_row_order_sha256
+from pricing_pipeline.data.split_artifacts import load_split_artifact_npz
+from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
 
 
 @dataclass(frozen=True)
@@ -211,13 +212,67 @@ def _source_column_replay_folds(
     raise ValueError(f"Unsupported source_column split method: {method!r}")
 
 
+def _resolve_pk_columns(
+    *,
+    pk_column: str | None,
+    pk_columns: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    if pk_columns is None:
+        if pk_column is None:
+            raise ValueError("pk_column or pk_columns is required")
+        return (pk_column,)
+    if not pk_columns:
+        raise ValueError("pk_column or pk_columns is required")
+    if pk_column is None or pk_column == "IDpol":
+        return pk_columns
+    if len(pk_columns) == 1 and pk_column == pk_columns[0]:
+        return pk_columns
+    raise ValueError("pk_column and pk_columns disagree")
+
+
+def _requires_compact_artifact_frame(exc: ValueError) -> bool:
+    return str(exc) == "compact artifact requires the model frame"
+
+
+def _load_materialized_with_optional_frame(
+    split_set: CVSplitSet,
+    *,
+    dataset_loader,
+    pk_column: str | None,
+    pk_columns: tuple[str, ...] | None,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    try:
+        return load_materialized_cv_folds(split_set)
+    except ValueError as exc:
+        if not _requires_compact_artifact_frame(exc):
+            raise
+
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    frame = dataset_loader(split_set.manifest_id)
+    return load_materialized_cv_folds(split_set, frame=frame, pk_columns=pk_columns)
+
+
+def _load_replayable_cv_folds(
+    split_set: CVSplitSet,
+    *,
+    dataset_loader,
+    pk_column: str | None,
+    pk_columns: tuple[str, ...] | None,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    frame = dataset_loader(split_set.manifest_id)
+    return replay_cv_folds(split_set, frame, pk_column=None, pk_columns=pk_columns)
+
+
 def replay_cv_folds(
     split_set: CVSplitSet,
     frame: pd.DataFrame,
     *,
-    pk_column: str = "IDpol",
+    pk_column: str | None = "IDpol",
+    pk_columns: tuple[str, ...] | None = None,
 ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-    actual_hash = compute_row_order_sha256(frame, pk_column=pk_column)
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    actual_hash = compute_row_order_sha256(frame, pk_columns=pk_columns)
     if actual_hash != split_set.row_order_sha256:
         raise ValueError(
             "row_order_sha256 mismatch for "
@@ -249,34 +304,47 @@ def replay_cv_folds(
     }
 
 
-def load_materialized_cv_folds(split_set: CVSplitSet) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-    if not split_set.artifact_uri:
-        raise ValueError(f"split_set {split_set.split_set_id} has no artifact_uri")
-    path = Path(split_set.artifact_uri)
-    if split_set.artifact_sha256:
-        actual_sha256 = file_sha256(path)
-        if actual_sha256 != split_set.artifact_sha256:
-            raise ValueError(
-                "artifact_sha256 mismatch for "
-                f"{split_set.split_set_id}: expected {split_set.artifact_sha256}, "
-                f"got {actual_sha256}"
-            )
-    loaded = np.load(path)
-    folds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for fold_no in range(1, split_set.fold_count + 1):
-        folds[fold_no] = (
-            loaded[f"fold_{fold_no}_train_idx"],
-            loaded[f"fold_{fold_no}_test_idx"],
+def load_materialized_cv_folds(
+    split_set: CVSplitSet,
+    *,
+    frame: pd.DataFrame | None = None,
+    pk_columns: tuple[str, ...] | None = None,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    return load_split_artifact_npz(split_set, frame=frame, pk_columns=pk_columns)
+
+
+def _validation_split_from_split_set(split_set: CVSplitSet):
+    from pricing_pipeline.models.config import ValidationSplitConfig
+
+    params = json.loads(split_set.splitter_params_json or "{}")
+    if split_set.splitter_class == "sklearn.model_selection.KFold":
+        return ValidationSplitConfig.kfold(
+            n_splits=int(params.get("n_splits", split_set.fold_count)),
+            random_state=params.get("random_state"),
+            shuffle=bool(params.get("shuffle", True)),
+            materialize=True,
         )
-    return folds
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    if split_set.splitter_class == "sklearn.model_selection.train_test_split":
+        return ValidationSplitConfig.train_test_split(
+            test_size=float(params.get("test_size", 0.2)),
+            random_state=params.get("random_state"),
+            shuffle=bool(params.get("shuffle", True)),
+            stratify_column=params.get("stratify_column"),
+            materialize=True,
+        )
+    if split_set.splitter_class == "source_column" and params.get("method") == "column_kfold":
+        return ValidationSplitConfig.column_kfold(
+            column=str(params["column"]),
+            materialize=True,
+        )
+    if split_set.splitter_class == "source_column" and params.get("method") == "column_holdout":
+        return ValidationSplitConfig.column_holdout(
+            column=str(params["column"]),
+            train_values=tuple(params.get("train_values", ())),
+            test_values=tuple(params.get("test_values", ())),
+            materialize=True,
+        )
+    return ValidationSplitConfig.none()
 
 
 def materialize_cv_folds(
@@ -285,16 +353,18 @@ def materialize_cv_folds(
     frame: pd.DataFrame,
     *,
     output_path: Path,
-    pk_column: str = "IDpol",
+    pk_column: str | None = "IDpol",
+    pk_columns: tuple[str, ...] | None = None,
 ) -> Path:
-    folds = replay_cv_folds(split_set, frame, pk_column=pk_column)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    arrays = {}
-    for fold_no, (train_idx, test_idx) in folds.items():
-        arrays[f"fold_{fold_no}_train_idx"] = train_idx.astype(np.int64, copy=False)
-        arrays[f"fold_{fold_no}_test_idx"] = test_idx.astype(np.int64, copy=False)
-    np.savez_compressed(output_path, **arrays)
-    artifact_sha256 = file_sha256(output_path)
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    folds = replay_cv_folds(split_set, frame, pk_column=None, pk_columns=pk_columns)
+    artifact_sha256 = write_split_artifact_npz(
+        folds,
+        validation_split=_validation_split_from_split_set(split_set),
+        pk_columns=pk_columns,
+        row_count=len(frame),
+        output_path=output_path,
+    )
 
     with engine.begin() as con:
         con.execute(
@@ -325,10 +395,20 @@ def load_cv_folds(
     split_set_id: str,
     *,
     dataset_loader,
-    pk_column: str = "IDpol",
+    pk_column: str | None = "IDpol",
+    pk_columns: tuple[str, ...] | None = None,
 ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     split_set = fetch_split_set(engine, split_set_id)
     if split_set.split_mode == "MATERIALIZED":
-        return load_materialized_cv_folds(split_set)
-    frame = dataset_loader(split_set.manifest_id)
-    return replay_cv_folds(split_set, frame, pk_column=pk_column)
+        return _load_materialized_with_optional_frame(
+            split_set,
+            dataset_loader=dataset_loader,
+            pk_column=pk_column,
+            pk_columns=pk_columns,
+        )
+    return _load_replayable_cv_folds(
+        split_set,
+        dataset_loader=dataset_loader,
+        pk_column=pk_column,
+        pk_columns=pk_columns,
+    )
