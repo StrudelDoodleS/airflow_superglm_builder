@@ -30,8 +30,8 @@ fold 1 train rows = rows where test_fold != 1
 For holdout, knowing whether each row is test/holdout is enough:
 
 ```text
-test rows = rows where is_test is true
-train rows = rows where is_test is false
+test rows = rows where is_testing_set is true
+train rows = rows where is_testing_set is false
 ```
 
 The goal is to reduce `.npz` artifact size without putting row-level split
@@ -45,19 +45,17 @@ The compact artifact records:
 
 - artifact format metadata;
 - the configured primary key columns for the model frame;
-- a row identity hash derived from those primary key columns;
 - one compact assignment array.
 
 The artifact still uses row positions relative to the final model frame for
-fast reconstruction, but the stored row identity makes the artifact auditable
-and tied to whatever PK columns the model declared.
+fast reconstruction. Row identity and order are verified against existing
+`CV_SPLIT_SET` metadata rather than storing a per-row identity hash by default.
 
 For k-fold-like splits:
 
 ```text
 split_format = "fold_assignment_v1"
 pk_columns = ["policy_id"]                 # or ["policy_id", "snapshot_month"]
-row_key_hash = [...]
 test_fold = [...]
 ```
 
@@ -66,13 +64,15 @@ For holdout-like splits:
 ```text
 split_format = "holdout_assignment_v1"
 pk_columns = ["policy_id"]                 # or composite PK columns
-row_key_hash = [...]
-is_test = [...]
+is_testing_set = [...]
 ```
 
 The PK columns are not hard-coded. They come from
 `ModelFrameManifestSpec.pk_columns` or the equivalent `DatasetSpec.pk_columns`
 for the SQL-backed compatibility path.
+
+All artifact field names use lower snake case, matching the existing `.npz`
+keys such as `fold_1_train_idx`.
 
 ## Non-Goals
 
@@ -87,6 +87,10 @@ not exclusive assignments, should keep the existing explicit train/test arrays.
 
 It does not make split artifacts a source-data store. The artifact is still a
 small validation-index artifact keyed to the final model-frame row identity.
+
+It does not define a stable future fold-allocation policy for later refreshes.
+Compact artifacts are immutable receipts for one manifest/model frame. They are
+not reusable rules for deciding where new rows should land in future folds.
 
 ## Artifact Formats
 
@@ -111,14 +115,12 @@ Use this for exclusive multi-fold splits:
 ```text
 split_format = "fold_assignment_v1"
 pk_columns = np.array([...])
-row_key_hash = np.array([...])
 test_fold = np.array([...])
 ```
 
 Rules:
 
 - `test_fold` length must equal `row_count`.
-- `row_key_hash` length must equal `row_count`.
 - fold numbers are 1-based and must be in `1..fold_count`.
 - every fold number in `1..fold_count` must have at least one test row.
 - train rows for fold `n` are `test_fold != n`.
@@ -131,18 +133,16 @@ Use this for one-fold train/test splits:
 ```text
 split_format = "holdout_assignment_v1"
 pk_columns = np.array([...])
-row_key_hash = np.array([...])
-is_test = np.array([...])
+is_testing_set = np.array([...])
 ```
 
 Rules:
 
-- `is_test` length must equal `row_count`.
-- `row_key_hash` length must equal `row_count`.
-- `is_test` must be boolean or safely coercible to boolean.
+- `is_testing_set` length must equal `row_count`.
+- `is_testing_set` must be boolean or safely coercible to boolean.
 - there must be at least one train row and at least one test row.
-- train rows are `~is_test`.
-- test rows are `is_test`.
+- train rows are `~is_testing_set`.
+- test rows are `is_testing_set`.
 
 ## Row Identity
 
@@ -161,34 +161,49 @@ For composite PKs:
 pk_columns = ["policy_id", "snapshot_month"]
 ```
 
-The compact artifact should store a canonical `row_key_hash` array rather than
-raw PK values by default.
+V1 does not store per-row `row_key_hash` by default. The existing
+`CV_SPLIT_SET.row_order_sha256` already validates the configured PK values in
+the supplied model-frame order, and `CV_SPLIT_SET.row_count` validates the
+expected row count.
 
-Reasons:
-
-- PK values may be sensitive.
-- composite keys can contain mixed types.
-- object arrays in `.npz` are awkward and can require pickle loading.
-- the manifest already records `pk_columns_json`; the artifact only needs a
-  durable row identity check.
-
-The row key hash should be deterministic from the configured PK columns. It
-should use the same canonical JSON-style value normalization as the row-order
-hash path, but produce one hash per row instead of one digest for the whole
-frame.
-
-V1 should still require the current frame row order to match the artifact order.
 That means loading compact artifacts verifies:
 
 ```text
-current row_key_hash array == artifact row_key_hash array
 current row_count == artifact assignment length
 current row_order_sha256 == CV_SPLIT_SET.row_order_sha256
 ```
 
-Future work could support reordering by mapping `row_key_hash -> row position`,
-but v1 should not silently reorder. The current row-order contract is safer and
-easier to reason about.
+The compact artifact remains tied to the manifest row order. V1 should not
+silently reorder rows when loading an artifact.
+
+Future work may add an optional per-row `row_key_hash` array for stronger
+row-level identity checks or for loading the same artifact against the same rows
+in a different order. If added, hashes should be stored as fixed-width raw bytes
+such as `S32`, not as object arrays or hex strings.
+
+## Artifact Receipts vs Stable Assignment Rules
+
+Compact artifacts are immutable receipts for one manifest/model frame. When a
+later data refresh adds, removes, or changes rows, the build should create a new
+`DATASET_MANIFEST`, a new `CV_SPLIT_SET`, and a new artifact. The old artifact
+must not be mutated to insert new rows into old folds.
+
+Stable fold assignment across refreshes is a separate feature. If a team needs
+the same policy, customer, or entity to stay in the same fold over time, add a
+future split method such as:
+
+```toml
+[validation_split]
+method = "hash_kfold"
+columns = ["policy_id"]
+n_splits = 5
+salt = "claim_freq_v1"
+```
+
+That method would assign folds from a deterministic hash of the configured
+entity columns and salt, for example `fold = hash(policy_id, salt) % n_splits +
+1`. It should create a new split set for each new model frame; it should not
+reuse or mutate old compact artifacts.
 
 ## Split Methods
 
@@ -296,7 +311,7 @@ During manifest creation:
 final model frame
 -> validation_split_indices(...)
 -> compact assignment array when split is exclusive
--> .npz artifact with row_key_hash and assignment
+-> .npz artifact with split_format, pk_columns, and assignment
 -> CV_SPLIT_SET artifact_uri/artifact_sha256
 -> CV_FOLD fold counts
 ```
@@ -327,10 +342,9 @@ Raise clear `ValueError` messages when:
 - compact artifact is loaded without the frame needed for identity validation;
 - `split_format` is unknown;
 - required arrays are missing;
-- `row_key_hash` length does not match `row_count`;
 - assignment array length does not match `row_count`;
 - artifact `pk_columns` does not match the supplied/manifest PK columns;
-- current frame row identity does not match artifact `row_key_hash`;
+- current frame row identity/order does not match `CV_SPLIT_SET.row_order_sha256`;
 - `test_fold` contains fold numbers outside `1..fold_count`;
 - a fold has no train or no test rows;
 - holdout artifact has no train or no test rows;
@@ -370,7 +384,7 @@ Add focused unit tests:
 - artifact SHA checks still run;
 - compact artifact rejects missing frame;
 - compact artifact rejects wrong PK columns;
-- compact artifact rejects row identity mismatch;
+- compact artifact rejects row identity/order mismatch;
 - compact artifact rejects invalid fold assignment values;
 - compact artifact rejects holdout assignment with no train or no test rows;
 - composite PK row identity is stable and checked;
@@ -435,11 +449,9 @@ The current loader:
 should become format-aware and support legacy explicit artifacts plus compact
 assignment artifacts.
 
-The row identity helper should live near `compute_row_order_sha256(...)` so the
-same canonical PK normalization is used by both whole-frame row-order hashes and
-per-row artifact identity hashes.
+The compact loader should use `compute_row_order_sha256(...)` so the same
+canonical PK normalization validates whole-frame row identity and order.
 
 The implementation should not add a new config option unless needed. Compact
 format should be the default for eligible split methods. Legacy explicit format
 remains the fallback for unsupported split shapes and old artifacts.
-
