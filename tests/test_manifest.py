@@ -382,7 +382,7 @@ def test_source_column_validation_split_rejects_invalid_frame_values(
         validation_split_indices(frame, config_factory())
 
 
-def test_create_model_frame_manifest_records_source_column_split_metadata(
+def test_create_model_frame_manifest_materializes_compact_column_kfold_artifact(
     monkeypatch,
     tmp_path,
 ):
@@ -390,10 +390,9 @@ def test_create_model_frame_manifest_records_source_column_split_metadata(
     frame = pd.DataFrame(
         {
             "PolicyID": [101, 102, 103, 104],
-            "LossCost": [1.0, 2.0, 0.0, 3.0],
-            "ExposureYears": [1.0, 1.0, 0.5, 0.25],
-            "Segment": ["A", "B", "A", "C"],
-            "fold_number": [2, 1, 2, 1],
+            "ClaimNb": [0, 1, 0, 2],
+            "Exposure": [1.0, 0.5, 1.5, 0.25],
+            "fold_number": [1, 2, 1, 2],
         }
     )
     to_sql_calls = []
@@ -407,12 +406,12 @@ def test_create_model_frame_manifest_records_source_column_split_metadata(
         engine,
         frame=frame,
         spec=ModelFrameManifestSpec(
-            dataset_name="work_loss_cost_frame",
-            source_system="pricing_mart",
-            data_as_of_date="2026-06-04",
+            dataset_name="unit_model_frame",
+            source_system="unit",
+            data_as_of_date="2026-06-09",
             pk_columns=("PolicyID",),
-            target_column="LossCost",
-            weight_column="ExposureYears",
+            target_column="ClaimNb",
+            weight_column="Exposure",
         ),
         manifest_id="manifest_column_kfold",
         validation_split=ValidationSplitConfig.column_kfold(
@@ -453,15 +452,14 @@ def test_create_model_frame_manifest_records_source_column_split_metadata(
     assert folds["n_train"].tolist() == [2, 2]
     assert folds["n_test"].tolist() == [2, 2]
 
-    loaded = np.load(tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz")
-    assert sorted(loaded.files) == [
-        "fold_1_test_idx",
-        "fold_1_train_idx",
-        "fold_2_test_idx",
-        "fold_2_train_idx",
-    ]
-    assert loaded["fold_1_train_idx"].tolist() == [0, 2]
-    assert loaded["fold_1_test_idx"].tolist() == [1, 3]
+    loaded = np.load(
+        tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz",
+        allow_pickle=False,
+    )
+    assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
+    assert str(loaded["split_format"].item()) == "fold_assignment_v1"
+    assert loaded["pk_columns"].tolist() == ["PolicyID"]
+    assert loaded["test_fold"].tolist() == [1, 2, 1, 2]
 
 
 def test_build_validation_split_set_records_column_holdout_params():
@@ -728,7 +726,7 @@ def test_create_fremtpl_manifest_uses_configured_pricing_schema_for_to_sql(monke
     ]
 
 
-def test_create_dataset_manifest_can_materialize_train_test_split_npz(
+def test_create_dataset_manifest_with_train_test_split_materializes_artifact(
     monkeypatch,
     tmp_path,
 ):
@@ -778,10 +776,13 @@ def test_create_dataset_manifest_can_materialize_train_test_split_npz(
     assert result.split_artifact_uri is not None
 
     artifact_path = tmp_path / "manifest_train_test__train_test_split_test_0_4_seed_42.npz"
-    loaded = np.load(artifact_path)
-    assert sorted(loaded.files) == ["fold_1_test_idx", "fold_1_train_idx"]
-    assert len(loaded["fold_1_train_idx"]) == 3
-    assert len(loaded["fold_1_test_idx"]) == 2
+    loaded = np.load(artifact_path, allow_pickle=False)
+    assert sorted(loaded.files) == ["is_testing_set", "pk_columns", "split_format"]
+    assert str(loaded["split_format"].item()) == "holdout_assignment_v1"
+    assert loaded["pk_columns"].tolist() == ["IDpol"]
+    assert loaded["is_testing_set"].dtype == np.bool_
+    assert int(loaded["is_testing_set"].sum()) == 2
+    assert "fold_1_train_idx" not in loaded.files
 
     split_set_call = next(call for call in to_sql_calls if call["name"] == "CV_SPLIT_SET")
     split_set = split_set_call["frame"].iloc[0]
