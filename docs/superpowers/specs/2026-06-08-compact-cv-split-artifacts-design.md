@@ -265,10 +265,11 @@ New internal helpers should isolate artifact-format details:
 
 ```python
 def write_split_artifact_npz(
-    frame: pd.DataFrame,
+    folds: Mapping[int, tuple[np.ndarray, np.ndarray]],
     *,
     validation_split: ValidationSplitConfig,
     pk_columns: tuple[str, ...],
+    row_count: int,
     output_path: Path,
 ) -> str:
     ...
