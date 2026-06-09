@@ -17,6 +17,7 @@ from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec
@@ -178,24 +179,6 @@ def build_column_metadata(
     if split_column is not None:
         column_df.loc[column_df["column_name"].eq(split_column), "column_role"] = "SPLIT"
     return column_df
-
-
-def compute_row_order_sha256(
-    frame: pd.DataFrame,
-    *,
-    pk_column: str | None = None,
-    pk_columns: tuple[str, ...] | None = None,
-) -> str:
-    if pk_columns is None:
-        if pk_column is None:
-            raise ValueError("pk_column or pk_columns is required")
-        pk_columns = (pk_column,)
-
-    digest = hashlib.sha256()
-    for row in frame.loc[:, list(pk_columns)].itertuples(index=False, name=None):
-        digest.update(json.dumps(row, default=str, separators=(",", ":")).encode("utf-8"))
-        digest.update(b"\n")
-    return digest.hexdigest()
 
 
 def split_set_id_for_manifest(

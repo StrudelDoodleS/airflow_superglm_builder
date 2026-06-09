@@ -12,7 +12,7 @@ from sklearn.model_selection import KFold, train_test_split
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline.data.manifest import compute_row_order_sha256
+from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.data.manifest import runtime_dependency_metadata
 
 
