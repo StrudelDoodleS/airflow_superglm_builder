@@ -538,6 +538,55 @@ def test_write_split_artifact_npz_falls_back_to_legacy_explicit_arrays(
     assert "pk_columns" not in loaded.files
 
 
+def test_write_split_artifact_npz_rejects_kfold_train_not_complement(
+    tmp_path: Path,
+):
+    with pytest.raises(ValueError, match="fold_1_train_idx"):
+        write_split_artifact_npz(
+            {
+                1: (np.array([0, 2]), np.array([1, 4])),
+                2: (np.array([1, 3, 4]), np.array([0, 2])),
+                3: (np.array([0, 1, 2, 4]), np.array([3])),
+            },
+            validation_split=ValidationSplitConfig.kfold(n_splits=3, materialize=True),
+            pk_columns=("IDpol",),
+            row_count=5,
+            output_path=tmp_path / "bad_train_complement.npz",
+        )
+
+
+def test_write_split_artifact_npz_rejects_kfold_row_missing_from_test_assignment(
+    tmp_path: Path,
+):
+    with pytest.raises(ValueError, match="each row must appear in exactly one test fold"):
+        write_split_artifact_npz(
+            {
+                1: (np.array([0, 2, 3]), np.array([1, 4])),
+                2: (np.array([1, 3, 4]), np.array([0, 2])),
+            },
+            validation_split=ValidationSplitConfig.kfold(n_splits=2, materialize=True),
+            pk_columns=("IDpol",),
+            row_count=5,
+            output_path=tmp_path / "missing_test_assignment.npz",
+        )
+
+
+def test_write_split_artifact_npz_rejects_holdout_train_test_not_covering_all_rows(
+    tmp_path: Path,
+):
+    with pytest.raises(ValueError, match="cover every row"):
+        write_split_artifact_npz(
+            {1: (np.array([0, 2]), np.array([1, 4]))},
+            validation_split=ValidationSplitConfig.train_test_split(
+                test_size=0.4,
+                materialize=True,
+            ),
+            pk_columns=("IDpol",),
+            row_count=5,
+            output_path=tmp_path / "bad_holdout_cover.npz",
+        )
+
+
 def test_load_split_artifact_npz_rejects_compact_without_frame(tmp_path: Path):
     artifact = tmp_path / "compact_kfold.npz"
     artifact_sha = write_split_artifact_npz(
@@ -726,6 +775,27 @@ def test_load_split_artifact_npz_rejects_object_pk_columns(tmp_path: Path):
     )
 
     with pytest.raises(ValueError, match="pk_columns"):
+        load_split_artifact_npz(materialized, frame=frame(), pk_columns=("IDpol",))
+
+
+def test_load_split_artifact_npz_rejects_integral_float_test_fold(tmp_path: Path):
+    artifact = tmp_path / "integral_float_fold.npz"
+    np.savez_compressed(
+        artifact,
+        split_format=np.array(FOLD_ASSIGNMENT_FORMAT),
+        pk_columns=np.array(["IDpol"]),
+        test_fold=np.array([2.0, 1.0, 2.0, 3.0, 1.0], dtype=np.float64),
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="test_fold"):
         load_split_artifact_npz(materialized, frame=frame(), pk_columns=("IDpol",))
 
 

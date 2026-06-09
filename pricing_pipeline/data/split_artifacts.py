@@ -127,7 +127,7 @@ def _small_unsigned_dtype(max_value: int) -> np.dtype:
     return np.dtype(np.uint32)
 
 
-def _validated_indices(indices: Any, *, row_count: int, key: str) -> np.ndarray:
+def _normalise_index_array(indices: Any, *, row_count: int, key: str) -> np.ndarray:
     array = np.asarray(indices)
     if array.ndim != 1:
         raise ValueError(f"{key} must be a one-dimensional array")
@@ -135,7 +135,16 @@ def _validated_indices(indices: Any, *, row_count: int, key: str) -> np.ndarray:
         raise ValueError(f"{key} must be an integer array")
     if len(array) and (array.min() < 0 or array.max() >= row_count):
         raise ValueError(f"{key} contains row indices outside artifact row_count")
-    return array.astype(np.int64, copy=False)
+    array = array.astype(np.int64, copy=False)
+    if len(array) != len(np.unique(array)):
+        raise ValueError(f"{key} contains duplicate row indices")
+    return array
+
+
+def _index_mask(indices: np.ndarray, *, row_count: int) -> np.ndarray:
+    mask = np.zeros(row_count, dtype=np.bool_)
+    mask[indices] = True
+    return mask
 
 
 def _fold_assignment(
@@ -148,10 +157,26 @@ def _fold_assignment(
 
     dtype = _small_unsigned_dtype(max(folds))
     test_fold = np.zeros(row_count, dtype=dtype)
-    for fold_no, (_, test_idx) in sorted(folds.items()):
+    for fold_no, (train_idx, test_idx) in sorted(folds.items()):
         if fold_no < 1:
             raise ValueError("fold numbers must be one-based")
-        test_idx = _validated_indices(test_idx, row_count=row_count, key=f"fold_{fold_no}_test_idx")
+        train_idx = _normalise_index_array(
+            train_idx,
+            row_count=row_count,
+            key=f"fold_{fold_no}_train_idx",
+        )
+        test_idx = _normalise_index_array(
+            test_idx,
+            row_count=row_count,
+            key=f"fold_{fold_no}_test_idx",
+        )
+        _validate_train_test_complement(
+            train_idx,
+            test_idx,
+            row_count=row_count,
+            train_key=f"fold_{fold_no}_train_idx",
+            test_key=f"fold_{fold_no}_test_idx",
+        )
         if np.any(test_fold[test_idx] != 0):
             raise ValueError("test rows must not appear in more than one fold")
         test_fold[test_idx] = fold_no
@@ -168,11 +193,66 @@ def _holdout_assignment(
 ) -> np.ndarray:
     if sorted(folds) != [1]:
         raise ValueError("holdout artifacts require exactly one fold")
-    _, test_idx = folds[1]
-    test_idx = _validated_indices(test_idx, row_count=row_count, key="fold_1_test_idx")
+    train_idx, test_idx = folds[1]
+    train_idx = _normalise_index_array(
+        train_idx,
+        row_count=row_count,
+        key="fold_1_train_idx",
+    )
+    test_idx = _normalise_index_array(test_idx, row_count=row_count, key="fold_1_test_idx")
+    _validate_train_test_cover(
+        train_idx,
+        test_idx,
+        row_count=row_count,
+        train_key="fold_1_train_idx",
+        test_key="fold_1_test_idx",
+    )
     is_testing_set = np.zeros(row_count, dtype=np.bool_)
     is_testing_set[test_idx] = True
     return is_testing_set
+
+
+def _validate_train_test_complement(
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    *,
+    row_count: int,
+    train_key: str,
+    test_key: str,
+) -> None:
+    if len(train_idx) == 0:
+        raise ValueError(f"{train_key} must not be empty")
+    if len(test_idx) == 0:
+        raise ValueError(f"{test_key} must not be empty")
+
+    train_mask = _index_mask(train_idx, row_count=row_count)
+    test_mask = _index_mask(test_idx, row_count=row_count)
+    if np.any(train_mask & test_mask):
+        raise ValueError(f"{train_key} and {test_key} must be disjoint")
+    if not np.array_equal(train_mask, ~test_mask):
+        raise ValueError(f"{train_key} must equal the complement of {test_key}")
+
+
+def _validate_train_test_cover(
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    *,
+    row_count: int,
+    train_key: str,
+    test_key: str,
+) -> None:
+    if len(train_idx) == 0:
+        raise ValueError(f"{train_key} must not be empty")
+    if len(test_idx) == 0:
+        raise ValueError(f"{test_key} must not be empty")
+
+    train_mask = _index_mask(train_idx, row_count=row_count)
+    test_mask = _index_mask(test_idx, row_count=row_count)
+    if np.any(train_mask & test_mask):
+        raise ValueError(f"{train_key} and {test_key} must be disjoint")
+    covered = train_mask | test_mask
+    if not np.all(covered):
+        raise ValueError(f"{train_key} and {test_key} must cover every row")
 
 
 def _read_array(loaded, key: str) -> np.ndarray:
@@ -271,16 +351,8 @@ def _validate_assignment_length(
 def _validate_test_fold(array: np.ndarray, *, split_set) -> np.ndarray:
     _reject_object_array(array, key="test_fold")
     array = _validate_assignment_length(array, split_set=split_set, key="test_fold")
-    if array.dtype.kind in {"S", "U", "b"}:
-        raise ValueError("test_fold must be a numeric integer array")
-
-    if np.issubdtype(array.dtype, np.floating):
-        if np.isnan(array).any() or not np.isfinite(array).all():
-            raise ValueError("test_fold must not contain NaN or infinite values")
-        if not np.equal(array, np.floor(array)).all():
-            raise ValueError("test_fold must not contain fractional values")
-    elif not np.issubdtype(array.dtype, np.integer):
-        raise ValueError("test_fold must be a numeric integer array")
+    if array.dtype.kind not in {"i", "u"}:
+        raise ValueError("test_fold must be an integer dtype array")
 
     if np.any(array <= 0):
         raise ValueError("test_fold values must be one-based")
