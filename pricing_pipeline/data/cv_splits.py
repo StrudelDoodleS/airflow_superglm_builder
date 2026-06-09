@@ -220,10 +220,48 @@ def _resolve_pk_columns(
     if pk_columns is None:
         if pk_column is None:
             raise ValueError("pk_column or pk_columns is required")
-        pk_columns = (pk_column,)
-    if not pk_columns:
-        raise ValueError("pk_column or pk_columns is required")
-    return pk_columns
+        return (pk_column,)
+    if pk_column is None:
+        if not pk_columns:
+            raise ValueError("pk_column or pk_columns is required")
+        return pk_columns
+    if len(pk_columns) == 1 and pk_column == pk_columns[0]:
+        return pk_columns
+    raise ValueError("pk_column and pk_columns disagree")
+
+
+def _requires_compact_artifact_frame(exc: ValueError) -> bool:
+    return str(exc) == "compact artifact requires the model frame"
+
+
+def _load_materialized_with_optional_frame(
+    split_set: CVSplitSet,
+    *,
+    dataset_loader,
+    pk_column: str | None,
+    pk_columns: tuple[str, ...] | None,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    try:
+        return load_materialized_cv_folds(split_set)
+    except ValueError as exc:
+        if not _requires_compact_artifact_frame(exc):
+            raise
+
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    frame = dataset_loader(split_set.manifest_id)
+    return load_materialized_cv_folds(split_set, frame=frame, pk_columns=pk_columns)
+
+
+def _load_replayable_cv_folds(
+    split_set: CVSplitSet,
+    *,
+    dataset_loader,
+    pk_column: str | None,
+    pk_columns: tuple[str, ...] | None,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
+    frame = dataset_loader(split_set.manifest_id)
+    return replay_cv_folds(split_set, frame, pk_column=None, pk_columns=pk_columns)
 
 
 def replay_cv_folds(
@@ -319,7 +357,7 @@ def materialize_cv_folds(
     pk_columns: tuple[str, ...] | None = None,
 ) -> Path:
     pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
-    folds = replay_cv_folds(split_set, frame, pk_columns=pk_columns)
+    folds = replay_cv_folds(split_set, frame, pk_column=None, pk_columns=pk_columns)
     artifact_sha256 = write_split_artifact_npz(
         folds,
         validation_split=_validation_split_from_split_set(split_set),
@@ -361,8 +399,16 @@ def load_cv_folds(
     pk_columns: tuple[str, ...] | None = None,
 ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     split_set = fetch_split_set(engine, split_set_id)
-    pk_columns = _resolve_pk_columns(pk_column=pk_column, pk_columns=pk_columns)
-    frame = dataset_loader(split_set.manifest_id)
     if split_set.split_mode == "MATERIALIZED":
-        return load_materialized_cv_folds(split_set, frame=frame, pk_columns=pk_columns)
-    return replay_cv_folds(split_set, frame, pk_columns=pk_columns)
+        return _load_materialized_with_optional_frame(
+            split_set,
+            dataset_loader=dataset_loader,
+            pk_column=pk_column,
+            pk_columns=pk_columns,
+        )
+    return _load_replayable_cv_folds(
+        split_set,
+        dataset_loader=dataset_loader,
+        pk_column=pk_column,
+        pk_columns=pk_columns,
+    )

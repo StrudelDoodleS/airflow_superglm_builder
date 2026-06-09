@@ -201,6 +201,27 @@ def test_replay_cv_folds_rejects_changed_row_order():
         replay_cv_folds(split_set(), changed)
 
 
+def test_replay_cv_folds_rejects_disagreeing_pk_column_and_pk_columns():
+    with pytest.raises(ValueError, match="pk_column and pk_columns disagree"):
+        replay_cv_folds(
+            split_set(),
+            frame(),
+            pk_column="IDpol",
+            pk_columns=("ClaimNb",),
+        )
+
+
+def test_replay_cv_folds_accepts_duplicate_single_pk_column_specification():
+    folds = replay_cv_folds(
+        split_set(),
+        frame(),
+        pk_column="IDpol",
+        pk_columns=("IDpol",),
+    )
+
+    assert folds[1][1].tolist() == [1, 4]
+
+
 def test_load_cv_folds_hides_sql_and_dataset_loader():
     class ScalarResult:
         def __init__(self, mapping):
@@ -235,6 +256,65 @@ def test_load_cv_folds_hides_sql_and_dataset_loader():
     )
 
     assert folds[2][1].tolist() == [0, 2]
+
+
+def test_load_cv_folds_loads_legacy_materialized_artifact_without_dataset_loader(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "legacy.npz"
+    np.savez_compressed(
+        artifact,
+        fold_1_train_idx=np.array([0, 2, 3]),
+        fold_1_test_idx=np.array([1, 4]),
+        fold_2_train_idx=np.array([1, 3, 4]),
+        fold_2_test_idx=np.array([0, 2]),
+        fold_3_train_idx=np.array([0, 1, 2, 4]),
+        fold_3_test_idx=np.array([3]),
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": None,
+        }
+    )
+
+    class ScalarResult:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return materialized.__dict__
+
+    class Connection:
+        def execute(self, statement, params=None):
+            assert "FROM pricing.CV_SPLIT_SET" in str(statement)
+            assert params == {"split_set_id": materialized.split_set_id}
+            return ScalarResult()
+
+    class Engine:
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def dataset_loader(manifest_id: str) -> pd.DataFrame:
+        raise AssertionError(f"dataset_loader should not be called for {manifest_id}")
+
+    folds = load_cv_folds(
+        Engine(),
+        materialized.split_set_id,
+        dataset_loader=dataset_loader,
+    )
+
+    assert folds[1][1].tolist() == [1, 4]
+    assert folds[2][1].tolist() == [0, 2]
+    assert folds[3][1].tolist() == [3]
 
 
 def test_load_cv_folds_reconstructs_materialized_compact_artifact_from_dataset_loader(
