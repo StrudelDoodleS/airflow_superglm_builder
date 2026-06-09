@@ -74,6 +74,11 @@ for the SQL-backed compatibility path.
 All artifact field names use lower snake case, matching the existing `.npz`
 keys such as `fold_1_train_idx`.
 
+Compact artifacts are interpreted together with their `CV_SPLIT_SET` row. The
+artifact stores the assignment array; `CV_SPLIT_SET` supplies `row_count`,
+`row_order_sha256`, `fold_count`, `artifact_sha256`, and replay metadata. A
+compact artifact file alone is not sufficient to validate row identity.
+
 ## Non-Goals
 
 This design does not store row-level split assignments in SQL Server.
@@ -121,7 +126,10 @@ test_fold = np.array([...])
 Rules:
 
 - `test_fold` length must equal `row_count`.
+- `test_fold` must be one-dimensional and integer-like.
 - fold numbers are 1-based and must be in `1..fold_count`.
+- reject `0`, negative values, values greater than `fold_count`, nulls, NaN,
+  floats with fractional values, strings, and object arrays.
 - every fold number in `1..fold_count` must have at least one test row.
 - train rows for fold `n` are `test_fold != n`.
 - test rows for fold `n` are `test_fold == n`.
@@ -139,10 +147,18 @@ is_testing_set = np.array([...])
 Rules:
 
 - `is_testing_set` length must equal `row_count`.
-- `is_testing_set` must be boolean or safely coercible to boolean.
+- `is_testing_set` must be boolean dtype, or integer dtype containing only `0`
+  and `1`.
+- string and object arrays are rejected. Do not use blind `astype(bool)`,
+  because values such as `"False"` would become true.
 - there must be at least one train row and at least one test row.
 - train rows are `~is_testing_set`.
 - test rows are `is_testing_set`.
+
+The writer should store `is_testing_set` as boolean. It should store
+`test_fold` using a small unsigned integer dtype that can hold `fold_count`, for
+example `uint8`, `uint16`, or `uint32`. Using `uint16` everywhere is acceptable
+for v1 if that keeps the implementation simpler.
 
 ## Row Identity
 
@@ -310,7 +326,7 @@ During manifest creation:
 ```text
 final model frame
 -> validation_split_indices(...)
--> compact assignment array when split is exclusive
+-> compact assignment array when split is exclusive and compact-compatible
 -> .npz artifact with split_format, pk_columns, and assignment
 -> CV_SPLIT_SET artifact_uri/artifact_sha256
 -> CV_FOLD fold counts
@@ -321,6 +337,7 @@ During materialized load:
 ```text
 CV_SPLIT_SET
 -> artifact_uri
+-> verify artifact bytes against CV_SPLIT_SET.artifact_sha256 when present
 -> load .npz
 -> if legacy explicit format: read fold_N_train_idx/fold_N_test_idx
 -> if compact format: verify frame row identity and reconstruct folds
@@ -339,6 +356,7 @@ CV_SPLIT_SET replay params + final frame
 
 Raise clear `ValueError` messages when:
 
+- artifact bytes do not match `CV_SPLIT_SET.artifact_sha256`;
 - compact artifact is loaded without the frame needed for identity validation;
 - `split_format` is unknown;
 - required arrays are missing;
@@ -346,9 +364,10 @@ Raise clear `ValueError` messages when:
 - artifact `pk_columns` does not match the supplied/manifest PK columns;
 - current frame row identity/order does not match `CV_SPLIT_SET.row_order_sha256`;
 - `test_fold` contains fold numbers outside `1..fold_count`;
+- `test_fold` has a non-integer, null, NaN, string, object, or fractional dtype;
+- `is_testing_set` is not boolean or integer `0`/`1`;
 - a fold has no train or no test rows;
 - holdout artifact has no train or no test rows;
-- artifact hash does not match `CV_SPLIT_SET.artifact_sha256`.
 
 Unknown artifacts should fail closed. If no `split_format` key exists, treat the
 artifact as legacy explicit format.
@@ -364,8 +383,10 @@ Add an offline SQLite-style test path that:
 2. builds a small final model frame with configured PK columns;
 3. creates a manifest with `materialize=True`;
 4. confirms the `.npz` artifact uses the compact format;
-5. reloads folds through the same public loader used by no-Docker/direct flows;
-6. confirms reconstructed fold counts match `CV_FOLD`.
+5. confirms the compact artifact does not contain legacy
+   `fold_1_train_idx`/`fold_1_test_idx` arrays;
+6. reloads folds through the same public loader used by no-Docker/direct flows;
+7. confirms reconstructed fold counts match `CV_FOLD`.
 
 SQLite is only the offline stand-in. It does not replace SQL Server syntax
 validation. Keep existing SQL Server migration parse/syntax checks.
@@ -386,6 +407,10 @@ Add focused unit tests:
 - compact artifact rejects wrong PK columns;
 - compact artifact rejects row identity/order mismatch;
 - compact artifact rejects invalid fold assignment values;
+- compact artifact rejects fractional, string, object, null, and out-of-range
+  `test_fold` values;
+- compact artifact rejects string/object `is_testing_set` arrays and integer
+  arrays outside `0`/`1`;
 - compact artifact rejects holdout assignment with no train or no test rows;
 - composite PK row identity is stable and checked;
 - non-default DataFrame indexes are ignored.
@@ -451,6 +476,20 @@ assignment artifacts.
 
 The compact loader should use `compute_row_order_sha256(...)` so the same
 canonical PK normalization validates whole-frame row identity and order.
+
+All `.npz` loading should use:
+
+```python
+np.load(path, allow_pickle=False)
+```
+
+Avoid object arrays in new compact artifacts. Store `split_format` and
+`pk_columns` as ordinary NumPy string arrays, and store assignment arrays as
+boolean or numeric arrays.
+
+When `CV_SPLIT_SET.artifact_sha256` is present, compute the SHA-256 of the
+artifact bytes before reconstructing folds. If the hash does not match, fail
+before trusting assignment arrays.
 
 The implementation should not add a new config option unless needed. Compact
 format should be the default for eligible split methods. Legacy explicit format
