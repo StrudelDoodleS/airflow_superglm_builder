@@ -16,6 +16,11 @@ from pricing_pipeline.data.cv_splits import (
     resolve_splitter,
 )
 from pricing_pipeline.data.manifest import compute_row_order_sha256
+from pricing_pipeline.data.split_artifacts import FOLD_ASSIGNMENT_FORMAT
+from pricing_pipeline.data.split_artifacts import HOLDOUT_ASSIGNMENT_FORMAT
+from pricing_pipeline.data.split_artifacts import load_split_artifact_npz
+from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
+from pricing_pipeline.models.config import ValidationSplitConfig
 from scripts import export_cv_indices
 
 
@@ -365,3 +370,207 @@ def test_load_materialized_cv_folds_checks_artifact_hash(tmp_path: Path):
 
     with pytest.raises(ValueError, match="artifact_sha256"):
         load_materialized_cv_folds(materialized)
+
+
+def test_write_split_artifact_npz_writes_compact_kfold_assignment(tmp_path: Path):
+    rows = frame()
+    folds = {
+        1: (np.array([0, 2, 3]), np.array([1, 4])),
+        2: (np.array([1, 3, 4]), np.array([0, 2])),
+        3: (np.array([0, 1, 2, 4]), np.array([3])),
+    }
+    artifact = tmp_path / "compact_kfold.npz"
+
+    artifact_sha = write_split_artifact_npz(
+        folds,
+        validation_split=ValidationSplitConfig.kfold(n_splits=3, materialize=True),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+
+    loaded = np.load(artifact, allow_pickle=False)
+    assert artifact_sha
+    assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
+    assert str(loaded["split_format"].item()) == FOLD_ASSIGNMENT_FORMAT
+    assert loaded["pk_columns"].tolist() == ["IDpol"]
+    assert loaded["test_fold"].dtype == np.uint8
+    assert loaded["test_fold"].tolist() == [2, 1, 2, 3, 1]
+    assert "fold_1_train_idx" not in loaded.files
+    assert "fold_1_test_idx" not in loaded.files
+
+
+def test_load_split_artifact_npz_reconstructs_compact_kfold(tmp_path: Path):
+    rows = frame()
+    artifact = tmp_path / "compact_kfold.npz"
+    artifact_sha = write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+            3: (np.array([0, 1, 2, 4]), np.array([3])),
+        },
+        validation_split=ValidationSplitConfig.kfold(n_splits=3, materialize=True),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": artifact_sha,
+        }
+    )
+
+    folds = load_split_artifact_npz(materialized, frame=rows, pk_columns=("IDpol",))
+
+    assert folds[1][0].tolist() == [0, 2, 3]
+    assert folds[1][1].tolist() == [1, 4]
+    assert folds[3][0].tolist() == [0, 1, 2, 4]
+    assert folds[3][1].tolist() == [3]
+
+
+def test_write_split_artifact_npz_writes_compact_holdout_assignment(tmp_path: Path):
+    rows = frame()
+    artifact = tmp_path / "compact_holdout.npz"
+
+    write_split_artifact_npz(
+        {1: (np.array([0, 2, 3]), np.array([1, 4]))},
+        validation_split=ValidationSplitConfig.train_test_split(
+            test_size=0.4,
+            materialize=True,
+        ),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+
+    loaded = np.load(artifact, allow_pickle=False)
+    assert sorted(loaded.files) == ["is_testing_set", "pk_columns", "split_format"]
+    assert str(loaded["split_format"].item()) == HOLDOUT_ASSIGNMENT_FORMAT
+    assert loaded["pk_columns"].tolist() == ["IDpol"]
+    assert loaded["is_testing_set"].dtype == np.bool_
+    assert loaded["is_testing_set"].tolist() == [False, True, False, False, True]
+
+
+def test_load_split_artifact_npz_rejects_compact_without_frame(tmp_path: Path):
+    artifact = tmp_path / "compact_kfold.npz"
+    artifact_sha = write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+            3: (np.array([0, 1, 2, 4]), np.array([3])),
+        },
+        validation_split=ValidationSplitConfig.kfold(n_splits=3, materialize=True),
+        pk_columns=("IDpol",),
+        row_count=5,
+        output_path=artifact,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": artifact_sha,
+        }
+    )
+
+    with pytest.raises(ValueError, match="compact artifact requires the model frame"):
+        load_split_artifact_npz(materialized)
+
+
+def test_load_split_artifact_npz_keeps_legacy_explicit_support(tmp_path: Path):
+    artifact = tmp_path / "legacy.npz"
+    np.savez_compressed(
+        artifact,
+        fold_1_train_idx=np.array([0, 2, 3]),
+        fold_1_test_idx=np.array([1, 4]),
+        fold_2_train_idx=np.array([1, 3, 4]),
+        fold_2_test_idx=np.array([0, 2]),
+        fold_3_train_idx=np.array([0, 1, 2, 4]),
+        fold_3_test_idx=np.array([3]),
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": None,
+        }
+    )
+
+    folds = load_split_artifact_npz(materialized)
+
+    assert folds[1][0].tolist() == [0, 2, 3]
+    assert folds[1][1].tolist() == [1, 4]
+    assert folds[3][0].tolist() == [0, 1, 2, 4]
+    assert folds[3][1].tolist() == [3]
+
+
+@pytest.mark.parametrize(
+    "bad_test_fold",
+    [
+        np.array([1, 2, 0, 3, 1], dtype=np.int64),
+        np.array([1, 2, -1, 3, 1], dtype=np.int64),
+        np.array([1, 2, 4, 3, 1], dtype=np.int64),
+        np.array([1.0, 2.0, 1.5, 3.0, 1.0], dtype=np.float64),
+        np.array([1.0, 2.0, np.nan, 3.0, 1.0], dtype=np.float64),
+        np.array(["1", "2", "1", "3", "1"]),
+        np.array([1, 2, None, 3, 1], dtype=object),
+    ],
+)
+def test_load_split_artifact_npz_rejects_bad_test_fold_values(
+    tmp_path: Path,
+    bad_test_fold: np.ndarray,
+):
+    artifact = tmp_path / "bad_fold.npz"
+    np.savez_compressed(
+        artifact,
+        split_format=np.array(FOLD_ASSIGNMENT_FORMAT),
+        pk_columns=np.array(["IDpol"]),
+        test_fold=bad_test_fold,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="test_fold"):
+        load_split_artifact_npz(materialized, frame=frame(), pk_columns=("IDpol",))
+
+
+@pytest.mark.parametrize(
+    "bad_is_testing_set",
+    [
+        np.array([0, 1, 2, 0, 1], dtype=np.int64),
+        np.array(["False", "True", "False", "False", "True"]),
+        np.array([False, True, None, False, True], dtype=object),
+    ],
+)
+def test_load_split_artifact_npz_rejects_bad_is_testing_set_values(
+    tmp_path: Path,
+    bad_is_testing_set: np.ndarray,
+):
+    artifact = tmp_path / "bad_holdout.npz"
+    np.savez_compressed(
+        artifact,
+        split_format=np.array(HOLDOUT_ASSIGNMENT_FORMAT),
+        pk_columns=np.array(["IDpol"]),
+        is_testing_set=bad_is_testing_set,
+    )
+    materialized = CVSplitSet(
+        **{
+            **train_test_split_set().__dict__,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="is_testing_set"):
+        load_split_artifact_npz(materialized, frame=frame(), pk_columns=("IDpol",))
