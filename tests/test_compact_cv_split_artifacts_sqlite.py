@@ -27,9 +27,7 @@ def sqlite_engine_with_pricing_schema(tmp_path: Path):
 
     @event.listens_for(engine, "connect")
     def _attach_pricing_schema(dbapi_connection, connection_record):
-        dbapi_connection.execute(
-            f"ATTACH DATABASE '{pricing_db.as_posix()}' AS pricing"
-        )
+        dbapi_connection.execute(f"ATTACH DATABASE '{pricing_db.as_posix()}' AS pricing")
 
     return engine
 
@@ -94,11 +92,7 @@ def test_compact_materialized_manifest_loads_offline_with_sqlite(tmp_path: Path)
     assert cv_folds.to_dict("records") == [{"fold_no": 1, "n_train": 3, "n_test": 1}]
 
     manifest_rows = pd.read_sql_query(
-        text(
-            "SELECT pk_columns_json "
-            "FROM pricing.DATASET_MANIFEST "
-            "WHERE manifest_id = :id"
-        ),
+        text("SELECT pk_columns_json FROM pricing.DATASET_MANIFEST WHERE manifest_id = :id"),
         engine,
         params={"id": "sqlite_manifest_1"},
     )
