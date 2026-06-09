@@ -221,9 +221,9 @@ def _resolve_pk_columns(
         if pk_column is None:
             raise ValueError("pk_column or pk_columns is required")
         return (pk_column,)
-    if pk_column is None:
-        if not pk_columns:
-            raise ValueError("pk_column or pk_columns is required")
+    if not pk_columns:
+        raise ValueError("pk_column or pk_columns is required")
+    if pk_column is None or pk_column == "IDpol":
         return pk_columns
     if len(pk_columns) == 1 and pk_column == pk_columns[0]:
         return pk_columns

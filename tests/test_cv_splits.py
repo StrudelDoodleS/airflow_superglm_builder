@@ -206,9 +206,30 @@ def test_replay_cv_folds_rejects_disagreeing_pk_column_and_pk_columns():
         replay_cv_folds(
             split_set(),
             frame(),
-            pk_column="IDpol",
-            pk_columns=("ClaimNb",),
+            pk_column="ClaimNb",
+            pk_columns=("IDpol",),
         )
+
+
+def test_replay_cv_folds_accepts_composite_pk_columns_with_legacy_pk_column_default():
+    rows = frame()
+    composite_split_set = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "row_order_sha256": compute_row_order_sha256(
+                rows,
+                pk_columns=("IDpol", "ClaimNb"),
+            ),
+        }
+    )
+
+    folds = replay_cv_folds(
+        composite_split_set,
+        rows,
+        pk_columns=("IDpol", "ClaimNb"),
+    )
+
+    assert folds[1][1].tolist() == [1, 4]
 
 
 def test_replay_cv_folds_accepts_duplicate_single_pk_column_specification():
