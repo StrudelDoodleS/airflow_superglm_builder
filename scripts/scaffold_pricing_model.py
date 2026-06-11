@@ -256,7 +256,11 @@ def _custom_data_template(*, package_name: str) -> str:
 def _custom_modeling_template(*, package_name: str) -> str:
     return dedent(
         f"""\
-        \"\"\"Build the final model frame, fit/export the model, and create lineage.\"\"\"
+        \"\"\"Model-owned build logic for this pricing model.
+
+        Edit the functions in the first section. The final recipe function wires
+        those pieces into the shared manifest/publish contract.
+        \"\"\"
 
         from __future__ import annotations
 
@@ -265,6 +269,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
 
         import pandas as pd
 
+        # Model-local config/constants.
         from pricing_models.{package_name}.data import (
             DATASET_NAME,
             PK_COLUMNS,
@@ -272,6 +277,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
             WEIGHT_COLUMN,
         )
         from pricing_models.{package_name}.spec import MODEL_CONFIG
+
+        # Shared lifecycle helpers. Most model authors do not need to edit these imports.
         from pricing_pipeline.data.manifest import (
             ModelFrameManifestSpec,
             create_model_frame_manifest_with_split,
@@ -288,7 +295,17 @@ def _custom_modeling_template(*, package_name: str) -> str:
         from pricing_pipeline.publishing.rating_export import build_export_id
 
 
+        # ---------------------------------------------------------------------------
+        # Edit These Model-Specific Functions
+        # ---------------------------------------------------------------------------
+
         def read_prepared_source(prepared: Mapping[str, Any]) -> pd.DataFrame:
+            \"\"\"Load the prepared source frame for this run.
+
+            data.py decides the handoff shape. For example, if prepare_source_data(...)
+            returned {{"source_data_path": ".../source.parquet"}}, read that file here.
+            Do not pass large DataFrames through Airflow/XCom.
+            \"\"\"
             raise NotImplementedError(
                 "Read the source artifact/table identified by prepared and return a "
                 "pandas DataFrame."
@@ -296,6 +313,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
 
 
         def build_final_model_frame(raw: pd.DataFrame) -> pd.DataFrame:
+            \"\"\"Create the final frame used for validation, training, export, and manifesting.\"\"\"
             # Add target construction, pd.cut/binning, feature engineering, filtering,
             # and final feature selection here.
             return raw.copy()
@@ -309,12 +327,21 @@ def _custom_modeling_template(*, package_name: str) -> str:
             model_version: str,
             effective_from: str,
         ) -> tuple[str | Path, str | Path | None, dict[str, float]]:
+            \"\"\"Fit/validate the model and export the rating workbook.
+
+            Return:
+                rating_workbook_path, model_artifact_path, metrics
+            \"\"\"
             raise NotImplementedError(
                 "Fit/validate the model using split_indices, export the rating "
                 "workbook, optionally persist the model artifact, and return "
                 "(rating_workbook_path, model_artifact_path, metrics)."
             )
 
+
+        # ---------------------------------------------------------------------------
+        # Standard Build Recipe - Usually Leave This Alone
+        # ---------------------------------------------------------------------------
 
         def train_validate_export_model(
             prepared: Mapping[str, Any],
@@ -323,6 +350,14 @@ def _custom_modeling_template(*, package_name: str) -> str:
             settings,
             created_by: str = "airflow",
         ) -> dict[str, Any]:
+            \"\"\"Standard custom-model lifecycle recipe.
+
+            Start by customizing the functions above. Edit this recipe only when your
+            model needs a different build flow. The recipe resolves stable publish
+            metadata, calls the model-owned functions, creates the frame-backed
+            manifest, and returns the CompletedModelBuild payload consumed by the
+            publish task.
+            \"\"\"
             run_key = str(prepared.get("run_key") or "manual")
             export_id = build_export_id(MODEL_CONFIG.model_key, run_key)
             model_version = resolve_model_version_for_export(
@@ -337,6 +372,9 @@ def _custom_modeling_template(*, package_name: str) -> str:
 
             raw = read_prepared_source(prepared)
             frame = build_final_model_frame(raw)
+            # The manifest and split artifacts use this frame order, so keep ordering
+            # deterministic and aligned with PK_COLUMNS unless the model deliberately needs
+            # a different order.
             frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
             split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
             # If validation_split uses a source split column, do not include that

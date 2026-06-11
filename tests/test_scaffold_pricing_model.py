@@ -66,9 +66,14 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "manifest_sql" not in data
 
     modeling = (package_dir / "modeling.py").read_text(encoding="utf-8")
-    assert (
-        '"""Build the final model frame, fit/export the model, and create lineage."""' in modeling
-    )
+    assert '"""Model-owned build logic for this pricing model.' in modeling
+    assert "Edit These Model-Specific Functions" in modeling
+    assert "Standard Build Recipe - Usually Leave This Alone" in modeling
+    assert "data.py decides the handoff shape" in modeling
+    assert "Do not pass large DataFrames through Airflow/XCom" in modeling
+    assert "rating_workbook_path, model_artifact_path, metrics" in modeling
+    assert "Start by customizing the functions above" in modeling
+    assert "The manifest and split artifacts use this frame order" in modeling
     assert "def train_validate_export_model" in modeling
     assert "def read_prepared_source" in modeling
     assert "def build_final_model_frame" in modeling

@@ -324,12 +324,21 @@ By default, the helper writes a custom-DAG starter:
 - `pricing_models/<model_name>/data.py`: where you read or stage source data
   and return small run metadata such as output paths, `effective_from`, and
   `data_as_of_date`.
-- `pricing_models/<model_name>/modeling.py`: where you build the final pandas
-  model frame, create the frame-backed manifest, fit/validate the model, export
-  the SuperGLM rating workbook, and return `CompletedModelBuild`.
+- `pricing_models/<model_name>/modeling.py`: where you edit
+  `read_prepared_source(...)`, `build_final_model_frame(...)`, and
+  `fit_validate_export_rating_tables(...)`. The generated
+  `train_validate_export_model(...)` recipe wires those functions into
+  versioning, frame-backed manifest creation, and the completed-build payload;
+  start by leaving that recipe alone unless your model needs a different flow.
 - `pricing_models/<model_name>/airflow_tasks.py`: thin TaskFlow wrappers around
   your data/modeling code.
 - `dags/<dag_id>.py`: register -> prepare -> train/export/create-manifest -> publish.
+
+`prepare_source_data(...)` should return a small dictionary of paths, table
+names, IDs, or metadata. The Airflow wrapper merges in `run_key`, `output_dir`,
+`effective_from`, and `data_as_of_date`; `modeling.py` receives that merged
+dictionary as `prepared`. Keys such as `source_data_path` are model-owned
+examples, not framework-required field names.
 
 It refuses to overwrite existing files unless `--force` is passed. Model configs
 are auto-discovered from `pricing_models/<model_name>/model.toml`; no registry
@@ -380,8 +389,8 @@ model package and import the common SQL lifecycle tasks from
 from airflow.sdk import dag
 
 from pricing_models.claim_freq.airflow_tasks import (
-    prepare_source_data,
-    train_and_export_rates,
+    prepare_source_data_task,
+    train_validate_export_task,
 )
 from pricing_models.claim_freq.spec import MODEL_CONFIG
 from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
@@ -393,8 +402,8 @@ from pricing_pipeline.orchestration.publish_completed_build import (
 @dag(dag_id="claim_freq_build", schedule=None, catchup=False)
 def claim_freq_build():
     registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
-    prepared = prepare_source_data()
-    build = train_and_export_rates(prepared)
+    prepared = prepare_source_data_task()()
+    build = train_validate_export_task()(prepared)
 
     published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(build)
     registered >> prepared >> build >> published
@@ -403,7 +412,7 @@ def claim_freq_build():
 claim_freq_build()
 ```
 
-The upstream `train_and_export_rates` task should return a small dictionary with
+The upstream `train_validate_export_task` should return a small dictionary with
 paths and metadata, not a DataFrame. At minimum it needs the rating workbook
 path, model version, and effective-from date. In a real DAG those values should
 come from the run context and SQL history, not hardcoded strings:
