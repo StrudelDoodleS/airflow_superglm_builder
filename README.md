@@ -389,8 +389,8 @@ model package and import the common SQL lifecycle tasks from
 from airflow.sdk import dag
 
 from pricing_models.claim_freq.airflow_tasks import (
-    prepare_source_data,
-    train_and_export_rates,
+    prepare_source_data_task,
+    train_validate_export_task,
 )
 from pricing_models.claim_freq.spec import MODEL_CONFIG
 from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
@@ -402,8 +402,8 @@ from pricing_pipeline.orchestration.publish_completed_build import (
 @dag(dag_id="claim_freq_build", schedule=None, catchup=False)
 def claim_freq_build():
     registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
-    prepared = prepare_source_data()
-    build = train_and_export_rates(prepared)
+    prepared = prepare_source_data_task()()
+    build = train_validate_export_task()(prepared)
 
     published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(build)
     registered >> prepared >> build >> published
@@ -412,7 +412,7 @@ def claim_freq_build():
 claim_freq_build()
 ```
 
-The upstream `train_and_export_rates` task should return a small dictionary with
+The upstream `train_validate_export_task` should return a small dictionary with
 paths and metadata, not a DataFrame. At minimum it needs the rating workbook
 path, model version, and effective-from date. In a real DAG those values should
 come from the run context and SQL history, not hardcoded strings:

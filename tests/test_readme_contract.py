@@ -104,5 +104,8 @@ def test_readme_documents_completed_build_publish_task():
 
     assert "publish_completed_model_build_task" in readme
     assert "custom DAG" in readme
+    assert "prepare_source_data_task" in readme
+    assert "train_validate_export_task" in readme
+    assert "train_and_export_rates(prepared)" not in readme
     assert "build_pricing_model_dag" in readme
     assert "does not deploy" in readme
