@@ -135,6 +135,36 @@ def test_load_model_build_config_reads_column_holdout_validation_split(tmp_path:
     )
 
 
+def test_load_model_build_config_reads_custom_validation_split(tmp_path: Path):
+    path = tmp_path / "model.toml"
+    path.write_text(
+        "\n".join(
+            [
+                'model_key = "MTPL_FREQ"',
+                'model_label = "Motor frequency"',
+                'target_name = "ClaimNb"',
+                'model_type = "superglm_poisson"',
+                'deployment_slot = "MTPL_FREQ_UAT"',
+                'default_package_status = "PUBLISHED"',
+                "",
+                "[validation_split]",
+                'method = "custom"',
+                "materialize = true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_model_build_config(path)
+
+    assert config.validation_split == ValidationSplitConfig.custom(materialize=True)
+
+
+def test_custom_validation_split_constructor_requires_materialization():
+    with pytest.raises(ValueError, match="materialize"):
+        ValidationSplitConfig.custom(materialize=False)
+
+
 @pytest.mark.parametrize(
     ("split_lines", "match"),
     [
@@ -197,6 +227,20 @@ def test_load_model_build_config_reads_column_holdout_validation_split(tmp_path:
                 "materialize = true",
             ],
             "materialize",
+        ),
+        (
+            [
+                'method = "custom"',
+            ],
+            "materialize",
+        ),
+        (
+            [
+                'method = "custom"',
+                "materialize = true",
+                'column = "fold_number"',
+            ],
+            "column",
         ),
     ],
 )

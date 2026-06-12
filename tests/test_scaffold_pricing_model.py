@@ -78,11 +78,15 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "def read_prepared_source" in modeling
     assert "def build_final_model_frame" in modeling
     assert "def fit_validate_export_rating_tables" in modeling
+    assert "def validation_split_indices_for_model" in modeling
+    assert 'method = "custom"' in modeling
+    assert "return validation_split_indices(frame, MODEL_CONFIG.validation_split)" in modeling
     assert "completed_build_helpers import" in modeling
     assert "completed_model_build_payload(" in modeling
     assert "resolve_model_version_for_export" in modeling
     assert "ModelFrameManifestSpec" in modeling
     assert "create_model_frame_manifest_with_split" in modeling
+    assert "split_indices=split_indices" in modeling
     assert "manifest_id=manifest.manifest_id" in modeling
     assert "split_set_id=manifest.split_set_id" in modeling
     assert "If validation_split uses a source split column" in modeling

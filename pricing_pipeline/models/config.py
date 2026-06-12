@@ -107,6 +107,24 @@ class ValidationSplitConfig:
             test_values=test_values,
         )
 
+    @classmethod
+    def custom(
+        cls,
+        *,
+        materialize: bool = True,
+    ) -> "ValidationSplitConfig":
+        if not materialize:
+            raise ValueError("custom validation split requires materialize=true")
+        return cls(
+            method="custom",
+            n_splits=None,
+            test_size=None,
+            random_state=None,
+            shuffle=False,
+            stratify_column=None,
+            materialize=materialize,
+        )
+
 
 @dataclass(frozen=True)
 class ModelBuildConfig:
@@ -306,10 +324,28 @@ def _validation_split_config(data: dict[str, Any]) -> ValidationSplitConfig:
             test_values=test_values,
             materialize=_bool_value(split, "materialize", False),
         )
+    if method == "custom":
+        _reject_validation_split_fields(
+            split,
+            method=method,
+            fields={
+                "column",
+                "train_values",
+                "test_values",
+                "stratify_column",
+                "n_splits",
+                "test_size",
+                "random_state",
+                "shuffle",
+            },
+        )
+        if not _bool_value(split, "materialize", False):
+            raise ValueError("validation_split.materialize must be true for method='custom'")
+        return ValidationSplitConfig.custom(materialize=True)
 
     raise ValueError(
         "validation_split.method must be one of: "
-        "kfold, train_test_split, column_kfold, column_holdout, none"
+        "kfold, train_test_split, column_kfold, column_holdout, custom, none"
     )
 
 

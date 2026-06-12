@@ -109,3 +109,13 @@ def test_readme_documents_completed_build_publish_task():
     assert "train_and_export_rates(prepared)" not in readme
     assert "build_pricing_model_dag" in readme
     assert "does not deploy" in readme
+
+
+def test_readme_steers_model_owned_validation_splits_to_custom():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    adding_models = _readme_section(readme, "Adding Models")
+
+    assert 'method = "custom"' in adding_models
+    assert "validation_split_indices_for_model" in adding_models
+    assert 'method = "column_kfold"' not in adding_models
+    assert 'method = "column_holdout"' not in adding_models
