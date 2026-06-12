@@ -346,7 +346,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
 
             Built-in model.toml methods delegate to pricing_pipeline. If model.toml
             uses method = "custom", replace this function body with model-specific
-            positional row indices, for example from a source fold/holdout column.
+            positional row indices, for example from a SQL lookup, external mapping,
+            grouping rule, or temporal rule.
             \"\"\"
             if MODEL_CONFIG.validation_split.method == "custom":
                 raise NotImplementedError(
