@@ -366,9 +366,13 @@ import edits are needed for normal use. The older all-in-one `ModelSpec` /
   published model still trains on the full dataset; the split is retained for
   review/validation lineage. Use `method = "train_test_split"` for a holdout,
   `method = "kfold"` for cross-validation, or `method = "none"` for no
-  validation split. If the split comes from source data, a SQL lookup, a fold
-  column, a train/holdout flag, or any model-specific rule, use
-  `method = "custom"` with `materialize = true` and define
+  validation split. If the final frame already contains a simple fold column or
+  train/holdout flag, use `method = "column_kfold"` with
+  `column = "fold_number"` or `method = "column_holdout"` with `column`,
+  `train_values`, and `test_values`; those methods need no split code and mark
+  the split column as validation metadata. If the split comes from a SQL lookup,
+  external mapping file, grouping rule, temporal rule, or any other model-owned
+  logic, use `method = "custom"` with `materialize = true` and define
   `validation_split_indices_for_model(...)` in `modeling.py`; custom folds must
   be materialized because they are not replayable from TOML alone. Source split
   columns are validation metadata and should not be exported as rating features

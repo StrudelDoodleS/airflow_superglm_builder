@@ -368,7 +368,10 @@ def test_create_model_frame_manifest_records_supplied_custom_split_indices(
         "fold_1_train_idx",
         "fold_2_test_idx",
         "fold_2_train_idx",
+        "pk_columns",
+        "split_format",
     ]
+    assert loaded["pk_columns"].tolist() == ["PolicyID"]
     assert loaded["fold_1_train_idx"].tolist() == [0, 2, 3]
     assert loaded["fold_1_test_idx"].tolist() == [1]
     assert loaded["fold_2_train_idx"].tolist() == [1, 2]
