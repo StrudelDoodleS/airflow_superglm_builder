@@ -339,6 +339,24 @@ def _custom_modeling_template(*, package_name: str) -> str:
             )
 
 
+        def validation_split_indices_for_model(
+            frame: pd.DataFrame,
+        ) -> list[tuple[Any, Any]]:
+            \"\"\"Return the validation folds used by this model.
+
+            Built-in model.toml methods delegate to pricing_pipeline. If model.toml
+            uses method = "custom", replace this function body with model-specific
+            positional row indices, for example from a SQL lookup, external mapping,
+            grouping rule, or temporal rule.
+            \"\"\"
+            if MODEL_CONFIG.validation_split.method == "custom":
+                raise NotImplementedError(
+                    "Return custom validation folds as "
+                    "[(train_idx, test_idx), ...] using zero-based row positions."
+                )
+            return validation_split_indices(frame, MODEL_CONFIG.validation_split)
+
+
         # ---------------------------------------------------------------------------
         # Standard Build Recipe - Usually Leave This Alone
         # ---------------------------------------------------------------------------
@@ -376,7 +394,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
             # deterministic and aligned with PK_COLUMNS unless the model deliberately needs
             # a different order.
             frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
-            split_indices = validation_split_indices(frame, MODEL_CONFIG.validation_split)
+            split_indices = validation_split_indices_for_model(frame)
             # If validation_split uses a source split column, do not include that
             # column as a rating feature unless this is an intentional model decision.
             rating_workbook_path, model_artifact_path, metrics = (
@@ -401,6 +419,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
                 ),
                 validation_split=MODEL_CONFIG.validation_split,
                 validation_split_artifact_root=settings.validation_split_artifact_root,
+                split_indices=split_indices,
                 created_by=created_by,
             )
 

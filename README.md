@@ -326,7 +326,10 @@ By default, the helper writes a custom-DAG starter:
   `data_as_of_date`.
 - `pricing_models/<model_name>/modeling.py`: where you edit
   `read_prepared_source(...)`, `build_final_model_frame(...)`, and
-  `fit_validate_export_rating_tables(...)`. The generated
+  `fit_validate_export_rating_tables(...)`. If you use
+  `validation_split.method = "custom"`, edit
+  `validation_split_indices_for_model(...)` to return your model's
+  zero-based `(train_idx, test_idx)` folds. The generated
   `train_validate_export_model(...)` recipe wires those functions into
   versioning, frame-backed manifest creation, and the completed-build payload;
   start by leaving that recipe alone unless your model needs a different flow.
@@ -363,11 +366,17 @@ import edits are needed for normal use. The older all-in-one `ModelSpec` /
   published model still trains on the full dataset; the split is retained for
   review/validation lineage. Use `method = "train_test_split"` for a holdout,
   `method = "kfold"` for cross-validation, or `method = "none"` for no
-  validation split. If your final model frame already has source-provided split
-  assignment, use `method = "column_kfold"` with `column = "fold_number"` or
-  `method = "column_holdout"` with `column`, `train_values`, and `test_values`.
-  Source split columns are recorded for validation metadata and should not be
-  exported as rating features unless that is an intentional model decision. Set
+  validation split. If the final frame already contains a simple fold column or
+  train/holdout flag, use `method = "column_kfold"` with
+  `column = "fold_number"` or `method = "column_holdout"` with `column`,
+  `train_values`, and `test_values`; those methods need no split code and mark
+  the split column as validation metadata. If the split comes from a SQL lookup,
+  external mapping file, grouping rule, temporal rule, or any other model-owned
+  logic, use `method = "custom"` with `materialize = true` and define
+  `validation_split_indices_for_model(...)` in `modeling.py`; custom folds must
+  be materialized because they are not replayable from TOML alone. Source split
+  columns are validation metadata and should not be exported as rating features
+  unless that is an intentional model decision. Set
   `materialize = true` to write compressed `.npz` fold indexes under
   `VALIDATION_SPLIT_ARTIFACT_ROOT`; SQL stores only the artifact path, artifact
   SHA256, and dataset row-order SHA256.
@@ -452,6 +461,7 @@ model_version = resolve_model_version_for_export(
     model_key=MODEL_CONFIG.model_key,
     export_id=export_id,
 )
+split_indices = ...  # The exact folds used by your fitting/validation code.
 manifest = create_model_frame_manifest_with_split(
     engine,
     frame=final_model_frame,
@@ -465,6 +475,7 @@ manifest = create_model_frame_manifest_with_split(
     ),
     validation_split=MODEL_CONFIG.validation_split,
     validation_split_artifact_root=settings.validation_split_artifact_root,
+    split_indices=split_indices,
 )
 
 return completed_model_build_payload(

@@ -218,6 +218,8 @@ def split_set_id_for_validation_split(
         column_token = re.sub(r"[^A-Za-z0-9_]+", "_", str(validation_split.column)).strip("_")
         column_token = column_token or "source_column"
         return f"{manifest_id}__{validation_split.method}_{column_token}"
+    if validation_split.method == "custom":
+        return f"{manifest_id}__custom"
     raise ValueError(f"Unsupported validation split method: {validation_split.method}")
 
 
@@ -276,6 +278,78 @@ def _source_column_splitter_params(
     )
 
 
+def _normalise_index_array(value, *, field_name: str, row_count: int) -> np.ndarray:
+    array = np.asarray(value)
+    if array.ndim != 1:
+        raise ValueError(f"{field_name} must be a one-dimensional index array")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise ValueError(f"{field_name} must contain integer row positions")
+
+    array = array.astype(np.int64, copy=False)
+    if len(array) == 0:
+        raise ValueError(f"{field_name} must not be empty")
+    if np.any(array < 0) or np.any(array >= row_count):
+        raise ValueError(f"{field_name} contains row positions outside the model frame")
+    if len(np.unique(array)) != len(array):
+        raise ValueError(f"{field_name} must not contain duplicate row positions")
+    return array
+
+
+def _normalise_supplied_split_indices(
+    split_indices: list[tuple[object, object]],
+    *,
+    row_count: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    folds: list[tuple[np.ndarray, np.ndarray]] = []
+    for fold_no, (raw_train_idx, raw_test_idx) in enumerate(split_indices, start=1):
+        train_idx = _normalise_index_array(
+            raw_train_idx,
+            field_name=f"split_indices[{fold_no}].train_idx",
+            row_count=row_count,
+        )
+        test_idx = _normalise_index_array(
+            raw_test_idx,
+            field_name=f"split_indices[{fold_no}].test_idx",
+            row_count=row_count,
+        )
+        if np.intersect1d(train_idx, test_idx).size:
+            raise ValueError(f"split_indices[{fold_no}] train/test rows must not overlap")
+        folds.append((train_idx, test_idx))
+    return folds
+
+
+def _validate_supplied_split_indices_match_config(
+    frame: pd.DataFrame,
+    *,
+    validation_split: ValidationSplitConfig,
+    split_indices: list[tuple[np.ndarray, np.ndarray]],
+) -> None:
+    if validation_split.method == "custom":
+        return
+
+    expected_indices = validation_split_indices(frame, validation_split)
+    if len(split_indices) != len(expected_indices):
+        raise ValueError(
+            "supplied split_indices do not match "
+            f"validation_split.method={validation_split.method!r}; "
+            "use method='custom' for model-owned split logic"
+        )
+
+    for fold_no, ((train_idx, test_idx), (expected_train_idx, expected_test_idx)) in enumerate(
+        zip(split_indices, expected_indices, strict=True),
+        start=1,
+    ):
+        if not np.array_equal(train_idx, expected_train_idx) or not np.array_equal(
+            test_idx,
+            expected_test_idx,
+        ):
+            raise ValueError(
+                "supplied split_indices do not match "
+                f"validation_split.method={validation_split.method!r} at fold {fold_no}; "
+                "use method='custom' for model-owned split logic"
+            )
+
+
 def build_cv_split_set(
     frame: pd.DataFrame,
     *,
@@ -327,6 +401,7 @@ def build_validation_split_set(
     created_by: str = "airflow",
     artifact_uri: str | None = None,
     artifact_sha256: str | None = None,
+    split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> pd.DataFrame:
     split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
     if split_set_id is None:
@@ -354,8 +429,21 @@ def build_validation_split_set(
         splitter_class = "source_column"
         params = _source_column_splitter_params(frame, validation_split)
         fold_count = len(params["fold_values"]) if validation_split.method == "column_kfold" else 1
+    elif validation_split.method == "custom":
+        if split_indices is None:
+            raise ValueError("custom validation split requires model-supplied split_indices")
+        if artifact_uri is None:
+            raise ValueError("custom validation split requires materialize=true")
+        splitter_class = "custom"
+        params = {"method": "custom"}
+        fold_count = len(split_indices)
     else:
         raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+    if split_indices is not None and fold_count != len(split_indices):
+        raise ValueError(
+            "validation split metadata fold count does not match supplied split_indices"
+        )
 
     return pd.DataFrame(
         [
@@ -388,12 +476,15 @@ def build_validation_folds(
     *,
     split_set_id: str,
     validation_split: ValidationSplitConfig,
+    split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, int | str]] = []
-    for fold_no, (train_idx, test_idx) in enumerate(
-        validation_split_indices(frame, validation_split),
-        start=1,
-    ):
+    indices = (
+        split_indices
+        if split_indices is not None
+        else validation_split_indices(frame, validation_split)
+    )
+    for fold_no, (train_idx, test_idx) in enumerate(indices, start=1):
         rows.append(
             {
                 "split_set_id": split_set_id,
@@ -507,6 +598,11 @@ def validation_split_indices(
         if len(test_idx) == 0:
             raise ValueError("validation split column produced no test rows")
         return [(train_idx, test_idx)]
+    if validation_split.method == "custom":
+        raise ValueError(
+            "custom validation split requires model-supplied split_indices; "
+            "define them in modeling.py"
+        )
     raise ValueError(f"Unsupported validation split method: {validation_split.method}")
 
 
@@ -524,11 +620,14 @@ def write_validation_split_npz(
     validation_split: ValidationSplitConfig,
     output_path: Path,
     pk_columns: tuple[str, ...] = ("IDpol",),
+    split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> str:
     folds = {
         fold_no: (train_idx, test_idx)
         for fold_no, (train_idx, test_idx) in enumerate(
-            validation_split_indices(frame, validation_split),
+            split_indices
+            if split_indices is not None
+            else validation_split_indices(frame, validation_split),
             start=1,
         )
     }
@@ -603,9 +702,29 @@ def create_model_frame_manifest_with_split(
     manifest_id: str | None = None,
     validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
     validation_split_artifact_root: Path | None = None,
+    split_indices: list[tuple[object, object]] | None = None,
     created_by: str = "airflow",
 ) -> DatasetManifestResult:
     _validate_model_frame(frame, spec=spec, validation_split=validation_split)
+    supplied_split_indices = (
+        _normalise_supplied_split_indices(split_indices, row_count=len(frame))
+        if split_indices is not None
+        else None
+    )
+    if validation_split.method == "custom":
+        if supplied_split_indices is None:
+            raise ValueError("custom validation split requires model-supplied split_indices")
+        if not supplied_split_indices:
+            raise ValueError("custom validation split requires at least one supplied fold")
+        if not validation_split.materialize:
+            raise ValueError("custom validation split requires materialize=true")
+    elif supplied_split_indices is not None:
+        _validate_supplied_split_indices_match_config(
+            frame,
+            validation_split=validation_split,
+            split_indices=supplied_split_indices,
+        )
+
     manifest_id = manifest_id or new_manifest_id(spec.dataset_name)
     manifest_df = pd.DataFrame(
         [
@@ -642,6 +761,7 @@ def create_model_frame_manifest_with_split(
             validation_split=validation_split,
             output_path=artifact_path,
             pk_columns=spec.pk_columns,
+            split_indices=supplied_split_indices,
         )
         split_artifact_uri = str(artifact_path)
 
@@ -653,12 +773,14 @@ def create_model_frame_manifest_with_split(
         created_by=created_by,
         artifact_uri=split_artifact_uri,
         artifact_sha256=split_artifact_sha256,
+        split_indices=supplied_split_indices,
     )
     cv_fold_df = (
         build_validation_folds(
             frame,
             split_set_id=split_set_id,
             validation_split=validation_split,
+            split_indices=supplied_split_indices,
         )
         if split_set_id is not None
         else pd.DataFrame()

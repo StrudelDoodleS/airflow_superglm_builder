@@ -18,6 +18,7 @@ from pricing_pipeline.data.cv_splits import (
 from pricing_pipeline.data.manifest import compute_row_order_sha256
 from pricing_pipeline.data.split_artifacts import FOLD_ASSIGNMENT_FORMAT
 from pricing_pipeline.data.split_artifacts import HOLDOUT_ASSIGNMENT_FORMAT
+from pricing_pipeline.data.split_artifacts import EXPLICIT_INDICES_FORMAT
 from pricing_pipeline.data.split_artifacts import load_split_artifact_npz
 from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
 from pricing_pipeline.models.config import ValidationSplitConfig
@@ -736,6 +737,128 @@ def test_write_split_artifact_npz_falls_back_to_legacy_explicit_arrays(
     assert loaded["fold_1_test_idx"].tolist() == [1, 4]
     assert "split_format" not in loaded.files
     assert "pk_columns" not in loaded.files
+
+
+def test_write_split_artifact_npz_writes_frame_checked_custom_explicit_arrays(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "custom_explicit.npz"
+
+    write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+        },
+        validation_split=ValidationSplitConfig.custom(materialize=True),
+        pk_columns=("IDpol",),
+        row_count=5,
+        output_path=artifact,
+    )
+
+    loaded = np.load(artifact, allow_pickle=False)
+    assert sorted(loaded.files) == [
+        "fold_1_test_idx",
+        "fold_1_train_idx",
+        "fold_2_test_idx",
+        "fold_2_train_idx",
+        "pk_columns",
+        "split_format",
+    ]
+    assert str(loaded["split_format"].item()) == EXPLICIT_INDICES_FORMAT
+    assert loaded["pk_columns"].tolist() == ["IDpol"]
+
+
+def test_load_split_artifact_npz_rejects_changed_row_order_for_custom_explicit(
+    tmp_path: Path,
+):
+    rows = frame()
+    artifact = tmp_path / "custom_explicit.npz"
+    artifact_sha = write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+        },
+        validation_split=ValidationSplitConfig.custom(materialize=True),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_set_id": "manifest_1__custom",
+            "splitter_class": "custom",
+            "splitter_params_json": json.dumps({"method": "custom"}, sort_keys=True),
+            "fold_count": 2,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": artifact_sha,
+        }
+    )
+    changed = rows.sort_values("IDpol", ascending=False)
+
+    with pytest.raises(ValueError, match="row_order_sha256"):
+        load_split_artifact_npz(materialized, frame=changed, pk_columns=("IDpol",))
+
+
+def test_load_cv_folds_validates_custom_explicit_artifact_with_dataset_loader(
+    tmp_path: Path,
+):
+    rows = frame()
+    artifact = tmp_path / "custom_explicit.npz"
+    artifact_sha = write_split_artifact_npz(
+        {
+            1: (np.array([0, 2, 3]), np.array([1, 4])),
+            2: (np.array([1, 3, 4]), np.array([0, 2])),
+        },
+        validation_split=ValidationSplitConfig.custom(materialize=True),
+        pk_columns=("IDpol",),
+        row_count=len(rows),
+        output_path=artifact,
+    )
+    materialized = CVSplitSet(
+        **{
+            **split_set().__dict__,
+            "split_set_id": "manifest_1__custom",
+            "splitter_class": "custom",
+            "splitter_params_json": json.dumps({"method": "custom"}, sort_keys=True),
+            "fold_count": 2,
+            "split_mode": "MATERIALIZED",
+            "artifact_uri": str(artifact),
+            "artifact_sha256": artifact_sha,
+        }
+    )
+
+    class ScalarResult:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return materialized.__dict__
+
+    class Connection:
+        def execute(self, statement, params=None):
+            assert "FROM pricing.CV_SPLIT_SET" in str(statement)
+            assert params == {"split_set_id": materialized.split_set_id}
+            return ScalarResult()
+
+    class Engine:
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    with pytest.raises(ValueError, match="row_order_sha256"):
+        load_cv_folds(
+            Engine(),
+            materialized.split_set_id,
+            dataset_loader=lambda manifest_id: rows.sort_values("IDpol", ascending=False),
+            pk_columns=("IDpol",),
+        )
 
 
 def test_write_split_artifact_npz_rejects_kfold_train_not_complement(

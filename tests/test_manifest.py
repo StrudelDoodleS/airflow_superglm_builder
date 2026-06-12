@@ -297,6 +297,159 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
     )
 
 
+def test_create_model_frame_manifest_records_supplied_custom_split_indices(
+    monkeypatch,
+    tmp_path,
+):
+    engine = FakeEngine()
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 0.0, 2.0, 0.5],
+            "ExposureYears": [1.0, 1.0, 0.5, 0.25],
+            "BandedDriverAge": ["18-29", "30-39", "40-49", "50-59"],
+        }
+    )
+    split_indices = [
+        (np.asarray([0, 2, 3]), np.asarray([1])),
+        (np.asarray([1, 2]), np.asarray([0, 3])),
+    ]
+    to_sql_calls = []
+
+    def fake_to_sql(self, name, con, **kwargs):
+        to_sql_calls.append(
+            {
+                "name": name,
+                "schema": kwargs.get("schema"),
+                "frame": self.copy(),
+            }
+        )
+
+    monkeypatch.setattr(pd.DataFrame, "to_sql", fake_to_sql)
+
+    result = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name="work_loss_cost_frame",
+            source_system="pricing_mart",
+            data_as_of_date="2026-06-04",
+            pk_columns=("PolicyID",),
+            target_column="LossCost",
+            weight_column="ExposureYears",
+        ),
+        manifest_id="manifest_custom_split",
+        validation_split=ValidationSplitConfig.custom(materialize=True),
+        validation_split_artifact_root=tmp_path,
+        split_indices=split_indices,
+        created_by="unit-test",
+    )
+
+    assert result.split_set_id == "manifest_custom_split__custom"
+
+    split_set = next(call for call in to_sql_calls if call["name"] == "CV_SPLIT_SET")["frame"].iloc[
+        0
+    ]
+    assert split_set["split_mode"] == "MATERIALIZED"
+    assert split_set["splitter_class"] == "custom"
+    assert json.loads(split_set["splitter_params_json"]) == {"method": "custom"}
+    assert split_set["fold_count"] == 2
+
+    cv_folds = next(call for call in to_sql_calls if call["name"] == "CV_FOLD")["frame"]
+    assert cv_folds[["fold_no", "n_train", "n_test"]].to_dict("records") == [
+        {"fold_no": 1, "n_train": 3, "n_test": 1},
+        {"fold_no": 2, "n_train": 2, "n_test": 2},
+    ]
+
+    artifact_path = tmp_path / "manifest_custom_split__custom.npz"
+    loaded = np.load(artifact_path, allow_pickle=False)
+    assert sorted(loaded.files) == [
+        "fold_1_test_idx",
+        "fold_1_train_idx",
+        "fold_2_test_idx",
+        "fold_2_train_idx",
+        "pk_columns",
+        "split_format",
+    ]
+    assert loaded["pk_columns"].tolist() == ["PolicyID"]
+    assert loaded["fold_1_train_idx"].tolist() == [0, 2, 3]
+    assert loaded["fold_1_test_idx"].tolist() == [1]
+    assert loaded["fold_2_train_idx"].tolist() == [1, 2]
+    assert loaded["fold_2_test_idx"].tolist() == [0, 3]
+
+
+def test_create_model_frame_manifest_rejects_supplied_split_indices_that_do_not_match_config(
+    monkeypatch,
+):
+    engine = FakeEngine()
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "LossCost": [1.0, 0.0, 2.0, 0.5],
+            "ExposureYears": [1.0, 1.0, 0.5, 0.25],
+        }
+    )
+    monkeypatch.setattr(pd.DataFrame, "to_sql", lambda *args, **kwargs: None)
+
+    with pytest.raises(ValueError, match="method='custom'"):
+        create_model_frame_manifest_with_split(
+            engine,
+            frame=frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="work_loss_cost_frame",
+                source_system="pricing_mart",
+                data_as_of_date="2026-06-04",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+                weight_column="ExposureYears",
+            ),
+            manifest_id="manifest_split_mismatch",
+            validation_split=ValidationSplitConfig.train_test_split(
+                test_size=0.5,
+                random_state=42,
+            ),
+            split_indices=[
+                (np.asarray([0, 1]), np.asarray([2, 3])),
+            ],
+            created_by="unit-test",
+        )
+
+
+def test_create_model_frame_manifest_accepts_empty_supplied_split_indices_for_none(
+    monkeypatch,
+):
+    engine = FakeEngine()
+    frame = manifest_frame()
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda self, name, con, **kwargs: to_sql_calls.append(name),
+    )
+
+    result = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=ModelFrameManifestSpec(
+            dataset_name="no_validation_frame",
+            source_system="pricing_mart",
+            data_as_of_date="2026-06-04",
+            pk_columns=("IDpol",),
+            target_column="ClaimNb",
+            weight_column="Exposure",
+        ),
+        manifest_id="manifest_no_validation_from_recipe",
+        validation_split=ValidationSplitConfig.none(),
+        split_indices=[],
+        created_by="unit-test",
+    )
+
+    assert result.split_set_id is None
+    assert "CV_SPLIT_SET" not in to_sql_calls
+    assert "CV_FOLD" not in to_sql_calls
+
+
 def test_column_kfold_validation_split_uses_positional_indices_and_stable_fold_order():
     frame = pd.DataFrame(
         {
@@ -338,6 +491,11 @@ def test_column_holdout_validation_split_supports_numeric_values():
     )
 
     assert [(train.tolist(), test.tolist()) for train, test in folds] == [([0, 1, 3], [2])]
+
+
+def test_validation_split_indices_rejects_custom_without_model_supplied_folds():
+    with pytest.raises(ValueError, match="custom validation split"):
+        validation_split_indices(manifest_frame(), ValidationSplitConfig.custom(materialize=True))
 
 
 @pytest.mark.parametrize(

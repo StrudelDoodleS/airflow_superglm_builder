@@ -11,6 +11,7 @@ from pricing_pipeline.data.row_identity import compute_row_order_sha256
 
 FOLD_ASSIGNMENT_FORMAT = "fold_assignment_v1"
 HOLDOUT_ASSIGNMENT_FORMAT = "holdout_assignment_v1"
+EXPLICIT_INDICES_FORMAT = "explicit_indices_v1"
 
 
 def file_sha256(path: Path) -> str:
@@ -44,6 +45,20 @@ def write_split_artifact_npz(
             "pk_columns": pk_column_array,
             "is_testing_set": _holdout_assignment(folds, row_count=row_count),
         }
+    elif validation_split.method == "custom":
+        arrays = {
+            "split_format": np.array(EXPLICIT_INDICES_FORMAT),
+            "pk_columns": pk_column_array,
+        }
+        for fold_no, (train_idx, test_idx) in sorted(folds.items()):
+            arrays[f"fold_{fold_no}_train_idx"] = np.asarray(train_idx).astype(
+                np.int64,
+                copy=False,
+            )
+            arrays[f"fold_{fold_no}_test_idx"] = np.asarray(test_idx).astype(
+                np.int64,
+                copy=False,
+            )
     else:
         arrays = {}
         for fold_no, (train_idx, test_idx) in sorted(folds.items()):
@@ -106,6 +121,8 @@ def load_split_artifact_npz(
                 split_set=split_set,
             )
             return {1: _indices_from_test_mask(is_testing_set)}
+        if split_format == EXPLICIT_INDICES_FORMAT:
+            return _load_frame_checked_explicit_folds(loaded, split_set=split_set)
 
     raise ValueError(f"Unsupported split_format: {split_format!r}")
 
@@ -329,6 +346,35 @@ def _load_legacy_folds(loaded, *, split_set) -> dict[int, tuple[np.ndarray, np.n
             _read_array(loaded, f"fold_{fold_no}_train_idx"),
             _read_array(loaded, f"fold_{fold_no}_test_idx"),
         )
+    return folds
+
+
+def _load_frame_checked_explicit_folds(
+    loaded,
+    *,
+    split_set,
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    folds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for fold_no in range(1, split_set.fold_count + 1):
+        train_key = f"fold_{fold_no}_train_idx"
+        test_key = f"fold_{fold_no}_test_idx"
+        train_idx = _normalise_index_array(
+            _read_array(loaded, train_key),
+            row_count=split_set.row_count,
+            key=train_key,
+        )
+        test_idx = _normalise_index_array(
+            _read_array(loaded, test_key),
+            row_count=split_set.row_count,
+            key=test_key,
+        )
+        if len(train_idx) == 0:
+            raise ValueError(f"{train_key} must not be empty")
+        if len(test_idx) == 0:
+            raise ValueError(f"{test_key} must not be empty")
+        if np.intersect1d(train_idx, test_idx).size:
+            raise ValueError(f"{train_key} and {test_key} must be disjoint")
+        folds[fold_no] = (train_idx, test_idx)
     return folds
 
 
