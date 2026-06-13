@@ -49,9 +49,7 @@ def test_mssql_password_default_is_consistent_across_runtime_services():
     assert common_env["MSSQL_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
     assert mssql_env["MSSQL_SA_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
     assert mlflow_env["MSSQL_PASSWORD"] == MSSQL_PASSWORD_DEFAULT
-    assert "AirflowSuperGLM!2026" not in Path("docker-compose.yml").read_text(
-        encoding="utf-8"
-    )
+    assert "AirflowSuperGLM!2026" not in Path("docker-compose.yml").read_text(encoding="utf-8")
 
 
 def test_state_init_prepares_project_state_directories():
@@ -81,10 +79,7 @@ def test_state_mounts_follow_airflow_project_dir():
         "${AIRFLOW_PROJ_DIR:-.}/state/cv_splits:/opt/pricing/state/cv_splits"
         in compose["x-airflow-common"]["volumes"]
     )
-    assert (
-        "${AIRFLOW_PROJ_DIR:-.}/state/mssql/data:/var/opt/mssql"
-        in services["mssql"]["volumes"]
-    )
+    assert "${AIRFLOW_PROJ_DIR:-.}/state/mssql/data:/var/opt/mssql" in services["mssql"]["volumes"]
     assert (
         "${AIRFLOW_PROJ_DIR:-.}/state/mlflow/artifacts:/mlflow/artifacts"
         in services["mlflow"]["volumes"]
@@ -139,7 +134,7 @@ def test_mlflow_serves_artifacts_through_http_proxy():
 
     assert "--serve-artifacts" in mlflow_command
     assert "--artifacts-destination /mlflow/artifacts" in mlflow_command
-    assert "--allowed-hosts \"$${MLFLOW_ALLOWED_HOSTS}\"" in mlflow_command
+    assert '--allowed-hosts "$${MLFLOW_ALLOWED_HOSTS}"' in mlflow_command
     assert mlflow["environment"]["MLFLOW_ALLOWED_HOSTS"] == (
         "${MLFLOW_ALLOWED_HOSTS:-localhost,localhost:5000,127.0.0.1,127.0.0.1:5000,mlflow,mlflow:5000}"
     )
@@ -183,7 +178,10 @@ def test_mlflow_and_mssql_init_can_import_pricing_pipeline_helpers():
 
     for name in ["mlflow", "mssql-init"]:
         service = services[name]
-        assert "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline" in service["volumes"]
+        assert (
+            "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline"
+            in service["volumes"]
+        )
         assert service["environment"]["PYTHONPATH"] == "/opt/airflow"
 
 
@@ -208,25 +206,17 @@ def test_airflow_services_can_import_project_package_and_hide_examples():
     common_env = compose["x-airflow-common"]["environment"]
     common_volumes = compose["x-airflow-common"]["volumes"]
     run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
-    cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(
-        encoding="utf-8"
-    )
+    cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(encoding="utf-8")
 
     assert common_env["PYTHONPATH"] == "/opt/airflow"
-    assert (
-        "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline"
-        in common_volumes
-    )
-    assert (
-        "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models"
-        in common_volumes
-    )
+    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline" in common_volumes
+    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models" in common_volumes
     assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
     assert common_env["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
     assert "cleanup_airflow_examples.py" in run_script
     assert "airflow dags list-import-errors" in run_script
-    assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script
-    assert "airflow dags trigger \"${DAG_ID}\"" in run_script
+    assert 'DAG_ID="${DAG_ID:-demo_custom_publish}"' in run_script
+    assert 'airflow dags trigger "${DAG_ID}"' in run_script
     assert "bundle_name" in cleanup_script
     assert "example_dags" in cleanup_script
 
@@ -235,9 +225,7 @@ def test_airflow_common_env_propagates_runtime_overrides():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     common_env = compose["x-airflow-common"]["environment"]
 
-    assert common_env["MLFLOW_TRACKING_URI"] == (
-        "${MLFLOW_TRACKING_URI:-http://mlflow:5000}"
-    )
+    assert common_env["MLFLOW_TRACKING_URI"] == ("${MLFLOW_TRACKING_URI:-http://mlflow:5000}")
     assert common_env["RATING_EXPORT_ROOT"] == (
         "${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}"
     )
@@ -294,9 +282,7 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
 
 
 def test_deploy_api_publishes_model_scoped_deployment_history():
-    deployer = Path("pricing_pipeline/publishing/deployment.py").read_text(
-        encoding="utf-8"
-    )
+    deployer = Path("pricing_pipeline/publishing/deployment.py").read_text(encoding="utf-8")
 
     assert "model_id" in deployer
     assert "PRICING_MODEL_DEPLOYMENT" in deployer
@@ -309,9 +295,7 @@ def test_deploy_api_publishes_model_scoped_deployment_history():
 
 
 def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
-    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
-        encoding="utf-8"
-    )
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
     assert "ORDER BY" in loader
     assert "ls.level_set_id" in loader
@@ -321,9 +305,7 @@ def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
 
 
 def test_manual_revision_writer_creates_child_package_and_finalizes_published():
-    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(
-        encoding="utf-8"
-    )
+    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(encoding="utf-8")
 
     assert "parent_rate_package_id" in writer
     assert "package_status" in writer

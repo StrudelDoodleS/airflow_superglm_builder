@@ -5,7 +5,7 @@ README_CONTRACT_STRINGS = [
     "state/",
     "docker compose down -v",
     "building, validating, publishing",
-    "freMTPL motor pricing model as a runnable",
+    "explicit custom publish DAG",
     "Seed Database Schema",
     "scripts/render_schema_sql.py",
     "create_engine(",
@@ -35,8 +35,8 @@ README_CONTRACT_STRINGS = [
     "DatasetSpec",
     "pricing_models/<model_name>/",
     "create_model_frame_manifest_with_split",
-    "pricing_mtpl_frequency",
-    "--model-key MTPL_FREQ",
+    "demo_custom_publish",
+    "scripts/run_demo_custom_publish.py",
     "SQL Prediction Validation",
     "scripts/validate_sql_prediction_against_superglm.py",
     "pricing.PREDICT_CURRENT_RATE",
@@ -101,14 +101,26 @@ def test_readme_documents_rate_package_lifecycle_contract():
 
 def test_readme_documents_completed_build_publish_task():
     readme = Path("README.md").read_text(encoding="utf-8")
+    custom_section = _readme_section(readme, "Adding Models")
 
     assert "publish_completed_model_build_task" in readme
     assert "custom DAG" in readme
     assert "prepare_source_data_task" in readme
     assert "train_validate_export_task" in readme
     assert "train_and_export_rates(prepared)" not in readme
-    assert "build_pricing_model_dag" in readme
+    assert "build_pricing_model_dag" not in custom_section
     assert "does not deploy" in readme
+
+
+def test_readme_work_runtime_example_uses_explicit_taskflow_not_factory():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    work_sql_section = _readme_section(readme, "Work SQL Server Targeting")
+
+    assert "prepare_source_data_task(runtime_module=runtime_module)" in work_sql_section
+    assert "train_validate_export_task(runtime_module=runtime_module)" in work_sql_section
+    assert "publish_completed_model_build_task(" in work_sql_section
+    assert "build_pricing_model_dag" not in work_sql_section
+    assert "MODEL_SPEC" not in work_sql_section
 
 
 def test_readme_documents_source_column_and_custom_validation_split_paths():

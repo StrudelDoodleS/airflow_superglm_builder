@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 export AIRFLOW_PROJ_DIR="${AIRFLOW_PROJ_DIR:-${PROJECT_ROOT}}"
-DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"
+DAG_ID="${DAG_ID:-demo_custom_publish}"
 
 mkdir -p \
   "${AIRFLOW_PROJ_DIR}/state/mssql/data" \

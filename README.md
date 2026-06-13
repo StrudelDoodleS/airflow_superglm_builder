@@ -6,8 +6,8 @@ and deploying SQL-backed SuperGLM rate packages.
 The reusable pipeline stores dataset manifests and model lineage in SQL Server,
 trains model-specific SuperGLM estimators, optionally logs runs to MLflow,
 exports normalized rating tables, and publishes immutable rate packages back to
-SQL Server. The repository includes a freMTPL motor pricing model as a runnable
-demo/reference implementation.
+SQL Server. The repository includes an explicit custom publish DAG as the
+runnable demo/reference implementation.
 
 ## Contents
 
@@ -132,7 +132,7 @@ These steps assume Docker with the Compose v2 plugin is already installed.
 7. Trigger the bundled demo pipeline from Airflow, or from the CLI:
 
    ```bash
-   docker compose exec -T airflow-apiserver airflow dags trigger pricing_mtpl_frequency
+   docker compose exec -T airflow-apiserver airflow dags trigger demo_custom_publish
    ```
 
 The full one-command local smoke path is also available:
@@ -142,7 +142,7 @@ scripts/run_local_pipeline.sh
 ```
 
 That script builds the image, starts the services, cleans stale Airflow example
-DAG metadata, waits for the bundled `pricing_mtpl_frequency` demo DAG to be
+DAG metadata, waits for the bundled `demo_custom_publish` demo DAG to be
 visible, and triggers the DAG.
 
 ## No-Docker Work Quickstart
@@ -269,13 +269,12 @@ Prerequisites:
    uv run python scripts/load_fremtpl_raw.py --replace
    ```
 
-8. Trigger the bundled `pricing_mtpl_frequency` demo DAG from the Airflow UI, or
-   run it directly without Airflow:
+8. Trigger the bundled `demo_custom_publish` demo DAG from the Airflow UI, or
+   run the same explicit publish path directly without Airflow:
 
    ```bash
-   uv run python scripts/run_pipeline_no_airflow.py \
-     --runtime-module work_runtime.database \
-     --model-key MTPL_FREQ
+   PRICING_RUNTIME_MODULE=work_runtime.database \
+     uv run python scripts/run_demo_custom_publish.py
    ```
 
    The direct runner uses the same schema DDL, dataset manifest/CV metadata,
@@ -346,19 +345,16 @@ examples, not framework-required field names.
 It creates missing scaffold files and leaves existing files unchanged; pass
 `--force` only when you intentionally want to overwrite existing scaffold files.
 Model configs are auto-discovered from `pricing_models/<model_name>/model.toml`;
-no registry import edits are needed for normal use. The older all-in-one
-`ModelSpec` / `build_pricing_model_dag(...)` scaffold is still available with
-`--template factory`.
+no registry import edits are needed for normal use.
 
 - Global code in `pricing_pipeline/` owns SQL lifecycle access for schema
   application, dataset manifests, rating export publishing, and lineage writes.
   Source data access stays model/team-owned in `data.py`.
 - `DatasetSpec.manifest_sql` is only a compatibility path for SQL-backed final
-  model frames and the older factory/demo flow. New custom DAGs should usually
-  create the manifest from the final pandas model frame instead of re-reading
-  source SQL.
-- `ModelSpec` is only needed for the older all-in-one factory path. Custom DAGs
-  can ignore it.
+  model frames. New custom DAGs should usually create the manifest from the
+  final pandas model frame instead of re-reading source SQL.
+- Custom DAGs can ignore `ModelSpec`; the TOML-backed `MODEL_CONFIG` is enough
+  for the explicit task workflow.
 - `target_name` is the final training DataFrame column after your data/modeling
   code runs; it does not need to be a physical source column. Use your model
   data prep code for derived targets, exposure/offset columns, filters, and
@@ -384,10 +380,8 @@ no registry import edits are needed for normal use. The older all-in-one
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.
-- Add one DAG per model in `dags/`. For quick demos you can use
-  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`;
-  for serious model builds, a custom DAG can own ingestion, transforms,
-  training, validation, and then bolt on the completed-build publish task.
+- Add one DAG per model in `dags/`. The DAG should own ingestion, transforms,
+  training, validation, and then bolt on the shared register/publish tasks.
 
 ### Custom DAG Publish Task
 
@@ -552,10 +546,11 @@ DatasetSpec(
 Only local/demo datasets like freMTPL need `raw_loader=...` to fetch and seed a
 source table.
 
-For example, the current MTPL frequency model is implemented in
-`pricing_models/mtpl_frequency/`, registered as `MTPL_FREQ`, and exposed as the
-`pricing_mtpl_frequency` DAG. `pricing_superglm_pipeline` remains as a
-compatibility alias for older local commands.
+For example, the bundled explicit workflow is implemented in
+`pricing_models/demo_custom_publish/`, registered as `DEMO_CUSTOM_FREQ`, and
+exposed as the `demo_custom_publish` DAG. The older factory API remains in the
+library for compatibility, but factory DAGs are not the recommended example
+shape.
 
 For a work deployment, CloudBeaver is not required and should normally not be
 started. Work SQL connectivity should usually live in an importable Python
@@ -613,7 +608,7 @@ Open http://localhost:8088.
 The repository includes a freMTPL-based demo dataset and model specs so local
 smoke tests have runnable data. Work custom DAGs should use their own source
 read/stage code instead of loading demo data; `DatasetSpec` remains available
-only for SQL-backed final frames and the older factory/demo path.
+only for SQL-backed final frames and factory compatibility flows.
 
 After the schema and bundled demo data are loaded, seed simulated model builds:
 
@@ -681,16 +676,40 @@ def get_runtime_settings():
 The schema names returned by `get_schema_names()` should match the names used
 when rendering/running the database DDL.
 
-Then reference it from a model DAG:
+Then reference it from a model DAG by passing the runtime module into the
+explicit tasks:
 
 ```python
-pricing_motor_frequency = build_pricing_model_dag(
-    dag_id="pricing.motor_frequency.build",
-    spec=MODEL_SPEC,
-    model_config=MODEL_CONFIG,
-    runtime_module="work_runtime.database",
-    tags=["pricing", "motor", "frequency", "model-build"],
+from airflow.sdk import dag
+
+from pricing_models.motor_frequency.airflow_tasks import (
+    prepare_source_data_task,
+    train_validate_export_task,
 )
+from pricing_models.motor_frequency.spec import MODEL_CONFIG
+from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
+from pricing_pipeline.orchestration.publish_completed_build import (
+    publish_completed_model_build_task,
+)
+
+
+runtime_module = "work_runtime.database"
+
+
+@dag(dag_id="pricing_motor_frequency", schedule=None, catchup=False)
+def pricing_motor_frequency():
+    registered = register_pricing_model_task(
+        model_config=MODEL_CONFIG,
+        runtime_module=runtime_module,
+    )()
+    prepared = prepare_source_data_task(runtime_module=runtime_module)()
+    completed = train_validate_export_task(runtime_module=runtime_module)(prepared)
+    published = publish_completed_model_build_task(
+        model_config=MODEL_CONFIG,
+        runtime_module=runtime_module,
+    )(completed)
+
+    registered >> prepared >> completed >> published
 ```
 
 The DBA or platform owner must create the database user and grants inside the
@@ -723,7 +742,7 @@ scheduler, dag processor, worker, and triggerer services. It then runs the
 container smoke check with
 `docker compose run --rm airflow-apiserver python /opt/pricing/scripts/smoke_check.py`
 cleans stale example DAG metadata from existing local Airflow databases, waits
-for the bundled `pricing_mtpl_frequency` demo DAG to be loaded by the DAG
+for the bundled `demo_custom_publish` demo DAG to be loaded by the DAG
 processor, and triggers it through the Airflow CLI.
 
 ## Local Services
