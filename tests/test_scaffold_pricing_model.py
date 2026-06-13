@@ -4,8 +4,6 @@ import os
 import subprocess
 import sys
 
-import pytest
-
 from scripts.scaffold_pricing_model import ScaffoldOptions, scaffold_pricing_model
 
 
@@ -192,7 +190,7 @@ def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
     assert model_spec_keys(models_root=models_root) == ("FACTORY_MODEL",)
 
 
-def test_scaffold_pricing_model_refuses_to_overwrite_existing_files(tmp_path):
+def test_scaffold_pricing_model_skips_existing_files_and_recreates_missing_files(tmp_path):
     options = ScaffoldOptions(
         model_key="MY_MODEL",
         model_label="My model",
@@ -201,8 +199,39 @@ def test_scaffold_pricing_model_refuses_to_overwrite_existing_files(tmp_path):
     )
     scaffold_pricing_model(options)
 
-    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
-        scaffold_pricing_model(options)
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    data_path = package_dir / "data.py"
+    toml_path = package_dir / "model.toml"
+    modeling_path = package_dir / "modeling.py"
+
+    data_path.write_text(data_path.read_text(encoding="utf-8") + "\n# user edit\n")
+    toml_path.write_text(toml_path.read_text(encoding="utf-8") + "\n# user edit\n")
+    data_before = data_path.read_text(encoding="utf-8")
+    toml_before = toml_path.read_text(encoding="utf-8")
+    modeling_path.unlink()
+
+    result = scaffold_pricing_model(options)
+
+    assert result.created_files == (modeling_path,)
+    assert modeling_path.exists()
+    assert data_path.read_text(encoding="utf-8") == data_before
+    assert toml_path.read_text(encoding="utf-8") == toml_before
+
+    rerun = scaffold_pricing_model(options)
+
+    assert rerun.created_files == ()
+
+
+def test_scaffold_pricing_model_force_overwrites_existing_files(tmp_path):
+    options = ScaffoldOptions(
+        model_key="MY_MODEL",
+        model_label="My model",
+        target_name="target",
+        root=tmp_path,
+    )
+    scaffold_pricing_model(options)
+    model_toml = tmp_path / "pricing_models" / "my_model" / "model.toml"
+    model_toml.write_text("# stale\n", encoding="utf-8")
 
     result = scaffold_pricing_model(
         ScaffoldOptions(
@@ -214,7 +243,8 @@ def test_scaffold_pricing_model_refuses_to_overwrite_existing_files(tmp_path):
         )
     )
 
-    assert tmp_path / "pricing_models" / "my_model" / "model.toml" in result.created_files
+    assert model_toml in result.created_files
+    assert "# stale" not in model_toml.read_text(encoding="utf-8")
 
 
 def test_scaffold_pricing_model_accepts_explicit_names(tmp_path):

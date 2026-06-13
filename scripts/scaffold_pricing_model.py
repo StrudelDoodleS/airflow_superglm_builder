@@ -685,11 +685,6 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
             dag_path,
         )
 
-    existing = [path for path in files if path.exists()]
-    if existing and not options.force:
-        existing_text = ", ".join(path.as_posix() for path in existing)
-        raise FileExistsError(f"Refusing to overwrite existing files: {existing_text}")
-
     package_dir.mkdir(parents=True, exist_ok=True)
     dag_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -735,14 +730,18 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
                 ),
             }
         )
+    created_files: list[Path] = []
     for path in files:
+        if path.exists() and not options.force:
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content_by_path[path], encoding="utf-8")
+        created_files.append(path)
 
     return ScaffoldResult(
         package_name=package_name,
         dag_id=dag_id,
-        created_files=files,
+        created_files=tuple(created_files),
     )
 
 

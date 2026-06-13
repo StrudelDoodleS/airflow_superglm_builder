@@ -343,10 +343,11 @@ names, IDs, or metadata. The Airflow wrapper merges in `run_key`, `output_dir`,
 dictionary as `prepared`. Keys such as `source_data_path` are model-owned
 examples, not framework-required field names.
 
-It refuses to overwrite existing files unless `--force` is passed. Model configs
-are auto-discovered from `pricing_models/<model_name>/model.toml`; no registry
-import edits are needed for normal use. The older all-in-one `ModelSpec` /
-`build_pricing_model_dag(...)` scaffold is still available with
+It creates missing scaffold files and leaves existing files unchanged; pass
+`--force` only when you intentionally want to overwrite existing scaffold files.
+Model configs are auto-discovered from `pricing_models/<model_name>/model.toml`;
+no registry import edits are needed for normal use. The older all-in-one
+`ModelSpec` / `build_pricing_model_dag(...)` scaffold is still available with
 `--template factory`.
 
 - Global code in `pricing_pipeline/` owns SQL lifecycle access for schema
