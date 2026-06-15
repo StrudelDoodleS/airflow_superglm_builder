@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import importlib.util
 import os
 import shutil
 import signal
@@ -65,6 +64,7 @@ def test_no_docker_scripts_exist_without_compose_dependency():
         Path("scripts/start_no_docker_stack.sh"),
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
+        Path("scripts/run_mtpl_frequency_custom.py"),
         Path("scripts/run_pipeline_no_airflow.py"),
     ]:
         assert script.exists(), f"{script} is missing"
@@ -77,51 +77,6 @@ def test_settings_can_skip_database_creation_for_hosted_targets():
     settings = Settings.from_env({"PRICING_SKIP_DATABASE_CREATE": "true"})
 
     assert settings.skip_database_create is True
-
-
-def test_dag_schema_dir_can_be_overridden_for_no_docker(monkeypatch, tmp_path):
-    monkeypatch.setenv("PRICING_SCHEMA_DIR", str(tmp_path))
-
-    airflow_module = types.ModuleType("airflow")
-    airflow_sdk_module = types.ModuleType("airflow.sdk")
-
-    class FakeTaskOutput:
-        def __rshift__(self, other):
-            return other
-
-    def dag(**dag_kwargs):
-        def decorator(func):
-            def factory(*args, **kwargs):
-                func(*args, **kwargs)
-                return types.SimpleNamespace(dag_id=dag_kwargs["dag_id"])
-
-            return factory
-
-        return decorator
-
-    def task(func):
-        def task_factory(*args, **kwargs):
-            return FakeTaskOutput()
-
-        return task_factory
-
-    airflow_sdk_module.dag = dag
-    airflow_sdk_module.get_current_context = lambda: {}
-    airflow_sdk_module.task = task
-    airflow_module.sdk = airflow_sdk_module
-    sys.modules.pop("pricing_pipeline.orchestration.dag_factory", None)
-    monkeypatch.setitem(sys.modules, "airflow", airflow_module)
-    monkeypatch.setitem(sys.modules, "airflow.sdk", airflow_sdk_module)
-
-    dag_path = Path("dags/pricing_superglm_pipeline.py").resolve()
-    spec = importlib.util.spec_from_file_location("pricing_superglm_pipeline_override", dag_path)
-    assert spec is not None
-    assert spec.loader is not None
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    assert module.SCHEMA_DIR == tmp_path
 
 
 def test_no_airflow_runner_help_runs_without_pythonpath():
@@ -261,6 +216,100 @@ def test_no_airflow_runner_model_key_choices_are_spec_runnable_only(monkeypatch)
     assert run_pipeline_no_airflow.parse_args().model_key == "FACTORY_MODEL"
 
 
+def test_mtpl_custom_runner_help_runs_without_pythonpath():
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/run_mtpl_frequency_custom.py", "--help"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "explicit freMTPL custom model path" in result.stdout
+    assert "--runtime-module" in result.stdout
+    assert "--effective-from" in result.stdout
+    assert "--output-root" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_mtpl_custom_runner_composes_explicit_publish_path(monkeypatch, tmp_path):
+    from scripts import run_mtpl_frequency_custom
+
+    engine = object()
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(run_mtpl_frequency_custom, "load_env", lambda: None)
+    monkeypatch.setattr(
+        run_mtpl_frequency_custom,
+        "get_runtime",
+        lambda runtime_module=None: types.SimpleNamespace(
+            settings=Settings.from_env({}),
+            get_engine=lambda: engine,
+        ),
+    )
+    monkeypatch.setattr(
+        run_mtpl_frequency_custom,
+        "ensure_pricing_model",
+        lambda engine_arg, **kwargs: calls.append(("register", engine_arg, kwargs)),
+    )
+    monkeypatch.setattr(
+        run_mtpl_frequency_custom,
+        "prepare_source_data",
+        lambda engine_arg, **kwargs: (
+            calls.append(("prepare", engine_arg, kwargs))
+            or {
+                "run_key": kwargs["run_key"],
+                "output_dir": str(tmp_path / "prepared"),
+                "source_sql": "SELECT 1",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        run_mtpl_frequency_custom,
+        "train_validate_export_model",
+        lambda prepared, **kwargs: (
+            calls.append(("train", prepared, kwargs))
+            or {
+                "rating_workbook_path": str(tmp_path / "rating.xlsx"),
+                "model_version": "v1",
+                "effective_from": "2026-06-05",
+                "export_id": "MTPL_FREQ__python__2026_06_05",
+                "manifest_id": "manifest-1",
+                "split_set_id": "split-1",
+            }
+        ),
+    )
+
+    class FakePublishResult:
+        def to_dict(self):
+            return {"rate_package_id": 123, "package_version": 1}
+
+    monkeypatch.setattr(
+        run_mtpl_frequency_custom,
+        "publish_completed_model_build",
+        lambda engine_arg, **kwargs: (
+            calls.append(("publish", engine_arg, kwargs)) or FakePublishResult()
+        ),
+    )
+
+    result = run_mtpl_frequency_custom.run_mtpl_frequency_custom(
+        effective_from="2026-06-05",
+        output_root=tmp_path / "runs",
+        created_by="test",
+    )
+
+    assert result == {"rate_package_id": 123, "package_version": 1}
+    assert [call[0] for call in calls] == ["register", "prepare", "train", "publish"]
+    publish_call = calls[-1]
+    assert publish_call[1] is engine
+    assert publish_call[2]["dataset"] is None
+    assert publish_call[2]["created_by"] == "test"
+
+
 def test_no_docker_service_picker_lists_available_services_without_pythonpath():
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
@@ -295,7 +344,7 @@ def test_no_docker_service_picker_builds_python_commands():
     ]
     assert commands[0].argv == ["/python", "scripts/apply_schema.py"]
     assert commands[1].argv == ["/python", "scripts/load_fremtpl_raw.py", "--replace"]
-    assert commands[2].argv == ["/python", "scripts/run_pipeline_no_airflow.py"]
+    assert commands[2].argv == ["/python", "scripts/run_mtpl_frequency_custom.py"]
     assert not any("docker" in part.lower() for command in commands for part in command.argv)
 
 

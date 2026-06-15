@@ -36,7 +36,7 @@ README_CONTRACT_STRINGS = [
     "pricing_models/<model_name>/",
     "create_model_frame_manifest_with_split",
     "pricing_mtpl_frequency",
-    "--model-key MTPL_FREQ",
+    "scripts/run_mtpl_frequency_custom.py",
     "SQL Prediction Validation",
     "scripts/validate_sql_prediction_against_superglm.py",
     "pricing.PREDICT_CURRENT_RATE",
@@ -107,7 +107,8 @@ def test_readme_documents_completed_build_publish_task():
     assert "prepare_source_data_task" in readme
     assert "train_validate_export_task" in readme
     assert "train_and_export_rates(prepared)" not in readme
-    assert "build_pricing_model_dag" in readme
+    assert "pricing_motor_frequency = build_pricing_model_dag" not in readme
+    assert "pricing_superglm_pipeline" not in readme
     assert "does not deploy" in readme
 
 

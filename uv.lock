@@ -148,7 +148,7 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "scikit-learn" },
     { name = "sqlalchemy" },
-    { name = "superglm", git = "https://github.com/StrudelDoodleS/superglm.git?rev=592891b6e405fdfa90e35ff39a16b8ebd5eb84f6" },
+    { name = "superglm", git = "https://github.com/StrudelDoodleS/superglm.git?rev=72feaf5dd98452c0562b9f86ee834702da90f23b" },
 ]
 provides-extras = ["mlflow"]
 
@@ -2877,8 +2877,8 @@ wheels = [
 
 [[package]]
 name = "superglm"
-version = "0.9.0"
-source = { git = "https://github.com/StrudelDoodleS/superglm.git?rev=592891b6e405fdfa90e35ff39a16b8ebd5eb84f6#592891b6e405fdfa90e35ff39a16b8ebd5eb84f6" }
+version = "0.10.0"
+source = { git = "https://github.com/StrudelDoodleS/superglm.git?rev=72feaf5dd98452c0562b9f86ee834702da90f23b#72feaf5dd98452c0562b9f86ee834702da90f23b" }
 dependencies = [
     { name = "matplotlib" },
     { name = "numba" },

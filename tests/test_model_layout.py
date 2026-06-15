@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from textwrap import dedent
+
+import numpy as np
+import pandas as pd
 
 from pricing_models.mtpl_frequency.spec import MODEL_CONFIG, MODEL_SPEC
 
@@ -45,11 +49,8 @@ def test_mtpl_frequency_spec_lives_in_model_package():
     assert MODEL_SPEC.experiment_name == "pricing-mtpl-frequency"
     assert MODEL_SPEC.deployment_slot == "MTPL_FREQ_UAT"
     assert MODEL_SPEC.dataset.dataset_name == "freMTPL2freq"
-    assert MODEL_SPEC.build_model.__module__ == "pricing_models.mtpl_frequency.training"
-    assert (
-        MODEL_SPEC.build_training_frame.__module__
-        == "pricing_models.mtpl_frequency.training"
-    )
+    assert MODEL_SPEC.build_model.__module__ == "pricing_models.mtpl_frequency.modeling"
+    assert MODEL_SPEC.build_training_frame.__module__ == "pricing_models.mtpl_frequency.modeling"
 
 
 def test_model_specs_are_available_from_registry():
@@ -63,6 +64,128 @@ def test_model_configs_are_available_from_registry():
     from pricing_models.registry import get_model_config
 
     assert get_model_config("MTPL_FREQ") == MODEL_CONFIG
+    assert MODEL_CONFIG.validation_split.method == "kfold"
+    assert MODEL_CONFIG.validation_split.n_splits == 5
+    assert MODEL_CONFIG.validation_split.random_state == 42
+    assert MODEL_CONFIG.validation_split.materialize is True
+
+
+def test_mtpl_frequency_custom_model_modules_define_explicit_workflow_hooks():
+    from pricing_models.mtpl_frequency import data, modeling
+
+    assert data.MODEL_FRAME.dataset_name == "freMTPL2freq_model_frame"
+    assert data.MODEL_FRAME.source_system == "freMTPL_raw_sql"
+    assert data.MODEL_FRAME.pk_columns == ("IDpol",)
+    assert data.MODEL_FRAME.target_column == "ClaimNb"
+    assert data.MODEL_FRAME.weight_column == "Exposure"
+    assert data.DEFAULT_OUTPUT_ROOT.as_posix().endswith("state/mtpl_frequency")
+    assert hasattr(data, "prepare_source_data")
+    assert modeling.FEATURE_COLUMNS == [
+        "VehAge",
+        "DrivAge",
+        "BonusMalus",
+        "LogDensity",
+        "Area",
+        "VehPower",
+        "VehBrand",
+        "VehGas",
+        "Region",
+    ]
+    assert not hasattr(modeling, "FEATURE_SOURCE_COLUMNS")
+    assert not hasattr(modeling, "REQUIRED_RAW_COLUMNS")
+    assert not hasattr(modeling, "FINAL_MODEL_FRAME_COLUMNS")
+
+    raw = pd.DataFrame(
+        {
+            "IDpol": [1, 2, 3],
+            "ClaimNb": [0, 2, 1],
+            "Exposure": [0.5, 1.0, 2.0],
+            "Area": ["A", "B", "C"],
+            "VehPower": [6, 7, 8],
+            "VehAge": [3, 4, 5],
+            "DrivAge": [45, 50, 55],
+            "BonusMalus": [50, 60, 70],
+            "VehBrand": ["B1", "B2", "B3"],
+            "VehGas": ["Regular", "Diesel", "Regular"],
+            "Density": [0.2, 50.0, 123.0],
+            "Region": ["R1", "R2", "R3"],
+        }
+    )
+    frame = modeling.build_final_model_frame(raw)
+
+    assert list(frame.columns) == [
+        "IDpol",
+        "ClaimNb",
+        "Exposure",
+        "VehAge",
+        "DrivAge",
+        "BonusMalus",
+        "LogDensity",
+        "Area",
+        "VehPower",
+        "VehBrand",
+        "VehGas",
+        "Region",
+    ]
+    np.testing.assert_allclose(
+        frame["LogDensity"].to_numpy(),
+        np.log(np.array([1.0, 50.0, 123.0])),
+    )
+    assert "build_model" in dir(modeling)
+    assert "train_validate_export_model" in dir(modeling)
+
+
+def test_mtpl_frequency_modeling_imports_single_frame_contract_object():
+    import pricing_models.mtpl_frequency.modeling as modeling
+
+    source = Path(modeling.__file__).read_text(encoding="utf-8")
+    assert "from pricing_models.mtpl_frequency.data import MODEL_FRAME" in source
+    assert "MODEL_FRAME.final_columns" not in source
+    assert "FEATURE_SOURCE_COLUMNS" not in source
+    assert "REQUIRED_RAW_COLUMNS" not in source
+    assert "FINAL_MODEL_FRAME_COLUMNS" not in source
+    assert "DATASET_NAME" not in source
+    assert "SOURCE_SYSTEM" not in source
+    assert "TARGET_COLUMN" not in source
+    assert "WEIGHT_COLUMN" not in source
+
+
+def test_mtpl_frequency_training_is_compatibility_shim():
+    from pricing_models.mtpl_frequency import modeling, training
+
+    source = Path(training.__file__).read_text(encoding="utf-8")
+    assert "compatibility" in source.lower()
+    assert "from superglm import" not in source
+    assert "def build_model" not in source
+    assert "def build_training_frame" not in source
+    assert training.FEATURE_COLUMNS is modeling.FEATURE_COLUMNS
+    assert training.build_model is modeling.build_model
+    assert training.build_training_frame is modeling.build_training_frame
+
+
+def test_mtpl_frequency_prepare_source_data_uses_configured_schema(monkeypatch, tmp_path):
+    from pricing_models.mtpl_frequency import data
+
+    class DummyEngine:
+        _execution_options = {"pricing_schema": "python_pricing"}
+
+    monkeypatch.setattr(data, "load_fremtpl_raw", lambda engine, *, replace=False: 3)
+
+    payload = data.prepare_source_data(
+        DummyEngine(),
+        run_key="manual",
+        output_dir=tmp_path,
+    )
+
+    assert payload["source_row_count"] == 3
+    assert "FROM python_pricing.FREMTPL_RAW" in payload["source_sql"]
+
+
+def test_mtpl_frequency_airflow_wrappers_are_thin_task_factories():
+    from pricing_models.mtpl_frequency import airflow_tasks
+
+    assert hasattr(airflow_tasks, "prepare_source_data_task")
+    assert hasattr(airflow_tasks, "train_validate_export_task")
 
 
 def test_model_config_registry_discovers_toml_without_importing_specs(tmp_path, monkeypatch):

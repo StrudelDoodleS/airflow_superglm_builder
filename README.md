@@ -273,13 +273,13 @@ Prerequisites:
    run it directly without Airflow:
 
    ```bash
-   uv run python scripts/run_pipeline_no_airflow.py \
-     --runtime-module work_runtime.database \
-     --model-key MTPL_FREQ
+   uv run python scripts/run_mtpl_frequency_custom.py \
+     --runtime-module work_runtime.database
    ```
 
-   The direct runner uses the same schema DDL, dataset manifest/CV metadata,
-   MLflow logging, rating export, and SQL publish code as the DAG.
+   The direct runner uses the same explicit custom path as the DAG: prepare the
+   freMTPL source data, build the final model frame, record the 5-fold split and
+   frame manifest, export the rating workbook/model artifact, and publish to SQL.
 
 ## Adding Models
 
@@ -299,7 +299,7 @@ pricing_pipeline/
   data/          # dataset specs, raw loaders, manifests, CV split metadata
   infra/         # env config, SQL connection, schema application, MLflow setup
   models/        # shared model/data contracts and SuperGLM diagnostics capture
-  orchestration/ # Airflow DAG factory and direct train/export/publish flow
+  orchestration/ # Airflow task wrappers and direct train/export/publish helpers
   publishing/    # rating package publish, model registry, run lineage
   tools/         # optional local ERD generation
 ```
@@ -384,10 +384,11 @@ no registry import edits are needed for normal use. The older all-in-one
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.
-- Add one DAG per model in `dags/`. For quick demos you can use
-  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`;
-  for serious model builds, a custom DAG can own ingestion, transforms,
-  training, validation, and then bolt on the completed-build publish task.
+- Add one DAG per model in `dags/`. Prefer the explicit custom TaskFlow shape:
+  register the model, prepare source data, train/export/create the frame
+  manifest, then bolt on the completed-build publish task. The older
+  `build_pricing_model_dag(...)` helper remains available only for the
+  `--template factory` compatibility scaffold.
 
 ### Custom DAG Publish Task
 
@@ -554,8 +555,8 @@ source table.
 
 For example, the current MTPL frequency model is implemented in
 `pricing_models/mtpl_frequency/`, registered as `MTPL_FREQ`, and exposed as the
-`pricing_mtpl_frequency` DAG. `pricing_superglm_pipeline` remains as a
-compatibility alias for older local commands.
+explicit `pricing_mtpl_frequency` custom DAG. The matching no-Airflow runner is
+`scripts/run_mtpl_frequency_custom.py`.
 
 For a work deployment, CloudBeaver is not required and should normally not be
 started. Work SQL connectivity should usually live in an importable Python
@@ -684,13 +685,40 @@ when rendering/running the database DDL.
 Then reference it from a model DAG:
 
 ```python
-pricing_motor_frequency = build_pricing_model_dag(
+from airflow.sdk import dag
+
+from pricing_models.motor_frequency.airflow_tasks import (
+    prepare_source_data_task,
+    train_validate_export_task,
+)
+from pricing_models.motor_frequency.spec import MODEL_CONFIG
+from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
+from pricing_pipeline.orchestration.publish_completed_build import (
+    publish_completed_model_build_task,
+)
+
+
+@dag(
     dag_id="pricing.motor_frequency.build",
-    spec=MODEL_SPEC,
-    model_config=MODEL_CONFIG,
-    runtime_module="work_runtime.database",
+    schedule=None,
+    catchup=False,
     tags=["pricing", "motor", "frequency", "model-build"],
 )
+def pricing_motor_frequency():
+    registered = register_pricing_model_task(
+        model_config=MODEL_CONFIG,
+        runtime_module="work_runtime.database",
+    )()
+    prepared = prepare_source_data_task(runtime_module="work_runtime.database")()
+    completed = train_validate_export_task(runtime_module="work_runtime.database")(prepared)
+    published = publish_completed_model_build_task(
+        model_config=MODEL_CONFIG,
+        runtime_module="work_runtime.database",
+    )(completed)
+    registered >> prepared >> completed >> published
+
+
+pricing_motor_frequency()
 ```
 
 The DBA or platform owner must create the database user and grants inside the

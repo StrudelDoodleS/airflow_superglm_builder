@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
-from pricing_pipeline.models.config import load_model_build_config
 from pricing_pipeline.models.spec import ModelSpec
+from pricing_models.mtpl_frequency.config import MODEL_CONFIG
 from pricing_models.mtpl_frequency.training import (
     FEATURE_COLUMNS,
     TRAINING_SQL,
@@ -12,8 +10,6 @@ from pricing_models.mtpl_frequency.training import (
     build_training_frame,
 )
 
-
-MODEL_CONFIG = load_model_build_config(Path(__file__).with_name("model.toml"))
 
 MODEL_SPEC = ModelSpec(
     model_key=MODEL_CONFIG.model_key,
