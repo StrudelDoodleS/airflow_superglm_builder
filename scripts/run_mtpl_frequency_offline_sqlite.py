@@ -36,23 +36,41 @@ from pricing_pipeline.publishing.rating_export import build_export_id  # noqa: E
 
 
 DEFAULT_DB_ROOT = Path("state/offline/mtpl_frequency")
-INSPECTABLE_TABLES = [
-    "FREMTPL_RAW",
-    "DATASET_MANIFEST",
-    "DATASET_COLUMN",
-    "CV_SPLIT_SET",
-    "CV_FOLD",
-    "PRICING_MODEL",
-    "MODEL_RUN",
-    "MODEL_RUN_METRIC",
-    "PRICING_RATE_PACKAGE",
-]
+OFFLINE_DDL_DIR = ROOT / "db" / "offline_sqlite"
+SCHEMA_DB_FILES = {
+    "pricing": "pricing.sqlite",
+    "pricing_stg": "pricing_stg.sqlite",
+    "mlops": "mlops.sqlite",
+}
+INSPECTABLE_TABLES = {
+    "pricing": [
+        "FREMTPL_RAW",
+        "DATASET_MANIFEST",
+        "DATASET_COLUMN",
+        "CV_SPLIT_SET",
+        "CV_FOLD",
+        "CV_FOLD_METRIC",
+        "PRICING_MODEL",
+        "MODEL_RUN",
+        "PRICING_RATE_PACKAGE",
+    ],
+    "pricing_stg": [
+        "STG_RATING_EXPORT",
+        "STG_RATE_CELL",
+        "STG_CELL_LEVEL",
+    ],
+    "mlops": [
+        "MODEL_RUN_DATASET",
+        "MODEL_RUN_SPLIT_SET",
+        "MODEL_RUN_METRIC",
+    ],
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build the freMTPL custom model path into an offline SQLite database. "
+            "Build the freMTPL custom model path into offline SQLite databases. "
             "This is a local smoke run for inspecting source, manifest, split, "
             "model-run, metric, and package rows without SQL Server or Airflow."
         )
@@ -77,13 +95,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Delete the existing offline SQLite file and artifacts before running.",
+        help="Delete the existing offline SQLite files and artifacts before running.",
     )
     return parser.parse_args()
 
 
-def sqlite_engine_with_pricing_schema(db_path: Path):
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+def sqlite_engine_with_offline_schemas(db_paths: dict[str, Path]):
+    for db_path in db_paths.values():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -92,9 +111,21 @@ def sqlite_engine_with_pricing_schema(db_path: Path):
 
     @event.listens_for(engine, "connect")
     def _attach_pricing_schema(dbapi_connection, _connection_record):
-        dbapi_connection.execute(f"ATTACH DATABASE '{db_path.as_posix()}' AS pricing")
+        for schema, db_path in db_paths.items():
+            dbapi_connection.execute(f"ATTACH DATABASE '{db_path.as_posix()}' AS {schema}")
 
     return engine
+
+
+def apply_offline_ddl(engine) -> None:
+    connection = engine.raw_connection()
+    try:
+        for schema in SCHEMA_DB_FILES:
+            ddl_path = OFFLINE_DDL_DIR / f"{schema}.sql"
+            connection.executescript(ddl_path.read_text(encoding="utf-8"))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def fre_mtpl_like_raw_frame(row_count: int) -> pd.DataFrame:
@@ -155,62 +186,6 @@ def seed_fremtpl_raw(engine, *, row_count: int) -> int:
     return int(len(frame))
 
 
-def create_offline_lifecycle_tables(engine) -> None:
-    statements = [
-        """
-        CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (
-            model_id TEXT PRIMARY KEY,
-            model_key TEXT NOT NULL,
-            model_label TEXT NOT NULL,
-            target_name TEXT NOT NULL,
-            model_type TEXT NOT NULL,
-            created_by TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
-            rate_package_id TEXT PRIMARY KEY,
-            model_id TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            package_status TEXT NOT NULL,
-            source_export_id TEXT NOT NULL,
-            effective_from TEXT NOT NULL,
-            manifest_id TEXT NOT NULL,
-            split_set_id TEXT,
-            rating_workbook_path TEXT NOT NULL,
-            model_artifact_path TEXT,
-            created_by TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
-            model_run_id TEXT PRIMARY KEY,
-            model_id TEXT NOT NULL,
-            model_version TEXT NOT NULL,
-            export_id TEXT NOT NULL,
-            manifest_id TEXT NOT NULL,
-            split_set_id TEXT,
-            rate_package_id TEXT NOT NULL,
-            rating_workbook_path TEXT NOT NULL,
-            model_artifact_path TEXT,
-            effective_from TEXT NOT NULL,
-            created_by TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN_METRIC (
-            model_run_id TEXT NOT NULL,
-            metric_name TEXT NOT NULL,
-            metric_value REAL NOT NULL,
-            PRIMARY KEY (model_run_id, metric_name)
-        )
-        """,
-    ]
-    with engine.begin() as con:
-        for statement in statements:
-            con.execute(text(statement))
-
-
 def insert_offline_lifecycle_rows(
     engine,
     *,
@@ -227,9 +202,11 @@ def insert_offline_lifecycle_rows(
             text(
                 """
                 INSERT OR REPLACE INTO pricing.PRICING_MODEL (
-                    model_id, model_key, model_label, target_name, model_type, created_by
+                    model_id, model_key, model_label, target_name, model_type,
+                    model_status, created_by
                 ) VALUES (
-                    :model_id, :model_key, :model_label, :target_name, :model_type, :created_by
+                    :model_id, :model_key, :model_label, :target_name, :model_type,
+                    :model_status, :created_by
                 )
                 """
             ),
@@ -239,6 +216,7 @@ def insert_offline_lifecycle_rows(
                 "model_label": MODEL_CONFIG.model_label,
                 "target_name": MODEL_CONFIG.target_name,
                 "model_type": MODEL_CONFIG.model_type,
+                "model_status": "ACTIVE",
                 "created_by": created_by,
             },
         )
@@ -302,27 +280,32 @@ def insert_offline_lifecycle_rows(
             con.execute(
                 text(
                     """
-                    INSERT OR REPLACE INTO pricing.MODEL_RUN_METRIC (
-                        model_run_id, metric_name, metric_value
-                    ) VALUES (:model_run_id, :metric_name, :metric_value)
+                    INSERT OR REPLACE INTO mlops.MODEL_RUN_METRIC (
+                        model_run_id, metric_name, metric_value, metric_scope
+                    ) VALUES (
+                        :model_run_id, :metric_name, :metric_value, :metric_scope
+                    )
                     """
                 ),
                 {
                     "model_run_id": model_run_id,
                     "metric_name": metric_name,
                     "metric_value": float(metric_value),
+                    "metric_scope": "model_run",
                 },
             )
     return {"model_run_id": model_run_id, "rate_package_id": rate_package_id}
 
 
-def table_counts(engine) -> dict[str, int]:
-    counts: dict[str, int] = {}
+def table_counts(engine) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
     with engine.begin() as con:
-        for table_name in INSPECTABLE_TABLES:
-            counts[table_name] = int(
-                con.execute(text(f"SELECT COUNT(*) FROM pricing.{table_name}")).scalar_one()
-            )
+        for schema, table_names in INSPECTABLE_TABLES.items():
+            counts[schema] = {}
+            for table_name in table_names:
+                counts[schema][table_name] = int(
+                    con.execute(text(f"SELECT COUNT(*) FROM {schema}.{table_name}")).scalar_one()
+                )
     return counts
 
 
@@ -335,19 +318,20 @@ def run_mtpl_frequency_offline_sqlite(
     reset: bool = False,
 ) -> dict[str, Any]:
     root = Path(db_root)
-    db_path = root / "pricing.sqlite"
+    db_paths = {schema: root / file_name for schema, file_name in SCHEMA_DB_FILES.items()}
     artifact_root = root / "artifacts"
     output_root = root / "runs"
     if reset:
-        if db_path.exists():
-            db_path.unlink()
+        for db_path in db_paths.values():
+            if db_path.exists():
+                db_path.unlink()
         if artifact_root.exists():
             shutil.rmtree(artifact_root)
         if output_root.exists():
             shutil.rmtree(output_root)
 
-    engine = sqlite_engine_with_pricing_schema(db_path)
-    create_offline_lifecycle_tables(engine)
+    engine = sqlite_engine_with_offline_schemas(db_paths)
+    apply_offline_ddl(engine)
     seeded_rows = seed_fremtpl_raw(engine, row_count=row_count)
 
     effective = effective_from_for_run(effective_from)
@@ -407,7 +391,7 @@ def run_mtpl_frequency_offline_sqlite(
     )
 
     return {
-        "db_path": str(db_path),
+        "db_paths": {schema: str(path) for schema, path in db_paths.items()},
         "artifact_root": str(artifact_root),
         "run_key": run_key,
         "export_id": export_id,

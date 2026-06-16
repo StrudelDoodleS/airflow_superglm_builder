@@ -250,7 +250,7 @@ def test_mtpl_offline_sqlite_runner_help_runs_without_pythonpath():
     )
 
     assert result.returncode == 0
-    assert "offline SQLite database" in result.stdout
+    assert "offline SQLite databases" in result.stdout
     assert "--db-root" in result.stdout
     assert "--reset" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr

@@ -7,6 +7,10 @@ from pathlib import Path
 def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tmp_path):
     from scripts import run_mtpl_frequency_offline_sqlite
 
+    assert Path("db/offline_sqlite/pricing.sql").exists()
+    assert Path("db/offline_sqlite/pricing_stg.sql").exists()
+    assert Path("db/offline_sqlite/mlops.sql").exists()
+
     def fake_fit_export(
         frame,
         *,
@@ -44,18 +48,34 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
         reset=True,
     )
 
-    db_path = Path(result["db_path"])
+    db_path = Path(result["db_paths"]["pricing"])
+    pricing_stg_path = Path(result["db_paths"]["pricing_stg"])
+    mlops_path = Path(result["db_paths"]["mlops"])
     assert db_path.exists()
+    assert pricing_stg_path.exists()
+    assert mlops_path.exists()
     assert result["tables"] == {
-        "FREMTPL_RAW": 40,
-        "DATASET_MANIFEST": 1,
-        "DATASET_COLUMN": 12,
-        "CV_SPLIT_SET": 1,
-        "CV_FOLD": 5,
-        "PRICING_MODEL": 1,
-        "MODEL_RUN": 1,
-        "MODEL_RUN_METRIC": 2,
-        "PRICING_RATE_PACKAGE": 1,
+        "pricing": {
+            "FREMTPL_RAW": 40,
+            "DATASET_MANIFEST": 1,
+            "DATASET_COLUMN": 12,
+            "CV_SPLIT_SET": 1,
+            "CV_FOLD": 5,
+            "CV_FOLD_METRIC": 0,
+            "PRICING_MODEL": 1,
+            "MODEL_RUN": 1,
+            "PRICING_RATE_PACKAGE": 1,
+        },
+        "pricing_stg": {
+            "STG_RATING_EXPORT": 0,
+            "STG_RATE_CELL": 0,
+            "STG_CELL_LEVEL": 0,
+        },
+        "mlops": {
+            "MODEL_RUN_DATASET": 0,
+            "MODEL_RUN_SPLIT_SET": 0,
+            "MODEL_RUN_METRIC": 2,
+        },
     }
 
     with sqlite3.connect(db_path) as con:
@@ -79,3 +99,10 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert package == ("v1", "PUBLISHED", result["export_id"])
     assert len(fold_rows) == 5
     assert all(n_train > 0 and n_test > 0 for _, n_train, n_test in fold_rows)
+
+    with sqlite3.connect(mlops_path) as con:
+        metrics = con.execute(
+            "SELECT metric_name FROM MODEL_RUN_METRIC ORDER BY metric_name"
+        ).fetchall()
+
+    assert metrics == [("row_count",), ("validation_fold_count",)]

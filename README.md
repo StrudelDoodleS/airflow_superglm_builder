@@ -288,10 +288,17 @@ Prerequisites:
    uv run python scripts/run_mtpl_frequency_offline_sqlite.py --reset
    ```
 
-   This creates `state/offline/mtpl_frequency/pricing.sqlite` with deterministic
-   freMTPL-like source rows, `DATASET_MANIFEST`, `DATASET_COLUMN`,
-   `CV_SPLIT_SET`, `CV_FOLD`, and minimal model-run/package rows for local
-   inspection. It is an offline smoke check, not the production publish path.
+   This creates a local offline DDL structure with deterministic freMTPL-like
+   source rows, manifest/CV metadata, model-run metrics, and package rows for
+   inspection:
+
+   ```text
+   state/offline/mtpl_frequency/pricing.sqlite
+   state/offline/mtpl_frequency/pricing_stg.sqlite
+   state/offline/mtpl_frequency/mlops.sqlite
+   ```
+
+   It is an offline smoke check, not the production publish path.
 
 ## Adding Models
 
