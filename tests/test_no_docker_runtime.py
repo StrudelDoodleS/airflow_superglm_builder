@@ -65,6 +65,7 @@ def test_no_docker_scripts_exist_without_compose_dependency():
         Path("scripts/start_airflow_local.py"),
         Path("scripts/start_mlflow_local.py"),
         Path("scripts/run_mtpl_frequency_custom.py"),
+        Path("scripts/run_mtpl_frequency_offline_sqlite.py"),
         Path("scripts/run_pipeline_no_airflow.py"),
     ]:
         assert script.exists(), f"{script} is missing"
@@ -233,6 +234,25 @@ def test_mtpl_custom_runner_help_runs_without_pythonpath():
     assert "--runtime-module" in result.stdout
     assert "--effective-from" in result.stdout
     assert "--output-root" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_mtpl_offline_sqlite_runner_help_runs_without_pythonpath():
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/run_mtpl_frequency_offline_sqlite.py", "--help"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "offline SQLite database" in result.stdout
+    assert "--db-root" in result.stdout
+    assert "--reset" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
 
 
