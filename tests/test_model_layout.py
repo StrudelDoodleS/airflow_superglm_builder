@@ -206,6 +206,8 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
 
         def fit_reml(self, X, y, *, offset=None, verbose=False):
             calls.append(("fit_reml", list(X.columns), len(y), verbose))
+            print("POI iter 1  obj=10.5  |grad|=2.5  delta_obj=inf  [VehAge=0.1, DrivAge=0.2]")
+            print("POI iter 2  obj=8.25  |grad|=1.25  delta_obj=2.25  [VehAge=0.3, DrivAge=0.4]")
             return self
 
         def summary(self, detail="compact"):
@@ -215,7 +217,14 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
             return {"_model": {"deviance": 8.5}, "VehAge": {"edf": 1.2}}
 
         def reml_diagnostics(self):
-            return {"enabled": True, "lambdas": {"VehAge": 0.1}}
+            return {
+                "enabled": True,
+                "lambdas": {"VehAge": 0.3, "DrivAge": 0.4},
+                "lambda_history": [
+                    {"VehAge": 0.1, "DrivAge": 0.2},
+                    {"VehAge": 0.3, "DrivAge": 0.4},
+                ],
+            }
 
         def metrics(self, X, y, *, sample_weight=None, offset=None):
             calls.append(("metrics", len(X), len(y), sample_weight is not None))
@@ -230,6 +239,30 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
 
         def log_artifact(self, path, artifact_path=None):
             calls.append(("log_artifact", Path(path).name, artifact_path))
+
+        def start_span(self, name, span_type=None, attributes=None):
+            calls.append(("start_span", name, span_type, attributes))
+
+            class FakeSpan:
+                def set_inputs(self, value):
+                    calls.append(("span_inputs", value))
+
+                def set_outputs(self, value):
+                    calls.append(("span_outputs", value))
+
+                def set_attributes(self, value):
+                    calls.append(("span_attributes", value))
+
+            class FakeSpanContext:
+                def __enter__(self):
+                    calls.append(("span_enter",))
+                    return FakeSpan()
+
+                def __exit__(self, exc_type, exc, tb):
+                    calls.append(("span_exit", exc_type))
+                    return False
+
+            return FakeSpanContext()
 
     def fake_export_rating_tables(model, X, y, exposure, *, output_path, mlflow_client):
         Path(output_path).write_text("workbook", encoding="utf-8")
@@ -258,18 +291,40 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
     assert (tmp_path / "v1_2026-06-05" / "superglm_fit.log").exists()
     assert (tmp_path / "v1_2026-06-05" / "superglm_diagnostics.json").exists()
     assert (tmp_path / "v1_2026-06-05" / "superglm_reml_diagnostics.json").exists()
+    assert (tmp_path / "v1_2026-06-05" / "superglm_training_trace.csv").exists()
     assert metrics["deviance"] == 8.5
     assert metrics["superglm_aic"] == 4.0
     assert ("fit_reml", modeling.FEATURE_COLUMNS, 4, True) in calls
     assert ("log_param", "family", "poisson") in calls
     assert ("log_param", "feature_columns", ",".join(modeling.FEATURE_COLUMNS)) in calls
+    assert (
+        "start_span",
+        "superglm.fit_reml",
+        "TRAINING",
+        {"row_count": 4, "feature_count": len(modeling.FEATURE_COLUMNS)},
+    ) in calls
+    assert ("span_inputs", {"rows": 4, "features": modeling.FEATURE_COLUMNS}) in calls
+    assert ("span_outputs", {"final_loss": 8.25, "iteration_count": 2}) in calls
     assert ("log_metric", "deviance", 8.5, {}) in calls
     assert ("log_metric", "superglm_aic", 4.0, {}) in calls
+    assert ("log_metric", "superglm_reml_objective", 10.5, {"step": 0}) in calls
+    assert ("log_metric", "superglm_reml_objective", 8.25, {"step": 1}) in calls
+    assert ("log_metric", "loss", 10.5, {"step": 0}) in calls
+    assert ("log_metric", "loss", 8.25, {"step": 1}) in calls
+    assert ("log_metric", "training_loss", 10.5, {"step": 0}) in calls
+    assert ("log_metric", "training_loss", 8.25, {"step": 1}) in calls
+    assert ("log_metric", "superglm_reml_gradient_norm", 2.5, {"step": 0}) in calls
+    assert ("log_metric", "superglm_reml_delta_objective", 2.25, {"step": 1}) in calls
+    assert ("log_metric", "superglm_lambda_VehAge", 0.1, {"step": 0}) in calls
+    assert ("log_metric", "superglm_lambda_VehAge", 0.3, {"step": 1}) in calls
+    assert ("log_metric", "superglm_lambda_DrivAge", 0.2, {"step": 0}) in calls
+    assert ("log_metric", "superglm_lambda_DrivAge", 0.4, {"step": 1}) in calls
     assert ("log_artifact", "superglm_model.pkl", "model") in calls
     assert ("log_artifact", "model_summary.txt", "model") in calls
     assert ("log_artifact", "superglm_fit.log", "training_diagnostics") in calls
     assert ("log_artifact", "superglm_diagnostics.json", "training_diagnostics") in calls
     assert ("log_artifact", "superglm_reml_diagnostics.json", "training_diagnostics") in calls
+    assert ("log_artifact", "superglm_training_trace.csv", "training_diagnostics") in calls
 
 
 def test_mtpl_frequency_training_is_compatibility_shim():

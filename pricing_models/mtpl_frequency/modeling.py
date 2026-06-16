@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import pickle
+import re
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Mapping
@@ -69,6 +70,12 @@ SUPERGLM_METRIC_ATTRIBUTES = [
     "pearson_chi2",
     "phi",
 ]
+_POI_ITER_PATTERN = re.compile(
+    r"POI iter\s+(?P<iteration>\d+)\s+"
+    r"obj=(?P<objective>[^\s]+)\s+"
+    r"\|grad\|=(?P<gradient>[^\s]+)\s+"
+    r"delta_obj=(?P<delta>[^\s]+)"
+)
 
 
 def read_prepared_source(engine, prepared: Mapping[str, Any]) -> pd.DataFrame:
@@ -171,6 +178,83 @@ def _finite_metric(value: object) -> float | None:
     return metric if np.isfinite(metric) else None
 
 
+def _superglm_trace_rows(
+    *,
+    fit_log_text: str,
+    reml_diagnostics: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    rows_by_step: dict[int, dict[str, object]] = {}
+
+    for match in _POI_ITER_PATTERN.finditer(fit_log_text):
+        step = int(match.group("iteration")) - 1
+        row = rows_by_step.setdefault(step, {"step": step})
+        objective = _finite_metric(match.group("objective"))
+        gradient = _finite_metric(match.group("gradient"))
+        delta = _finite_metric(match.group("delta"))
+        if objective is not None:
+            row["reml_objective"] = objective
+        if gradient is not None:
+            row["reml_gradient_norm"] = gradient
+        if delta is not None:
+            row["reml_delta_objective"] = delta
+
+    if not any("reml_objective" in row for row in rows_by_step.values()):
+        objective_history = reml_diagnostics.get("objective_history")
+        if isinstance(objective_history, list):
+            for step, value in enumerate(objective_history):
+                objective = _finite_metric(value)
+                if objective is not None:
+                    row = rows_by_step.setdefault(step, {"step": step})
+                    row["reml_objective"] = objective
+
+    lambda_history = reml_diagnostics.get("lambda_history")
+    if isinstance(lambda_history, list):
+        for step, lambdas in enumerate(lambda_history):
+            if not isinstance(lambdas, Mapping):
+                continue
+            row = rows_by_step.setdefault(step, {"step": step})
+            for term, value in sorted(lambdas.items()):
+                metric = _finite_metric(value)
+                if metric is not None:
+                    safe_term = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(term)).strip("_")
+                    if safe_term:
+                        row[f"lambda_{safe_term}"] = metric
+
+    return [rows_by_step[step] for step in sorted(rows_by_step)]
+
+
+def _write_training_trace_artifact(path: Path, rows: list[dict[str, object]]) -> None:
+    if rows:
+        pd.DataFrame(rows).to_csv(path, index=False)
+        return
+    pd.DataFrame(columns=["step", "reml_objective", "reml_gradient_norm"]).to_csv(
+        path,
+        index=False,
+    )
+
+
+def _log_superglm_trace_metrics(mlflow_client, rows: list[dict[str, object]]) -> None:
+    for row in rows:
+        step = int(row["step"])
+        objective = _finite_metric(row.get("reml_objective"))
+        gradient = _finite_metric(row.get("reml_gradient_norm"))
+        delta = _finite_metric(row.get("reml_delta_objective"))
+        if objective is not None:
+            mlflow_client.log_metric("superglm_reml_objective", objective, step=step)
+            mlflow_client.log_metric("training_loss", objective, step=step)
+            mlflow_client.log_metric("loss", objective, step=step)
+        if gradient is not None:
+            mlflow_client.log_metric("superglm_reml_gradient_norm", gradient, step=step)
+        if delta is not None:
+            mlflow_client.log_metric("superglm_reml_delta_objective", delta, step=step)
+        for key, value in sorted(row.items()):
+            if not key.startswith("lambda_"):
+                continue
+            metric = _finite_metric(value)
+            if metric is not None:
+                mlflow_client.log_metric(f"superglm_{key}", metric, step=step)
+
+
 def fit_validate_export_rating_tables(
     frame: pd.DataFrame,
     *,
@@ -193,6 +277,7 @@ def fit_validate_export_rating_tables(
     fit_log_path = artifact_dir / "superglm_fit.log"
     diagnostics_path = artifact_dir / "superglm_diagnostics.json"
     reml_diagnostics_path = artifact_dir / "superglm_reml_diagnostics.json"
+    training_trace_path = artifact_dir / "superglm_training_trace.csv"
 
     model = build_model()
     mlflow_client.log_param("family", getattr(model, "family", "poisson"))
@@ -204,27 +289,50 @@ def fit_validate_export_rating_tables(
     mlflow_client.log_param("effective_from", effective_from)
     mlflow_client.log_param("validation_fold_count", len(split_indices))
 
-    log_buffer = io.StringIO()
-    logging.info("Starting SuperGLM fit_reml for %s rows", len(X))
-    with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
-        fitted = model.fit_reml(X, y, offset=offset, verbose=True)
-    if fitted is None:
-        fitted = model
+    with mlflow_client.start_span(
+        "superglm.fit_reml",
+        span_type="TRAINING",
+        attributes={"row_count": len(X), "feature_count": len(FEATURE_COLUMNS)},
+    ) as fit_span:
+        fit_span.set_inputs({"rows": len(X), "features": FEATURE_COLUMNS})
+        log_buffer = io.StringIO()
+        logging.info("Starting SuperGLM fit_reml for %s rows", len(X))
+        with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
+            fitted = model.fit_reml(X, y, offset=offset, verbose=True)
+        if fitted is None:
+            fitted = model
 
-    fit_log_text = log_buffer.getvalue()
-    if not fit_log_text:
-        fit_log_text = "No SuperGLM stdout/stderr diagnostics were captured during fit_reml.\n"
+        fit_log_text = log_buffer.getvalue()
+        if not fit_log_text:
+            fit_log_text = "No SuperGLM stdout/stderr diagnostics were captured during fit_reml.\n"
+
+        diagnostics = fitted.diagnostics() if callable(getattr(fitted, "diagnostics", None)) else {}
+        reml_diagnostics = (
+            fitted.reml_diagnostics() if callable(getattr(fitted, "reml_diagnostics", None)) else {}
+        )
+        trace_rows = _superglm_trace_rows(
+            fit_log_text=fit_log_text,
+            reml_diagnostics=reml_diagnostics,
+        )
+        objective_values = [
+            value
+            for row in trace_rows
+            if (value := _finite_metric(row.get("reml_objective"))) is not None
+        ]
+        fit_outputs = {"iteration_count": len(objective_values)}
+        if objective_values:
+            fit_outputs["final_loss"] = objective_values[-1]
+        fit_span.set_outputs(fit_outputs)
+
     fit_log_path.write_text(fit_log_text, encoding="utf-8")
     mlflow_client.log_artifact(str(fit_log_path), artifact_path="training_diagnostics")
-
-    diagnostics = fitted.diagnostics() if callable(getattr(fitted, "diagnostics", None)) else {}
-    reml_diagnostics = (
-        fitted.reml_diagnostics() if callable(getattr(fitted, "reml_diagnostics", None)) else {}
-    )
     _write_json_artifact(diagnostics_path, diagnostics)
     _write_json_artifact(reml_diagnostics_path, reml_diagnostics)
     mlflow_client.log_artifact(str(diagnostics_path), artifact_path="training_diagnostics")
     mlflow_client.log_artifact(str(reml_diagnostics_path), artifact_path="training_diagnostics")
+    _write_training_trace_artifact(training_trace_path, trace_rows)
+    mlflow_client.log_artifact(str(training_trace_path), artifact_path="training_diagnostics")
+    _log_superglm_trace_metrics(mlflow_client, trace_rows)
 
     export_rating_tables(
         fitted,

@@ -7,6 +7,8 @@ from pathlib import Path
 def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tmp_path):
     from scripts import run_mtpl_frequency_offline_sqlite
 
+    monkeypatch.setenv("PRICING_ENABLE_MLFLOW", "false")
+
     assert Path("db/offline_sqlite/pricing.sql").exists()
     assert Path("db/offline_sqlite/pricing_stg.sql").exists()
     assert Path("db/offline_sqlite/mlops.sql").exists()

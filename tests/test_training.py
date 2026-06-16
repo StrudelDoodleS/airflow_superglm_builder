@@ -129,6 +129,9 @@ def test_configure_mlflow_returns_noop_client_when_mlflow_is_missing(monkeypatch
     client.log_artifact("/tmp/model.pkl", artifact_path="model")
     with client.start_run() as run:
         assert run.info.run_id == ""
+    with client.start_span("fit_reml") as span:
+        span.set_inputs({"rows": 3})
+        span.set_outputs({"loss": 1.0})
 
 
 def test_optional_mlflow_client_swallows_tracking_backend_failures(monkeypatch):
@@ -151,6 +154,9 @@ def test_optional_mlflow_client_swallows_tracking_backend_failures(monkeypatch):
         def log_metric(self, key, value, **kwargs):
             raise RuntimeError("mlflow server down")
 
+        def start_span(self, name, span_type=None, attributes=None):
+            raise RuntimeError("mlflow server down")
+
     monkeypatch.setattr(mlflow_tracking, "mlflow", FailingMlflow())
 
     client = mlflow_tracking.configure_mlflow("http://mlflow:5000")
@@ -160,11 +166,57 @@ def test_optional_mlflow_client_swallows_tracking_backend_failures(monkeypatch):
     client.log_artifact("/tmp/model.pkl", artifact_path="model")
     with client.start_run() as run:
         assert run.info.run_id == ""
+    with client.start_span("fit_reml") as span:
+        span.set_inputs({"rows": 3})
+        span.set_outputs({"loss": 1.0})
 
 
-def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
-    monkeypatch, tmp_path
-):
+def test_optional_mlflow_client_delegates_start_span():
+    calls = []
+
+    class FakeSpan:
+        def set_inputs(self, value):
+            calls.append(("set_inputs", value))
+
+        def set_outputs(self, value):
+            calls.append(("set_outputs", value))
+
+        def set_attributes(self, value):
+            calls.append(("set_attributes", value))
+
+    class FakeSpanContext:
+        def __enter__(self):
+            calls.append(("span_enter",))
+            return FakeSpan()
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("span_exit", exc_type))
+            return False
+
+    class FakeMlflow:
+        def start_span(self, name, span_type=None, attributes=None):
+            calls.append(("start_span", name, span_type, attributes))
+            return FakeSpanContext()
+
+    client = mlflow_tracking.optional_mlflow_client(FakeMlflow())
+
+    with client.start_span(
+        "superglm.fit_reml",
+        span_type="TRAINING",
+        attributes={"row_count": 4},
+    ) as span:
+        span.set_inputs({"rows": 4})
+        span.set_outputs({"loss": 10.5})
+        span.set_attributes({"iteration_count": 2})
+
+    assert ("start_span", "superglm.fit_reml", "TRAINING", {"row_count": 4}) in calls
+    assert ("set_inputs", {"rows": 4}) in calls
+    assert ("set_outputs", {"loss": 10.5}) in calls
+    assert ("set_attributes", {"iteration_count": 2}) in calls
+    assert ("span_exit", None) in calls
+
+
+def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(monkeypatch, tmp_path):
     raw = raw_training_frame(Exposure=[0.5, 1.0, 2.0])
     fit_calls = []
     mlflow_calls = []
@@ -185,9 +237,7 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
         mlflow_calls.append(("log_metric", key, value, kwargs))
 
     fake_mlflow = SimpleNamespace(
-        set_experiment=lambda experiment: mlflow_calls.append(
-            ("set_experiment", experiment)
-        ),
+        set_experiment=lambda experiment: mlflow_calls.append(("set_experiment", experiment)),
         start_run=lambda: FakeStartRun(),
         log_param=lambda key, value: mlflow_calls.append(("log_param", key, value)),
         log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
@@ -245,9 +295,7 @@ def test_train_superglm_reads_data_fits_logs_model_artifact_and_metric(
     np.testing.assert_allclose(fit_call["offset"], np.log(raw["Exposure"]))
 
 
-def test_train_superglm_logs_superglm_fit_diagnostics_to_mlflow(
-    monkeypatch, tmp_path
-):
+def test_train_superglm_logs_superglm_fit_diagnostics_to_mlflow(monkeypatch, tmp_path):
     raw = raw_training_frame(Exposure=[0.5, 1.0, 2.0])
     fit_calls = []
     mlflow_calls = []
