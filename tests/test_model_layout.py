@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -148,6 +149,127 @@ def test_mtpl_frequency_modeling_imports_single_frame_contract_object():
     assert "SOURCE_SYSTEM" not in source
     assert "TARGET_COLUMN" not in source
     assert "WEIGHT_COLUMN" not in source
+    assert "fit_reml_with_diagnostics" not in source
+    assert "mlflow_client.log_param" in source
+    assert "mlflow_client.log_metric" in source
+    assert "mlflow_client.log_artifact" in source
+
+
+def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_models.mtpl_frequency import modeling
+
+    frame = pd.DataFrame(
+        {
+            "IDpol": [1, 2, 3, 4],
+            "ClaimNb": [0, 1, 0, 2],
+            "Exposure": [0.5, 1.0, 0.75, 1.25],
+            "VehAge": [3, 4, 5, 6],
+            "DrivAge": [45, 50, 55, 60],
+            "BonusMalus": [50, 60, 70, 80],
+            "LogDensity": [0.0, 2.0, 3.0, 4.0],
+            "Area": ["A", "B", "C", "D"],
+            "VehPower": [6, 7, 8, 9],
+            "VehBrand": ["B1", "B2", "B3", "B4"],
+            "VehGas": ["Regular", "Diesel", "Regular", "Diesel"],
+            "Region": ["R1", "R2", "R3", "R4"],
+        }
+    )
+    calls = []
+
+    class FakeMetrics:
+        deviance = 8.5
+        null_deviance = 12.0
+        aic = 4.0
+        bic = 5.0
+        effective_df = 3.25
+        explained_deviance = 0.5
+        log_likelihood = -2.0
+        n_active_groups = 7
+        n_obs = 4
+        pearson_chi2 = 1.25
+        phi = 1.0
+
+    class FakeModel:
+        family = "poisson"
+
+        def __init__(self):
+            self.result = SimpleNamespace(
+                deviance=8.5,
+                n_iter=3,
+                converged=True,
+                effective_df=3.25,
+                phi=1.0,
+            )
+
+        def fit_reml(self, X, y, *, offset=None, verbose=False):
+            calls.append(("fit_reml", list(X.columns), len(y), verbose))
+            return self
+
+        def summary(self, detail="compact"):
+            return f"summary detail={detail}"
+
+        def diagnostics(self):
+            return {"_model": {"deviance": 8.5}, "VehAge": {"edf": 1.2}}
+
+        def reml_diagnostics(self):
+            return {"enabled": True, "lambdas": {"VehAge": 0.1}}
+
+        def metrics(self, X, y, *, sample_weight=None, offset=None):
+            calls.append(("metrics", len(X), len(y), sample_weight is not None))
+            return FakeMetrics()
+
+    class FakeMlflow:
+        def log_param(self, key, value):
+            calls.append(("log_param", key, value))
+
+        def log_metric(self, key, value, **kwargs):
+            calls.append(("log_metric", key, value, kwargs))
+
+        def log_artifact(self, path, artifact_path=None):
+            calls.append(("log_artifact", Path(path).name, artifact_path))
+
+    def fake_export_rating_tables(model, X, y, exposure, *, output_path, mlflow_client):
+        Path(output_path).write_text("workbook", encoding="utf-8")
+        calls.append(("export_rating_tables", Path(output_path).name, mlflow_client))
+        return output_path
+
+    monkeypatch.setattr(modeling, "build_model", FakeModel)
+    monkeypatch.setattr(modeling, "export_rating_tables", fake_export_rating_tables)
+    monkeypatch.setattr(
+        modeling.pickle,
+        "dump",
+        lambda fitted, handle: handle.write(b"fake-model"),
+    )
+
+    workbook_path, model_path, metrics = modeling.fit_validate_export_rating_tables(
+        frame,
+        split_indices=[(np.array([0, 1]), np.array([2, 3]))],
+        output_dir=tmp_path,
+        model_version="v1",
+        effective_from="2026-06-05",
+        mlflow_client=FakeMlflow(),
+    )
+
+    assert Path(workbook_path).exists()
+    assert Path(model_path).exists()
+    assert (tmp_path / "v1_2026-06-05" / "superglm_fit.log").exists()
+    assert (tmp_path / "v1_2026-06-05" / "superglm_diagnostics.json").exists()
+    assert (tmp_path / "v1_2026-06-05" / "superglm_reml_diagnostics.json").exists()
+    assert metrics["deviance"] == 8.5
+    assert metrics["superglm_aic"] == 4.0
+    assert ("fit_reml", modeling.FEATURE_COLUMNS, 4, True) in calls
+    assert ("log_param", "family", "poisson") in calls
+    assert ("log_param", "feature_columns", ",".join(modeling.FEATURE_COLUMNS)) in calls
+    assert ("log_metric", "deviance", 8.5, {}) in calls
+    assert ("log_metric", "superglm_aic", 4.0, {}) in calls
+    assert ("log_artifact", "superglm_model.pkl", "model") in calls
+    assert ("log_artifact", "model_summary.txt", "model") in calls
+    assert ("log_artifact", "superglm_fit.log", "training_diagnostics") in calls
+    assert ("log_artifact", "superglm_diagnostics.json", "training_diagnostics") in calls
+    assert ("log_artifact", "superglm_reml_diagnostics.json", "training_diagnostics") in calls
 
 
 def test_mtpl_frequency_training_is_compatibility_shim():

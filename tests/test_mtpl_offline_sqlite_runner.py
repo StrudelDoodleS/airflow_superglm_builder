@@ -18,6 +18,7 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
         output_dir,
         model_version,
         effective_from,
+        mlflow_client=None,
     ):
         artifact_dir = Path(output_dir) / f"{model_version}_{effective_from}"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +44,7 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     result = run_mtpl_frequency_offline_sqlite.run_mtpl_frequency_offline_sqlite(
         db_root=tmp_path / "offline",
         row_count=40,
+        synthetic_source=True,
         effective_from="2026-06-05",
         created_by="unit-test",
         reset=True,
@@ -106,3 +108,32 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
         ).fetchall()
 
     assert metrics == [("row_count",), ("validation_fold_count",)]
+
+
+def test_mtpl_offline_sqlite_runner_uses_full_fremtpl_fetch_by_default(
+    monkeypatch,
+    tmp_path,
+):
+    from scripts import run_mtpl_frequency_offline_sqlite
+
+    full_frame = run_mtpl_frequency_offline_sqlite.fre_mtpl_like_raw_frame(7)
+    calls = []
+    monkeypatch.setattr(
+        run_mtpl_frequency_offline_sqlite,
+        "fetch_fremtpl",
+        lambda: calls.append("fetch") or full_frame,
+    )
+
+    engine = run_mtpl_frequency_offline_sqlite.sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    run_mtpl_frequency_offline_sqlite.apply_offline_ddl(engine)
+
+    seeded = run_mtpl_frequency_offline_sqlite.seed_fremtpl_raw(engine)
+
+    assert seeded == 7
+    assert calls == ["fetch"]

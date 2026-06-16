@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,15 +20,21 @@ if str(ROOT) not in sys.path:
 
 from pricing_models.mtpl_frequency.data import MODEL_FRAME, SOURCE_SQL  # noqa: E402
 from pricing_models.mtpl_frequency.modeling import (  # noqa: E402
+    MLFLOW_EXPERIMENT,
     build_final_model_frame,
     fit_validate_export_rating_tables,
     read_prepared_source,
     validation_split_indices_for_model,
 )
 from pricing_models.mtpl_frequency.spec import MODEL_CONFIG  # noqa: E402
-from pricing_pipeline.data.fremtpl import FREMTPL_COLUMNS  # noqa: E402
+from pricing_pipeline.data.fremtpl import (  # noqa: E402
+    FREMTPL_COLUMNS,
+    fetch_fremtpl,
+    prepare_fremtpl_raw_frame,
+)
 from pricing_pipeline.data.manifest import create_model_frame_manifest_with_split  # noqa: E402
 from pricing_pipeline.infra.config import Settings  # noqa: E402
+from pricing_pipeline.infra.mlflow_tracking import configure_mlflow  # noqa: E402
 from pricing_pipeline.orchestration.completed_build_helpers import (  # noqa: E402
     completed_model_build_payload,
     effective_from_for_run,
@@ -83,8 +91,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--row-count",
         type=int,
-        default=120,
-        help="Number of deterministic freMTPL-like source rows to seed.",
+        default=None,
+        help=("Optional row limit after loading freMTPL. Omit this for the full freMTPL dataset."),
+    )
+    parser.add_argument(
+        "--synthetic-source",
+        action="store_true",
+        help=(
+            "Use deterministic freMTPL-like generated rows instead of fetching "
+            "the full OpenML freMTPL dataset. Intended for quick script tests."
+        ),
     )
     parser.add_argument(
         "--effective-from",
@@ -173,8 +189,30 @@ def fre_mtpl_like_raw_frame(row_count: int) -> pd.DataFrame:
     )
 
 
-def seed_fremtpl_raw(engine, *, row_count: int) -> int:
-    frame = fre_mtpl_like_raw_frame(row_count)
+def offline_source_frame(
+    *,
+    row_count: int | None = None,
+    synthetic_source: bool = False,
+) -> pd.DataFrame:
+    if synthetic_source:
+        return fre_mtpl_like_raw_frame(row_count or 120)
+
+    frame = prepare_fremtpl_raw_frame(fetch_fremtpl())
+    if row_count is not None:
+        return frame.head(row_count).copy()
+    return frame
+
+
+def seed_fremtpl_raw(
+    engine,
+    *,
+    row_count: int | None = None,
+    synthetic_source: bool = False,
+) -> int:
+    frame = offline_source_frame(
+        row_count=row_count,
+        synthetic_source=synthetic_source,
+    )
     with engine.begin() as con:
         frame.to_sql(
             "FREMTPL_RAW",
@@ -312,7 +350,8 @@ def table_counts(engine) -> dict[str, dict[str, int]]:
 def run_mtpl_frequency_offline_sqlite(
     *,
     db_root: str | Path = DEFAULT_DB_ROOT,
-    row_count: int = 120,
+    row_count: int | None = None,
+    synthetic_source: bool = False,
     effective_from: str | None = None,
     created_by: str = "offline_sqlite",
     reset: bool = False,
@@ -332,15 +371,20 @@ def run_mtpl_frequency_offline_sqlite(
 
     engine = sqlite_engine_with_offline_schemas(db_paths)
     apply_offline_ddl(engine)
-    seeded_rows = seed_fremtpl_raw(engine, row_count=row_count)
+    seeded_rows = seed_fremtpl_raw(
+        engine,
+        row_count=row_count,
+        synthetic_source=synthetic_source,
+    )
 
     effective = effective_from_for_run(effective_from)
     run_key = run_key_for_value(f"offline_sqlite__{effective}")
     output_dir = output_root / run_key
-    settings = Settings(
+    env_settings = Settings.from_env(os.environ)
+    settings = replace(
+        env_settings,
         rating_export_root=output_root,
         validation_split_artifact_root=artifact_root / "validation_splits",
-        mlflow_enabled=False,
     )
     prepared = {
         "run_key": run_key,
@@ -357,13 +401,21 @@ def run_mtpl_frequency_offline_sqlite(
     frame = build_final_model_frame(raw)
     frame = frame.sort_values(list(MODEL_FRAME.pk_columns)).reset_index(drop=True)
     split_indices = validation_split_indices_for_model(frame)
-    rating_workbook_path, model_artifact_path, metrics = fit_validate_export_rating_tables(
-        frame,
-        split_indices=split_indices,
-        output_dir=output_dir,
-        model_version=model_version,
-        effective_from=effective,
+    mlflow_client = configure_mlflow(
+        settings.mlflow_tracking_uri,
+        enabled=settings.mlflow_enabled,
     )
+    mlflow_client.set_experiment(MLFLOW_EXPERIMENT)
+    with mlflow_client.start_run() as mlflow_run:
+        rating_workbook_path, model_artifact_path, metrics = fit_validate_export_rating_tables(
+            frame,
+            split_indices=split_indices,
+            output_dir=output_dir,
+            model_version=model_version,
+            effective_from=effective,
+            mlflow_client=mlflow_client,
+        )
+        mlflow_run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "") or "")
     manifest = create_model_frame_manifest_with_split(
         engine,
         frame=frame,
@@ -381,6 +433,7 @@ def run_mtpl_frequency_offline_sqlite(
         created_by=created_by,
         manifest_id=manifest.manifest_id,
         split_set_id=manifest.split_set_id,
+        mlflow_run_id=mlflow_run_id or None,
         model_artifact_path=model_artifact_path,
         metrics=metrics,
     )
@@ -409,6 +462,7 @@ def main() -> None:
     result = run_mtpl_frequency_offline_sqlite(
         db_root=args.db_root,
         row_count=args.row_count,
+        synthetic_source=args.synthetic_source,
         effective_from=args.effective_from,
         created_by=args.created_by,
         reset=args.reset,

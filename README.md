@@ -281,16 +281,16 @@ Prerequisites:
    freMTPL source data, build the final model frame, record the 5-fold split and
    frame manifest, export the rating workbook/model artifact, and publish to SQL.
 
-   To inspect the same freMTPL model-frame and CV metadata flow without Airflow,
-   SQL Server, or OpenML, run the offline SQLite smoke build:
+   To inspect the same freMTPL model-frame and CV metadata flow without Airflow
+   or SQL Server, run the offline SQLite smoke build:
 
    ```bash
    uv run python scripts/run_mtpl_frequency_offline_sqlite.py --reset
    ```
 
-   This creates a local offline DDL structure with deterministic freMTPL-like
-   source rows, manifest/CV metadata, model-run metrics, and package rows for
-   inspection:
+   By default this fetches the full freMTPL source data, fits the model, records
+   the 5-fold split, exports the workbook/model artifact, and creates a local
+   offline DDL structure for inspection:
 
    ```text
    state/offline/mtpl_frequency/pricing.sqlite
@@ -299,6 +299,7 @@ Prerequisites:
    ```
 
    It is an offline smoke check, not the production publish path.
+   For a faster no-network check, add `--synthetic-source --row-count 120`.
 
 ## Adding Models
 

@@ -6,7 +6,11 @@ at the bottom wires those pieces into the shared manifest and publish contract.
 
 from __future__ import annotations
 
+import io
+import json
+import logging
 import pickle
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,7 +27,7 @@ from pricing_pipeline.data.manifest import (
     create_model_frame_manifest_with_split,
     validation_split_indices,
 )
-from pricing_pipeline.models.superglm_diagnostics import fit_reml_with_diagnostics
+from pricing_pipeline.infra.mlflow_tracking import configure_mlflow, optional_mlflow_client
 from pricing_pipeline.orchestration.completed_build_helpers import (
     completed_model_build_payload,
     effective_from_for_run,
@@ -47,6 +51,23 @@ FEATURE_COLUMNS = [
     "VehBrand",
     "VehGas",
     "Region",
+]
+MLFLOW_EXPERIMENT = "pricing-mtpl-frequency"
+SUPERGLM_METRIC_ATTRIBUTES = [
+    "aic",
+    "aicc",
+    "bic",
+    "deviance",
+    "ebic",
+    "effective_df",
+    "explained_deviance",
+    "log_likelihood",
+    "n_active_groups",
+    "n_obs",
+    "null_deviance",
+    "null_log_likelihood",
+    "pearson_chi2",
+    "phi",
 ]
 
 
@@ -119,6 +140,37 @@ def build_model() -> SuperGLM:
     )
 
 
+def _json_default(value: object) -> object:
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except TypeError, ValueError:
+            pass
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, tuple):
+        return list(value)
+    return str(value)
+
+
+def _write_json_artifact(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(payload, default=_json_default, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _finite_metric(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        metric = float(value)
+    except TypeError, ValueError:
+        return None
+    return metric if np.isfinite(metric) else None
+
+
 def fit_validate_export_rating_tables(
     frame: pd.DataFrame,
     *,
@@ -126,24 +178,53 @@ def fit_validate_export_rating_tables(
     output_dir: str | Path,
     model_version: str,
     effective_from: str,
+    mlflow_client=None,
 ) -> tuple[str | Path, str | Path | None, dict[str, float]]:
-    """Fit on the full frame and export the rating workbook/model artifact."""
+    """Fit on the full frame and visibly log SuperGLM diagnostics to MLflow."""
     X, y, exposure, offset = build_training_frame(frame)
     output_path = Path(output_dir)
     artifact_dir = output_path / f"{model_version}_{effective_from}"
     artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    fitted = fit_reml_with_diagnostics(
-        build_model(),
-        X,
-        y,
-        offset=offset,
-        diagnostics_path=artifact_dir / "superglm_fit.log",
-    )
+    mlflow_client = optional_mlflow_client(mlflow_client)
 
     workbook_path = artifact_dir / f"rating_tables_{model_version}_{effective_from}.xlsx"
     model_path = artifact_dir / "superglm_model.pkl"
     summary_path = artifact_dir / "model_summary.txt"
+    fit_log_path = artifact_dir / "superglm_fit.log"
+    diagnostics_path = artifact_dir / "superglm_diagnostics.json"
+    reml_diagnostics_path = artifact_dir / "superglm_reml_diagnostics.json"
+
+    model = build_model()
+    mlflow_client.log_param("family", getattr(model, "family", "poisson"))
+    mlflow_client.log_param("target", MODEL_FRAME.target_column)
+    mlflow_client.log_param("offset", "log(Exposure)")
+    mlflow_client.log_param("row_count", len(X))
+    mlflow_client.log_param("feature_columns", ",".join(FEATURE_COLUMNS))
+    mlflow_client.log_param("model_version", model_version)
+    mlflow_client.log_param("effective_from", effective_from)
+    mlflow_client.log_param("validation_fold_count", len(split_indices))
+
+    log_buffer = io.StringIO()
+    logging.info("Starting SuperGLM fit_reml for %s rows", len(X))
+    with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
+        fitted = model.fit_reml(X, y, offset=offset, verbose=True)
+    if fitted is None:
+        fitted = model
+
+    fit_log_text = log_buffer.getvalue()
+    if not fit_log_text:
+        fit_log_text = "No SuperGLM stdout/stderr diagnostics were captured during fit_reml.\n"
+    fit_log_path.write_text(fit_log_text, encoding="utf-8")
+    mlflow_client.log_artifact(str(fit_log_path), artifact_path="training_diagnostics")
+
+    diagnostics = fitted.diagnostics() if callable(getattr(fitted, "diagnostics", None)) else {}
+    reml_diagnostics = (
+        fitted.reml_diagnostics() if callable(getattr(fitted, "reml_diagnostics", None)) else {}
+    )
+    _write_json_artifact(diagnostics_path, diagnostics)
+    _write_json_artifact(reml_diagnostics_path, reml_diagnostics)
+    mlflow_client.log_artifact(str(diagnostics_path), artifact_path="training_diagnostics")
+    mlflow_client.log_artifact(str(reml_diagnostics_path), artifact_path="training_diagnostics")
 
     export_rating_tables(
         fitted,
@@ -151,10 +232,13 @@ def fit_validate_export_rating_tables(
         y,
         exposure,
         output_path=workbook_path,
+        mlflow_client=mlflow_client,
     )
     with model_path.open("wb") as handle:
         pickle.dump(fitted, handle)
     summary_path.write_text(str(fitted.summary(detail="compact")), encoding="utf-8")
+    mlflow_client.log_artifact(str(model_path), artifact_path="model")
+    mlflow_client.log_artifact(str(summary_path), artifact_path="model")
 
     result = getattr(fitted, "result", None)
     metrics = {
@@ -171,6 +255,22 @@ def fit_validate_export_rating_tables(
         metrics["deviance"] = float(result.deviance)
     if getattr(result, "n_iter", None) is not None:
         metrics["n_iter"] = float(result.n_iter)
+    if getattr(result, "converged", None) is not None:
+        metrics["converged"] = 1.0 if bool(result.converged) else 0.0
+    if getattr(result, "effective_df", None) is not None:
+        metrics["effective_df"] = float(result.effective_df)
+    if getattr(result, "phi", None) is not None:
+        metrics["phi"] = float(result.phi)
+
+    if callable(getattr(fitted, "metrics", None)):
+        superglm_metrics = fitted.metrics(X, y, sample_weight=exposure, offset=offset)
+        for attribute in SUPERGLM_METRIC_ATTRIBUTES:
+            value = _finite_metric(getattr(superglm_metrics, attribute, None))
+            if value is not None:
+                metrics[f"superglm_{attribute}"] = value
+
+    for metric_name, metric_value in sorted(metrics.items()):
+        mlflow_client.log_metric(metric_name, metric_value)
 
     return workbook_path, model_path, metrics
 
@@ -206,13 +306,21 @@ def train_validate_export_model(
     frame = build_final_model_frame(raw)
     frame = frame.sort_values(list(MODEL_FRAME.pk_columns)).reset_index(drop=True)
     split_indices = validation_split_indices_for_model(frame)
-    rating_workbook_path, model_artifact_path, metrics = fit_validate_export_rating_tables(
-        frame,
-        split_indices=split_indices,
-        output_dir=prepared.get("output_dir") or Path("state") / run_key,
-        model_version=model_version,
-        effective_from=effective_from,
+    mlflow_client = configure_mlflow(
+        settings.mlflow_tracking_uri,
+        enabled=settings.mlflow_enabled,
     )
+    mlflow_client.set_experiment(MLFLOW_EXPERIMENT)
+    with mlflow_client.start_run() as mlflow_run:
+        rating_workbook_path, model_artifact_path, metrics = fit_validate_export_rating_tables(
+            frame,
+            split_indices=split_indices,
+            output_dir=prepared.get("output_dir") or Path("state") / run_key,
+            model_version=model_version,
+            effective_from=effective_from,
+            mlflow_client=mlflow_client,
+        )
+        mlflow_run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "") or "")
     manifest = create_model_frame_manifest_with_split(
         engine,
         frame=frame,
@@ -231,6 +339,7 @@ def train_validate_export_model(
         created_by=created_by,
         manifest_id=manifest.manifest_id,
         split_set_id=manifest.split_set_id,
+        mlflow_run_id=mlflow_run_id or None,
         model_artifact_path=model_artifact_path,
         metrics=metrics,
     )
