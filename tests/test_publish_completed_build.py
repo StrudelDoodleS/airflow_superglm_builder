@@ -41,7 +41,7 @@ def _install_fake_airflow_taskflow(monkeypatch, context):
 
 def _config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="CLAIM_FREQ",
+        model_name="CLAIM_FREQ",
         model_label="Claim frequency",
         target_name="claim_count",
         model_type="superglm_poisson",
@@ -264,7 +264,7 @@ def test_completed_build_publish_api_does_not_import_dag_factory():
 def test_completed_model_publish_result_to_dict():
     result = CompletedModelPublishResult(
         model_id=17,
-        model_key="CLAIM_FREQ",
+        model_name="CLAIM_FREQ",
         model_version="20260603",
         manifest_id="manifest-1",
         split_set_id=None,
@@ -522,7 +522,7 @@ def test_publish_completed_model_build_task_fills_airflow_context(
         calls.append((engine, kwargs))
         return CompletedModelPublishResult(
             model_id=17,
-            model_key="CLAIM_FREQ",
+            model_name="CLAIM_FREQ",
             model_version="20260603",
             manifest_id="manifest-1",
             split_set_id=None,
@@ -555,7 +555,7 @@ def test_publish_completed_model_build_task_fills_airflow_context(
         }
     )
 
-    assert result["model_key"] == "CLAIM_FREQ"
+    assert result["model_name"] == "CLAIM_FREQ"
     assert calls[0][0] == "engine"
     completed = calls[0][1]["completed_build"]
     assert completed["dag_id"] == "claim_freq_build"
@@ -596,7 +596,7 @@ def test_publish_completed_model_build_task_allows_dataset_none_with_manifest(
         calls.append((engine, kwargs))
         return CompletedModelPublishResult(
             model_id=17,
-            model_key="CLAIM_FREQ",
+            model_name="CLAIM_FREQ",
             model_version="20260603",
             manifest_id=kwargs["completed_build"]["manifest_id"],
             split_set_id=None,
@@ -666,7 +666,7 @@ def test_register_pricing_model_task_uses_global_registry_helper(monkeypatch):
             "ensure_pricing_model",
             engine,
             {
-                "model_key": "CLAIM_FREQ",
+                "model_name": "CLAIM_FREQ",
                 "model_label": "Claim frequency",
                 "target_name": "claim_count",
                 "model_type": "superglm_poisson",

@@ -42,7 +42,7 @@ CREATE TABLE mlops.DATASET_COLUMN (
 
 CREATE TABLE pricing.MODEL (
     model_id BIGINT IDENTITY(1,1) PRIMARY KEY,
-    model_key NVARCHAR(128) UNIQUE NOT NULL,
+    model_name NVARCHAR(128) UNIQUE NOT NULL,
     model_label NVARCHAR(256),
     target_name NVARCHAR(128) NOT NULL,
     model_type NVARCHAR(128) NOT NULL,

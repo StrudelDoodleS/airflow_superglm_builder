@@ -69,7 +69,7 @@ def build_pricing_model_dag(
         start_date=datetime(2026, 1, 1),
         schedule=schedule,
         catchup=False,
-        tags=tags or ["pricing", spec.model_key.lower(), "mlflow"],
+        tags=tags or ["pricing", spec.model_name.lower(), "mlflow"],
     )
     def _pricing_model_dag():
         @task

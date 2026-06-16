@@ -13,7 +13,7 @@ from pricing_models.mtpl_frequency.spec import MODEL_CONFIG, MODEL_SPEC
 def _write_model_toml(
     package_dir,
     *,
-    model_key: str,
+    model_name: str,
     model_label: str | None = None,
     target_name: str = "target",
 ) -> None:
@@ -22,11 +22,11 @@ def _write_model_toml(
     (package_dir / "model.toml").write_text(
         dedent(
             f"""\
-            model_key = "{model_key}"
-            model_label = "{model_label or model_key.title()}"
+            model_name = "{model_name}"
+            model_label = "{model_label or model_name.title()}"
             target_name = "{target_name}"
             model_type = "superglm_poisson"
-            deployment_slot = "{model_key}_UAT"
+            deployment_slot = "{model_name}_UAT"
             default_package_status = "PUBLISHED"
 
             [validation_split]
@@ -44,7 +44,7 @@ def _write_model_toml(
 def test_mtpl_frequency_spec_lives_in_model_package():
     from pricing_models.mtpl_frequency.spec import MODEL_SPEC
 
-    assert MODEL_SPEC.model_key == "MTPL_FREQ"
+    assert MODEL_SPEC.model_name == "MTPL_FREQ"
     assert MODEL_SPEC.target_name == "ClaimNb"
     assert MODEL_SPEC.model_type == "superglm_poisson"
     assert MODEL_SPEC.experiment_name == "pricing-mtpl-frequency"
@@ -55,10 +55,10 @@ def test_mtpl_frequency_spec_lives_in_model_package():
 
 
 def test_model_specs_are_available_from_registry():
-    from pricing_models.registry import get_model_spec, model_keys
+    from pricing_models.registry import get_model_spec, model_names
 
-    assert "MTPL_FREQ" in model_keys()
-    assert get_model_spec("MTPL_FREQ").model_key == "MTPL_FREQ"
+    assert "MTPL_FREQ" in model_names()
+    assert get_model_spec("MTPL_FREQ").model_name == "MTPL_FREQ"
 
 
 def test_model_configs_are_available_from_registry():
@@ -374,18 +374,18 @@ def test_mtpl_frequency_airflow_wrappers_are_thin_task_factories():
 def test_model_config_registry_discovers_toml_without_importing_specs(tmp_path, monkeypatch):
     models_root = tmp_path / "pricing_models"
     package_dir = models_root / "lazy_model"
-    _write_model_toml(package_dir, model_key="LAZY_MODEL", model_label="Lazy model")
+    _write_model_toml(package_dir, model_name="LAZY_MODEL", model_label="Lazy model")
     (package_dir / "spec.py").write_text(
         "raise RuntimeError('spec import should not happen for config lookup')\n",
         encoding="utf-8",
     )
     monkeypatch.syspath_prepend(tmp_path)
 
-    from pricing_models.registry import get_model_config, model_keys
+    from pricing_models.registry import get_model_config, model_names
 
-    assert model_keys(models_root=models_root) == ("LAZY_MODEL",)
+    assert model_names(models_root=models_root) == ("LAZY_MODEL",)
     config = get_model_config("LAZY_MODEL", models_root=models_root)
-    assert config.model_key == "LAZY_MODEL"
+    assert config.model_name == "LAZY_MODEL"
     assert config.model_label == "Lazy model"
 
 
@@ -393,8 +393,8 @@ def test_model_spec_registry_lazy_imports_only_selected_package(tmp_path, monkey
     models_root = tmp_path / "pricing_models"
     selected_dir = models_root / "selected_model"
     poison_dir = models_root / "poison_model"
-    _write_model_toml(selected_dir, model_key="SELECTED_MODEL")
-    _write_model_toml(poison_dir, model_key="POISON_MODEL")
+    _write_model_toml(selected_dir, model_name="SELECTED_MODEL")
+    _write_model_toml(poison_dir, model_name="POISON_MODEL")
     (selected_dir / "spec.py").write_text(
         dedent(
             """\
@@ -407,7 +407,7 @@ def test_model_spec_registry_lazy_imports_only_selected_package(tmp_path, monkey
                 return raw
 
             MODEL_SPEC = ModelSpec(
-                model_key="SELECTED_MODEL",
+                model_name="SELECTED_MODEL",
                 model_label="Selected model",
                 target_name="target",
                 model_type="superglm_poisson",
@@ -444,26 +444,26 @@ def test_model_spec_registry_lazy_imports_only_selected_package(tmp_path, monkey
         package_prefix="pricing_models",
     )
 
-    assert spec.model_key == "SELECTED_MODEL"
+    assert spec.model_name == "SELECTED_MODEL"
 
 
-def test_model_config_registry_rejects_duplicate_model_keys(tmp_path):
+def test_model_config_registry_rejects_duplicate_model_names(tmp_path):
     models_root = tmp_path / "pricing_models"
-    _write_model_toml(models_root / "first_model", model_key="DUPLICATE_MODEL")
-    _write_model_toml(models_root / "second_model", model_key="DUPLICATE_MODEL")
+    _write_model_toml(models_root / "first_model", model_name="DUPLICATE_MODEL")
+    _write_model_toml(models_root / "second_model", model_name="DUPLICATE_MODEL")
 
-    from pricing_models.registry import model_keys
+    from pricing_models.registry import model_names
 
     try:
-        model_keys(models_root=models_root)
+        model_names(models_root=models_root)
     except ValueError as exc:
-        assert "Duplicate model_key 'DUPLICATE_MODEL'" in str(exc)
+        assert "Duplicate model_name 'DUPLICATE_MODEL'" in str(exc)
     else:
-        raise AssertionError("duplicate model keys should fail registry discovery")
+        raise AssertionError("duplicate model names should fail registry discovery")
 
 
 def test_mtpl_frequency_model_config_matches_spec_identity():
-    assert MODEL_CONFIG.model_key == MODEL_SPEC.model_key
+    assert MODEL_CONFIG.model_name == MODEL_SPEC.model_name
     assert MODEL_CONFIG.model_label == MODEL_SPEC.model_label
     assert MODEL_CONFIG.target_name == MODEL_SPEC.target_name
     assert MODEL_CONFIG.model_type == MODEL_SPEC.model_type

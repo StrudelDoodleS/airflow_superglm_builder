@@ -70,7 +70,7 @@ class FakeEngine:
 
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -81,7 +81,7 @@ def config() -> ModelBuildConfig:
 
 def config_with_slot(deployment_slot: str) -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -132,29 +132,25 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
     )
 
     sql = executed_sql(engine)
-    lock_index = next(
-        i for i, statement in enumerate(sql)
-        if "sys.sp_getapplock" in statement
-    )
+    lock_index = next(i for i, statement in enumerate(sql) if "sys.sp_getapplock" in statement)
     package_select_index = next(
-        i for i, statement in enumerate(sql)
-        if "FROM pricing.PRICING_RATE_PACKAGE" in statement
+        i for i, statement in enumerate(sql) if "FROM pricing.PRICING_RATE_PACKAGE" in statement
     )
     current_select_index = next(
-        i for i, statement in enumerate(sql)
-        if "FROM pricing.PRICING_MODEL_DEPLOYMENT" in statement
+        i for i, statement in enumerate(sql) if "FROM pricing.PRICING_MODEL_DEPLOYMENT" in statement
     )
     update_index = next(
-        i for i, statement in enumerate(sql)
+        i
+        for i, statement in enumerate(sql)
         if "UPDATE pricing.PRICING_MODEL_DEPLOYMENT" in statement
     )
     insert_index = next(
-        i for i, statement in enumerate(sql)
+        i
+        for i, statement in enumerate(sql)
         if "INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT" in statement
     )
     merge_index = next(
-        i for i, statement in enumerate(sql)
-        if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
+        i for i, statement in enumerate(sql) if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
     )
 
     assert lock_index < package_select_index < current_select_index < update_index
@@ -192,7 +188,8 @@ def test_deploy_rate_package_resolves_by_model_and_package_version_using_default
     )
 
     package_select, package_params = next(
-        (statement, params) for statement, params in engine.connection.events
+        (statement, params)
+        for statement, params in engine.connection.events
         if "FROM pricing.PRICING_RATE_PACKAGE" in statement
     )
     assert "package_version = :package_version" in package_select
@@ -217,17 +214,14 @@ def test_deploy_rate_package_canonicalizes_deployment_slot_before_lock_and_write
     )
 
     sql = executed_sql(engine)
-    lock_index = next(
-        i for i, statement in enumerate(sql)
-        if "sys.sp_getapplock" in statement
-    )
+    lock_index = next(i for i, statement in enumerate(sql) if "sys.sp_getapplock" in statement)
     insert_index = next(
-        i for i, statement in enumerate(sql)
+        i
+        for i, statement in enumerate(sql)
         if "INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT" in statement
     )
     merge_index = next(
-        i for i, statement in enumerate(sql)
-        if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
+        i for i, statement in enumerate(sql) if "MERGE pricing.PRICING_PACKAGE_POINTER" in statement
     )
 
     assert result.deployment_slot == "MTPL_FREQ_PROD"
@@ -288,7 +282,8 @@ def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
     sql = executed_sql(engine)
     assert any("sys.sp_getapplock" in statement for statement in sql)
     write_sql = [
-        statement for statement in sql
+        statement
+        for statement in sql
         if statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
     ]
     assert write_sql == []
@@ -391,7 +386,8 @@ def test_deploy_rate_package_rejects_already_current_package_without_writes():
         )
 
     write_sql = [
-        statement for statement in executed_sql(engine)
+        statement
+        for statement in executed_sql(engine)
         if statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
     ]
     assert write_sql == []

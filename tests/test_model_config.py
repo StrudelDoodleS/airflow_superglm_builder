@@ -14,7 +14,7 @@ def test_load_model_build_config_reads_stable_metadata(tmp_path: Path):
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -28,7 +28,7 @@ def test_load_model_build_config_reads_stable_metadata(tmp_path: Path):
     config = load_model_build_config(path)
 
     assert config == ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -38,12 +38,32 @@ def test_load_model_build_config_reads_stable_metadata(tmp_path: Path):
     )
 
 
-def test_load_model_build_config_reads_train_test_validation_split(tmp_path: Path):
+def test_load_model_build_config_rejects_obsolete_model_key(tmp_path: Path):
     path = tmp_path / "model.toml"
     path.write_text(
         "\n".join(
             [
                 'model_key = "MTPL_FREQ"',
+                'model_label = "Motor frequency"',
+                'target_name = "ClaimNb"',
+                'model_type = "superglm_poisson"',
+                'deployment_slot = "MTPL_FREQ_UAT"',
+                'default_package_status = "PUBLISHED"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="model_name"):
+        load_model_build_config(path)
+
+
+def test_load_model_build_config_reads_train_test_validation_split(tmp_path: Path):
+    path = tmp_path / "model.toml"
+    path.write_text(
+        "\n".join(
+            [
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -78,7 +98,7 @@ def test_load_model_build_config_reads_column_kfold_validation_split(tmp_path: P
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -107,7 +127,7 @@ def test_load_model_build_config_reads_column_holdout_validation_split(tmp_path:
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -140,7 +160,7 @@ def test_load_model_build_config_reads_custom_validation_split(tmp_path: Path):
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -253,7 +273,7 @@ def test_load_model_build_config_rejects_invalid_source_column_split_fields(
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -278,7 +298,7 @@ def test_load_model_build_config_rejects_unknown_validation_split_method(
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
@@ -301,7 +321,7 @@ def test_load_model_build_config_rejects_missing_required_field(tmp_path: Path):
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',
                 'deployment_slot = "MTPL_FREQ_UAT"',
@@ -321,7 +341,7 @@ def test_load_model_build_config_rejects_non_published_default_status(
     path.write_text(
         "\n".join(
             [
-                'model_key = "MTPL_FREQ"',
+                'model_name = "MTPL_FREQ"',
                 'model_label = "Motor frequency"',
                 'target_name = "ClaimNb"',
                 'model_type = "superglm_poisson"',

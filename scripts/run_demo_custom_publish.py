@@ -61,7 +61,7 @@ def run_demo_custom_publish(
 
     ensure_pricing_model(
         engine,
-        model_key=MODEL_CONFIG.model_key,
+        model_name=MODEL_CONFIG.model_name,
         model_label=MODEL_CONFIG.model_label,
         target_name=MODEL_CONFIG.target_name,
         model_type=MODEL_CONFIG.model_type,
@@ -72,12 +72,12 @@ def run_demo_custom_publish(
     final_frame = build_final_model_frame(frame)
     effective_from = effective_from_for_run()
     export_id = build_export_id(
-        MODEL_CONFIG.model_key,
+        MODEL_CONFIG.model_name,
         f"python__{effective_from}",
     )
     model_version = resolve_model_version_for_export(
         engine,
-        model_key=MODEL_CONFIG.model_key,
+        model_name=MODEL_CONFIG.model_name,
         export_id=export_id,
     )
     table_name = training_table_for_run(export_id)

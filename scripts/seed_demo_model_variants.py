@@ -1,4 +1,5 @@
 """Seed demo model/package history for inspecting the pricing schema."""
+
 from __future__ import annotations
 
 import argparse
@@ -420,7 +421,9 @@ def ensure_demo_manifest(engine, package: DemoPackage, *, created_by: str) -> st
                 "dataset_name": package.data_slice_name,
                 "source_system": "demo_seed",
                 "data_as_of_date": package.effective_from,
-                "row_count": sum(level.record_count for term in package.terms for level in term.levels),
+                "row_count": sum(
+                    level.record_count for term in package.terms for level in term.levels
+                ),
                 "target_column": package.target_name,
                 "created_by": created_by,
             },
@@ -431,7 +434,7 @@ def ensure_demo_manifest(engine, package: DemoPackage, *, created_by: str) -> st
 def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
     model_id = ensure_pricing_model(
         engine,
-        model_key=package.model_name,
+        model_name=package.model_name,
         model_label=package.model_label,
         target_name=package.target_name,
         model_type=package.model_type,
@@ -461,7 +464,7 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
         deploy_rate_package(
             engine,
             ModelBuildConfig(
-                model_key=package.model_name,
+                model_name=package.model_name,
                 model_label=package.model_label,
                 target_name=package.target_name,
                 model_type=package.model_type,

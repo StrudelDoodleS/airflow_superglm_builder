@@ -22,10 +22,10 @@ def _required_text(value: str, field_name: str) -> str:
 def existing_model_version_for_export(
     engine,
     *,
-    model_key: str,
+    model_name: str,
     export_id: str,
 ) -> str | None:
-    model_key = _required_text(model_key, "model_key")
+    model_name = _required_text(model_name, "model_name")
     export_id = _required_text(export_id, "export_id")
     schemas = schema_names_from_connectable(engine)
 
@@ -37,18 +37,18 @@ def existing_model_version_for_export(
                 FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
                 JOIN {schemas.pricing}.PRICING_MODEL AS pm
                   ON pm.model_id = rp.model_id
-                WHERE pm.model_key = :model_key
+                WHERE pm.model_name = :model_name
                   AND rp.source_export_id = :export_id
                 ORDER BY rp.rate_package_id DESC
                 """
             ),
-            {"model_key": model_key, "export_id": export_id},
+            {"model_name": model_name, "export_id": export_id},
         ).scalar()
     return None if version is None else str(version)
 
 
-def next_trained_model_version(engine, *, model_key: str) -> str:
-    model_key = _required_text(model_key, "model_key")
+def next_trained_model_version(engine, *, model_name: str) -> str:
+    model_name = _required_text(model_name, "model_name")
     schemas = schema_names_from_connectable(engine)
 
     with engine.begin() as con:
@@ -60,11 +60,11 @@ def next_trained_model_version(engine, *, model_key: str) -> str:
                     FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
                     JOIN {schemas.pricing}.PRICING_MODEL AS pm
                       ON pm.model_id = rp.model_id
-                    WHERE pm.model_key = :model_key
+                    WHERE pm.model_name = :model_name
                       AND rp.parent_rate_package_id IS NULL
                     """
                 ),
-                {"model_key": model_key},
+                {"model_name": model_name},
             ).scalars()
         )
 
@@ -79,14 +79,14 @@ def next_trained_model_version(engine, *, model_key: str) -> str:
 def resolve_model_version_for_export(
     engine,
     *,
-    model_key: str,
+    model_name: str,
     export_id: str,
 ) -> str:
     existing = existing_model_version_for_export(
         engine,
-        model_key=model_key,
+        model_name=model_name,
         export_id=export_id,
     )
     if existing is not None:
         return existing
-    return next_trained_model_version(engine, model_key=model_key)
+    return next_trained_model_version(engine, model_name=model_name)

@@ -78,7 +78,7 @@ def train_validate_export_task(
         )
         model_version = resolve_model_version_for_export(
             runtime.get_engine(),
-            model_key=MODEL_KEY,
+            model_name=MODEL_KEY,
             export_id=export_id,
         )
         frame = read_training_frame(str(prepared_training["training_frame_path"]))

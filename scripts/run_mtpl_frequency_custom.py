@@ -92,7 +92,7 @@ def run_mtpl_frequency_custom(
 
     ensure_pricing_model(
         engine,
-        model_key=MODEL_CONFIG.model_key,
+        model_name=MODEL_CONFIG.model_name,
         model_label=MODEL_CONFIG.model_label,
         target_name=MODEL_CONFIG.target_name,
         model_type=MODEL_CONFIG.model_type,

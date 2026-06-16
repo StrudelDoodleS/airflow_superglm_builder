@@ -41,13 +41,13 @@ def _discover_entries_cached(models_root: str) -> tuple[ModelRegistryEntry, ...]
             config_path=config_path,
             config=load_model_build_config(config_path),
         )
-        existing = by_key.get(entry.config.model_key)
+        existing = by_key.get(entry.config.model_name)
         if existing is not None:
             raise ValueError(
-                f"Duplicate model_key {entry.config.model_key!r} in "
+                f"Duplicate model_name {entry.config.model_name!r} in "
                 f"{existing.config_path.as_posix()} and {entry.config_path.as_posix()}"
             )
-        by_key[entry.config.model_key] = entry
+        by_key[entry.config.model_name] = entry
         entries.append(entry)
     return tuple(entries)
 
@@ -57,10 +57,10 @@ def _discover_entries(models_root: Path | None = None) -> tuple[ModelRegistryEnt
 
 
 def _entries_by_key(models_root: Path | None = None) -> dict[str, ModelRegistryEntry]:
-    return {entry.config.model_key: entry for entry in _discover_entries(models_root)}
+    return {entry.config.model_name: entry for entry in _discover_entries(models_root)}
 
 
-def model_keys(*, models_root: Path | None = None) -> tuple[str, ...]:
+def model_names(*, models_root: Path | None = None) -> tuple[str, ...]:
     return tuple(sorted(_entries_by_key(models_root)))
 
 
@@ -98,33 +98,33 @@ def _spec_file_defines_model_spec(spec_path: Path) -> bool:
     return False
 
 
-def model_spec_keys(*, models_root: Path | None = None) -> tuple[str, ...]:
-    """Return model keys that can be run through ModelSpec-based tooling."""
+def model_spec_names(*, models_root: Path | None = None) -> tuple[str, ...]:
+    """Return model names that can be run through ModelSpec-based tooling."""
     return tuple(
         sorted(
-            entry.config.model_key
+            entry.config.model_name
             for entry in _discover_entries(models_root)
             if _spec_file_defines_model_spec(entry.spec_path)
         )
     )
 
 
-def _unknown_model_error(model_key: str, models_root: Path | None = None) -> ValueError:
-    choices = ", ".join(model_keys(models_root=models_root))
+def _unknown_model_error(model_name: str, models_root: Path | None = None) -> ValueError:
+    choices = ", ".join(model_names(models_root=models_root))
     if choices:
-        return ValueError(f"Unknown model key {model_key!r}. Choices: {choices}")
-    return ValueError(f"Unknown model key {model_key!r}. No model.toml files found")
+        return ValueError(f"Unknown model name {model_name!r}. Choices: {choices}")
+    return ValueError(f"Unknown model name {model_name!r}. No model.toml files found")
 
 
 def get_model_config(
-    model_key: str,
+    model_name: str,
     *,
     models_root: Path | None = None,
 ) -> ModelBuildConfig:
     try:
-        return _entries_by_key(models_root)[model_key].config
+        return _entries_by_key(models_root)[model_name].config
     except KeyError as exc:
-        raise _unknown_model_error(model_key, models_root) from exc
+        raise _unknown_model_error(model_name, models_root) from exc
 
 
 def _load_spec_from_path(entry: ModelRegistryEntry) -> ModelSpec:
@@ -138,15 +138,15 @@ def _load_spec_from_path(entry: ModelRegistryEntry) -> ModelSpec:
 
 
 def get_model_spec(
-    model_key: str,
+    model_name: str,
     *,
     models_root: Path | None = None,
     package_prefix: str = DEFAULT_PACKAGE_PREFIX,
 ) -> ModelSpec:
     try:
-        entry = _entries_by_key(models_root)[model_key]
+        entry = _entries_by_key(models_root)[model_name]
     except KeyError as exc:
-        raise _unknown_model_error(model_key, models_root) from exc
+        raise _unknown_model_error(model_name, models_root) from exc
 
     if _models_root(models_root) == MODELS_ROOT and package_prefix == DEFAULT_PACKAGE_PREFIX:
         module = importlib.import_module(f"{package_prefix}.{entry.package_name}.spec")
@@ -154,9 +154,9 @@ def get_model_spec(
     else:
         model_spec = _load_spec_from_path(entry)
 
-    if model_spec.model_key != model_key:
+    if model_spec.model_name != model_name:
         raise ValueError(
-            f"{entry.spec_path.as_posix()} defines MODEL_SPEC.model_key "
-            f"{model_spec.model_key!r}, expected {model_key!r}"
+            f"{entry.spec_path.as_posix()} defines MODEL_SPEC.model_name "
+            f"{model_spec.model_name!r}, expected {model_name!r}"
         )
     return model_spec

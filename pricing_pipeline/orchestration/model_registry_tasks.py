@@ -19,7 +19,7 @@ def register_pricing_model_task(
         runtime = runtime_from_env_or_module(runtime_module)
         return ensure_pricing_model(
             runtime.get_engine(),
-            model_key=model_config.model_key,
+            model_name=model_config.model_name,
             model_label=model_config.model_label,
             target_name=model_config.target_name,
             model_type=model_config.model_type,

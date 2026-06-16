@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS pricing.CV_FOLD_METRIC (
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (
     model_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_key TEXT NOT NULL,
+    model_name TEXT NOT NULL,
     model_label TEXT,
     target_name TEXT NOT NULL,
     model_type TEXT NOT NULL,
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL,
     retired_ts TEXT,
-    UNIQUE (model_key)
+    UNIQUE (model_name)
 );
 
 CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (

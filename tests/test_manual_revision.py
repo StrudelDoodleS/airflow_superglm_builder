@@ -18,7 +18,7 @@ from pricing_pipeline.publishing.manual_revision import (
 
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -32,7 +32,6 @@ def metadata_row(**overrides):
         "rate_package_id": 202,
         "parent_rate_package_id": None,
         "model_id": 17,
-        "model_key": "MTPL_FREQ",
         "model_name": "MTPL_FREQ",
         "model_version": "2026.05",
         "package_version": 4,
@@ -154,7 +153,7 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
-def test_load_rate_package_snapshot_by_id_scopes_metadata_to_model_key(monkeypatch):
+def test_load_rate_package_snapshot_by_id_scopes_metadata_to_model_name(monkeypatch):
     engine = object()
     fake_read_sql = ReadSqlFake(metadata_rows=[metadata_row(rate_package_id=101)])
     monkeypatch.setattr(
@@ -172,12 +171,12 @@ def test_load_rate_package_snapshot_by_id_scopes_metadata_to_model_key(monkeypat
     assert con is engine
     assert "FROM pricing.PRICING_RATE_PACKAGE" in statement
     assert "JOIN pricing.PRICING_MODEL" in statement
-    assert "m.model_key = :model_key" in statement
+    assert "m.model_name = :model_name" in statement
     assert "rp.rate_package_id = :rate_package_id" in statement
-    assert params == {"model_key": "MTPL_FREQ", "rate_package_id": 101}
+    assert params == {"model_name": "MTPL_FREQ", "rate_package_id": 101}
 
 
-def test_load_rate_package_snapshot_by_version_scopes_metadata_to_model_key(monkeypatch):
+def test_load_rate_package_snapshot_by_version_scopes_metadata_to_model_name(monkeypatch):
     engine = object()
     fake_read_sql = ReadSqlFake(metadata_rows=[metadata_row()])
     monkeypatch.setattr(
@@ -192,9 +191,9 @@ def test_load_rate_package_snapshot_by_version_scopes_metadata_to_model_key(monk
     )
 
     statement, _con, params = fake_read_sql.calls[0]
-    assert "m.model_key = :model_key" in statement
+    assert "m.model_name = :model_name" in statement
     assert "rp.package_version = :package_version" in statement
-    assert params == {"model_key": "MTPL_FREQ", "package_version": 4}
+    assert params == {"model_name": "MTPL_FREQ", "package_version": 4}
 
 
 @pytest.mark.parametrize(
@@ -552,8 +551,7 @@ def test_write_manual_revision_creates_child_package_and_copies_children():
     finalize_sql, finalize_params = next(
         (statement, params)
         for statement, params in calls
-        if "UPDATE pricing.PRICING_RATE_PACKAGE" in statement
-        and "'PUBLISHED'" in statement
+        if "UPDATE pricing.PRICING_RATE_PACKAGE" in statement and "'PUBLISHED'" in statement
     )
     assert "SET package_status = 'PUBLISHED'" in finalize_sql
     assert finalize_params == {"rate_package_id": 303}
@@ -667,7 +665,7 @@ def test_create_manual_revision_rejects_missing_parent_metadata_before_writer(
     "metadata_overrides",
     [
         {"model_name": "OTHER_MODEL"},
-        {"model_key": "OTHER_MODEL"},
+        {"model_name": "OTHER_MODEL"},
     ],
 )
 def test_create_manual_revision_rejects_parent_model_mismatch_before_writer(

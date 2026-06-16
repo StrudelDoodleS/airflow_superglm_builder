@@ -359,10 +359,10 @@ def train_validate_export_model(
     created_by: str = "airflow",
 ) -> dict[str, Any]:
     run_key = str(prepared.get("run_key") or "manual")
-    export_id = build_export_id(MODEL_CONFIG.model_key, run_key)
+    export_id = build_export_id(MODEL_CONFIG.model_name, run_key)
     model_version = resolve_model_version_for_export(
         engine,
-        model_key=MODEL_CONFIG.model_key,
+        model_name=MODEL_CONFIG.model_name,
         export_id=export_id,
     )
     effective_from = effective_from_for_run(required_payload_text(prepared, "effective_from"))

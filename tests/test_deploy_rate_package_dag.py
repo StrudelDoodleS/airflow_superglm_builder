@@ -71,7 +71,7 @@ def test_pricing_deploy_rate_package_dag_exposes_manual_params(monkeypatch):
     assert dag_obj.catchup is False
     assert set(dag_obj.tags) >= {"pricing", "deploy"}
     assert set(dag_obj.params) == {
-        "model_key",
+        "model_name",
         "rate_package_id",
         "package_version",
         "deployment_slot",
@@ -86,7 +86,7 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
     module = _import_deploy_dag_module(monkeypatch)
     calls = []
     engine = object()
-    config = types.SimpleNamespace(model_key="MTPL_FREQ")
+    config = types.SimpleNamespace(model_name="MTPL_FREQ")
 
     class FakePublisher:
         def __init__(self, engine_arg, config_arg):
@@ -106,14 +106,14 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
     monkeypatch.setattr(
         module,
         "get_model_config",
-        lambda model_key: calls.append(("config", model_key)) or config,
+        lambda model_name: calls.append(("config", model_name)) or config,
     )
     monkeypatch.setattr(module, "get_engine", lambda: calls.append(("engine",)) or engine)
     monkeypatch.setattr(module, "ModelPublisher", FakePublisher)
 
     result = module.deploy_rate_package_from_params(
         {
-            "model_key": " MTPL_FREQ ",
+            "model_name": " MTPL_FREQ ",
             "rate_package_id": "",
             "package_version": "4",
             "deployment_slot": "MTPL_FREQ_UAT",
@@ -138,7 +138,7 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
         ),
     ]
     assert result == {
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "deployment_slot": "MTPL_FREQ_UAT",
         "previous_rate_package_id": "",
         "rate_package_id": "202",
@@ -154,7 +154,7 @@ def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
     module = _import_deploy_dag_module(monkeypatch)
     calls = []
     engine = object()
-    config = types.SimpleNamespace(model_key="MTPL_FREQ")
+    config = types.SimpleNamespace(model_name="MTPL_FREQ")
 
     class FakePublisher:
         def __init__(self, engine_arg, config_arg):
@@ -171,13 +171,13 @@ def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
                 deployment_reason="approved",
             )
 
-    monkeypatch.setattr(module, "get_model_config", lambda _model_key: config)
+    monkeypatch.setattr(module, "get_model_config", lambda _model_name: config)
     monkeypatch.setattr(module, "get_engine", lambda: engine)
     monkeypatch.setattr(module, "ModelPublisher", FakePublisher)
 
     result = module.deploy_rate_package_from_params(
         {
-            "model_key": "MTPL_FREQ",
+            "model_name": "MTPL_FREQ",
             "rate_package_id": " 202 ",
             "package_version": None,
             "deployment_reason": "approved",
@@ -219,10 +219,10 @@ def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
     monkeypatch.setattr(
         module,
         "get_model_config",
-        lambda _model_key: pytest.fail("invalid selector should fail before config lookup"),
+        lambda _model_name: pytest.fail("invalid selector should fail before config lookup"),
     )
     params = {
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "rate_package_id": None,
         "package_version": None,
         field_name: field_value,
@@ -235,15 +235,15 @@ def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
 @pytest.mark.parametrize(
     ("params", "message"),
     [
-        ({"model_key": "   ", "rate_package_id": 1}, "model_key"),
-        ({"model_key": "MTPL_FREQ"}, "exactly one"),
+        ({"model_name": "   ", "rate_package_id": 1}, "model_name"),
+        ({"model_name": "MTPL_FREQ"}, "exactly one"),
         (
-            {"model_key": "MTPL_FREQ", "rate_package_id": 1, "package_version": 4},
+            {"model_name": "MTPL_FREQ", "rate_package_id": 1, "package_version": 4},
             "exactly one",
         ),
     ],
 )
-def test_deploy_rate_package_from_params_validates_model_key_and_selector(
+def test_deploy_rate_package_from_params_validates_model_name_and_selector(
     monkeypatch,
     params,
     message,

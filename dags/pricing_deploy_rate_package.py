@@ -12,7 +12,7 @@ from pricing_pipeline.publishing.publisher import ModelPublisher
 
 
 _PARAMS = {
-    "model_key": "",
+    "model_name": "",
     "rate_package_id": None,
     "package_version": None,
     "deployment_slot": None,
@@ -73,16 +73,16 @@ def _string_id(value: int | None) -> str:
 
 
 def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, str]:
-    model_key = str(params.get("model_key", "")).strip()
-    if not model_key:
-        raise ValueError("model_key is required")
+    model_name = str(params.get("model_name", "")).strip()
+    if not model_name:
+        raise ValueError("model_name is required")
 
     rate_package_id = _optional_int(params.get("rate_package_id"), "rate_package_id")
     package_version = _optional_int(params.get("package_version"), "package_version")
     if (rate_package_id is None) == (package_version is None):
         raise ValueError("provide exactly one of rate_package_id or package_version")
 
-    config = get_model_config(model_key)
+    config = get_model_config(model_name)
     result = ModelPublisher(get_engine(), config).deploy(
         rate_package_id=rate_package_id,
         package_version=package_version,
@@ -92,7 +92,7 @@ def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, s
     )
 
     return {
-        "model_key": config.model_key,
+        "model_name": config.model_name,
         "deployment_slot": result.deployment_slot,
         "previous_rate_package_id": _string_id(result.previous_rate_package_id),
         "rate_package_id": str(result.rate_package_id),

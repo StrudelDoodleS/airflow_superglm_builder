@@ -9,13 +9,11 @@ from pricing_pipeline.models.config import ModelBuildConfig
 
 
 class _Executable(Protocol):
-    def execute(self, statement, params=None):
-        ...
+    def execute(self, statement, params=None): ...
 
 
 class _Beginable(Protocol):
-    def begin(self):
-        ...
+    def begin(self): ...
 
 
 class ModelRegistryError(RuntimeError):
@@ -25,29 +23,29 @@ class ModelRegistryError(RuntimeError):
 @dataclass(frozen=True)
 class PricingModelRecord:
     model_id: int
-    model_key: str
+    model_name: str
     model_label: str | None
     target_name: str
     model_type: str
     model_status: str
 
 
-def get_pricing_model(con: _Executable, model_key: str) -> PricingModelRecord | None:
+def get_pricing_model(con: _Executable, model_name: str) -> PricingModelRecord | None:
     row = (
         con.execute(
             text(
                 """
                 SELECT model_id,
-                    model_key,
+                    model_name,
                     model_label,
                     target_name,
                     model_type,
                     model_status
                 FROM pricing.PRICING_MODEL
-                WHERE model_key = :model_key
+                WHERE model_name = :model_name
                 """
             ),
-            {"model_key": model_key},
+            {"model_name": model_name},
         )
         .mappings()
         .one_or_none()
@@ -56,7 +54,7 @@ def get_pricing_model(con: _Executable, model_key: str) -> PricingModelRecord | 
         return None
     return PricingModelRecord(
         model_id=int(row["model_id"]),
-        model_key=str(row["model_key"]),
+        model_name=str(row["model_name"]),
         model_label=row["model_label"],
         target_name=str(row["target_name"]),
         model_type=str(row["model_type"]),
@@ -64,48 +62,38 @@ def get_pricing_model(con: _Executable, model_key: str) -> PricingModelRecord | 
     )
 
 
-def validate_registered_model(
-    con: _Executable, config: ModelBuildConfig
-) -> PricingModelRecord:
-    record = get_pricing_model(con, config.model_key)
+def validate_registered_model(con: _Executable, config: ModelBuildConfig) -> PricingModelRecord:
+    record = get_pricing_model(con, config.model_name)
     if record is None:
         raise ModelRegistryError(
-            f"model_key {config.model_key!r} is not registered; "
+            f"model_name {config.model_name!r} is not registered; "
             "run explicit model registration first"
         )
 
     mismatches: list[str] = []
     if record.model_label != config.model_label:
-        mismatches.append(
-            f"model_label db={record.model_label!r} config={config.model_label!r}"
-        )
+        mismatches.append(f"model_label db={record.model_label!r} config={config.model_label!r}")
     if record.target_name != config.target_name:
-        mismatches.append(
-            f"target_name db={record.target_name!r} config={config.target_name!r}"
-        )
+        mismatches.append(f"target_name db={record.target_name!r} config={config.target_name!r}")
     if record.model_type != config.model_type:
-        mismatches.append(
-            f"model_type db={record.model_type!r} config={config.model_type!r}"
-        )
+        mismatches.append(f"model_type db={record.model_type!r} config={config.model_type!r}")
     if record.model_status != "ACTIVE":
         mismatches.append(f"model_status db={record.model_status!r} expected='ACTIVE'")
 
     if mismatches:
         raise ModelRegistryError(
-            f"registered model {config.model_key!r} does not match config: "
+            f"registered model {config.model_name!r} does not match config: "
             + "; ".join(mismatches)
         )
     return record
 
 
-def register_pricing_model(
-    con: _Executable, config: ModelBuildConfig, *, created_by: str
-) -> int:
+def register_pricing_model(con: _Executable, config: ModelBuildConfig, *, created_by: str) -> int:
     con.execute(
         text(
             """
             INSERT INTO pricing.PRICING_MODEL (
-                model_key,
+                model_name,
                 model_label,
                 target_name,
                 model_type,
@@ -113,7 +101,7 @@ def register_pricing_model(
                 created_by
             )
             SELECT
-                :model_key,
+                :model_name,
                 :model_label,
                 :target_name,
                 :model_type,
@@ -122,12 +110,12 @@ def register_pricing_model(
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM pricing.PRICING_MODEL WITH (UPDLOCK, HOLDLOCK)
-                WHERE model_key = :model_key
+                WHERE model_name = :model_name
             );
             """
         ),
         {
-            "model_key": config.model_key,
+            "model_name": config.model_name,
             "model_label": config.model_label,
             "target_name": config.target_name,
             "model_type": config.model_type,
@@ -140,10 +128,10 @@ def register_pricing_model(
                 """
                 SELECT model_id
                 FROM pricing.PRICING_MODEL
-                WHERE model_key = :model_key
+                WHERE model_name = :model_name
                 """
             ),
-            {"model_key": config.model_key},
+            {"model_name": config.model_name},
         ).scalar_one()
     )
 
@@ -151,7 +139,7 @@ def register_pricing_model(
 def _ensure_pricing_model_on_connection(
     con: _Executable,
     *,
-    model_key: str,
+    model_name: str,
     target_name: str,
     model_type: str,
     created_by: str,
@@ -159,7 +147,7 @@ def _ensure_pricing_model_on_connection(
     model_status: str = "ACTIVE",
 ) -> int:
     params = {
-        "model_key": model_key,
+        "model_name": model_name,
         "model_label": model_label,
         "target_name": target_name,
         "model_type": model_type,
@@ -172,14 +160,14 @@ def _ensure_pricing_model_on_connection(
                 MERGE pricing.PRICING_MODEL WITH (HOLDLOCK) AS tgt
                 USING (
                     SELECT
-                        :model_key AS model_key,
+                        :model_name AS model_name,
                         :model_label AS model_label,
                         :target_name AS target_name,
                         :model_type AS model_type,
                         :model_status AS model_status,
                         :created_by AS created_by
                 ) AS src
-                ON tgt.model_key = src.model_key
+                ON tgt.model_name = src.model_name
                 WHEN MATCHED THEN
                     UPDATE SET
                         model_label = COALESCE(src.model_label, tgt.model_label),
@@ -188,7 +176,7 @@ def _ensure_pricing_model_on_connection(
                         model_status = src.model_status
                 WHEN NOT MATCHED THEN
                     INSERT (
-                        model_key,
+                        model_name,
                         model_label,
                         target_name,
                         model_type,
@@ -196,7 +184,7 @@ def _ensure_pricing_model_on_connection(
                         created_by
                     )
                     VALUES (
-                        src.model_key,
+                        src.model_name,
                         src.model_label,
                         src.target_name,
                         src.model_type,
@@ -213,10 +201,10 @@ def _ensure_pricing_model_on_connection(
                 """
                 SELECT model_id
                 FROM pricing.PRICING_MODEL
-                WHERE model_key = :model_key
+                WHERE model_name = :model_name
                 """
             ),
-            {"model_key": model_key},
+            {"model_name": model_name},
         ).scalar_one()
     )
 
@@ -224,7 +212,7 @@ def _ensure_pricing_model_on_connection(
 def ensure_pricing_model(
     bind: _Executable | _Beginable,
     *,
-    model_key: str,
+    model_name: str,
     target_name: str,
     model_type: str,
     created_by: str,
@@ -234,7 +222,7 @@ def ensure_pricing_model(
     if hasattr(bind, "execute"):
         return _ensure_pricing_model_on_connection(
             bind,  # type: ignore[arg-type]
-            model_key=model_key,
+            model_name=model_name,
             target_name=target_name,
             model_type=model_type,
             created_by=created_by,
@@ -245,7 +233,7 @@ def ensure_pricing_model(
     with bind.begin() as con:  # type: ignore[union-attr]
         return _ensure_pricing_model_on_connection(
             con,
-            model_key=model_key,
+            model_name=model_name,
             target_name=target_name,
             model_type=model_type,
             created_by=created_by,

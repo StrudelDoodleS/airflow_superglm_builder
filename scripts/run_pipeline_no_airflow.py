@@ -21,7 +21,7 @@ from pricing_pipeline.orchestration.pipeline import run_training_export_publish 
 from pricing_models.registry import (  # noqa: E402
     get_model_config,
     get_model_spec,
-    model_spec_keys,
+    model_spec_names,
 )
 
 
@@ -71,9 +71,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--manifest-id", default=None)
     parser.add_argument(
-        "--model-key",
+        "--model-name",
         default="MTPL_FREQ",
-        choices=model_spec_keys(),
+        choices=model_spec_names(),
         help="Registered model spec to train and publish.",
     )
     parser.add_argument("--dag-id", default="no_docker_local")
@@ -97,8 +97,8 @@ def main() -> None:
             runtime.ensure_database(settings.pricing_database)
 
     engine = runtime.get_engine()
-    model_spec = get_model_spec(args.model_key)
-    model_config = get_model_config(args.model_key)
+    model_spec = get_model_spec(args.model_name)
+    model_config = get_model_config(args.model_name)
 
     if not args.skip_schema_apply:
         applied = apply_migrations(engine, _schema_dir())

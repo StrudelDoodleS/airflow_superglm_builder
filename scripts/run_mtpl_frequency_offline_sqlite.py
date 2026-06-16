@@ -241,13 +241,13 @@ def register_offline_model(engine, *, created_by: str) -> int:
             text(
                 """
                 INSERT INTO pricing.PRICING_MODEL (
-                    model_key, model_label, target_name, model_type,
+                    model_name, model_label, target_name, model_type,
                     model_status, created_by
                 ) VALUES (
-                    :model_key, :model_label, :target_name, :model_type,
+                    :model_name, :model_label, :target_name, :model_type,
                     :model_status, :created_by
                 )
-                ON CONFLICT(model_key) DO UPDATE SET
+                ON CONFLICT(model_name) DO UPDATE SET
                     model_label = excluded.model_label,
                     target_name = excluded.target_name,
                     model_type = excluded.model_type,
@@ -255,7 +255,7 @@ def register_offline_model(engine, *, created_by: str) -> int:
                 """
             ),
             {
-                "model_key": MODEL_CONFIG.model_key,
+                "model_name": MODEL_CONFIG.model_name,
                 "model_label": MODEL_CONFIG.model_label,
                 "target_name": MODEL_CONFIG.target_name,
                 "model_type": MODEL_CONFIG.model_type,
@@ -269,10 +269,10 @@ def register_offline_model(engine, *, created_by: str) -> int:
                     """
                     SELECT model_id
                     FROM pricing.PRICING_MODEL
-                    WHERE model_key = :model_key
+                    WHERE model_name = :model_name
                     """
                 ),
-                {"model_key": MODEL_CONFIG.model_key},
+                {"model_name": MODEL_CONFIG.model_name},
             ).scalar_one()
         )
 
@@ -832,7 +832,7 @@ def insert_offline_model_run_rows(
                 "manifest_id": completed_build["manifest_id"],
                 "split_set_id": completed_build.get("split_set_id"),
                 "rate_package_id": rate_package_id,
-                "model_name": MODEL_CONFIG.model_key,
+                "model_name": MODEL_CONFIG.model_name,
                 "rating_workbook_path": completed_build["rating_workbook_path"],
                 "model_artifact_path": completed_build.get("model_artifact_path"),
                 "effective_from": completed_build["effective_from"],
@@ -921,7 +921,7 @@ def run_mtpl_frequency_offline_sqlite(
         "effective_from": effective,
         "data_as_of_date": effective,
     }
-    export_id = build_export_id(MODEL_CONFIG.model_key, run_key)
+    export_id = build_export_id(MODEL_CONFIG.model_name, run_key)
     model_version = "v1"
 
     raw = read_prepared_source(engine, prepared)
@@ -968,7 +968,7 @@ def run_mtpl_frequency_offline_sqlite(
         engine,
         workbook_path=Path(rating_workbook_path),
         export_id=export_id,
-        model_name=MODEL_CONFIG.model_key,
+        model_name=MODEL_CONFIG.model_name,
         model_version=model_version,
         effective_from=effective,
         target_name=MODEL_CONFIG.target_name,

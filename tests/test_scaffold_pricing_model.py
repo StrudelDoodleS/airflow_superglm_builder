@@ -10,7 +10,7 @@ from scripts.scaffold_pricing_model import ScaffoldOptions, scaffold_pricing_mod
 def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     result = scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             model_label="My model",
             target_name="derived_target",
             root=tmp_path,
@@ -33,7 +33,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert not hasattr(result, "registry_instructions")
 
     model_toml = (package_dir / "model.toml").read_text(encoding="utf-8")
-    assert 'model_key = "MY_MODEL"' in model_toml
+    assert 'model_name = "MY_MODEL"' in model_toml
     assert 'model_label = "My model"' in model_toml
     assert 'target_name = "derived_target"' in model_toml
     assert 'deployment_slot = "MY_MODEL_UAT"' in model_toml
@@ -123,7 +123,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
 def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
     result = scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             model_label="My model",
             target_name="derived_target",
             root=tmp_path,
@@ -165,7 +165,7 @@ def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
 def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
     scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="CUSTOM_MODEL",
+            model_name="CUSTOM_MODEL",
             model_label="Custom model",
             target_name="target",
             root=tmp_path,
@@ -173,7 +173,7 @@ def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
     )
     scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="FACTORY_MODEL",
+            model_name="FACTORY_MODEL",
             model_label="Factory model",
             target_name="target",
             root=tmp_path,
@@ -181,18 +181,18 @@ def test_custom_scaffold_is_config_discovered_but_not_spec_runnable(tmp_path):
         )
     )
 
-    from pricing_models.registry import get_model_config, model_keys, model_spec_keys
+    from pricing_models.registry import get_model_config, model_names, model_spec_names
 
     models_root = tmp_path / "pricing_models"
 
-    assert model_keys(models_root=models_root) == ("CUSTOM_MODEL", "FACTORY_MODEL")
-    assert get_model_config("CUSTOM_MODEL", models_root=models_root).model_key == "CUSTOM_MODEL"
-    assert model_spec_keys(models_root=models_root) == ("FACTORY_MODEL",)
+    assert model_names(models_root=models_root) == ("CUSTOM_MODEL", "FACTORY_MODEL")
+    assert get_model_config("CUSTOM_MODEL", models_root=models_root).model_name == "CUSTOM_MODEL"
+    assert model_spec_names(models_root=models_root) == ("FACTORY_MODEL",)
 
 
 def test_scaffold_pricing_model_skips_existing_files_and_recreates_missing_files(tmp_path):
     options = ScaffoldOptions(
-        model_key="MY_MODEL",
+        model_name="MY_MODEL",
         model_label="My model",
         target_name="target",
         root=tmp_path,
@@ -224,7 +224,7 @@ def test_scaffold_pricing_model_skips_existing_files_and_recreates_missing_files
 
 def test_scaffold_pricing_model_force_overwrites_existing_files(tmp_path):
     options = ScaffoldOptions(
-        model_key="MY_MODEL",
+        model_name="MY_MODEL",
         model_label="My model",
         target_name="target",
         root=tmp_path,
@@ -235,7 +235,7 @@ def test_scaffold_pricing_model_force_overwrites_existing_files(tmp_path):
 
     result = scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             model_label="My model",
             target_name="target",
             root=tmp_path,
@@ -250,7 +250,7 @@ def test_scaffold_pricing_model_force_overwrites_existing_files(tmp_path):
 def test_scaffold_pricing_model_accepts_explicit_names(tmp_path):
     result = scaffold_pricing_model(
         ScaffoldOptions(
-            model_key="WORK_FREQ",
+            model_name="WORK_FREQ",
             model_label="Work frequency",
             target_name="claim_count",
             model_type="superglm_tweedie",
@@ -287,7 +287,7 @@ def test_scaffold_pricing_model_script_help_runs_without_pythonpath():
     )
 
     assert result.returncode == 0
-    assert "--model-key" in result.stdout
+    assert "--model-name" in result.stdout
     assert "--target-name" in result.stdout
     assert "--template" in result.stdout
     assert "ModuleNotFoundError" not in result.stderr
@@ -298,7 +298,7 @@ def test_scaffold_pricing_model_script_reports_toml_discovery(tmp_path):
         [
             sys.executable,
             "scripts/scaffold_pricing_model.py",
-            "--model-key",
+            "--model-name",
             "SCRIPT_MODEL",
             "--target-name",
             "target",

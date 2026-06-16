@@ -308,7 +308,7 @@ model development, most edits should be under `pricing_models/`.
 
 ```text
 pricing_models/<model_name>/
-  model.toml   # model key, label, target, deployment slot, validation split
+  model.toml   # model name, label, target, deployment slot, validation split
   spec.py       # loads MODEL_CONFIG from model.toml
   sql/          # optional model-local SQL scripts used by data.py
   data.py       # source reads/staging and small run metadata
@@ -328,7 +328,7 @@ Create the starting files with the scaffold helper:
 
 ```bash
 uv run python scripts/scaffold_pricing_model.py \
-  --model-key MY_MODEL \
+  --model-name MY_MODEL \
   --model-label "My model" \
   --target-name derived_target
 ```
@@ -474,13 +474,13 @@ run_id = context["run_id"]
 # - new export_id gets the next vN from SQL package history
 # - effective_from from Airflow logical date, a DAG param, or business as-of date
 # - data_as_of_date from the source data snapshot/as-at date
-# - export_id from model_key + Airflow run_id, so reruns are idempotent
+# - export_id from model_name + Airflow run_id, so reruns are idempotent
 effective_from = effective_from_for_run(logical_date)
 data_as_of_date = prepared["data_as_of_date"]
-export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
+export_id = build_export_id(MODEL_CONFIG.model_name, run_id)
 model_version = resolve_model_version_for_export(
     engine,
-    model_key=MODEL_CONFIG.model_key,
+    model_name=MODEL_CONFIG.model_name,
     export_id=export_id,
 )
 split_indices = ...  # The exact folds used by your fitting/validation code.
@@ -889,7 +889,7 @@ Convenience views expose the current state:
 ## Rate Package Lifecycle
 
 Production model builds use stable model metadata from each model's
-`model.toml`. That config records housekeeping identity such as `model_key`,
+`model.toml`. That config records housekeeping identity such as `model_name`,
 `target_name`, `model_type`, and the default deployment slot; SQL Server owns
 the generated `model_id`.
 
@@ -900,7 +900,7 @@ candidate rate packages, but they do not move live deployment pointers by
 default.
 
 Live deployments happen through the generic manual DAG
-`pricing_deploy_rate_package`. The deploy run requires `model_key`, exactly one
+`pricing_deploy_rate_package`. The deploy run requires `model_name`, exactly one
 reviewed package selector (`rate_package_id` or `package_version`),
 `deployed_by`, and `deployment_reason` as the audit reason.
 `deployment_slot` is optional and defaults to the model config deployment slot.
@@ -959,7 +959,7 @@ Example SQL call:
 
 ```sql
 EXEC pricing.PREDICT_CURRENT_RATE
-    @model_key = N'MTPL_FREQ',
+    @model_name = N'MTPL_FREQ',
     @deployment_slot = N'MTPL_FREQ_UAT',
     @exposure = 0.75,
     @features_json = N'{
@@ -983,7 +983,7 @@ the same rows, and fails if the results exceed tolerance:
 
 ```bash
 uv run python scripts/validate_sql_prediction_against_superglm.py \
-  --model-key MTPL_FREQ \
+  --model-name MTPL_FREQ \
   --deployment-slot MTPL_FREQ_UAT \
   --limit 1000 \
   --rtol 1e-4 \
@@ -1025,13 +1025,13 @@ The seeder publishes:
 Useful inspection queries:
 
 ```sql
-SELECT model_id, model_key, target_name, model_type, model_status
+SELECT model_id, model_name, target_name, model_type, model_status
 FROM pricing.PRICING_MODEL
 ORDER BY model_id;
 
-SELECT model_key, deployment_slot, rate_package_id, model_version, package_version
+SELECT model_name, deployment_slot, rate_package_id, model_version, package_version
 FROM pricing.V_CURRENT_RATE_PACKAGE
-ORDER BY model_key, deployment_slot;
+ORDER BY model_name, deployment_slot;
 
 SELECT model_name, model_version, package_version, package_status
 FROM pricing.PRICING_RATE_PACKAGE

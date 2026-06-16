@@ -75,7 +75,7 @@ def test_existing_model_version_for_export_returns_stored_version_exactly():
     assert (
         existing_model_version_for_export(
             engine,
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             export_id="my_model__run_1",
         )
         == "20260605"
@@ -87,30 +87,30 @@ def test_model_version_queries_respect_configured_pricing_schema():
 
     existing_model_version_for_export(
         engine,
-        model_key="MY_MODEL",
+        model_name="MY_MODEL",
         export_id="my_model__run_1",
     )
 
     sql, params = engine.connection.calls[0]
     assert "FROM python_pricing.PRICING_RATE_PACKAGE AS rp" in sql
     assert "JOIN python_pricing.PRICING_MODEL AS pm" in sql
-    assert params == {"model_key": "MY_MODEL", "export_id": "my_model__run_1"}
+    assert params == {"model_name": "MY_MODEL", "export_id": "my_model__run_1"}
 
 
 def test_next_trained_model_version_ignores_non_vn_history_and_child_packages():
     engine = FakeEngine(versions=["v2", "20260605", "v10", "manual"])
 
-    assert next_trained_model_version(engine, model_key="MY_MODEL") == "v11"
+    assert next_trained_model_version(engine, model_name="MY_MODEL") == "v11"
 
     sql, params = engine.connection.calls[0]
     assert "rp.parent_rate_package_id IS NULL" in sql
-    assert params == {"model_key": "MY_MODEL"}
+    assert params == {"model_name": "MY_MODEL"}
 
 
 def test_next_trained_model_version_defaults_to_v1_when_no_vn_history():
     engine = FakeEngine(versions=["20260605", "manual"])
 
-    assert next_trained_model_version(engine, model_key="MY_MODEL") == "v1"
+    assert next_trained_model_version(engine, model_name="MY_MODEL") == "v1"
 
 
 def test_resolve_model_version_for_export_reuses_existing_export_version():
@@ -119,7 +119,7 @@ def test_resolve_model_version_for_export_reuses_existing_export_version():
     assert (
         resolve_model_version_for_export(
             engine,
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             export_id="my_model__run_1",
         )
         == "v7"
@@ -133,7 +133,7 @@ def test_resolve_model_version_for_export_allocates_next_version_for_new_export(
     assert (
         resolve_model_version_for_export(
             engine,
-            model_key="MY_MODEL",
+            model_name="MY_MODEL",
             export_id="my_model__run_2",
         )
         == "v5"
@@ -144,10 +144,10 @@ def test_resolve_model_version_for_export_allocates_next_version_for_new_export(
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"model_key": None, "export_id": "export-1"}, "model_key"),
-        ({"model_key": "", "export_id": "export-1"}, "model_key"),
-        ({"model_key": "MY_MODEL", "export_id": "   "}, "export_id"),
-        ({"model_key": "MY_MODEL", "export_id": None}, "export_id"),
+        ({"model_name": None, "export_id": "export-1"}, "model_name"),
+        ({"model_name": "", "export_id": "export-1"}, "model_name"),
+        ({"model_name": "MY_MODEL", "export_id": "   "}, "export_id"),
+        ({"model_name": "MY_MODEL", "export_id": None}, "export_id"),
     ],
 )
 def test_existing_model_version_for_export_rejects_blank_identity(kwargs, message):

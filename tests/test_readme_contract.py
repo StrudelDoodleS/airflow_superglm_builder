@@ -47,7 +47,7 @@ RATE_PACKAGE_LIFECYCLE_STRINGS = [
     "model.toml",
     "ModelPublisher",
     "pricing_deploy_rate_package",
-    "model_key",
+    "model_name",
     "rate_package_id",
     "package_version",
     "deployment_slot",
@@ -58,7 +58,7 @@ RATE_PACKAGE_LIFECYCLE_STRINGS = [
 ]
 
 RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS = [
-    "The deploy run requires `model_key`, exactly one",
+    "The deploy run requires `model_name`, exactly one",
     "`rate_package_id` or `package_version`",
     "`deployed_by`, and `deployment_reason`",
     "`deployment_slot` is optional",

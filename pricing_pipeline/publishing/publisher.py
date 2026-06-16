@@ -36,22 +36,18 @@ def _validate_export_matches_config(
 ) -> None:
     mismatches: list[str] = []
     if int(export_result.model_id) != int(model_id):
+        mismatches.append(f"model_id export={export_result.model_id!r} config={model_id!r}")
+    if export_result.model_name != config.model_name:
         mismatches.append(
-            f"model_id export={export_result.model_id!r} config={model_id!r}"
-        )
-    if export_result.model_key != config.model_key:
-        mismatches.append(
-            f"model_key export={export_result.model_key!r} config={config.model_key!r}"
+            f"model_name export={export_result.model_name!r} config={config.model_name!r}"
         )
     if export_result.target_name != config.target_name:
         mismatches.append(
-            f"target_name export={export_result.target_name!r} "
-            f"config={config.target_name!r}"
+            f"target_name export={export_result.target_name!r} config={config.target_name!r}"
         )
     if export_result.model_type != config.model_type:
         mismatches.append(
-            f"model_type export={export_result.model_type!r} "
-            f"config={config.model_type!r}"
+            f"model_type export={export_result.model_type!r} config={config.model_type!r}"
         )
     if export_result.deployment_slot != config.deployment_slot:
         mismatches.append(
@@ -141,7 +137,7 @@ class ModelPublisher:
             self.engine,
             workbook_path=Path(export_result.rating_workbook_path),
             export_id=export_result.export_id,
-            model_name=self.config.model_key,
+            model_name=self.config.model_name,
             model_version=export_result.model_version,
             target_name=self.config.target_name,
             model_type=self.config.model_type,

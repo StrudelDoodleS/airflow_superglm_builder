@@ -165,7 +165,7 @@ class CompletedModelBuild(BaseModel):
 @dataclass(frozen=True)
 class CompletedModelPublishResult:
     model_id: int
-    model_key: str
+    model_name: str
     model_version: str
     manifest_id: str
     split_set_id: str | None
@@ -194,11 +194,11 @@ def _existing_workbook(path_value: str | None) -> str:
     return str(path)
 
 
-def _resolve_export_id(model_key: str, export_id: str | None, airflow_run_id: str | None) -> str:
+def _resolve_export_id(model_name: str, export_id: str | None, airflow_run_id: str | None) -> str:
     if export_id is not None and str(export_id).strip():
         return str(export_id).strip()
     if airflow_run_id is not None and str(airflow_run_id).strip():
-        return build_export_id(model_key, str(airflow_run_id).strip())
+        return build_export_id(model_name, str(airflow_run_id).strip())
     raise CompletedModelBuildError("export_id or airflow_run_id is required")
 
 
@@ -249,7 +249,7 @@ def publish_completed_model_build(
         if build.airflow_run_id is not None and str(build.airflow_run_id).strip()
         else None
     )
-    export_id = _resolve_export_id(model_config.model_key, build.export_id, airflow_run_id)
+    export_id = _resolve_export_id(model_config.model_name, build.export_id, airflow_run_id)
     if airflow_run_id is None:
         airflow_run_id = export_id
     resolved_package_status = _required_text(
@@ -279,7 +279,7 @@ def publish_completed_model_build(
 
     export = ModelExportResult(
         model_id=model_id,
-        model_key=model_config.model_key,
+        model_name=model_config.model_name,
         model_version=model_version,
         model_type=model_config.model_type,
         target_name=model_config.target_name,
@@ -307,7 +307,7 @@ def publish_completed_model_build(
 
     return CompletedModelPublishResult(
         model_id=int(model_id),
-        model_key=model_config.model_key,
+        model_name=model_config.model_name,
         model_version=model_version,
         manifest_id=manifest_id,
         split_set_id=split_set_id,
@@ -345,7 +345,7 @@ def publish_completed_model_build_task(
         _fill_if_blank(payload, "created_by", created_by)
         if not payload.get("export_id") and payload.get("airflow_run_id"):
             payload["export_id"] = build_export_id(
-                model_config.model_key,
+                model_config.model_name,
                 str(payload["airflow_run_id"]),
             )
 

@@ -93,7 +93,7 @@ def test_no_airflow_runner_help_runs_without_pythonpath():
     )
 
     assert result.returncode == 0
-    assert "--model-key" in result.stdout
+    assert "--model-name" in result.stdout
     assert "--ensure-database" in result.stdout
     assert "--skip-schema-apply" in result.stdout
     assert "--skip-raw-load" in result.stdout
@@ -136,7 +136,7 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
             skip_raw_load=True,
             replace_raw=False,
             manifest_id="manifest-1",
-            model_key="MTPL_FREQ",
+            model_name="MTPL_FREQ",
             dag_id="no_docker_local",
             airflow_run_id="manual__1",
             logical_date="2026-05-27",
@@ -192,19 +192,19 @@ def test_no_airflow_runner_passes_model_config(monkeypatch, capsys):
     }
 
 
-def test_no_airflow_runner_model_key_choices_are_spec_runnable_only(monkeypatch):
+def test_no_airflow_runner_model_name_choices_are_spec_runnable_only(monkeypatch):
     from scripts import run_pipeline_no_airflow
 
     monkeypatch.setattr(
         run_pipeline_no_airflow,
-        "model_spec_keys",
+        "model_spec_names",
         lambda: ("FACTORY_MODEL",),
     )
 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["run_pipeline_no_airflow.py", "--model-key", "CUSTOM_MODEL"],
+        ["run_pipeline_no_airflow.py", "--model-name", "CUSTOM_MODEL"],
     )
     with pytest.raises(SystemExit):
         run_pipeline_no_airflow.parse_args()
@@ -212,9 +212,9 @@ def test_no_airflow_runner_model_key_choices_are_spec_runnable_only(monkeypatch)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["run_pipeline_no_airflow.py", "--model-key", "FACTORY_MODEL"],
+        ["run_pipeline_no_airflow.py", "--model-name", "FACTORY_MODEL"],
     )
-    assert run_pipeline_no_airflow.parse_args().model_key == "FACTORY_MODEL"
+    assert run_pipeline_no_airflow.parse_args().model_name == "FACTORY_MODEL"
 
 
 def test_mtpl_custom_runner_help_runs_without_pythonpath():

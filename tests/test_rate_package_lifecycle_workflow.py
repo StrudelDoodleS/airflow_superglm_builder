@@ -82,7 +82,7 @@ class LifecycleState:
 
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -110,7 +110,7 @@ def spec() -> ModelSpec:
         )
 
     return ModelSpec(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         target_name="ClaimNb",
         model_type="superglm_poisson",
         experiment_name="pricing-mtpl-frequency",
@@ -145,7 +145,6 @@ def snapshot_for(package: dict) -> RatePackageSnapshot:
             "rate_package_id": package["rate_package_id"],
             "parent_rate_package_id": package.get("parent_rate_package_id"),
             "model_id": 17,
-            "model_key": "MTPL_FREQ",
             "model_name": "MTPL_FREQ",
             "model_version": package["model_version"],
             "package_version": package["package_version"],
@@ -406,10 +405,7 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
         "20260501",
         "20260508",
     ]
-    assert [
-        value for key, value in fake_mlflow.params
-        if key == "row_count"
-    ] == [2, 4]
+    assert [value for key, value in fake_mlflow.params if key == "row_count"] == [2, 4]
     assert [run["rate_package_id"] for run in state.recorded_runs] == [101, 102]
     assert [
         (deployment.rate_package_id, deployment.previous_rate_package_id)

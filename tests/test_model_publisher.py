@@ -16,7 +16,7 @@ from pricing_pipeline.publishing.publisher import ModelPublisher
 
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -30,7 +30,7 @@ def test_model_publisher_stores_engine_and_config():
     publisher = ModelPublisher(engine, config())
 
     assert publisher.engine is engine
-    assert publisher.config.model_key == "MTPL_FREQ"
+    assert publisher.config.model_name == "MTPL_FREQ"
 
 
 def test_rate_package_selector_requires_one_selector():
@@ -126,10 +126,12 @@ def test_model_publisher_load_rate_package_delegates(monkeypatch):
 
     monkeypatch.setattr(
         "pricing_pipeline.publishing.publisher.load_rate_package_snapshot",
-        lambda engine_arg, config_arg, selector_arg: calls.append(
-            (engine_arg, config_arg, selector_arg),
-        )
-        or expected,
+        lambda engine_arg, config_arg, selector_arg: (
+            calls.append(
+                (engine_arg, config_arg, selector_arg),
+            )
+            or expected
+        ),
     )
 
     assert publisher.load_rate_package(selector) == expected
@@ -233,7 +235,7 @@ def test_model_publisher_publish_training_export_rejects_mismatched_export_ident
     engine = object()
     export = ModelExportResult(
         model_id=17,
-        model_key="OTHER_MODEL",
+        model_name="OTHER_MODEL",
         model_version="20260527",
         model_type="superglm_poisson",
         target_name="ClaimNb",
@@ -268,7 +270,7 @@ def test_model_publisher_publish_training_export_rejects_mismatched_export_ident
         ),
     )
 
-    with pytest.raises(ModelRegistryError, match="model_key"):
+    with pytest.raises(ModelRegistryError, match="model_name"):
         ModelPublisher(engine, config()).publish_training_export(export)
 
 
@@ -280,7 +282,7 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
     engine = object()
     export = ModelExportResult(
         model_id=17,
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_version="20260527",
         model_type="superglm_poisson",
         target_name="ClaimNb",

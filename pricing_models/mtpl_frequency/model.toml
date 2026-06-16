@@ -1,4 +1,4 @@
-model_key = "MTPL_FREQ"
+model_name = "MTPL_FREQ"
 model_label = "Motor frequency"
 target_name = "ClaimNb"
 model_type = "superglm_poisson"
