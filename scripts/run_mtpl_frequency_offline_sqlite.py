@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,7 @@ from pricing_pipeline.orchestration.completed_build_helpers import (  # noqa: E4
 )
 from pricing_pipeline.orchestration.run_context import run_key_for_value  # noqa: E402
 from pricing_pipeline.publishing.rating_export import build_export_id  # noqa: E402
+from pricing_pipeline.publishing.staging import stage_rating_export  # noqa: E402
 
 
 DEFAULT_DB_ROOT = Path("state/offline/mtpl_frequency")
@@ -59,6 +61,15 @@ INSPECTABLE_TABLES = {
         "CV_FOLD",
         "CV_FOLD_METRIC",
         "PRICING_MODEL",
+        "PRICING_FEATURE",
+        "PRICING_FEATURE_LEVEL_SET",
+        "PRICING_FEATURE_LEVEL",
+        "PRICING_TERM",
+        "PRICING_TERM_FEATURE",
+        "PRICING_RATE_CELL",
+        "PRICING_RATE_CELL_LEVEL",
+        "PRICING_COMPILED_RATE_CELL",
+        "PRICING_COMPILED_1D_RATE_BAND",
         "MODEL_RUN",
         "PRICING_RATE_PACKAGE",
     ],
@@ -224,32 +235,26 @@ def seed_fremtpl_raw(
     return int(len(frame))
 
 
-def insert_offline_lifecycle_rows(
-    engine,
-    *,
-    completed_build: dict[str, Any],
-    created_by: str,
-) -> dict[str, str]:
-    model_id = MODEL_CONFIG.model_key
-    export_id = str(completed_build["export_id"])
-    model_run_id = f"{export_id}__run"
-    rate_package_id = f"{export_id}__package"
-    metrics = completed_build.get("metrics") or {}
+def register_offline_model(engine, *, created_by: str) -> int:
     with engine.begin() as con:
         con.execute(
             text(
                 """
-                INSERT OR REPLACE INTO pricing.PRICING_MODEL (
-                    model_id, model_key, model_label, target_name, model_type,
+                INSERT INTO pricing.PRICING_MODEL (
+                    model_key, model_label, target_name, model_type,
                     model_status, created_by
                 ) VALUES (
-                    :model_id, :model_key, :model_label, :target_name, :model_type,
+                    :model_key, :model_label, :target_name, :model_type,
                     :model_status, :created_by
                 )
+                ON CONFLICT(model_key) DO UPDATE SET
+                    model_label = excluded.model_label,
+                    target_name = excluded.target_name,
+                    model_type = excluded.model_type,
+                    model_status = excluded.model_status
                 """
             ),
             {
-                "model_id": model_id,
                 "model_key": MODEL_CONFIG.model_key,
                 "model_label": MODEL_CONFIG.model_label,
                 "target_name": MODEL_CONFIG.target_name,
@@ -258,27 +263,266 @@ def insert_offline_lifecycle_rows(
                 "created_by": created_by,
             },
         )
-        con.execute(
+        return int(
+            con.execute(
+                text(
+                    """
+                    SELECT model_id
+                    FROM pricing.PRICING_MODEL
+                    WHERE model_key = :model_key
+                    """
+                ),
+                {"model_key": MODEL_CONFIG.model_key},
+            ).scalar_one()
+        )
+
+
+def _scalar_int(value: object) -> int:
+    if value is None:
+        raise ValueError("expected SQLite insert row id")
+    return int(value)
+
+
+def _insert_feature(con, row: Mapping[str, Any]) -> int:
+    feature_name = str(row["feature_name"])
+    existing = con.execute(
+        text("SELECT feature_id FROM pricing.PRICING_FEATURE WHERE feature_name = :name"),
+        {"name": feature_name},
+    ).scalar_one_or_none()
+    if existing is not None:
+        return int(existing)
+
+    result = con.execute(
+        text(
+            """
+            INSERT INTO pricing.PRICING_FEATURE (
+                feature_name, feature_value_type, is_ordered
+            ) VALUES (
+                :feature_name, :feature_value_type, :is_ordered
+            )
+            """
+        ),
+        {
+            "feature_name": feature_name,
+            "feature_value_type": row["feature_value_type"],
+            "is_ordered": 1 if row["level_set_type"] in {"NUMERIC_BAND", "SPLINE_GRID_1D"} else 0,
+        },
+    )
+    return _scalar_int(result.lastrowid)
+
+
+def _insert_level_set(con, *, model_id: int, feature_id: int, row: Mapping[str, Any]) -> int:
+    params = {
+        "model_id": model_id,
+        "feature_id": feature_id,
+        "level_set_name": row["level_set_name"],
+    }
+    existing = con.execute(
+        text(
+            """
+            SELECT level_set_id
+            FROM pricing.PRICING_FEATURE_LEVEL_SET
+            WHERE model_id = :model_id
+              AND feature_id = :feature_id
+              AND level_set_name = :level_set_name
+            """
+        ),
+        params,
+    ).scalar_one_or_none()
+    if existing is not None:
+        return int(existing)
+
+    level_set_type = str(row["level_set_type"])
+    if level_set_type == "SPLINE_GRID_1D":
+        binning_strategy = "SPLINE_EVAL_GRID"
+    elif level_set_type == "NUMERIC_BAND":
+        binning_strategy = "EXPLICIT_BANDS"
+    else:
+        binning_strategy = "EXPLICIT_LEVELS"
+
+    result = con.execute(
+        text(
+            """
+            INSERT INTO pricing.PRICING_FEATURE_LEVEL_SET (
+                model_id, feature_id, level_set_name, level_set_type,
+                binning_strategy, grid_width
+            ) VALUES (
+                :model_id, :feature_id, :level_set_name, :level_set_type,
+                :binning_strategy, NULL
+            )
+            """
+        ),
+        {
+            **params,
+            "level_set_type": level_set_type,
+            "binning_strategy": binning_strategy,
+        },
+    )
+    return _scalar_int(result.lastrowid)
+
+
+def _insert_feature_level(con, *, level_set_id: int, row: Mapping[str, Any]) -> int:
+    params = {"level_set_id": level_set_id, "level_code": row["level_code"]}
+    existing = con.execute(
+        text(
+            """
+            SELECT feature_level_id
+            FROM pricing.PRICING_FEATURE_LEVEL
+            WHERE level_set_id = :level_set_id
+              AND level_code = :level_code
+            """
+        ),
+        params,
+    ).scalar_one_or_none()
+    if existing is not None:
+        return int(existing)
+
+    result = con.execute(
+        text(
+            """
+            INSERT INTO pricing.PRICING_FEATURE_LEVEL (
+                level_set_id, level_code, level_label, order_index, lower_bound,
+                upper_bound, representative_value, is_missing, is_other
+            ) VALUES (
+                :level_set_id, :level_code, :level_label, :order_index, :lower_bound,
+                :upper_bound, :representative_value, :is_missing, :is_other
+            )
+            """
+        ),
+        {
+            "level_set_id": level_set_id,
+            "level_code": row["level_code"],
+            "level_label": row["level_label"],
+            "order_index": row["order_index"],
+            "lower_bound": row["lower_bound"],
+            "upper_bound": row["upper_bound"],
+            "representative_value": row["representative_value"],
+            "is_missing": int(row["is_missing"] or 0),
+            "is_other": int(row["is_other"] or 0),
+        },
+    )
+    return _scalar_int(result.lastrowid)
+
+
+def publish_offline_rating_package(
+    engine,
+    *,
+    completed_build: dict[str, Any],
+    model_id: int,
+    created_by: str,
+) -> dict[str, int | bool]:
+    export_id = str(completed_build["export_id"])
+    with engine.begin() as con:
+        export_row = (
+            con.execute(
+                text(
+                    """
+                    SELECT
+                        export_id,
+                        model_id,
+                        model_name,
+                        model_version,
+                        base_rate,
+                        effective_from_date,
+                        effective_to_date,
+                        source_file
+                    FROM pricing_stg.STG_RATING_EXPORT
+                    WHERE export_id = :export_id
+                    """
+                ),
+                {"export_id": export_id},
+            )
+            .mappings()
+            .one()
+        )
+        existing = (
+            con.execute(
+                text(
+                    """
+                    SELECT rate_package_id, package_version
+                    FROM pricing.PRICING_RATE_PACKAGE
+                    WHERE model_id = :model_id
+                      AND source_export_id = :export_id
+                    """
+                ),
+                {"model_id": model_id, "export_id": export_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is not None:
+            return {
+                "rate_package_id": int(existing["rate_package_id"]),
+                "package_version": int(existing["package_version"]),
+                "was_existing": True,
+            }
+
+        package_version = (
+            int(
+                con.execute(
+                    text(
+                        """
+                        SELECT COALESCE(MAX(package_version), 0) + 1
+                        FROM pricing.PRICING_RATE_PACKAGE
+                        WHERE model_id = :model_id
+                        """
+                    ),
+                    {"model_id": model_id},
+                ).scalar_one()
+            )
+            or 1
+        )
+        package_result = con.execute(
             text(
                 """
                 INSERT OR REPLACE INTO pricing.PRICING_RATE_PACKAGE (
-                    rate_package_id, model_id, model_version, package_status,
-                    source_export_id, effective_from, manifest_id, split_set_id,
-                    rating_workbook_path, model_artifact_path, created_by
+                    parent_rate_package_id,
+                    model_id,
+                    model_name,
+                    model_version,
+                    package_version,
+                    base_rate,
+                    effective_from_date,
+                    effective_to_date,
+                    package_status,
+                    source_export_id,
+                    source_file,
+                    manifest_id,
+                    split_set_id,
+                    rating_workbook_path,
+                    model_artifact_path,
+                    created_by
                 ) VALUES (
-                    :rate_package_id, :model_id, :model_version, :package_status,
-                    :source_export_id, :effective_from, :manifest_id, :split_set_id,
-                    :rating_workbook_path, :model_artifact_path, :created_by
+                    NULL,
+                    :model_id,
+                    :model_name,
+                    :model_version,
+                    :package_version,
+                    :base_rate,
+                    :effective_from_date,
+                    :effective_to_date,
+                    :package_status,
+                    :source_export_id,
+                    :source_file,
+                    :manifest_id,
+                    :split_set_id,
+                    :rating_workbook_path,
+                    :model_artifact_path,
+                    :created_by
                 )
                 """
             ),
             {
-                "rate_package_id": rate_package_id,
                 "model_id": model_id,
-                "model_version": completed_build["model_version"],
+                "model_name": export_row["model_name"],
+                "model_version": export_row["model_version"],
+                "package_version": package_version,
+                "base_rate": export_row["base_rate"],
+                "effective_from_date": export_row["effective_from_date"],
+                "effective_to_date": export_row["effective_to_date"],
                 "package_status": MODEL_CONFIG.default_package_status,
                 "source_export_id": export_id,
-                "effective_from": completed_build["effective_from"],
+                "source_file": export_row["source_file"],
                 "manifest_id": completed_build["manifest_id"],
                 "split_set_id": completed_build.get("split_set_id"),
                 "rating_workbook_path": completed_build["rating_workbook_path"],
@@ -286,31 +530,313 @@ def insert_offline_lifecycle_rows(
                 "created_by": created_by,
             },
         )
+        rate_package_id = _scalar_int(package_result.lastrowid)
+
+        rate_rows = (
+            con.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM pricing_stg.STG_RATE_CELL
+                    WHERE export_id = :export_id
+                    ORDER BY row_id
+                    """
+                ),
+                {"export_id": export_id},
+            )
+            .mappings()
+            .all()
+        )
+        level_rows = (
+            con.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM pricing_stg.STG_CELL_LEVEL
+                    WHERE export_id = :export_id
+                    ORDER BY row_id, position_no
+                    """
+                ),
+                {"export_id": export_id},
+            )
+            .mappings()
+            .all()
+        )
+        if not rate_rows or not level_rows:
+            raise ValueError(f"staged export {export_id!r} has no rating cells")
+
+        rate_by_row_id = {int(row["row_id"]): row for row in rate_rows}
+        levels_by_row: dict[int, list[Mapping[str, Any]]] = {}
+        for row in level_rows:
+            levels_by_row.setdefault(int(row["row_id"]), []).append(row)
+
+        feature_ids: dict[str, int] = {}
+        level_set_ids: dict[tuple[str, str], int] = {}
+        feature_level_ids: dict[tuple[int, str], int] = {}
+        for row in level_rows:
+            feature_name = str(row["feature_name"])
+            feature_id = feature_ids.get(feature_name)
+            if feature_id is None:
+                feature_id = _insert_feature(con, row)
+                feature_ids[feature_name] = feature_id
+
+            level_set_key = (feature_name, str(row["level_set_name"]))
+            level_set_id = level_set_ids.get(level_set_key)
+            if level_set_id is None:
+                level_set_id = _insert_level_set(
+                    con,
+                    model_id=model_id,
+                    feature_id=feature_id,
+                    row=row,
+                )
+                level_set_ids[level_set_key] = level_set_id
+
+            feature_level_key = (level_set_id, str(row["level_code"]))
+            if feature_level_key not in feature_level_ids:
+                feature_level_ids[feature_level_key] = _insert_feature_level(
+                    con,
+                    level_set_id=level_set_id,
+                    row=row,
+                )
+
+        term_ids: dict[str, int] = {}
+        for row in rate_rows:
+            term_name = str(row["term_name"])
+            if term_name in term_ids:
+                continue
+            result = con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_TERM (
+                        rate_package_id, term_name, term_type, sequence_no
+                    ) VALUES (
+                        :rate_package_id, :term_name, :term_type, :sequence_no
+                    )
+                    """
+                ),
+                {
+                    "rate_package_id": rate_package_id,
+                    "term_name": term_name,
+                    "term_type": row["term_type"],
+                    "sequence_no": row["sequence_no"],
+                },
+            )
+            term_ids[term_name] = _scalar_int(result.lastrowid)
+
+        inserted_term_features: set[tuple[int, int]] = set()
+        for row in level_rows:
+            rate_row = rate_by_row_id[int(row["row_id"])]
+            term_id = term_ids[str(rate_row["term_name"])]
+            position_no = int(row["position_no"])
+            key = (term_id, position_no)
+            if key in inserted_term_features:
+                continue
+            feature_name = str(row["feature_name"])
+            feature_id = feature_ids[feature_name]
+            level_set_id = level_set_ids[(feature_name, str(row["level_set_name"]))]
+            con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_TERM_FEATURE (
+                        term_id, position_no, feature_id, level_set_id, input_column_name
+                    ) VALUES (
+                        :term_id, :position_no, :feature_id, :level_set_id,
+                        :input_column_name
+                    )
+                    """
+                ),
+                {
+                    "term_id": term_id,
+                    "position_no": position_no,
+                    "feature_id": feature_id,
+                    "level_set_id": level_set_id,
+                    "input_column_name": feature_name,
+                },
+            )
+            inserted_term_features.add(key)
+
+        cell_ids: dict[int, int] = {}
+        for row in rate_rows:
+            row_id = int(row["row_id"])
+            term_id = term_ids[str(row["term_name"])]
+            cell_key_text = str(row["cell_key_text"])
+            cell_key_digest = hashlib.sha256(cell_key_text.encode("utf-8")).hexdigest()
+            result = con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_RATE_CELL (
+                        term_id, cell_key_text, cell_key_digest, multiplier,
+                        log_coefficient, exposure_weight, record_count,
+                        is_reference, is_default
+                    ) VALUES (
+                        :term_id, :cell_key_text, :cell_key_digest, :multiplier,
+                        :log_coefficient, :exposure_weight, :record_count,
+                        :is_reference, :is_default
+                    )
+                    """
+                ),
+                {
+                    "term_id": term_id,
+                    "cell_key_text": cell_key_text,
+                    "cell_key_digest": cell_key_digest,
+                    "multiplier": row["multiplier"],
+                    "log_coefficient": row["log_coefficient"],
+                    "exposure_weight": row["exposure_weight"],
+                    "record_count": row["record_count"],
+                    "is_reference": int(row["is_reference"] or 0),
+                    "is_default": int(row["is_default"] or 0),
+                },
+            )
+            cell_id = _scalar_int(result.lastrowid)
+            cell_ids[row_id] = cell_id
+
+            for level_row in levels_by_row[row_id]:
+                feature_name = str(level_row["feature_name"])
+                level_set_id = level_set_ids[(feature_name, str(level_row["level_set_name"]))]
+                feature_level_id = feature_level_ids[(level_set_id, str(level_row["level_code"]))]
+                con.execute(
+                    text(
+                        """
+                        INSERT INTO pricing.PRICING_RATE_CELL_LEVEL (
+                            cell_id, position_no, feature_level_id
+                        ) VALUES (
+                            :cell_id, :position_no, :feature_level_id
+                        )
+                        """
+                    ),
+                    {
+                        "cell_id": cell_id,
+                        "position_no": int(level_row["position_no"]),
+                        "feature_level_id": feature_level_id,
+                    },
+                )
+
+        for row in rate_rows:
+            row_id = int(row["row_id"])
+            term_id = term_ids[str(row["term_name"])]
+            cell_key_text = str(row["cell_key_text"])
+            cell_key_digest = hashlib.sha256(cell_key_text.encode("utf-8")).hexdigest()
+            con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_COMPILED_RATE_CELL (
+                        rate_package_id, term_id, cell_key_digest, term_name,
+                        term_type, sequence_no, cell_key_text, multiplier,
+                        log_coefficient, exposure_weight, record_count,
+                        is_default, is_reference
+                    ) VALUES (
+                        :rate_package_id, :term_id, :cell_key_digest, :term_name,
+                        :term_type, :sequence_no, :cell_key_text, :multiplier,
+                        :log_coefficient, :exposure_weight, :record_count,
+                        :is_default, :is_reference
+                    )
+                    """
+                ),
+                {
+                    "rate_package_id": rate_package_id,
+                    "term_id": term_id,
+                    "cell_key_digest": cell_key_digest,
+                    "term_name": row["term_name"],
+                    "term_type": row["term_type"],
+                    "sequence_no": row["sequence_no"],
+                    "cell_key_text": cell_key_text,
+                    "multiplier": row["multiplier"],
+                    "log_coefficient": row["log_coefficient"],
+                    "exposure_weight": row["exposure_weight"],
+                    "record_count": row["record_count"],
+                    "is_default": int(row["is_default"] or 0),
+                    "is_reference": int(row["is_reference"] or 0),
+                },
+            )
+
+            if row["term_type"] not in {"DISCRETIZED_SPLINE_1D", "NUMERIC_BANDED_1D"}:
+                continue
+            level_row = levels_by_row[row_id][0]
+            feature_name = str(level_row["feature_name"])
+            level_set_id = level_set_ids[(feature_name, str(level_row["level_set_name"]))]
+            feature_level_id = feature_level_ids[(level_set_id, str(level_row["level_code"]))]
+            con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_COMPILED_1D_RATE_BAND (
+                        rate_package_id, term_id, feature_level_id, term_name,
+                        feature_name, level_code, sort_order, lower_bound,
+                        upper_bound, representative_value, multiplier, log_coefficient
+                    ) VALUES (
+                        :rate_package_id, :term_id, :feature_level_id, :term_name,
+                        :feature_name, :level_code, :sort_order, :lower_bound,
+                        :upper_bound, :representative_value, :multiplier,
+                        :log_coefficient
+                    )
+                    """
+                ),
+                {
+                    "rate_package_id": rate_package_id,
+                    "term_id": term_id,
+                    "feature_level_id": feature_level_id,
+                    "term_name": row["term_name"],
+                    "feature_name": feature_name,
+                    "level_code": level_row["level_code"],
+                    "sort_order": int(level_row["order_index"] or 0),
+                    "lower_bound": level_row["lower_bound"],
+                    "upper_bound": level_row["upper_bound"],
+                    "representative_value": level_row["representative_value"],
+                    "multiplier": row["multiplier"],
+                    "log_coefficient": row["log_coefficient"],
+                },
+            )
+
+    return {
+        "rate_package_id": rate_package_id,
+        "package_version": package_version,
+        "was_existing": False,
+    }
+
+
+def insert_offline_model_run_rows(
+    engine,
+    *,
+    completed_build: dict[str, Any],
+    model_id: int,
+    rate_package_id: int,
+    created_by: str,
+) -> dict[str, str]:
+    export_id = str(completed_build["export_id"])
+    model_run_id = f"{export_id}__run"
+    metrics = completed_build.get("metrics") or {}
+    with engine.begin() as con:
         con.execute(
             text(
                 """
                 INSERT OR REPLACE INTO pricing.MODEL_RUN (
-                    model_run_id, model_id, model_version, export_id, manifest_id,
-                    split_set_id, rate_package_id, rating_workbook_path,
-                    model_artifact_path, effective_from, created_by
+                    model_run_id, model_id, dag_id, airflow_run_id, mlflow_run_id,
+                    model_version, export_id, manifest_id, split_set_id, rate_package_id,
+                    model_name, rating_workbook_path, model_artifact_path, effective_from,
+                    run_status, completed_ts, created_by
                 ) VALUES (
-                    :model_run_id, :model_id, :model_version, :export_id, :manifest_id,
-                    :split_set_id, :rate_package_id, :rating_workbook_path,
-                    :model_artifact_path, :effective_from, :created_by
+                    :model_run_id, :model_id, :dag_id, :airflow_run_id, :mlflow_run_id,
+                    :model_version, :export_id, :manifest_id, :split_set_id, :rate_package_id,
+                    :model_name, :rating_workbook_path, :model_artifact_path, :effective_from,
+                    :run_status, CURRENT_TIMESTAMP, :created_by
                 )
                 """
             ),
             {
                 "model_run_id": model_run_id,
                 "model_id": model_id,
+                "dag_id": "offline_sqlite",
+                "airflow_run_id": export_id,
+                "mlflow_run_id": completed_build.get("mlflow_run_id"),
                 "model_version": completed_build["model_version"],
                 "export_id": export_id,
                 "manifest_id": completed_build["manifest_id"],
                 "split_set_id": completed_build.get("split_set_id"),
                 "rate_package_id": rate_package_id,
+                "model_name": MODEL_CONFIG.model_key,
                 "rating_workbook_path": completed_build["rating_workbook_path"],
                 "model_artifact_path": completed_build.get("model_artifact_path"),
                 "effective_from": completed_build["effective_from"],
+                "run_status": "SUCCEEDED",
                 "created_by": created_by,
             },
         )
@@ -332,7 +858,7 @@ def insert_offline_lifecycle_rows(
                     "metric_scope": "model_run",
                 },
             )
-    return {"model_run_id": model_run_id, "rate_package_id": rate_package_id}
+    return {"model_run_id": model_run_id}
 
 
 def table_counts(engine) -> dict[str, dict[str, int]]:
@@ -371,6 +897,7 @@ def run_mtpl_frequency_offline_sqlite(
 
     engine = sqlite_engine_with_offline_schemas(db_paths)
     apply_offline_ddl(engine)
+    model_id = register_offline_model(engine, created_by=created_by)
     seeded_rows = seed_fremtpl_raw(
         engine,
         row_count=row_count,
@@ -437,9 +964,30 @@ def run_mtpl_frequency_offline_sqlite(
         model_artifact_path=model_artifact_path,
         metrics=metrics,
     )
-    lifecycle = insert_offline_lifecycle_rows(
+    stage_rating_export(
+        engine,
+        workbook_path=Path(rating_workbook_path),
+        export_id=export_id,
+        model_name=MODEL_CONFIG.model_key,
+        model_version=model_version,
+        effective_from=effective,
+        target_name=MODEL_CONFIG.target_name,
+        model_type=MODEL_CONFIG.model_type,
+        created_by=created_by,
+        replace=True,
+        model_id=model_id,
+    )
+    package = publish_offline_rating_package(
         engine,
         completed_build=completed_build,
+        model_id=model_id,
+        created_by=created_by,
+    )
+    lifecycle = insert_offline_model_run_rows(
+        engine,
+        completed_build=completed_build,
+        model_id=model_id,
+        rate_package_id=int(package["rate_package_id"]),
         created_by=created_by,
     )
 
@@ -452,6 +1000,9 @@ def run_mtpl_frequency_offline_sqlite(
         "manifest_id": manifest.manifest_id,
         "split_set_id": manifest.split_set_id,
         "split_artifact_uri": manifest.split_artifact_uri,
+        "rate_package_id": package["rate_package_id"],
+        "package_version": package["package_version"],
+        "was_existing": package["was_existing"],
         **lifecycle,
         "tables": table_counts(engine),
     }

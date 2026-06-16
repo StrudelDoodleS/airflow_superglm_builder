@@ -13,39 +13,9 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert Path("db/offline_sqlite/pricing_stg.sql").exists()
     assert Path("db/offline_sqlite/mlops.sql").exists()
 
-    def fake_fit_export(
-        frame,
-        *,
-        split_indices,
-        output_dir,
-        model_version,
-        effective_from,
-        mlflow_client=None,
-    ):
-        artifact_dir = Path(output_dir) / f"{model_version}_{effective_from}"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        workbook_path = artifact_dir / "rating_tables.xlsx"
-        model_path = artifact_dir / "superglm_model.pkl"
-        workbook_path.write_text("offline workbook placeholder", encoding="utf-8")
-        model_path.write_bytes(b"offline model placeholder")
-        return (
-            workbook_path,
-            model_path,
-            {
-                "row_count": float(len(frame)),
-                "validation_fold_count": float(len(split_indices)),
-            },
-        )
-
-    monkeypatch.setattr(
-        run_mtpl_frequency_offline_sqlite,
-        "fit_validate_export_rating_tables",
-        fake_fit_export,
-    )
-
     result = run_mtpl_frequency_offline_sqlite.run_mtpl_frequency_offline_sqlite(
         db_root=tmp_path / "offline",
-        row_count=40,
+        row_count=120,
         synthetic_source=True,
         effective_from="2026-06-05",
         created_by="unit-test",
@@ -58,29 +28,50 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert db_path.exists()
     assert pricing_stg_path.exists()
     assert mlops_path.exists()
-    assert result["tables"] == {
-        "pricing": {
-            "FREMTPL_RAW": 40,
-            "DATASET_MANIFEST": 1,
-            "DATASET_COLUMN": 12,
-            "CV_SPLIT_SET": 1,
-            "CV_FOLD": 5,
-            "CV_FOLD_METRIC": 0,
-            "PRICING_MODEL": 1,
-            "MODEL_RUN": 1,
-            "PRICING_RATE_PACKAGE": 1,
-        },
-        "pricing_stg": {
-            "STG_RATING_EXPORT": 0,
-            "STG_RATE_CELL": 0,
-            "STG_CELL_LEVEL": 0,
-        },
-        "mlops": {
-            "MODEL_RUN_DATASET": 0,
-            "MODEL_RUN_SPLIT_SET": 0,
-            "MODEL_RUN_METRIC": 2,
-        },
+    assert {
+        table_name: result["tables"]["pricing"][table_name]
+        for table_name in [
+            "FREMTPL_RAW",
+            "DATASET_MANIFEST",
+            "DATASET_COLUMN",
+            "CV_SPLIT_SET",
+            "CV_FOLD",
+            "CV_FOLD_METRIC",
+            "PRICING_MODEL",
+            "MODEL_RUN",
+            "PRICING_RATE_PACKAGE",
+        ]
+    } == {
+        "FREMTPL_RAW": 120,
+        "DATASET_MANIFEST": 1,
+        "DATASET_COLUMN": 12,
+        "CV_SPLIT_SET": 1,
+        "CV_FOLD": 5,
+        "CV_FOLD_METRIC": 0,
+        "PRICING_MODEL": 1,
+        "MODEL_RUN": 1,
+        "PRICING_RATE_PACKAGE": 1,
     }
+    assert result["tables"]["mlops"] == {
+        "MODEL_RUN_DATASET": 0,
+        "MODEL_RUN_SPLIT_SET": 0,
+        "MODEL_RUN_METRIC": 7,
+    }
+    for table_name in [
+        "PRICING_FEATURE",
+        "PRICING_FEATURE_LEVEL_SET",
+        "PRICING_FEATURE_LEVEL",
+        "PRICING_TERM",
+        "PRICING_TERM_FEATURE",
+        "PRICING_RATE_CELL",
+        "PRICING_RATE_CELL_LEVEL",
+        "PRICING_COMPILED_RATE_CELL",
+        "PRICING_COMPILED_1D_RATE_BAND",
+    ]:
+        assert result["tables"]["pricing"][table_name] > 0
+    assert result["tables"]["pricing_stg"]["STG_RATING_EXPORT"] == 1
+    assert result["tables"]["pricing_stg"]["STG_RATE_CELL"] > 0
+    assert result["tables"]["pricing_stg"]["STG_CELL_LEVEL"] > 0
 
     with sqlite3.connect(db_path) as con:
         manifest = con.execute(
@@ -92,15 +83,36 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
         package = con.execute(
             "SELECT model_version, package_status, source_export_id FROM PRICING_RATE_PACKAGE"
         ).fetchone()
+        rate_cells = con.execute(
+            """
+            SELECT t.term_name, c.cell_key_text, c.multiplier
+            FROM PRICING_RATE_CELL c
+            JOIN PRICING_TERM t ON t.term_id = c.term_id
+            ORDER BY t.sequence_no, c.cell_id
+            LIMIT 5
+            """
+        ).fetchall()
+        compiled_bands = con.execute(
+            """
+            SELECT term_name, feature_name, level_code, multiplier
+            FROM PRICING_COMPILED_1D_RATE_BAND
+            ORDER BY term_name, sort_order
+            LIMIT 5
+            """
+        ).fetchall()
         fold_rows = con.execute(
             "SELECT fold_no, n_train, n_test FROM CV_FOLD ORDER BY fold_no"
         ).fetchall()
 
-    assert manifest == ("freMTPL2freq_model_frame", 40, "2026-06-05")
+    assert manifest == ("freMTPL2freq_model_frame", 120, "2026-06-05")
     assert split[0] == "MATERIALIZED"
     assert split[1] == 5
     assert Path(split[2]).exists()
     assert package == ("v1", "PUBLISHED", result["export_id"])
+    assert rate_cells
+    assert all(multiplier > 0 for _, _, multiplier in rate_cells)
+    assert compiled_bands
+    assert all(multiplier > 0 for _, _, _, multiplier in compiled_bands)
     assert len(fold_rows) == 5
     assert all(n_train > 0 and n_test > 0 for _, n_train, n_test in fold_rows)
 
@@ -109,7 +121,15 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
             "SELECT metric_name FROM MODEL_RUN_METRIC ORDER BY metric_name"
         ).fetchall()
 
-    assert metrics == [("row_count",), ("validation_fold_count",)]
+    assert metrics == [
+        ("claim_count_sum",),
+        ("converged",),
+        ("deviance",),
+        ("exposure_sum",),
+        ("n_iter",),
+        ("row_count",),
+        ("validation_fold_count",),
+    ]
 
 
 def test_mtpl_offline_sqlite_runner_uses_full_fremtpl_fetch_by_default(
