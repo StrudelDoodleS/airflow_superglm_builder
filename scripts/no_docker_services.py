@@ -84,8 +84,8 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
         ),
         "pipeline": ServiceCommand(
             name="pipeline",
-            description="Run the full pricing pipeline directly, without Airflow.",
-            argv=[python_executable, "scripts/run_pipeline_no_airflow.py"],
+            description="Run the explicit freMTPL custom model publish path without Airflow.",
+            argv=[python_executable, "scripts/run_mtpl_frequency_custom.py"],
             category="pipeline-task",
         ),
         "seed-demo": ServiceCommand(
@@ -154,7 +154,9 @@ def _process_group_id(process: subprocess.Popen) -> int | None:
         return None
     try:
         return os.getpgid(pid)
-    except (OSError, ProcessLookupError):
+    except OSError:
+        return None
+    except ProcessLookupError:
         return None
 
 
@@ -430,7 +432,9 @@ def _configure_mouse_navigation() -> None:
     try:
         curses.mousemask(getattr(curses, "ALL_MOUSE_EVENTS", 0))
         curses.mouseinterval(0)
-    except (AttributeError, curses.error):
+    except AttributeError:
+        pass
+    except curses.error:
         pass
 
 
@@ -440,14 +444,8 @@ def _mouse_wheel_delta() -> int:
     except curses.error:
         return 0
 
-    wheel_up_flags = (
-        getattr(curses, "BUTTON4_PRESSED", 0)
-        | getattr(curses, "BUTTON4_CLICKED", 0)
-    )
-    wheel_down_flags = (
-        getattr(curses, "BUTTON5_PRESSED", 0)
-        | getattr(curses, "BUTTON5_CLICKED", 0)
-    )
+    wheel_up_flags = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON4_CLICKED", 0)
+    wheel_down_flags = getattr(curses, "BUTTON5_PRESSED", 0) | getattr(curses, "BUTTON5_CLICKED", 0)
     if state & wheel_up_flags:
         return -1
     if state & wheel_down_flags:
@@ -527,9 +525,7 @@ def _run_long_running(commands: list[ServiceCommand], *, dry_run: bool) -> None:
             _print_command_warning(command)
             print(f"==> {command.name}: {' '.join(command.argv)}", flush=True)
             if not dry_run:
-                processes.append(
-                    subprocess.Popen(command.argv, cwd=ROOT, start_new_session=True)
-                )
+                processes.append(subprocess.Popen(command.argv, cwd=ROOT, start_new_session=True))
         if dry_run:
             return
         while processes:
@@ -558,8 +554,7 @@ def run_services(names: list[str], *, dry_run: bool = False) -> None:
 def _print_command_warning(command: ServiceCommand) -> None:
     if command.name == "cloudbeaver":
         print(
-            "cloudbeaver uses Docker Compose in this repo; "
-            "skip it on Docker-blocked machines.",
+            "cloudbeaver uses Docker Compose in this repo; skip it on Docker-blocked machines.",
             flush=True,
         )
 

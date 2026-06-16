@@ -27,7 +27,7 @@ from pricing_pipeline.models.spec import coerce_training_frame  # noqa: E402
 PREDICT_SQL = text(
     """
     EXEC pricing.PREDICT_CURRENT_RATE
-        @model_key = :model_key,
+        @model_name = :model_name,
         @deployment_slot = :deployment_slot,
         @features_json = :features_json,
         @exposure = :exposure
@@ -44,10 +44,7 @@ def _json_value(value: Any) -> Any:
 
 
 def build_feature_payload(row: Mapping[str, Any], feature_columns: Sequence[str]) -> str:
-    payload = {
-        column: _json_value(row[column])
-        for column in feature_columns
-    }
+    payload = {column: _json_value(row[column]) for column in feature_columns}
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -61,7 +58,7 @@ def predict_with_superglm(fitted_model, training_frame) -> np.ndarray:
 def fetch_sql_predictions(
     engine,
     *,
-    model_key: str,
+    model_name: str,
     deployment_slot: str,
     X: pd.DataFrame,
     exposure: np.ndarray,
@@ -70,15 +67,19 @@ def fetch_sql_predictions(
     predictions: list[float] = []
     with engine.begin() as con:
         for (_, row), exposure_value in zip(X.iterrows(), exposure, strict=True):
-            result = con.execute(
-                PREDICT_SQL,
-                {
-                    "model_key": model_key,
-                    "deployment_slot": deployment_slot,
-                    "features_json": build_feature_payload(row, feature_columns),
-                    "exposure": float(exposure_value),
-                },
-            ).mappings().first()
+            result = (
+                con.execute(
+                    PREDICT_SQL,
+                    {
+                        "model_name": model_name,
+                        "deployment_slot": deployment_slot,
+                        "features_json": build_feature_payload(row, feature_columns),
+                        "exposure": float(exposure_value),
+                    },
+                )
+                .mappings()
+                .first()
+            )
             if result is None:
                 raise RuntimeError("pricing.PREDICT_CURRENT_RATE returned no rows")
             predictions.append(float(result["prediction"]))
@@ -91,9 +92,7 @@ def prediction_error_summary(expected: np.ndarray, actual: np.ndarray) -> dict[s
     abs_error = np.abs(actual - expected)
     rel_error = np.zeros_like(abs_error)
     nonzero_expected = np.abs(expected) > 0
-    rel_error[nonzero_expected] = (
-        abs_error[nonzero_expected] / np.abs(expected[nonzero_expected])
-    )
+    rel_error[nonzero_expected] = abs_error[nonzero_expected] / np.abs(expected[nonzero_expected])
     return {
         "rows_checked": int(expected.size),
         "max_abs_error": float(abs_error.max(initial=0.0)),
@@ -123,11 +122,11 @@ def assert_predictions_close(
     )
 
 
-def find_latest_model_artifact(rating_export_root: Path, model_key: str) -> Path:
-    candidates = list((rating_export_root / model_key).glob("**/superglm_model.pkl"))
+def find_latest_model_artifact(rating_export_root: Path, model_name: str) -> Path:
+    candidates = list((rating_export_root / model_name).glob("**/superglm_model.pkl"))
     if not candidates:
         raise FileNotFoundError(
-            f"No superglm_model.pkl found under {rating_export_root / model_key}"
+            f"No superglm_model.pkl found under {rating_export_root / model_name}"
         )
     return max(candidates, key=lambda path: (path.stat().st_mtime, str(path)))
 
@@ -147,20 +146,20 @@ def load_fitted_model(model_path: Path):
 def validate_sql_prediction(
     engine,
     *,
-    model_key: str,
+    model_name: str,
     deployment_slot: str,
     model_path: Path,
     limit: int | None,
     rtol: float,
     atol: float,
 ) -> dict[str, float | int]:
-    spec = get_model_spec(model_key)
+    spec = get_model_spec(model_name)
     training_frame = load_training_frame(engine, spec, limit=limit)
     fitted_model = load_fitted_model(model_path)
     expected = predict_with_superglm(fitted_model, training_frame)
     actual = fetch_sql_predictions(
         engine,
-        model_key=model_key,
+        model_name=model_name,
         deployment_slot=deployment_slot,
         X=training_frame.X,
         exposure=training_frame.exposure,
@@ -177,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
             "for the same rows and offset."
         )
     )
-    parser.add_argument("--model-key", required=True)
+    parser.add_argument("--model-name", required=True)
     parser.add_argument("--deployment-slot", required=True)
     parser.add_argument("--model-path", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=1000)
@@ -197,11 +196,11 @@ def main() -> int:
     settings = Settings.from_env(os.environ)
     model_path = args.model_path or find_latest_model_artifact(
         settings.rating_export_root,
-        args.model_key,
+        args.model_name,
     )
     summary = validate_sql_prediction(
         get_engine(settings),
-        model_key=args.model_key,
+        model_name=args.model_name,
         deployment_slot=args.deployment_slot,
         model_path=model_path,
         limit=args.limit,

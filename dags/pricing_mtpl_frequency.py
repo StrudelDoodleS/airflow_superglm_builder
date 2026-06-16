@@ -1,17 +1,36 @@
+"""Explicit custom TaskFlow DAG for the freMTPL frequency model."""
+
 from __future__ import annotations
 
-from pricing_models.mtpl_frequency.spec import MODEL_CONFIG, MODEL_SPEC
-from pricing_pipeline.orchestration.dag_factory import (
-    build_pricing_model_dag,
-    context_date_iso as _context_date_iso,  # noqa: F401
-    schema_dir_from_env,
+from airflow.sdk import dag
+
+from pricing_models.mtpl_frequency.airflow_tasks import (
+    prepare_source_data_task,
+    train_validate_export_task,
+)
+from pricing_models.mtpl_frequency.spec import MODEL_CONFIG
+from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
+from pricing_pipeline.orchestration.publish_completed_build import (
+    publish_completed_model_build_task,
 )
 
-SCHEMA_DIR = schema_dir_from_env()
 
-pricing_mtpl_frequency = build_pricing_model_dag(
+@dag(
     dag_id="pricing_mtpl_frequency",
-    spec=MODEL_SPEC,
-    model_config=MODEL_CONFIG,
-    tags=["pricing", "mtpl", "frequency", "mlflow"],
+    schedule=None,
+    catchup=False,
+    tags=["pricing", "mtpl", "frequency", "custom-tasks"],
 )
+def pricing_mtpl_frequency():
+    registered = register_pricing_model_task(
+        model_config=MODEL_CONFIG,
+        task_id="register_mtpl_frequency",
+    )()
+    prepared = prepare_source_data_task()()
+    completed = train_validate_export_task()(prepared)
+    published = publish_completed_model_build_task(model_config=MODEL_CONFIG)(completed)
+
+    registered >> prepared >> completed >> published
+
+
+pricing_mtpl_frequency()

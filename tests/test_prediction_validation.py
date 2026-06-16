@@ -103,7 +103,7 @@ def test_fetch_sql_predictions_calls_prediction_proc_for_each_row():
 
     predictions = validator.fetch_sql_predictions(
         engine,
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         deployment_slot="MTPL_FREQ_UAT",
         X=X,
         exposure=exposure,
@@ -115,7 +115,7 @@ def test_fetch_sql_predictions_calls_prediction_proc_for_each_row():
     first_sql, first_params = engine.connection.calls[0]
     assert "EXEC pricing.PREDICT_CURRENT_RATE" in first_sql
     assert first_params == {
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "deployment_slot": "MTPL_FREQ_UAT",
         "features_json": '{"Area":"C","VehAge":4}',
         "exposure": 0.75,

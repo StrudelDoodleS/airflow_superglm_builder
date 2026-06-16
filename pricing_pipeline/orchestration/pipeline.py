@@ -41,10 +41,10 @@ def train_and_export_model(
     )
     model_id = validate_model_on_engine(engine, model_config)
     model_version = logical_date.replace("-", "")
-    export_id = build_export_id(spec.model_key, airflow_run_id)
+    export_id = build_export_id(spec.model_name, airflow_run_id)
     workbook_path = build_rating_export_path(
         settings.rating_export_root,
-        model_name=spec.model_key,
+        model_name=spec.model_name,
         logical_date=logical_date,
         export_id=export_id,
     )
@@ -56,7 +56,7 @@ def train_and_export_model(
     with mlflow_client.start_run() as run:
         model = spec.build_model()
         workbook_path.parent.mkdir(parents=True, exist_ok=True)
-        mlflow_client.log_param("model_name", spec.model_key)
+        mlflow_client.log_param("model_name", spec.model_name)
         mlflow_client.log_param("model_id", model_id)
         mlflow_client.log_param("model_version", model_version)
         mlflow_client.log_param("manifest_id", manifest_id)
@@ -95,7 +95,7 @@ def train_and_export_model(
 
         return ModelExportResult(
             model_id=model_id,
-            model_key=spec.model_key,
+            model_name=spec.model_name,
             model_version=model_version,
             model_type=spec.model_type,
             target_name=spec.target_name,
@@ -133,7 +133,7 @@ def publish_model_export(
         split_set_id=export_result.split_set_id,
         export_id=export_result.export_id,
         model_id=export_result.model_id,
-        model_name=export_result.model_key,
+        model_name=export_result.model_name,
         model_version=export_result.model_version,
         rate_package_id=publish_result.rate_package_id,
         rating_workbook_path=str(publish_result.rating_workbook_path),

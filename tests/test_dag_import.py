@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -80,24 +79,13 @@ def _import_dag_module(module_name: str, filename: str):
     return module
 
 
-def test_pricing_superglm_pipeline_dag_imports_without_airflow(monkeypatch):
-    _install_fake_airflow(monkeypatch)
-
-    module = _import_dag_module(
-        "pricing_superglm_pipeline_test",
-        "pricing_superglm_pipeline.py",
-    )
-
-    assert hasattr(module, "pricing_superglm_pipeline")
-    assert (
-        module._context_date_iso(
-            {"dag_run": types.SimpleNamespace(run_after=datetime(2026, 4, 27, tzinfo=UTC))}
-        )
-        == "2026-04-27"
-    )
+def test_bundled_dags_do_not_use_factory():
+    for dag_path in Path("dags").glob("*.py"):
+        text = dag_path.read_text(encoding="utf-8")
+        assert "build_pricing_model_dag" not in text
 
 
-def test_pricing_mtpl_frequency_dag_keeps_model_publish_tasks_separate(monkeypatch):
+def test_pricing_mtpl_frequency_dag_uses_explicit_custom_tasks(monkeypatch):
     task_outputs = _install_fake_airflow(monkeypatch)
 
     module = _import_dag_module(
@@ -108,10 +96,10 @@ def test_pricing_mtpl_frequency_dag_keeps_model_publish_tasks_separate(monkeypat
     assert hasattr(module, "pricing_mtpl_frequency")
     task_ids = [output.task_id for output in task_outputs]
     assert task_ids == [
-        "apply_pricing_schema",
-        "prepare_dataset",
-        "train_and_export",
-        "publish_export",
+        "register_mtpl_frequency",
+        "prepare_source_data",
+        "train_validate_export",
+        "publish_completed_model_build",
     ]
 
 

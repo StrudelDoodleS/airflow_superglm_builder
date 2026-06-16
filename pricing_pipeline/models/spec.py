@@ -31,7 +31,7 @@ class DatasetSpec:
 
 @dataclass(frozen=True)
 class ModelSpec:
-    model_key: str
+    model_name: str
     target_name: str
     model_type: str
     experiment_name: str
@@ -49,7 +49,7 @@ class ModelSpec:
 @dataclass(frozen=True)
 class ModelExportResult:
     model_id: int
-    model_key: str
+    model_name: str
     model_version: str
     model_type: str
     target_name: str

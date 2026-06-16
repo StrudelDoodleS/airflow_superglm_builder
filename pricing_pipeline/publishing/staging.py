@@ -72,9 +72,7 @@ def find_blocks(raw: pd.DataFrame, term_row: int, header_row: int) -> list[dict[
         if not term_name or not h0 or not h1 or not h2:
             continue
         headers = [h0.lower(), h1.lower(), h2.lower()]
-        level_header = "level" in headers[0] or clean_identifier(h0) == clean_identifier(
-            term_name
-        )
+        level_header = "level" in headers[0] or clean_identifier(h0) == clean_identifier(term_name)
         if level_header and "relativity" in headers[1] and "weight" in headers[2]:
             blocks.append(
                 {
@@ -251,19 +249,15 @@ def _resolve_registered_model_id(con, args: argparse.Namespace) -> int:
     record = get_pricing_model(con, args.model_name)
     if record is None:
         raise ModelRegistryError(
-            f"model_key {args.model_name!r} is not registered; "
+            f"model_name {args.model_name!r} is not registered; "
             "run explicit model registration first"
         )
 
     mismatches: list[str] = []
     if getattr(args, "model_label", None) is not None and record.model_label != args.model_label:
-        mismatches.append(
-            f"model_label db={record.model_label!r} staging={args.model_label!r}"
-        )
+        mismatches.append(f"model_label db={record.model_label!r} staging={args.model_label!r}")
     if record.target_name != args.target_name:
-        mismatches.append(
-            f"target_name db={record.target_name!r} staging={args.target_name!r}"
-        )
+        mismatches.append(f"target_name db={record.target_name!r} staging={args.target_name!r}")
     if record.model_type != args.model_type:
         mismatches.append(f"model_type db={record.model_type!r} staging={args.model_type!r}")
     if record.model_status != "ACTIVE":

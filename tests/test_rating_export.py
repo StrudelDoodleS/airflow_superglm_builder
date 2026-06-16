@@ -53,9 +53,7 @@ def raw_training_frame() -> pd.DataFrame:
 
 
 def test_build_export_id_is_path_safe():
-    export_id = rating_export.build_export_id(
-        "MTPL_FREQ", "scheduled__2026-04-27T10:30:00+00:00"
-    )
+    export_id = rating_export.build_export_id("MTPL_FREQ", "scheduled__2026-04-27T10:30:00+00:00")
 
     assert export_id == "mtpl_freq__scheduled__20260427t1030000000"
 
@@ -68,10 +66,7 @@ def test_build_rating_export_path_uses_model_and_date(tmp_path: Path):
         export_id="mtpl_freq__run1",
     )
 
-    assert (
-        path
-        == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
-    )
+    assert path == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
 
 
 def test_build_rating_export_path_accepts_positional_call_shape(tmp_path: Path):
@@ -79,10 +74,7 @@ def test_build_rating_export_path_accepts_positional_call_shape(tmp_path: Path):
         tmp_path, "MTPL_FREQ", "2026-04-27", "mtpl_freq__run1"
     )
 
-    assert (
-        path
-        == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
-    )
+    assert path == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
 
 
 class FakeExportModel:
@@ -100,9 +92,7 @@ def test_export_rating_tables_creates_parent_calls_model_and_logs_mlflow(
     model = FakeExportModel()
     mlflow_calls = []
     fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
-            (path, artifact_path)
-        )
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
     )
     monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
 
@@ -111,15 +101,11 @@ def test_export_rating_tables_creates_parent_calls_model_and_logs_mlflow(
     y = np.array([0.0, 1.0])
     exposure = np.array([0.5, 2.0])
 
-    result = rating_export.export_rating_tables(
-        model, X, y, exposure, output_path=output_path
-    )
+    result = rating_export.export_rating_tables(model, X, y, exposure, output_path=output_path)
 
     assert result == output_path
     assert output_path.read_bytes() == b"workbook"
-    assert model.calls == [
-        ((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})
-    ]
+    assert model.calls == [((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})]
     assert mlflow_calls == [(str(output_path), "rating_tables")]
 
 
@@ -127,9 +113,7 @@ def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_pa
     model = FakeExportModel()
     mlflow_calls = []
     fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
-            (path, artifact_path)
-        )
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
     )
     monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
 
@@ -142,20 +126,14 @@ def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_pa
 
     assert result == output_path
     assert output_path.read_bytes() == b"workbook"
-    assert model.calls == [
-        ((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})
-    ]
+    assert model.calls == [((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})]
     assert mlflow_calls == [(str(output_path), "rating_tables")]
 
 
-def test_export_rating_tables_requires_superglm_rating_export_support(
-    monkeypatch, tmp_path: Path
-):
+def test_export_rating_tables_requires_superglm_rating_export_support(monkeypatch, tmp_path: Path):
     mlflow_calls = []
     fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append(
-            (path, artifact_path)
-        )
+        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
     )
     monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
 
@@ -243,9 +221,7 @@ class FakeFrame:
         self.events = events
 
     def to_sql(self, name, con, schema=None, if_exists=None, index=None, chunksize=None):
-        self.events.append(
-            ("to_sql", self.label, name, con, schema, if_exists, index, chunksize)
-        )
+        self.events.append(("to_sql", self.label, name, con, schema, if_exists, index, chunksize))
 
 
 class FakeBeginConnection:
@@ -296,7 +272,7 @@ class FakePricingModelResult:
     def one_or_none(self):
         return {
             "model_id": 17,
-            "model_key": "MTPL_FREQ",
+            "model_name": "MTPL_FREQ",
             "model_label": None,
             "target_name": "ClaimNb",
             "model_type": "superglm_poisson",
@@ -321,13 +297,13 @@ class FakeModelRegistryEngine(FakeEngine):
         self.connection = FakeModelRegistryConnection(events)
 
 
-def test_ensure_pricing_model_merges_by_model_key_and_returns_model_id():
+def test_ensure_pricing_model_merges_by_model_name_and_returns_model_id():
     events = []
     con = FakeModelRegistryConnection(events)
 
     model_id = ensure_pricing_model(
         con,
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         target_name="ClaimNb",
         model_type="superglm_poisson",
         created_by="airflow",
@@ -337,11 +313,11 @@ def test_ensure_pricing_model_merges_by_model_key_and_returns_model_id():
     merge_sql = events[0][1]
     select_sql = events[1][1]
     assert "MERGE pricing.PRICING_MODEL WITH (HOLDLOCK)" in merge_sql
-    assert "ON tgt.model_key = src.model_key" in merge_sql
+    assert "ON tgt.model_name = src.model_name" in merge_sql
     assert "model_status" in merge_sql
     assert "SELECT model_id" in select_sql
     assert events[0][2] == {
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "model_label": None,
         "target_name": "ClaimNb",
         "model_type": "superglm_poisson",
@@ -404,14 +380,14 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
 
     delete_sql = [event[1] for event in events if event[0] == "execute"]
     assert delete_sql == [
-        "\n                SELECT model_id,\n                    model_key,\n                    model_label,\n                    target_name,\n                    model_type,\n                    model_status\n                FROM pricing.PRICING_MODEL\n                WHERE model_key = :model_key\n                ",
+        "\n                SELECT model_id,\n                    model_name,\n                    model_label,\n                    target_name,\n                    model_type,\n                    model_status\n                FROM pricing.PRICING_MODEL\n                WHERE model_name = :model_name\n                ",
         "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
         "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id WHERE export_id = :export_id",
     ]
     assert [event[2] for event in events if event[0] == "execute"] == [
-        {"model_key": "MTPL_FREQ"},
+        {"model_name": "MTPL_FREQ"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
@@ -544,9 +520,7 @@ def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_p
         created_by="airflow",
     )
 
-    export_df, rate_df, level_df = load_superglm_excel_to_staging.build_staging_frames(
-        args
-    )
+    export_df, rate_df, level_df = load_superglm_excel_to_staging.build_staging_frames(args)
 
     assert export_df.loc[0, "base_rate"] == 0.123
     assert rate_df["term_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
@@ -654,7 +628,7 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
     engine = object()
     workbook_path = tmp_path / "rating_tables.xlsx"
     config = ModelBuildConfig(
-        model_key="CONFIG_MODEL",
+        model_name="CONFIG_MODEL",
         model_label="Config model",
         target_name="ConfigTarget",
         model_type="config_type",
@@ -663,7 +637,7 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
     )
     export = ModelExportResult(
         model_id=17,
-        model_key="CONFIG_MODEL",
+        model_name="CONFIG_MODEL",
         model_version="20260527",
         model_type="config_type",
         target_name="ConfigTarget",
@@ -787,7 +761,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "model_version": "20260427",
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
-            "split_role": "validation",
+        "split_role": "validation",
         "rate_package_id": 42,
         "rating_workbook_path": "/tmp/rating_tables.xlsx",
         "run_status": "SUCCESS",
@@ -846,7 +820,7 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
         "manifest_id": "manifest-1",
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
-            "split_role": "validation",
+        "split_role": "validation",
     }
 
 
@@ -949,8 +923,7 @@ def test_train_and_export_model_validates_registered_model_without_creating(
     monkeypatch.setattr(
         pipeline,
         "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
-        or 17,
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
         raising=False,
     )
     monkeypatch.setattr(
@@ -972,7 +945,7 @@ def test_train_and_export_model_validates_registered_model_without_creating(
         }
     )
     spec = ModelSpec(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         target_name="ClaimNb",
         model_type="superglm_poisson",
         experiment_name="pricing-mtpl-frequency",
@@ -1112,8 +1085,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     monkeypatch.setattr(
         pipeline,
         "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
-        or 17,
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
     )
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow, raising=False)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
@@ -1137,7 +1109,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         }
     )
     spec = ModelSpec(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         target_name="ClaimNb",
         model_type="superglm_poisson",
         experiment_name="pricing-mtpl-frequency",
@@ -1163,9 +1135,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     )
 
     export_id = "mtpl_freq__scheduled__20260427t1030000000"
-    workbook_path = (
-        tmp_path / "MTPL_FREQ" / "2026-04-27" / export_id / "rating_tables.xlsx"
-    )
+    workbook_path = tmp_path / "MTPL_FREQ" / "2026-04-27" / export_id / "rating_tables.xlsx"
     model_path = workbook_path.parent / "superglm_model.pkl"
 
     assert result == {
@@ -1212,7 +1182,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     publish_call = next(event for event in calls if event[0] == "publish_training_export")
     assert publish_call[1].to_dict() == {
         "model_id": 17,
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "model_version": "20260427",
         "model_type": "superglm_poisson",
         "target_name": "ClaimNb",
@@ -1329,16 +1299,14 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
     monkeypatch.setattr(
         pipeline,
         "configure_mlflow",
-        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs))
-        or NoOpMlflowClient(),
+        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs)) or NoOpMlflowClient(),
     )
     monkeypatch.setattr(pipeline, "mlflow", RaisingMlflow(), raising=False)
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(
         pipeline,
         "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config))
-        or 17,
+        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
     )
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
@@ -1363,7 +1331,7 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
         airflow_run_id="manual__without_mlflow",
         logical_date="2026-05-28",
         spec=ModelSpec(
-            model_key="MTPL_FREQ",
+            model_name="MTPL_FREQ",
             target_name="ClaimNb",
             model_type="superglm_poisson",
             experiment_name="pricing-mtpl-frequency",
@@ -1423,7 +1391,7 @@ def test_publish_model_export_returns_candidate_without_deploying(
     engine = object()
     export = {
         "model_id": 17,
-        "model_key": "MTPL_FREQ",
+        "model_name": "MTPL_FREQ",
         "model_version": "20260527",
         "model_type": "superglm_poisson",
         "target_name": "ClaimNb",

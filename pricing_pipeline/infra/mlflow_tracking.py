@@ -26,6 +26,25 @@ class NoOpMlflowRunContext:
         return False
 
 
+class NoOpMlflowSpan:
+    def set_inputs(self, value) -> None:
+        return None
+
+    def set_outputs(self, value) -> None:
+        return None
+
+    def set_attributes(self, attributes: dict[str, Any]) -> None:
+        return None
+
+
+class NoOpMlflowSpanContext:
+    def __enter__(self) -> NoOpMlflowSpan:
+        return NoOpMlflowSpan()
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class OptionalMlflowClient:
     def __init__(self, backend: Any | None):
         self._backend = backend
@@ -56,6 +75,25 @@ class OptionalMlflowClient:
         if self._backend is None:
             return NoOpMlflowRunContext()
         return OptionalMlflowRunContext(self._backend)
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        span_type: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ):
+        if self._backend is None:
+            return NoOpMlflowSpanContext()
+        method = getattr(self._backend, "start_span", None)
+        if method is None:
+            return NoOpMlflowSpanContext()
+        try:
+            context = method(name, span_type=span_type, attributes=attributes)
+            return OptionalMlflowSpanContext(context)
+        except Exception as exc:  # pragma: no cover - warning text is not behavior
+            logger.warning("MLflow start_span failed; continuing without tracing: %s", exc)
+            return NoOpMlflowSpanContext()
 
     def log_param(self, key: str, value) -> None:
         self._call("log_param", key, value)
@@ -91,6 +129,32 @@ class OptionalMlflowRunContext:
             return bool(self._active_context.__exit__(exc_type, exc, tb))
         except Exception as mlflow_exc:  # pragma: no cover - warning text is not behavior
             logger.warning("MLflow run close failed; continuing: %s", mlflow_exc)
+            return False
+
+
+class OptionalMlflowSpanContext:
+    def __init__(self, backend_context):
+        self._backend_context = backend_context
+        self._active_context = None
+
+    def __enter__(self):
+        try:
+            self._active_context = self._backend_context
+            if hasattr(self._backend_context, "__enter__"):
+                return self._backend_context.__enter__()
+            return self._backend_context
+        except Exception as exc:  # pragma: no cover - warning text is not behavior
+            logger.warning("MLflow span start failed; continuing without tracing: %s", exc)
+            self._active_context = None
+            return NoOpMlflowSpan()
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self._active_context is None or not hasattr(self._active_context, "__exit__"):
+            return False
+        try:
+            return bool(self._active_context.__exit__(exc_type, exc, tb))
+        except Exception as mlflow_exc:  # pragma: no cover - warning text is not behavior
+            logger.warning("MLflow span close failed; continuing: %s", mlflow_exc)
             return False
 
 

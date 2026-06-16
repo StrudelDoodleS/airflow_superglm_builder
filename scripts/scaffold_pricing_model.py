@@ -20,7 +20,7 @@ _MODEL_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 @dataclass(frozen=True)
 class ScaffoldOptions:
-    model_key: str
+    model_name: str
     target_name: str
     model_label: str | None = None
     model_type: str = "superglm_poisson"
@@ -54,20 +54,20 @@ def _required_text(value: str | None, field_name: str) -> str:
     return cleaned
 
 
-def _validate_model_key(model_key: str) -> str:
-    cleaned = _required_text(model_key, "model_key")
+def _validate_model_name(model_name: str) -> str:
+    cleaned = _required_text(model_name, "model_name")
     if not _MODEL_KEY.match(cleaned):
         raise ValueError(
-            "model_key must start with a letter and contain only letters, numbers, and underscores"
+            "model_name must start with a letter and contain only letters, numbers, and underscores"
         )
     return cleaned
 
 
-def _module_name_from_model_key(model_key: str) -> str:
-    value = re.sub(r"[^A-Za-z0-9_]+", "_", model_key).strip("_").lower()
+def _module_name_from_model_name(model_name: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_]+", "_", model_name).strip("_").lower()
     value = re.sub(r"_+", "_", value)
     if not value:
-        raise ValueError("model_key must produce a non-empty package name")
+        raise ValueError("model_name must produce a non-empty package name")
     return value
 
 
@@ -78,13 +78,13 @@ def _validate_python_identifier(value: str, field_name: str) -> str:
     return cleaned
 
 
-def _default_label(model_key: str) -> str:
-    return model_key.replace("_", " ").title()
+def _default_label(model_name: str) -> str:
+    return model_name.replace("_", " ").title()
 
 
 def _model_toml_template(
     *,
-    model_key: str,
+    model_name: str,
     model_label: str,
     target_name: str,
     model_type: str,
@@ -95,7 +95,7 @@ def _model_toml_template(
         # Model housekeeping config. Keep model identity, deployment lane, and
         # validation split settings here; keep source SQL and Python model code
         # in the neighboring package files.
-        model_key = {_toml_string(model_key)}
+        model_name = {_toml_string(model_name)}
         model_label = {_toml_string(model_label)}
         target_name = {_toml_string(target_name)}
         model_type = {_toml_string(model_type)}
@@ -189,10 +189,10 @@ def _custom_spec_template() -> str:
     )
 
 
-def _custom_source_sql_template(*, model_key: str) -> str:
+def _custom_source_sql_template(*, model_name: str) -> str:
     return dedent(
         f"""\
-        -- Source-data query placeholder for {model_key}.
+        -- Source-data query placeholder for {model_name}.
         --
         -- Put model-local source SQL here when that is convenient, then read it
         -- from data.py. You can also ignore this file and call your team's
@@ -377,10 +377,10 @@ def _custom_modeling_template(*, package_name: str) -> str:
             publish task.
             \"\"\"
             run_key = str(prepared.get("run_key") or "manual")
-            export_id = build_export_id(MODEL_CONFIG.model_key, run_key)
+            export_id = build_export_id(MODEL_CONFIG.model_name, run_key)
             model_version = resolve_model_version_for_export(
                 engine,
-                model_key=MODEL_CONFIG.model_key,
+                model_name=MODEL_CONFIG.model_name,
                 export_id=export_id,
             )
             effective_from = effective_from_for_run(
@@ -518,11 +518,11 @@ def _custom_airflow_tasks_template(*, package_name: str) -> str:
     )
 
 
-def _custom_dag_template(*, package_name: str, dag_id: str, model_key: str) -> str:
+def _custom_dag_template(*, package_name: str, dag_id: str, model_name: str) -> str:
     tag = package_name.replace("_", "-")
     return dedent(
         f"""\
-        \"\"\"Airflow DAG for the {model_key} pricing model build.\"\"\"
+        \"\"\"Airflow DAG for the {model_name} pricing model build.\"\"\"
 
         from __future__ import annotations
 
@@ -597,7 +597,7 @@ def _factory_spec_template(
         )
 
         MODEL_SPEC = ModelSpec(
-            model_key=MODEL_CONFIG.model_key,
+            model_name=MODEL_CONFIG.model_name,
             model_label=MODEL_CONFIG.model_label,
             target_name=MODEL_CONFIG.target_name,
             model_type=MODEL_CONFIG.model_type,
@@ -635,12 +635,12 @@ def _factory_dag_template(*, package_name: str, dag_id: str) -> str:
 
 
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
-    model_key = _validate_model_key(options.model_key)
+    model_name = _validate_model_name(options.model_name)
     template = _required_text(options.template, "template")
     if template not in {"custom", "factory"}:
         raise ValueError("template must be one of: custom, factory")
     package_name = _validate_python_identifier(
-        options.package_name or _module_name_from_model_key(model_key),
+        options.package_name or _module_name_from_model_name(model_name),
         "package_name",
     )
     dag_id = _validate_python_identifier(
@@ -649,12 +649,12 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     )
     target_name = _required_text(options.target_name, "target_name")
     model_label = _required_text(
-        options.model_label or _default_label(model_key),
+        options.model_label or _default_label(model_name),
         "model_label",
     )
     model_type = _required_text(options.model_type, "model_type")
     deployment_slot = _required_text(
-        options.deployment_slot or f"{model_key}_UAT",
+        options.deployment_slot or f"{model_name}_UAT",
         "deployment_slot",
     )
     experiment_name = _required_text(
@@ -691,7 +691,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     content_by_path = {
         package_dir / "__init__.py": _package_init_template(package_name=package_name),
         package_dir / "model.toml": _model_toml_template(
-            model_key=model_key,
+            model_name=model_name,
             model_label=model_label,
             target_name=target_name,
             model_type=model_type,
@@ -713,7 +713,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         content_by_path.update(
             {
                 package_dir / "sql" / "source_data.sql": _custom_source_sql_template(
-                    model_key=model_key
+                    model_name=model_name
                 ),
                 package_dir / "spec.py": _custom_spec_template(),
                 package_dir / "data.py": _custom_data_template(package_name=package_name),
@@ -726,7 +726,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
                 dag_path: _custom_dag_template(
                     package_name=package_name,
                     dag_id=dag_id,
-                    model_key=model_key,
+                    model_name=model_name,
                 ),
             }
         )
@@ -749,7 +749,7 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
     parser = argparse.ArgumentParser(
         description="Create a pricing model package and Airflow DAG scaffold.",
     )
-    parser.add_argument("--model-key", required=True)
+    parser.add_argument("--model-name", required=True)
     parser.add_argument("--target-name", required=True)
     parser.add_argument("--model-label")
     parser.add_argument("--model-type", default="superglm_poisson")
@@ -770,7 +770,7 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     return ScaffoldOptions(
-        model_key=args.model_key,
+        model_name=args.model_name,
         model_label=args.model_label,
         target_name=args.target_name,
         model_type=args.model_type,

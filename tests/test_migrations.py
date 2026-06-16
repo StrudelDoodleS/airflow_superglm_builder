@@ -64,7 +64,9 @@ def _create_table_columns(ddl: str) -> dict[str, list[str]]:
     return columns
 
 
-def _create_table_foreign_keys(ddl: str) -> dict[str, list[tuple[tuple[str, ...], str, tuple[str, ...]]]]:
+def _create_table_foreign_keys(
+    ddl: str,
+) -> dict[str, list[tuple[tuple[str, ...], str, tuple[str, ...]]]]:
     foreign_key_pattern = re.compile(
         r"FOREIGN KEY \(([^)]*)\)\s+REFERENCES\s+([a-z_]+\.[A-Z0-9_]+)\(([^)]*)\)",
         re.S,
@@ -76,9 +78,13 @@ def _create_table_foreign_keys(ddl: str) -> dict[str, list[tuple[tuple[str, ...]
         for source_columns, target_table, target_columns in foreign_key_pattern.findall(body):
             table_foreign_keys.append(
                 (
-                    tuple(column.strip() for column in source_columns.replace("\n", " ").split(",")),
+                    tuple(
+                        column.strip() for column in source_columns.replace("\n", " ").split(",")
+                    ),
                     target_table,
-                    tuple(column.strip() for column in target_columns.replace("\n", " ").split(",")),
+                    tuple(
+                        column.strip() for column in target_columns.replace("\n", " ").split(",")
+                    ),
                 )
             )
 
@@ -239,26 +245,30 @@ def test_model_registry_migration_keeps_history_and_guards_current_deployments()
     assert "WHERE effective_to_ts IS NULL" in migration
 
 
-def test_fresh_schema_defines_model_keys_near_table_identifiers():
-    pricing_core = Path("db/migrations/V002__pricing_core_minimal.sql").read_text(
-        encoding="utf-8"
-    )
-    fremtpl_run = Path("db/migrations/V005__fremtpl_raw_model_run.sql").read_text(
-        encoding="utf-8"
-    )
+def test_fresh_schema_defines_model_names_near_table_identifiers():
+    pricing_core = Path("db/migrations/V002__pricing_core_minimal.sql").read_text(encoding="utf-8")
+    fremtpl_run = Path("db/migrations/V005__fremtpl_raw_model_run.sql").read_text(encoding="utf-8")
 
-    assert pricing_core.index("rate_package_id        BIGINT IDENTITY") < pricing_core.index(
-        "model_id               BIGINT NULL"
-    ) < pricing_core.index("model_name             NVARCHAR(128)")
-    assert pricing_core.index("pointer_name      NVARCHAR(128)") < pricing_core.index(
-        "model_id          BIGINT NULL"
-    ) < pricing_core.index("rate_package_id   BIGINT NOT NULL")
-    assert pricing_core.index("level_set_id        BIGINT IDENTITY") < pricing_core.index(
-        "model_id            BIGINT NULL"
-    ) < pricing_core.index("feature_id          BIGINT NOT NULL")
-    assert fremtpl_run.index("model_run_id BIGINT IDENTITY") < fremtpl_run.index(
-        "model_id BIGINT NULL"
-    ) < fremtpl_run.index("dag_id NVARCHAR(250) NOT NULL")
+    assert (
+        pricing_core.index("rate_package_id        BIGINT IDENTITY")
+        < pricing_core.index("model_id               BIGINT NULL")
+        < pricing_core.index("model_name             NVARCHAR(128)")
+    )
+    assert (
+        pricing_core.index("pointer_name      NVARCHAR(128)")
+        < pricing_core.index("model_id          BIGINT NULL")
+        < pricing_core.index("rate_package_id   BIGINT NOT NULL")
+    )
+    assert (
+        pricing_core.index("level_set_id        BIGINT IDENTITY")
+        < pricing_core.index("model_id            BIGINT NULL")
+        < pricing_core.index("feature_id          BIGINT NOT NULL")
+    )
+    assert (
+        fremtpl_run.index("model_run_id BIGINT IDENTITY")
+        < fremtpl_run.index("model_id BIGINT NULL")
+        < fremtpl_run.index("dag_id NVARCHAR(250) NOT NULL")
+    )
 
 
 def test_model_registry_migration_scopes_packages_pointers_and_level_sets():
@@ -313,15 +323,23 @@ def test_rate_package_source_export_migration_adds_idempotency_key():
 
 
 def test_rate_package_source_file_migration_adds_workbook_identity():
-    migration = Path("db/migrations/V020__rate_package_source_file.sql").read_text(
-        encoding="utf-8"
-    )
+    migration = Path("db/migrations/V020__rate_package_source_file.sql").read_text(encoding="utf-8")
 
     assert "ALTER TABLE pricing.PRICING_RATE_PACKAGE" in migration
     assert "ADD source_file NVARCHAR(1024) NULL" in migration
     assert "JOIN pricing_stg.STG_RATING_EXPORT AS src" in migration
     assert "src.export_id = rp.source_export_id" in migration
     assert "rp.package_status = 'DRAFT'" in migration
+
+
+def test_model_name_unification_migration_replaces_model_key_contract():
+    migration = Path("db/migrations/V021__unify_model_name.sql").read_text(encoding="utf-8")
+
+    assert "sp_rename 'pricing.PRICING_MODEL.model_key', 'model_name', 'COLUMN'" in migration
+    assert "CREATE OR ALTER VIEW pricing.V_ACTIVE_MODEL" in migration
+    assert "UQ_PRICING_MODEL_NAME" in migration
+    assert "model_name" in migration
+    assert migration.count("model_key") == 2
 
 
 def test_package_writer_allocates_version_under_lock():
@@ -344,9 +362,7 @@ def test_model_registry_migration_exposes_current_views_not_mutable_active_flags
 
 
 def test_compiled_band_sort_order_migration_backfills_and_rekeys_table():
-    migration = Path("db/migrations/V008__compiled_band_sort_order.sql").read_text(
-        encoding="utf-8"
-    )
+    migration = Path("db/migrations/V008__compiled_band_sort_order.sql").read_text(encoding="utf-8")
 
     assert "ALTER TABLE pricing.PRICING_COMPILED_1D_RATE_BAND" in migration
     assert "ADD sort_order INT NOT NULL" in migration
@@ -387,9 +403,7 @@ def test_cv_split_runtime_metadata_migration_adds_dependency_audit_json():
 
 
 def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
-    migration = Path("db/migrations/V013__model_run_lineage_tables.sql").read_text(
-        encoding="utf-8"
-    )
+    migration = Path("db/migrations/V013__model_run_lineage_tables.sql").read_text(encoding="utf-8")
 
     assert "CREATE SCHEMA mlops" in migration
     assert "CREATE TABLE mlops.MODEL_RUN_DATASET" in migration
@@ -402,8 +416,7 @@ def test_model_run_lineage_migration_adds_minimal_mlops_link_tables():
     assert "REFERENCES pricing.DATASET_MANIFEST(manifest_id)" in migration
     assert "REFERENCES pricing.CV_SPLIT_SET(manifest_id, split_set_id)" in migration
     assert (
-        "REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id)"
-        in migration
+        "REFERENCES mlops.MODEL_RUN_DATASET(model_run_id, dataset_role, manifest_id)" in migration
     )
     assert "PRICING_PACKAGE_POINTER" not in migration
     assert "pricing_stg" not in migration
@@ -427,7 +440,10 @@ def test_guard_error_compatibility_migration_keeps_throw_with_statement_terminat
     )
 
     assert "CREATE OR ALTER PROCEDURE pricing.PREDICT_CURRENT_RATE" in migration
-    assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE" in migration
+    assert (
+        "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_PACKAGE_IMMUTABLE_UPDATE_DELETE"
+        in migration
+    )
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_CELL_LEVEL_IMMUTABLE_WRITE" in migration
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD" in migration
     assert ";THROW 51000" in migration
@@ -455,12 +471,10 @@ def test_prediction_proc_migration_scores_current_package_from_compiled_views():
 
 
 def test_prediction_proc_aggregates_relativity_from_matched_terms():
-    migration = Path("db/migrations/V014__current_rate_prediction_proc.sql").read_text(
-        encoding="utf-8"
-    )
+    migration = Path("db/migrations/V021__unify_model_name.sql").read_text(encoding="utf-8")
 
     assert re.search(
-        r"SELECT\s+@model_key AS model_key,.*?"
+        r"SELECT\s+@model_name AS model_name,.*?"
         r"EXP\(SUM\(log_coefficient\)\) AS relativity,.*?"
         r"@matched_terms AS matched_terms\s+FROM @matched;",
         migration,
@@ -488,9 +502,7 @@ def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages()
 
 
 def test_rating_package_loader_builds_package_as_draft_before_final_status():
-    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(
-        encoding="utf-8"
-    )
+    loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
     assert "requested_package_status = args.package_status" in loader
     assert '"package_status": "DRAFT"' in loader
@@ -561,8 +573,7 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
         "REFERENCES pricing.RATE_PACKAGE(model_id, rate_package_id)"
     ) in ddl
     assert (
-        "FOREIGN KEY (model_id, model_run_id) "
-        "REFERENCES mlops.MODEL_RUN(model_id, model_run_id)"
+        "FOREIGN KEY (model_id, model_run_id) REFERENCES mlops.MODEL_RUN(model_id, model_run_id)"
     ) in ddl
     assert (
         "FOREIGN KEY (model_run_id, dataset_role, manifest_id) "
@@ -576,10 +587,7 @@ def test_useful_tables_reference_ddl_excludes_staging_and_row_materialization():
         "FOREIGN KEY (feature_id, level_set_id) "
         "REFERENCES pricing.FEATURE_LEVEL_SET(feature_id, level_set_id)"
     ) in ddl
-    assert (
-        "FOREIGN KEY (cell_id, term_id) "
-        "REFERENCES pricing.RATE_CELL(cell_id, term_id)"
-    ) in ddl
+    assert ("FOREIGN KEY (cell_id, term_id) REFERENCES pricing.RATE_CELL(cell_id, term_id)") in ddl
     assert (
         "FOREIGN KEY (term_id, position_no, level_set_id) "
         "REFERENCES pricing.TERM_FEATURE(term_id, position_no, level_set_id)"
@@ -625,17 +633,12 @@ def test_full_useful_tables_reference_matches_strict_erd_table_contract():
     }
 
     assert set(full_columns) == set(persisted_tables)
-    assert {
-        table_name: full_columns[table_name] for table_name in sorted(full_columns)
-    } == {
+    assert {table_name: full_columns[table_name] for table_name in sorted(full_columns)} == {
         table_name: persisted_tables[table_name] for table_name in sorted(persisted_tables)
     }
     assert {
         table_name: full_foreign_keys[table_name] for table_name in sorted(full_foreign_keys)
-    } == {
-        table_name: strict_foreign_keys[table_name]
-        for table_name in sorted(persisted_tables)
-    }
+    } == {table_name: strict_foreign_keys[table_name] for table_name in sorted(persisted_tables)}
 
     runtime_views = [
         "pricing_runtime.V_COMPILED_RATE_CELL",

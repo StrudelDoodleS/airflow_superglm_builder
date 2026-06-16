@@ -58,7 +58,7 @@ CREATE TABLE mlops.DATASET_COLUMN (
 
 CREATE TABLE pricing.MODEL (
     model_id BIGINT IDENTITY(1,1) NOT NULL,
-    model_key NVARCHAR(128) NOT NULL,
+    model_name NVARCHAR(128) NOT NULL,
     model_label NVARCHAR(256) NULL,
     target_name NVARCHAR(128) NOT NULL,
     model_type NVARCHAR(128) NOT NULL,
@@ -71,7 +71,7 @@ CREATE TABLE pricing.MODEL (
         PRIMARY KEY (model_id),
 
     CONSTRAINT UQ_MODEL_KEY
-        UNIQUE (model_key),
+        UNIQUE (model_name),
 
     CONSTRAINT CK_MODEL_STATUS
         CHECK (model_status IN ('ACTIVE', 'RETIRED', 'DISABLED'))
@@ -485,7 +485,7 @@ SELECT
     d.deployment_id,
     d.deployment_slot,
     d.model_id,
-    m.model_key,
+    m.model_name,
     m.model_label,
     d.rate_package_id,
     p.package_version,

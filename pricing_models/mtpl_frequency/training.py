@@ -1,17 +1,27 @@
+"""Compatibility helpers for the older MTPL factory/scripts path.
+
+New custom builds should use pricing_models.mtpl_frequency.modeling directly.
+This module re-exports the model primitives so legacy ModelSpec-based utilities
+do not carry a second implementation of the same SuperGLM model.
+"""
+
 from __future__ import annotations
 
 import pickle
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from superglm import Categorical, Numeric, Spline, SuperGLM
 
 try:
     import mlflow
 except ModuleNotFoundError:
     mlflow = None
 
+from pricing_models.mtpl_frequency.modeling import (
+    FEATURE_COLUMNS,
+    build_model,
+    build_training_frame,
+)
 from pricing_pipeline.infra.mlflow_tracking import optional_mlflow_client
 from pricing_pipeline.models.superglm_diagnostics import (
     fit_reml_with_diagnostics,
@@ -19,59 +29,16 @@ from pricing_pipeline.models.superglm_diagnostics import (
 )
 
 
-FEATURE_COLUMNS = [
-    "VehAge",
-    "DrivAge",
-    "BonusMalus",
-    "LogDensity",
-    "Area",
-    "VehPower",
-    "VehBrand",
-    "VehGas",
-    "Region",
+__all__ = [
+    "FEATURE_COLUMNS",
+    "TRAINING_SQL",
+    "build_model",
+    "build_training_frame",
+    "parse_deviance_log_metrics",
+    "train_superglm",
 ]
 
-FEATURE_SOURCE_COLUMNS = [column for column in FEATURE_COLUMNS if column != "LogDensity"]
-REQUIRED_RAW_COLUMNS = ["ClaimNb", "Exposure", "Density", *FEATURE_SOURCE_COLUMNS]
 TRAINING_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
-
-
-def build_training_frame(
-    raw: pd.DataFrame,
-) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
-    missing = [column for column in REQUIRED_RAW_COLUMNS if column not in raw.columns]
-    if missing:
-        raise ValueError(f"missing columns: {', '.join(missing)}")
-
-    training = raw.loc[raw["Exposure"] > 0, REQUIRED_RAW_COLUMNS].copy()
-    training["LogDensity"] = np.log(training["Density"].astype(float).clip(lower=1.0))
-
-    X = training.loc[:, FEATURE_COLUMNS].copy()
-    y = training["ClaimNb"].to_numpy(dtype=float)
-    exposure = training["Exposure"].to_numpy(dtype=float)
-    offset = np.log(exposure)
-    return X, y, exposure, offset
-
-
-def build_model() -> SuperGLM:
-    features = {
-        "VehAge": Spline(),
-        "DrivAge": Spline(),
-        "BonusMalus": Spline(),
-        "LogDensity": Numeric(),
-        "Area": Categorical(),
-        "VehPower": Categorical(),
-        "VehBrand": Categorical(),
-        "VehGas": Categorical(),
-        "Region": Categorical(),
-    }
-    return SuperGLM(
-        family="poisson",
-        selection_penalty=0.0,
-        discrete=True,
-        n_bins=256,
-        features=features,
-    )
 
 
 def train_superglm(

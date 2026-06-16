@@ -42,8 +42,7 @@ def _require_columns(frame_name: str, frame: pd.DataFrame, columns: tuple[str, .
     missing = [column for column in columns if column not in frame.columns]
     if missing:
         raise ManualRevisionError(
-            f"{frame_name} rate cell frame is missing required column(s): "
-            f"{', '.join(missing)}",
+            f"{frame_name} rate cell frame is missing required column(s): {', '.join(missing)}",
         )
 
 
@@ -96,8 +95,7 @@ def _numeric_rate_cell_column(
     finite_values = np.isfinite(numeric_values.to_numpy())
     if not finite_values.all():
         raise ManualRevisionError(
-            error_message
-            or f"{frame_name} {column_name} values must be numeric finite numbers",
+            error_message or f"{frame_name} {column_name} values must be numeric finite numbers",
         )
     return numeric_values
 
@@ -187,9 +185,7 @@ def _required_text(value: str | None, field_name: str) -> str:
 
 
 def _validate_revision_parent_metadata(parent: RatePackageSnapshot) -> None:
-    missing = [
-        key for key in _REQUIRED_REVISION_PARENT_METADATA_KEYS if key not in parent.metadata
-    ]
+    missing = [key for key in _REQUIRED_REVISION_PARENT_METADATA_KEYS if key not in parent.metadata]
     if missing:
         raise ManualRevisionError(
             "parent metadata is missing required key(s): " + ", ".join(missing),
@@ -200,16 +196,16 @@ def _validate_revision_parent_model(
     config: ModelBuildConfig,
     parent: RatePackageSnapshot,
 ) -> None:
-    configured_model_key = config.model_key
-    for metadata_key in ("model_name", "model_key"):
+    configured_model_name = config.model_name
+    for metadata_key in ("model_name", "registry_model_name", "package_model_name"):
         if metadata_key not in parent.metadata:
             continue
         parent_model = str(parent.metadata[metadata_key]).strip()
-        if parent_model != configured_model_key:
+        if parent_model != configured_model_name:
             raise ManualRevisionError(
                 "parent model/configured model mismatch: "
                 f"parent {metadata_key}={parent_model!r} does not match "
-                f"configured model_key={configured_model_key!r}",
+                f"configured model_name={configured_model_name!r}",
             )
 
 
@@ -239,19 +235,25 @@ def _write_manual_revision(
     model_id = int(parent_metadata["model_id"])
 
     with engine.begin() as con:
-        con.execute(text("""
+        con.execute(
+            text("""
             DROP TABLE IF EXISTS #manual_rate_cell_edits;
             DROP TABLE IF EXISTS #term_map;
             DROP TABLE IF EXISTS #cell_map;
-        """))
+        """)
+        )
 
-        package_version = con.execute(text("""
+        package_version = con.execute(
+            text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
-        """), {"model_id": model_id}).scalar_one()
+        """),
+            {"model_id": model_id},
+        ).scalar_one()
 
-        rate_package_id = con.execute(text("""
+        rate_package_id = con.execute(
+            text("""
             INSERT INTO pricing.PRICING_RATE_PACKAGE (
                 parent_rate_package_id,
                 model_id,
@@ -277,28 +279,33 @@ def _write_manual_revision(
                 :package_status,
                 :created_by
             );
-        """), {
-            "parent_rate_package_id": parent_rate_package_id,
-            "model_id": model_id,
-            "model_name": parent_metadata["model_name"],
-            "model_version": parent_metadata["model_version"],
-            "package_version": package_version,
-            "base_rate": parent_metadata["base_rate"],
-            "effective_from_date": parent_metadata["effective_from_date"],
-            "effective_to_date": parent_metadata["effective_to_date"],
-            "package_status": "DRAFT",
-            "created_by": created_by,
-        }).scalar_one()
+        """),
+            {
+                "parent_rate_package_id": parent_rate_package_id,
+                "model_id": model_id,
+                "model_name": parent_metadata["model_name"],
+                "model_version": parent_metadata["model_version"],
+                "package_version": package_version,
+                "base_rate": parent_metadata["base_rate"],
+                "effective_from_date": parent_metadata["effective_from_date"],
+                "effective_to_date": parent_metadata["effective_to_date"],
+                "package_status": "DRAFT",
+                "created_by": created_by,
+            },
+        ).scalar_one()
 
-        con.execute(text("""
+        con.execute(
+            text("""
             CREATE TABLE #manual_rate_cell_edits (
                 cell_id BIGINT NOT NULL PRIMARY KEY,
                 multiplier DECIMAL(19,10) NOT NULL,
                 log_coefficient DECIMAL(19,12) NOT NULL
             );
-        """))
+        """)
+        )
         if manual_edit_rows:
-            con.execute(text("""
+            con.execute(
+                text("""
                 INSERT INTO #manual_rate_cell_edits (
                     cell_id,
                     multiplier,
@@ -309,9 +316,12 @@ def _write_manual_revision(
                     :multiplier,
                     :log_coefficient
                 );
-            """), manual_edit_rows)
+            """),
+                manual_edit_rows,
+            )
 
-        con.execute(text("""
+        con.execute(
+            text("""
             CREATE TABLE #term_map (
                 old_term_id BIGINT NOT NULL PRIMARY KEY,
                 new_term_id BIGINT NOT NULL UNIQUE
@@ -539,22 +549,29 @@ def _write_manual_revision(
             LEFT JOIN #manual_rate_cell_edits AS edit
               ON edit.cell_id = src_band_cell.cell_id
             WHERE band.rate_package_id = :parent_rate_package_id;
-        """), {
-            "parent_rate_package_id": parent_rate_package_id,
-            "rate_package_id": rate_package_id,
-        })
+        """),
+            {
+                "parent_rate_package_id": parent_rate_package_id,
+                "rate_package_id": rate_package_id,
+            },
+        )
 
-        con.execute(text("""
+        con.execute(
+            text("""
             UPDATE pricing.PRICING_RATE_PACKAGE
             SET package_status = 'PUBLISHED'
             WHERE rate_package_id = :rate_package_id;
-        """), {"rate_package_id": rate_package_id})
+        """),
+            {"rate_package_id": rate_package_id},
+        )
 
-        con.execute(text("""
+        con.execute(
+            text("""
             DROP TABLE IF EXISTS #cell_map;
             DROP TABLE IF EXISTS #term_map;
             DROP TABLE IF EXISTS #manual_rate_cell_edits;
-        """))
+        """)
+        )
 
     return int(rate_package_id), int(package_version)
 
@@ -604,9 +621,10 @@ def _metadata_query(selector: RatePackageSelector):
                 rp.rate_package_id,
                 rp.parent_rate_package_id,
                 rp.model_id,
-                m.model_key,
+                m.model_name AS model_name,
+                m.model_name AS registry_model_name,
                 m.model_label,
-                rp.model_name,
+                rp.model_name AS package_model_name,
                 rp.model_version,
                 rp.package_version,
                 rp.base_rate,
@@ -618,7 +636,7 @@ def _metadata_query(selector: RatePackageSelector):
             FROM pricing.PRICING_RATE_PACKAGE AS rp
             JOIN pricing.PRICING_MODEL AS m
               ON m.model_id = rp.model_id
-            WHERE m.model_key = :model_key
+            WHERE m.model_name = :model_name
               AND rp.rate_package_id = :rate_package_id
         """)
     return text("""
@@ -626,9 +644,10 @@ def _metadata_query(selector: RatePackageSelector):
             rp.rate_package_id,
             rp.parent_rate_package_id,
             rp.model_id,
-            m.model_key,
+            m.model_name AS model_name,
+            m.model_name AS registry_model_name,
             m.model_label,
-            rp.model_name,
+            rp.model_name AS package_model_name,
             rp.model_version,
             rp.package_version,
             rp.base_rate,
@@ -640,7 +659,7 @@ def _metadata_query(selector: RatePackageSelector):
         FROM pricing.PRICING_RATE_PACKAGE AS rp
         JOIN pricing.PRICING_MODEL AS m
           ON m.model_id = rp.model_id
-        WHERE m.model_key = :model_key
+        WHERE m.model_name = :model_name
           AND rp.package_version = :package_version
     """)
 
@@ -649,7 +668,7 @@ def _metadata_params(
     config: ModelBuildConfig,
     selector: RatePackageSelector,
 ) -> dict[str, int | str]:
-    params: dict[str, int | str] = {"model_key": config.model_key}
+    params: dict[str, int | str] = {"model_name": config.model_name}
     if selector.rate_package_id is not None:
         params["rate_package_id"] = selector.rate_package_id
     else:
@@ -674,7 +693,8 @@ def load_rate_package_snapshot(
     rate_package_id = int(metadata_row["rate_package_id"])
     package_params = {"rate_package_id": rate_package_id}
 
-    terms = pd.read_sql_query(text("""
+    terms = pd.read_sql_query(
+        text("""
         SELECT
             t.*
         FROM pricing.PRICING_TERM AS t
@@ -682,9 +702,13 @@ def load_rate_package_snapshot(
         ORDER BY
             t.sequence_no,
             t.term_id
-    """), engine, params=package_params)
+    """),
+        engine,
+        params=package_params,
+    )
 
-    rate_cells = pd.read_sql_query(text("""
+    rate_cells = pd.read_sql_query(
+        text("""
         SELECT
             rc.*
         FROM pricing.PRICING_RATE_CELL AS rc
@@ -694,9 +718,13 @@ def load_rate_package_snapshot(
         ORDER BY
             t.sequence_no,
             rc.cell_id
-    """), engine, params=package_params)
+    """),
+        engine,
+        params=package_params,
+    )
 
-    cell_levels = pd.read_sql_query(text("""
+    cell_levels = pd.read_sql_query(
+        text("""
         SELECT
             rcl.*
         FROM pricing.PRICING_RATE_CELL_LEVEL AS rcl
@@ -709,9 +737,13 @@ def load_rate_package_snapshot(
             t.sequence_no,
             rc.cell_id,
             rcl.position_no
-    """), engine, params=package_params)
+    """),
+        engine,
+        params=package_params,
+    )
 
-    compiled_rate_cells = pd.read_sql_query(text("""
+    compiled_rate_cells = pd.read_sql_query(
+        text("""
         SELECT
             crc.*
         FROM pricing.PRICING_COMPILED_RATE_CELL AS crc
@@ -720,9 +752,13 @@ def load_rate_package_snapshot(
             crc.sequence_no,
             crc.term_id,
             crc.cell_key_text
-    """), engine, params=package_params)
+    """),
+        engine,
+        params=package_params,
+    )
 
-    compiled_1d_bands = pd.read_sql_query(text("""
+    compiled_1d_bands = pd.read_sql_query(
+        text("""
         SELECT
             b.*
         FROM pricing.PRICING_COMPILED_1D_RATE_BAND AS b
@@ -731,7 +767,10 @@ def load_rate_package_snapshot(
             b.term_id,
             b.sort_order,
             b.feature_level_id
-    """), engine, params=package_params)
+    """),
+        engine,
+        params=package_params,
+    )
 
     return RatePackageSnapshot(
         metadata=metadata_row,

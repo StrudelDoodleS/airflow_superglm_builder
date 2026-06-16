@@ -57,7 +57,7 @@ class FakeConnection:
 
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -70,7 +70,7 @@ def test_get_pricing_model_returns_record_for_existing_model():
     con = FakeConnection(
         {
             "model_id": 17,
-            "model_key": "MTPL_FREQ",
+            "model_name": "MTPL_FREQ",
             "model_label": "Motor frequency",
             "target_name": "ClaimNb",
             "model_type": "superglm_poisson",
@@ -82,7 +82,7 @@ def test_get_pricing_model_returns_record_for_existing_model():
 
     assert record == PricingModelRecord(
         model_id=17,
-        model_key="MTPL_FREQ",
+        model_name="MTPL_FREQ",
         model_label="Motor frequency",
         target_name="ClaimNb",
         model_type="superglm_poisson",
@@ -101,7 +101,7 @@ def test_validate_registered_model_fails_on_metadata_mismatch():
     con = FakeConnection(
         {
             "model_id": 17,
-            "model_key": "MTPL_FREQ",
+            "model_name": "MTPL_FREQ",
             "model_label": "Motor frequency",
             "target_name": "LossCost",
             "model_type": "superglm_poisson",

@@ -67,12 +67,12 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
     monkeypatch.setattr(
         runner,
         "resolve_model_version_for_export",
-        lambda engine_arg, *, model_key, export_id: (
+        lambda engine_arg, *, model_name, export_id: (
             calls.append(
                 (
                     "resolve_model_version_for_export",
                     engine_arg,
-                    model_key,
+                    model_name,
                     export_id,
                 )
             )
@@ -111,7 +111,7 @@ def test_run_demo_custom_publish_registers_model_and_publishes(monkeypatch, tmp_
 
     assert result["rate_package_id"] == 101
     assert calls[0][0] == "ensure_pricing_model"
-    assert calls[0][2]["model_key"] == "DEMO_CUSTOM_FREQ"
+    assert calls[0][2]["model_name"] == "DEMO_CUSTOM_FREQ"
     assert calls[0][2]["created_by"] == "pytest"
     assert [call[0] for call in calls] == [
         "ensure_pricing_model",

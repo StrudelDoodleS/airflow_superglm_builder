@@ -1,4 +1,4 @@
-model_key = "DEMO_CUSTOM_FREQ"
+model_name = "DEMO_CUSTOM_FREQ"
 model_label = "Demo custom frequency"
 target_name = "claim_count"
 model_type = "superglm_poisson"

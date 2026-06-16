@@ -128,7 +128,7 @@ class ValidationSplitConfig:
 
 @dataclass(frozen=True)
 class ModelBuildConfig:
-    model_key: str
+    model_name: str
     model_label: str
     target_name: str
     model_type: str
@@ -138,7 +138,7 @@ class ModelBuildConfig:
 
 
 _REQUIRED_FIELDS = (
-    "model_key",
+    "model_name",
     "model_label",
     "target_name",
     "model_type",
@@ -354,12 +354,15 @@ def load_model_build_config(path: str | Path) -> ModelBuildConfig:
     with config_path.open("rb") as handle:
         data = tomllib.load(handle)
 
+    if "model_key" in data:
+        raise ValueError("model config field 'model_key' was renamed to 'model_name'")
+
     for field_name in _REQUIRED_FIELDS:
         if field_name not in data:
             raise ValueError(f"model config missing required field {field_name!r}")
 
     config = ModelBuildConfig(
-        model_key=_require_non_empty_string(data, "model_key"),
+        model_name=_require_non_empty_string(data, "model_name"),
         model_label=_require_non_empty_string(data, "model_label"),
         target_name=_require_non_empty_string(data, "target_name"),
         model_type=_require_non_empty_string(data, "model_type"),

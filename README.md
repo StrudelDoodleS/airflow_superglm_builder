@@ -273,13 +273,33 @@ Prerequisites:
    run it directly without Airflow:
 
    ```bash
-   uv run python scripts/run_pipeline_no_airflow.py \
-     --runtime-module work_runtime.database \
-     --model-key MTPL_FREQ
+   uv run python scripts/run_mtpl_frequency_custom.py \
+     --runtime-module work_runtime.database
    ```
 
-   The direct runner uses the same schema DDL, dataset manifest/CV metadata,
-   MLflow logging, rating export, and SQL publish code as the DAG.
+   The direct runner uses the same explicit custom path as the DAG: prepare the
+   freMTPL source data, build the final model frame, record the 5-fold split and
+   frame manifest, export the rating workbook/model artifact, and publish to SQL.
+
+   To inspect the same freMTPL model-frame and CV metadata flow without Airflow
+   or SQL Server, run the offline SQLite smoke build:
+
+   ```bash
+   uv run python scripts/run_mtpl_frequency_offline_sqlite.py --reset
+   ```
+
+   By default this fetches the full freMTPL source data, fits the model, records
+   the 5-fold split, exports the workbook/model artifact, and creates a local
+   offline DDL structure for inspection:
+
+   ```text
+   state/offline/mtpl_frequency/pricing.sqlite
+   state/offline/mtpl_frequency/pricing_stg.sqlite
+   state/offline/mtpl_frequency/mlops.sqlite
+   ```
+
+   It is an offline smoke check, not the production publish path.
+   For a faster no-network check, add `--synthetic-source --row-count 120`.
 
 ## Adding Models
 
@@ -288,7 +308,7 @@ model development, most edits should be under `pricing_models/`.
 
 ```text
 pricing_models/<model_name>/
-  model.toml   # model key, label, target, deployment slot, validation split
+  model.toml   # model name, label, target, deployment slot, validation split
   spec.py       # loads MODEL_CONFIG from model.toml
   sql/          # optional model-local SQL scripts used by data.py
   data.py       # source reads/staging and small run metadata
@@ -299,7 +319,7 @@ pricing_pipeline/
   data/          # dataset specs, raw loaders, manifests, CV split metadata
   infra/         # env config, SQL connection, schema application, MLflow setup
   models/        # shared model/data contracts and SuperGLM diagnostics capture
-  orchestration/ # Airflow DAG factory and direct train/export/publish flow
+  orchestration/ # Airflow task wrappers and direct train/export/publish helpers
   publishing/    # rating package publish, model registry, run lineage
   tools/         # optional local ERD generation
 ```
@@ -308,7 +328,7 @@ Create the starting files with the scaffold helper:
 
 ```bash
 uv run python scripts/scaffold_pricing_model.py \
-  --model-key MY_MODEL \
+  --model-name MY_MODEL \
   --model-label "My model" \
   --target-name derived_target
 ```
@@ -384,10 +404,11 @@ no registry import edits are needed for normal use. The older all-in-one
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.
-- Add one DAG per model in `dags/`. For quick demos you can use
-  `pricing_pipeline.orchestration.dag_factory.build_pricing_model_dag(...)`;
-  for serious model builds, a custom DAG can own ingestion, transforms,
-  training, validation, and then bolt on the completed-build publish task.
+- Add one DAG per model in `dags/`. Prefer the explicit custom TaskFlow shape:
+  register the model, prepare source data, train/export/create the frame
+  manifest, then bolt on the completed-build publish task. The older
+  `build_pricing_model_dag(...)` helper remains available only for the
+  `--template factory` compatibility scaffold.
 
 ### Custom DAG Publish Task
 
@@ -453,13 +474,13 @@ run_id = context["run_id"]
 # - new export_id gets the next vN from SQL package history
 # - effective_from from Airflow logical date, a DAG param, or business as-of date
 # - data_as_of_date from the source data snapshot/as-at date
-# - export_id from model_key + Airflow run_id, so reruns are idempotent
+# - export_id from model_name + Airflow run_id, so reruns are idempotent
 effective_from = effective_from_for_run(logical_date)
 data_as_of_date = prepared["data_as_of_date"]
-export_id = build_export_id(MODEL_CONFIG.model_key, run_id)
+export_id = build_export_id(MODEL_CONFIG.model_name, run_id)
 model_version = resolve_model_version_for_export(
     engine,
-    model_key=MODEL_CONFIG.model_key,
+    model_name=MODEL_CONFIG.model_name,
     export_id=export_id,
 )
 split_indices = ...  # The exact folds used by your fitting/validation code.
@@ -554,8 +575,8 @@ source table.
 
 For example, the current MTPL frequency model is implemented in
 `pricing_models/mtpl_frequency/`, registered as `MTPL_FREQ`, and exposed as the
-`pricing_mtpl_frequency` DAG. `pricing_superglm_pipeline` remains as a
-compatibility alias for older local commands.
+explicit `pricing_mtpl_frequency` custom DAG. The matching no-Airflow runner is
+`scripts/run_mtpl_frequency_custom.py`.
 
 For a work deployment, CloudBeaver is not required and should normally not be
 started. Work SQL connectivity should usually live in an importable Python
@@ -684,13 +705,40 @@ when rendering/running the database DDL.
 Then reference it from a model DAG:
 
 ```python
-pricing_motor_frequency = build_pricing_model_dag(
+from airflow.sdk import dag
+
+from pricing_models.motor_frequency.airflow_tasks import (
+    prepare_source_data_task,
+    train_validate_export_task,
+)
+from pricing_models.motor_frequency.spec import MODEL_CONFIG
+from pricing_pipeline.orchestration.model_registry_tasks import register_pricing_model_task
+from pricing_pipeline.orchestration.publish_completed_build import (
+    publish_completed_model_build_task,
+)
+
+
+@dag(
     dag_id="pricing.motor_frequency.build",
-    spec=MODEL_SPEC,
-    model_config=MODEL_CONFIG,
-    runtime_module="work_runtime.database",
+    schedule=None,
+    catchup=False,
     tags=["pricing", "motor", "frequency", "model-build"],
 )
+def pricing_motor_frequency():
+    registered = register_pricing_model_task(
+        model_config=MODEL_CONFIG,
+        runtime_module="work_runtime.database",
+    )()
+    prepared = prepare_source_data_task(runtime_module="work_runtime.database")()
+    completed = train_validate_export_task(runtime_module="work_runtime.database")(prepared)
+    published = publish_completed_model_build_task(
+        model_config=MODEL_CONFIG,
+        runtime_module="work_runtime.database",
+    )(completed)
+    registered >> prepared >> completed >> published
+
+
+pricing_motor_frequency()
 ```
 
 The DBA or platform owner must create the database user and grants inside the
@@ -841,7 +889,7 @@ Convenience views expose the current state:
 ## Rate Package Lifecycle
 
 Production model builds use stable model metadata from each model's
-`model.toml`. That config records housekeeping identity such as `model_key`,
+`model.toml`. That config records housekeeping identity such as `model_name`,
 `target_name`, `model_type`, and the default deployment slot; SQL Server owns
 the generated `model_id`.
 
@@ -852,7 +900,7 @@ candidate rate packages, but they do not move live deployment pointers by
 default.
 
 Live deployments happen through the generic manual DAG
-`pricing_deploy_rate_package`. The deploy run requires `model_key`, exactly one
+`pricing_deploy_rate_package`. The deploy run requires `model_name`, exactly one
 reviewed package selector (`rate_package_id` or `package_version`),
 `deployed_by`, and `deployment_reason` as the audit reason.
 `deployment_slot` is optional and defaults to the model config deployment slot.
@@ -911,7 +959,7 @@ Example SQL call:
 
 ```sql
 EXEC pricing.PREDICT_CURRENT_RATE
-    @model_key = N'MTPL_FREQ',
+    @model_name = N'MTPL_FREQ',
     @deployment_slot = N'MTPL_FREQ_UAT',
     @exposure = 0.75,
     @features_json = N'{
@@ -935,7 +983,7 @@ the same rows, and fails if the results exceed tolerance:
 
 ```bash
 uv run python scripts/validate_sql_prediction_against_superglm.py \
-  --model-key MTPL_FREQ \
+  --model-name MTPL_FREQ \
   --deployment-slot MTPL_FREQ_UAT \
   --limit 1000 \
   --rtol 1e-4 \
@@ -977,13 +1025,13 @@ The seeder publishes:
 Useful inspection queries:
 
 ```sql
-SELECT model_id, model_key, target_name, model_type, model_status
+SELECT model_id, model_name, target_name, model_type, model_status
 FROM pricing.PRICING_MODEL
 ORDER BY model_id;
 
-SELECT model_key, deployment_slot, rate_package_id, model_version, package_version
+SELECT model_name, deployment_slot, rate_package_id, model_version, package_version
 FROM pricing.V_CURRENT_RATE_PACKAGE
-ORDER BY model_key, deployment_slot;
+ORDER BY model_name, deployment_slot;
 
 SELECT model_name, model_version, package_version, package_status
 FROM pricing.PRICING_RATE_PACKAGE

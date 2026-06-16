@@ -1,4 +1,4 @@
-model_key = "MTPL_FREQ"
+model_name = "MTPL_FREQ"
 model_label = "Motor frequency"
 target_name = "ClaimNb"
 model_type = "superglm_poisson"
@@ -6,8 +6,8 @@ deployment_slot = "MTPL_FREQ_UAT"
 default_package_status = "PUBLISHED"
 
 [validation_split]
-method = "train_test_split"
-test_size = 0.20
+method = "kfold"
+n_splits = 5
 random_state = 42
 shuffle = true
 materialize = true
