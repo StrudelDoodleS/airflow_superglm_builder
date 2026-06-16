@@ -136,7 +136,9 @@ def _json_default(value: object) -> object:
     if callable(item):
         try:
             return item()
-        except TypeError, ValueError:
+        except TypeError:
+            pass
+        except ValueError:
             pass
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -157,7 +159,9 @@ def _finite_metric(value: object) -> float | None:
         return None
     try:
         metric = float(value)
-    except TypeError, ValueError:
+    except TypeError:
+        return None
+    except ValueError:
         return None
     return metric if np.isfinite(metric) else None
 

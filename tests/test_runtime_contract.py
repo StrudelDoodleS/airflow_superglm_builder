@@ -280,6 +280,17 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
 
 
+def test_generated_runtime_files_use_portable_exception_tuple_syntax():
+    for path in [
+        Path("pricing_models/mtpl_frequency/modeling.py"),
+        Path("scripts/no_docker_services.py"),
+    ]:
+        source = path.read_text(encoding="utf-8")
+        assert "except TypeError, ValueError:" not in source
+        assert "except OSError, ProcessLookupError:" not in source
+        assert "except AttributeError, curses.error:" not in source
+
+
 def test_deploy_api_publishes_model_scoped_deployment_history():
     deployer = Path("pricing_pipeline/publishing/deployment.py").read_text(encoding="utf-8")
 

@@ -159,3 +159,13 @@ def test_mtpl_offline_sqlite_runner_uses_full_fremtpl_fetch_by_default(
 
     assert seeded == 7
     assert calls == ["fetch"]
+
+    with sqlite3.connect(tmp_path / "pricing.sqlite") as con:
+        columns = {
+            row[1]: {"not_null": bool(row[3]), "primary_key_order": int(row[5])}
+            for row in con.execute("PRAGMA table_info(FREMTPL_RAW)").fetchall()
+        }
+
+    assert columns["IDpol"] == {"not_null": True, "primary_key_order": 1}
+    assert columns["ClaimNb"]["not_null"]
+    assert columns["Exposure"]["not_null"]

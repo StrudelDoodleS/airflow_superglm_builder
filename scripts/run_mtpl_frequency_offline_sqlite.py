@@ -225,11 +225,12 @@ def seed_fremtpl_raw(
         synthetic_source=synthetic_source,
     )
     with engine.begin() as con:
+        con.execute(text("DELETE FROM pricing.FREMTPL_RAW"))
         frame.to_sql(
             "FREMTPL_RAW",
             con,
             schema="pricing",
-            if_exists="replace",
+            if_exists="append",
             index=False,
         )
     return int(len(frame))

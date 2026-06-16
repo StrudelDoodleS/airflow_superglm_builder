@@ -197,7 +197,7 @@ def _validate_revision_parent_model(
     parent: RatePackageSnapshot,
 ) -> None:
     configured_model_name = config.model_name
-    for metadata_key in ("model_name", "model_name"):
+    for metadata_key in ("model_name", "registry_model_name", "package_model_name"):
         if metadata_key not in parent.metadata:
             continue
         parent_model = str(parent.metadata[metadata_key]).strip()
@@ -621,9 +621,10 @@ def _metadata_query(selector: RatePackageSelector):
                 rp.rate_package_id,
                 rp.parent_rate_package_id,
                 rp.model_id,
-                m.model_name,
+                m.model_name AS model_name,
+                m.model_name AS registry_model_name,
                 m.model_label,
-                rp.model_name,
+                rp.model_name AS package_model_name,
                 rp.model_version,
                 rp.package_version,
                 rp.base_rate,
@@ -643,9 +644,10 @@ def _metadata_query(selector: RatePackageSelector):
             rp.rate_package_id,
             rp.parent_rate_package_id,
             rp.model_id,
-            m.model_name,
+            m.model_name AS model_name,
+            m.model_name AS registry_model_name,
             m.model_label,
-            rp.model_name,
+            rp.model_name AS package_model_name,
             rp.model_version,
             rp.package_version,
             rp.base_rate,

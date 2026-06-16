@@ -154,7 +154,9 @@ def _process_group_id(process: subprocess.Popen) -> int | None:
         return None
     try:
         return os.getpgid(pid)
-    except OSError, ProcessLookupError:
+    except OSError:
+        return None
+    except ProcessLookupError:
         return None
 
 
@@ -430,7 +432,9 @@ def _configure_mouse_navigation() -> None:
     try:
         curses.mousemask(getattr(curses, "ALL_MOUSE_EVENTS", 0))
         curses.mouseinterval(0)
-    except AttributeError, curses.error:
+    except AttributeError:
+        pass
+    except curses.error:
         pass
 
 

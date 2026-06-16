@@ -665,7 +665,8 @@ def test_create_manual_revision_rejects_missing_parent_metadata_before_writer(
     "metadata_overrides",
     [
         {"model_name": "OTHER_MODEL"},
-        {"model_name": "OTHER_MODEL"},
+        {"registry_model_name": "OTHER_MODEL"},
+        {"package_model_name": "OTHER_MODEL"},
     ],
 )
 def test_create_manual_revision_rejects_parent_model_mismatch_before_writer(
