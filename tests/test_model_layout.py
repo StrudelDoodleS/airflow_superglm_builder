@@ -293,8 +293,13 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
     assert (tmp_path / "v1_2026-06-05" / "superglm_reml_diagnostics.json").exists()
     assert (tmp_path / "v1_2026-06-05" / "superglm_training_trace.csv").exists()
     assert metrics["deviance"] == 8.5
-    assert metrics["superglm_aic"] == 4.0
+    assert "superglm_aic" not in metrics
+    assert "first_fold_train_rows" not in metrics
+    assert "first_fold_test_rows" not in metrics
+    assert "effective_df" not in metrics
+    assert "phi" not in metrics
     assert ("fit_reml", modeling.FEATURE_COLUMNS, 4, True) in calls
+    assert not any(call[0] == "metrics" for call in calls)
     assert ("log_param", "family", "poisson") in calls
     assert ("log_param", "feature_columns", ",".join(modeling.FEATURE_COLUMNS)) in calls
     assert (
@@ -304,21 +309,22 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
         {"row_count": 4, "feature_count": len(modeling.FEATURE_COLUMNS)},
     ) in calls
     assert ("span_inputs", {"rows": 4, "features": modeling.FEATURE_COLUMNS}) in calls
-    assert ("span_outputs", {"final_loss": 8.25, "iteration_count": 2}) in calls
+    assert ("span_outputs", {"final_training_objective": 8.25, "iteration_count": 2}) in calls
     assert ("log_metric", "deviance", 8.5, {}) in calls
-    assert ("log_metric", "superglm_aic", 4.0, {}) in calls
-    assert ("log_metric", "superglm_reml_objective", 10.5, {"step": 0}) in calls
-    assert ("log_metric", "superglm_reml_objective", 8.25, {"step": 1}) in calls
-    assert ("log_metric", "loss", 10.5, {"step": 0}) in calls
-    assert ("log_metric", "loss", 8.25, {"step": 1}) in calls
-    assert ("log_metric", "training_loss", 10.5, {"step": 0}) in calls
-    assert ("log_metric", "training_loss", 8.25, {"step": 1}) in calls
+    assert ("log_metric", "superglm_training_objective", 10.5, {"step": 0}) in calls
+    assert ("log_metric", "superglm_training_objective", 8.25, {"step": 1}) in calls
     assert ("log_metric", "superglm_reml_gradient_norm", 2.5, {"step": 0}) in calls
-    assert ("log_metric", "superglm_reml_delta_objective", 2.25, {"step": 1}) in calls
-    assert ("log_metric", "superglm_lambda_VehAge", 0.1, {"step": 0}) in calls
-    assert ("log_metric", "superglm_lambda_VehAge", 0.3, {"step": 1}) in calls
-    assert ("log_metric", "superglm_lambda_DrivAge", 0.2, {"step": 0}) in calls
-    assert ("log_metric", "superglm_lambda_DrivAge", 0.4, {"step": 1}) in calls
+    logged_metric_names = [call[1] for call in calls if call and call[0] == "log_metric"]
+    assert "loss" not in logged_metric_names
+    assert "training_loss" not in logged_metric_names
+    assert "superglm_reml_objective" not in logged_metric_names
+    assert "superglm_reml_delta_objective" not in logged_metric_names
+    assert "superglm_aic" not in logged_metric_names
+    assert "effective_df" not in logged_metric_names
+    assert "phi" not in logged_metric_names
+    assert "superglm_phi" not in logged_metric_names
+    assert "superglm_lambda_VehAge" not in logged_metric_names
+    assert "superglm_lambda_DrivAge" not in logged_metric_names
     assert ("log_artifact", "superglm_model.pkl", "model") in calls
     assert ("log_artifact", "model_summary.txt", "model") in calls
     assert ("log_artifact", "superglm_fit.log", "training_diagnostics") in calls
