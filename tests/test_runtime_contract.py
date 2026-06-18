@@ -272,7 +272,7 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     expected = (
         "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@"
-        "72feaf5dd98452c0562b9f86ee834702da90f23b"
+        "42e8c05f01ab358b280050bad4e09753386245e6"
     )
 
     assert expected in requirements
