@@ -757,6 +757,32 @@ databases. Use separate environment files or Airflow connections for `local`,
 `dev`, `uat`, and `prod`, and make the active target visible in Airflow logs
 before publishing a model package.
 
+When a non-production work database must be rebuilt to match the repository DDL,
+use the remote schema reset script. It only targets the owned pricing schemas
+and requires the database name to match before any destructive statement runs.
+Dry-run is the default:
+
+```bash
+uv run python scripts/reset_remote_pricing_schema.py \
+  --runtime-module work_runtime.database \
+  --expected-database MVA
+```
+
+To drop owned triggers, views, stored procedures, tables, and schema tracking
+rows, then reapply `db/migrations`, pass both destructive flags:
+
+```bash
+uv run python scripts/reset_remote_pricing_schema.py \
+  --runtime-module work_runtime.database \
+  --expected-database MVA \
+  --execute \
+  --i-understand-this-drops-pricing-objects
+```
+
+Do not use this against production history. It is intended for early-stage or
+non-production rebuilds where the owned `pricing`, `pricing_stg`, and `mlops`
+objects may be wiped and recreated.
+
 ## Local Smoke Run
 
 Run the local Airflow 3.2.1 stack and trigger the bundled end-to-end smoke DAG:
