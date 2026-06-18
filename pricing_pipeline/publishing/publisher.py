@@ -7,6 +7,7 @@ import pandas as pd
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.publishing.deployment import deploy_rate_package
+from pricing_pipeline.publishing.fixed_offsets import stage_fixed_offsets
 from pricing_pipeline.publishing.lifecycle import (
     DeploymentResult,
     PredictionComparison,
@@ -133,9 +134,10 @@ class ModelPublisher:
             self.config,
             model_id=model_id,
         )
+        workbook_path = Path(export_result.rating_workbook_path)
         stage_rating_export(
             self.engine,
-            workbook_path=Path(export_result.rating_workbook_path),
+            workbook_path=workbook_path,
             export_id=export_result.export_id,
             model_name=self.config.model_name,
             model_version=export_result.model_version,
@@ -146,6 +148,12 @@ class ModelPublisher:
             replace=True,
             model_id=model_id,
         )
+        if workbook_path.exists():
+            stage_fixed_offsets(
+                self.engine,
+                workbook_path=workbook_path,
+                export_id=export_result.export_id,
+            )
         result = publish_rating_package(
             self.engine,
             export_id=export_result.export_id,
