@@ -27,6 +27,7 @@ README_CONTRACT_STRINGS = [
     "PRICING_SCHEMA_DIR=db/migrations",
     "scripts/apply_schema.py",
     "scripts/reset_remote_pricing_schema.py",
+    "runtime module's configured",
     "--i-understand-this-drops-pricing-objects",
     "scripts/run_local_pipeline.sh",
     "scripts/no_docker_services.py",

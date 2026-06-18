@@ -134,8 +134,7 @@ def _ensure_schema_configuration(con, schemas: SchemaNames) -> None:
     ]
     if mismatches:
         raise RuntimeError(
-            "Database was already initialized with different schema names: "
-            + "; ".join(mismatches)
+            "Database was already initialized with different schema names: " + "; ".join(mismatches)
         )
 
     for key, value in expected.items():
@@ -151,71 +150,89 @@ def _ensure_schema_configuration(con, schemas: SchemaNames) -> None:
             )
 
 
-def apply_migrations(engine: Engine, migrations_dir: Path) -> list[str]:
-    schemas = schema_names_from_connectable(engine)
+def apply_migrations_in_transaction(
+    con,
+    migrations_dir: Path,
+    *,
+    schemas: SchemaNames | None = None,
+) -> list[str]:
+    schemas = schemas or schema_names_from_connectable(con)
     applied_by = getpass.getuser()
     applied: list[str] = []
-    with engine.begin() as con:
-        _ensure_schema_migration_table(con)
-        _acquire_migration_lock(con)
-        _ensure_schema_configuration(con, schemas)
+    _ensure_schema_migration_table(con)
+    _acquire_migration_lock(con)
+    _ensure_schema_configuration(con, schemas)
 
-        for path in migration_files(migrations_dir):
-            sql_text = render_migration_sql(path.read_text(encoding="utf-8"), schemas)
-            checksum = migration_checksum(sql_text)
-            row = con.execute(
-                text(
-                    """
-                    SELECT checksum_sha256, status
-                    FROM dbo.SCHEMA_MIGRATION
-                    WHERE version_file = :name
-                    """
-                ),
-                {"name": path.name},
-            ).mappings().one_or_none()
-            if row is not None:
-                existing_checksum = row["checksum_sha256"]
-                if existing_checksum is None:
-                    con.execute(
-                        text(
-                            """
-                            UPDATE dbo.SCHEMA_MIGRATION
-                            SET checksum_sha256 = :checksum,
-                                status = 'APPLIED',
-                                error_message = NULL
-                            WHERE version_file = :name
-                            """
-                        ),
-                        {"name": path.name, "checksum": checksum},
-                    )
-                    continue
-                if existing_checksum != checksum:
-                    raise RuntimeError(
-                        "Migration checksum mismatch for "
-                        f"{path.name}: applied={existing_checksum} current={checksum}"
-                    )
-                continue
-
-            for batch in split_sql_server_batches(sql_text):
-                con.execute(text(batch))
+    for path in migration_files(migrations_dir):
+        sql_text = render_migration_sql(path.read_text(encoding="utf-8"), schemas)
+        checksum = migration_checksum(sql_text)
+        row = (
             con.execute(
                 text(
                     """
-                    INSERT INTO dbo.SCHEMA_MIGRATION(
-                        version_file,
-                        checksum_sha256,
-                        applied_by,
-                        status
-                    )
-                    VALUES (
-                        :name,
-                        :checksum,
-                        :applied_by,
-                        'APPLIED'
-                    )
-                    """
+                SELECT checksum_sha256, status
+                FROM dbo.SCHEMA_MIGRATION
+                WHERE version_file = :name
+                """
                 ),
-                {"name": path.name, "checksum": checksum, "applied_by": applied_by},
+                {"name": path.name},
             )
-            applied.append(path.name)
+            .mappings()
+            .one_or_none()
+        )
+        if row is not None:
+            existing_checksum = row["checksum_sha256"]
+            if existing_checksum is None:
+                con.execute(
+                    text(
+                        """
+                        UPDATE dbo.SCHEMA_MIGRATION
+                        SET checksum_sha256 = :checksum,
+                            status = 'APPLIED',
+                            error_message = NULL
+                        WHERE version_file = :name
+                        """
+                    ),
+                    {"name": path.name, "checksum": checksum},
+                )
+                continue
+            if existing_checksum != checksum:
+                raise RuntimeError(
+                    "Migration checksum mismatch for "
+                    f"{path.name}: applied={existing_checksum} current={checksum}"
+                )
+            continue
+
+        for batch in split_sql_server_batches(sql_text):
+            con.execute(text(batch))
+        con.execute(
+            text(
+                """
+                INSERT INTO dbo.SCHEMA_MIGRATION(
+                    version_file,
+                    checksum_sha256,
+                    applied_by,
+                    status
+                )
+                VALUES (
+                    :name,
+                    :checksum,
+                    :applied_by,
+                    'APPLIED'
+                )
+                """
+            ),
+            {"name": path.name, "checksum": checksum, "applied_by": applied_by},
+        )
+        applied.append(path.name)
     return applied
+
+
+def apply_migrations(engine: Engine, migrations_dir: Path) -> list[str]:
+    schemas = schema_names_from_connectable(engine)
+    with engine.begin() as con:
+        return apply_migrations_in_transaction(
+            con,
+            migrations_dir,
+            schemas=schemas,
+        )

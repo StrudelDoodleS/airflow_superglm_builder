@@ -758,9 +758,9 @@ databases. Use separate environment files or Airflow connections for `local`,
 before publishing a model package.
 
 When a non-production work database must be rebuilt to match the repository DDL,
-use the remote schema reset script. It only targets the owned pricing schemas
-and requires the database name to match before any destructive statement runs.
-Dry-run is the default:
+use the remote schema reset script. It targets the runtime module's configured
+pricing, staging, and MLOps schema names, and requires the database name to
+match before any destructive statement runs. Dry-run is the default:
 
 ```bash
 uv run python scripts/reset_remote_pricing_schema.py \
@@ -780,8 +780,8 @@ uv run python scripts/reset_remote_pricing_schema.py \
 ```
 
 Do not use this against production history. It is intended for early-stage or
-non-production rebuilds where the owned `pricing`, `pricing_stg`, and `mlops`
-objects may be wiped and recreated.
+non-production rebuilds where the runtime-configured owned schema objects may be
+wiped and recreated.
 
 ## Local Smoke Run
 

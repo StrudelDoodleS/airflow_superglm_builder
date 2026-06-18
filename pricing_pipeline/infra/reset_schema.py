@@ -6,11 +6,19 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from pricing_pipeline.infra.migrations import apply_migrations, migration_files
+from pricing_pipeline.infra.migrations import (
+    apply_migrations_in_transaction,
+    migration_files,
+)
 from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
 
 
 DEFAULT_RESET_SCHEMAS = ("pricing", "pricing_stg", "mlops")
+SCHEMA_CONFIG_KEYS = (
+    "pricing_schema",
+    "pricing_staging_schema",
+    "mlops_schema",
+)
 CONFIRMATION_FLAG = "--i-understand-this-drops-pricing-objects"
 
 
@@ -24,14 +32,33 @@ class ResetSchemaResult:
     applied_migrations: tuple[str, ...]
 
 
-def normalize_schema_names(schema_names: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    raw_names = tuple(schema_names) or DEFAULT_RESET_SCHEMAS
+def normalize_schema_names(
+    schema_names: tuple[str, ...] | list[str],
+    *,
+    allowed_schema_names: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    allowed = tuple(allowed_schema_names)
+    raw_names = tuple(schema_names) or allowed or DEFAULT_RESET_SCHEMAS
     normalized: list[str] = []
     for name in raw_names:
         normalized.append(validate_schema_name(name, "schema name"))
     if len(set(normalized)) != len(normalized):
         raise ValueError("schema names must be unique")
-    return tuple(normalized)
+    result = tuple(normalized)
+    if allowed and result != allowed:
+        raise ValueError(
+            "reset schema is not configured runtime schema; expected exactly: " + ", ".join(allowed)
+        )
+    if not allowed:
+        forbidden = {"dbo", "sys", "information_schema"}
+        invalid = [name for name in result if name.lower() in forbidden]
+        if invalid:
+            raise ValueError("reset schema is not configured runtime schema: " + ", ".join(invalid))
+    return result
+
+
+def schema_names_from_execution_options(options: dict[str, str]) -> tuple[str, ...]:
+    return tuple(str(options[key]) for key in SCHEMA_CONFIG_KEYS)
 
 
 def schema_config_from_reset_schemas(schema_names: tuple[str, ...]) -> SchemaNames:
@@ -153,24 +180,32 @@ def reset_and_reseed_schema(
     migrations_dir: Path,
     expected_database: str,
     schema_names: tuple[str, ...] | list[str] = (),
+    allowed_schema_names: tuple[str, ...] | list[str] = (),
     execute: bool = False,
 ) -> ResetSchemaResult:
-    schemas = normalize_schema_names(tuple(schema_names))
+    schemas = normalize_schema_names(
+        tuple(schema_names),
+        allowed_schema_names=tuple(allowed_schema_names),
+    )
     schema_config = schema_config_from_reset_schemas(schemas)
     configured_engine = engine.execution_options(**schema_config.as_execution_options())
     drop_batches = build_drop_batches(schemas)
     if execute and not migration_files(migrations_dir):
         raise RuntimeError(f"No schema DDL files found in {migrations_dir}")
 
+    applied: tuple[str, ...] = ()
     with configured_engine.begin() as con:
         actual_database = verify_expected_database(con, expected_database)
         if execute:
             for batch in drop_batches:
                 con.execute(text(batch))
-
-    applied: tuple[str, ...] = ()
-    if execute:
-        applied = tuple(apply_migrations(configured_engine, migrations_dir))
+            applied = tuple(
+                apply_migrations_in_transaction(
+                    con,
+                    migrations_dir,
+                    schemas=schema_config,
+                )
+            )
 
     return ResetSchemaResult(
         dry_run=not execute,

@@ -12,8 +12,8 @@ if str(ROOT) not in sys.path:
 
 from pricing_pipeline.infra.reset_schema import (  # noqa: E402
     CONFIRMATION_FLAG,
-    DEFAULT_RESET_SCHEMAS,
     reset_and_reseed_schema,
+    schema_names_from_execution_options,
 )
 from scripts.pricing_db import get_runtime, load_env  # noqa: E402
 
@@ -42,10 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schemas",
         nargs="*",
-        default=list(DEFAULT_RESET_SCHEMAS),
+        default=None,
         help=(
             "Owned schemas to drop/reseed, in this order: pricing pricing_stg mlops. "
-            "Defaults to pricing pricing_stg mlops."
+            "Defaults to the runtime module's configured schema names."
         ),
     )
     parser.add_argument(
@@ -71,17 +71,36 @@ def _resolve_schema_dir(path: Path) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def schema_names_from_runtime(
+    runtime, requested: tuple[str, ...] | list[str] | None
+) -> tuple[str, ...]:
+    configured = schema_names_from_execution_options(
+        runtime.settings.schema_names.as_execution_options()
+    )
+    if not requested:
+        return configured
+    if tuple(requested) != configured:
+        raise ValueError(
+            "reset schema is not configured runtime schema; expected exactly: "
+            + ", ".join(configured)
+        )
+    return tuple(requested)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     validate_args(args)
     load_env()
 
-    engine = get_runtime(args.runtime_module).get_engine()
+    runtime = get_runtime(args.runtime_module)
+    schema_names = schema_names_from_runtime(runtime, args.schemas)
+    engine = runtime.get_engine()
     result = reset_and_reseed_schema(
         engine,
         migrations_dir=_resolve_schema_dir(args.schema_dir),
         expected_database=args.expected_database,
-        schema_names=tuple(args.schemas),
+        schema_names=schema_names,
+        allowed_schema_names=schema_names,
         execute=args.execute,
     )
 
