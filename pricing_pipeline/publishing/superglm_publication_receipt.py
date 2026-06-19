@@ -15,6 +15,10 @@ from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, m
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+class _FrozenList(tuple):
+    pass
+
+
 def _normalise_json_metadata_value(
     value: Any,
     path: str,
@@ -29,8 +33,8 @@ def _normalise_json_metadata_value(
         if not math.isfinite(value):
             raise ValueError(f"{path} metadata contains a non-finite float")
         return value
-    if type(value) is list or (allow_frozen and type(value) is tuple):
-        return tuple(
+    if type(value) is list or (allow_frozen and isinstance(value, _FrozenList)):
+        return _FrozenList(
             _normalise_json_metadata_value(
                 item,
                 f"{path}[{index}]",
@@ -231,6 +235,12 @@ def _reject_non_finite(value: Any) -> None:
 
 
 def canonical_receipt_bytes(receipt: SuperGLMPublicationReceipt) -> bytes:
+    _normalise_metadata_object(
+        receipt.package_metadata,
+        "package_metadata",
+        allow_frozen=True,
+    )
+    _normalise_term_metadata(receipt.term_metadata, allow_frozen=True)
     _reject_non_finite(receipt.package_metadata)
     _reject_non_finite(receipt.term_metadata)
     data = receipt.model_dump(mode="json")

@@ -110,6 +110,22 @@ def test_canonical_receipt_rejects_non_finite_package_metadata():
         {"bad": Decimal("1.25")},
         {"bad": ("tuple",)},
         {1: "not a string key"},
+    ],
+)
+def test_canonical_receipt_rejects_copied_invalid_package_metadata(metadata):
+    receipt = _receipt().model_copy(update={"package_metadata": metadata})
+
+    with pytest.raises(ValueError, match="metadata"):
+        canonical_receipt_bytes(receipt)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"bad": datetime(2026, 1, 1)},
+        {"bad": Decimal("1.25")},
+        {"bad": ("tuple",)},
+        {1: "not a string key"},
         {"nested": {"bad": float("-inf")}},
     ],
 )
