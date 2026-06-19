@@ -139,6 +139,8 @@ def publish_model_export(
         rating_workbook_path=str(publish_result.rating_workbook_path),
         run_status="SUCCESS",
         created_by=export_result.created_by,
+        publication_receipt_path=export_result.publication_receipt_path,
+        publication_receipt_sha256=export_result.publication_receipt_sha256,
     )
 
     result: dict[str, str | bool] = {

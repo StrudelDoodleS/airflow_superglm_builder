@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from importlib.metadata import version
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from superglm import Categorical, Numeric, OrderedCategorical, Polynomial, Splin
 from superglm.features.spline import PSpline
 
 from pricing_pipeline.publishing.superglm_metadata import (
+    _grouping_metadata,
     _json_value,
     build_superglm_publication_receipt,
 )
@@ -184,6 +186,43 @@ def test_offset_contract_is_preserved_when_fit_used_offset():
     assert receipt.package_metadata["model"]["fit_used_offset"] is True
     assert receipt.offset_contract == contract
     assert receipt.model_dump(mode="json")["offset_contract"] == contract.model_dump(mode="json")
+    offset_metadata = receipt.term_metadata["Term_Months"]
+    assert offset_metadata["feature_kind"] == "offset"
+    assert offset_metadata["offset_handling"] == "EXPORTED_FACTOR"
+    assert offset_metadata["fixed_log_coefficient"] == 1.0
+    assert offset_metadata["coefficient_source"] == "offset"
+    assert offset_metadata["offset_factor_name"] == "Term_Months"
+    assert offset_metadata["offset_source_name"] == "TermMonths"
+    assert offset_metadata["offset_label"] == "log(TermMonths / 12)"
+
+
+def test_receipt_uses_installed_superglm_package_version():
+    model = _fit_model({"num": Numeric()})
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    assert receipt.superglm_version == version("superglm")
+
+
+def test_grouping_metadata_preserves_level_grouping_shape():
+    class FakeLevelGrouping:
+        original_to_group = {"A": "small", "B": "small", "C": "large"}
+        group_to_originals = {"small": ["A", "B"], "large": ["C"]}
+        all_original_levels = ["A", "B", "C"]
+        grouped_levels = ["small", "large"]
+
+    metadata = _grouping_metadata(FakeLevelGrouping())
+
+    assert metadata == {
+        "class_name": "FakeLevelGrouping",
+        "original_to_group": {"A": "small", "B": "small", "C": "large"},
+        "group_to_originals": {"small": ["A", "B"], "large": ["C"]},
+        "all_original_levels": ["A", "B", "C"],
+        "grouped_levels": ["small", "large"],
+    }
 
 
 def test_offset_fitted_model_rejects_none_offset_contract():

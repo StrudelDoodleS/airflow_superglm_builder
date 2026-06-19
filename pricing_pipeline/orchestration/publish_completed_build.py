@@ -8,7 +8,7 @@ from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import text
 
 from pricing_pipeline.data.manifest import (
@@ -161,6 +161,14 @@ class CompletedModelBuild(BaseModel):
                 "publication_receipt_sha256 must be a 64-character lowercase hex SHA-256 digest"
             )
         return digest
+
+    @model_validator(mode="after")
+    def _receipt_path_and_hash_are_paired(self) -> "CompletedModelBuild":
+        if (self.publication_receipt_path is None) != (self.publication_receipt_sha256 is None):
+            raise ValueError(
+                "publication_receipt_path and publication_receipt_sha256 must be supplied together"
+            )
+        return self
 
     @field_validator("metrics", mode="before")
     @classmethod

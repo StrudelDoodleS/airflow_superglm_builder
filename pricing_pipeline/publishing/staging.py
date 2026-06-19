@@ -5,7 +5,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import numpy as np
 import pandas as pd
@@ -282,18 +282,58 @@ def _empty_term_metadata_frame() -> pd.DataFrame:
 def _term_metadata_frame(
     export_id: str,
     receipt: SuperGLMPublicationReceipt,
+    *,
+    staged_terms: set[str] | None = None,
 ) -> pd.DataFrame:
     receipt_data = receipt.model_dump(mode="json")
     term_metadata = receipt_data["term_metadata"]
+    term_names = sorted(staged_terms if staged_terms is not None else term_metadata)
     rows = [
         {
             "export_id": export_id,
             "term_name": term_name,
             "term_metadata_json": _deterministic_json(term_metadata[term_name]),
         }
-        for term_name in sorted(term_metadata)
+        for term_name in term_names
     ]
     return pd.DataFrame(rows, columns=["export_id", "term_name", "term_metadata_json"])
+
+
+def _metadata_feature_kind(metadata: Mapping[str, Any]) -> str | None:
+    feature_kind = metadata.get("feature_kind")
+    if feature_kind is None:
+        return None
+    return str(feature_kind)
+
+
+def _receipt_term_type(
+    *,
+    term_name: str,
+    existing_term_type: str,
+    levels: pd.Series,
+    metadata: Mapping[str, Any],
+) -> str:
+    feature_kind = _metadata_feature_kind(metadata)
+    if feature_kind == "offset":
+        return "OFFSET_FACTOR"
+    if feature_kind == "numeric":
+        return "NUMERIC_MAIN"
+    if feature_kind == "categorical":
+        return "CATEGORICAL_MAIN"
+    if feature_kind == "ordered_categorical":
+        return "ORDERED_CATEGORICAL_MAIN"
+    if feature_kind == "spline":
+        return "DISCRETIZED_SPLINE_1D"
+    if feature_kind == "polynomial":
+        non_null = levels.dropna().astype(str)
+        if len(non_null) and non_null.map(lambda x: parse_interval(x)[0] is not None).mean() > 0.8:
+            return "NUMERIC_BANDED_1D"
+        return "POLYNOMIAL_MAIN"
+    if feature_kind in {None, "unknown"}:
+        return existing_term_type
+    raise ValueError(
+        f"publication receipt for term {term_name!r} has unsupported feature_kind {feature_kind!r}"
+    )
 
 
 def _apply_publication_receipt_metadata(
@@ -306,6 +346,33 @@ def _apply_publication_receipt_metadata(
 ) -> pd.DataFrame:
     if receipt is None:
         return _empty_term_metadata_frame()
+
+    receipt_data = receipt.model_dump(mode="json")
+    term_metadata: dict[str, dict[str, Any]] = dict(receipt_data["term_metadata"])
+    staged_terms = set(rate_df["term_name"].dropna().astype(str).unique())
+    receipt_terms = set(term_metadata)
+    missing_metadata = sorted(staged_terms - receipt_terms)
+    if missing_metadata:
+        raise ValueError(
+            "publication receipt metadata is missing for staged workbook term(s): "
+            + ", ".join(missing_metadata)
+        )
+    missing_workbook_terms = sorted(receipt_terms - staged_terms)
+    if missing_workbook_terms:
+        raise ValueError(
+            "publication receipt term metadata is not present in staged workbook term(s): "
+            + ", ".join(missing_workbook_terms)
+        )
+
+    for term_name in sorted(staged_terms):
+        matching_term = rate_df["term_name"] == term_name
+        levels = rate_df.loc[matching_term, "cell_key_text"].astype(str).str.split("=", n=1).str[-1]
+        rate_df.loc[matching_term, "term_type"] = _receipt_term_type(
+            term_name=term_name,
+            existing_term_type=str(rate_df.loc[matching_term, "term_type"].iloc[0]),
+            levels=levels,
+            metadata=term_metadata[term_name],
+        )
 
     offset_contract = receipt.offset_contract
     if offset_contract.handling == "EXPORTED_FACTOR":
@@ -326,7 +393,6 @@ def _apply_publication_receipt_metadata(
             "cannot stage OFFSET_FACTOR terms"
         )
 
-    receipt_data = receipt.model_dump(mode="json")
     export_df["publication_receipt_json"] = canonical_receipt_bytes(receipt).decode("utf-8")
     export_df["publication_receipt_sha256"] = receipt_sha256
     export_df["package_metadata_json"] = _deterministic_json(receipt_data["package_metadata"])
@@ -336,7 +402,7 @@ def _apply_publication_receipt_metadata(
     export_df["offset_label"] = offset_contract.label
     export_df["metadata_origin"] = receipt.metadata_origin
 
-    return _term_metadata_frame(args.export_id, receipt)
+    return _term_metadata_frame(args.export_id, receipt, staged_terms=staged_terms)
 
 
 def insert_staging_frames(

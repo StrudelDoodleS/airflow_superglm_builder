@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import superglm
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -125,6 +126,20 @@ def _grouping_metadata(grouping: Any) -> Any:
         return None
     if isinstance(grouping, Mapping):
         return _json_value(grouping)
+
+    level_grouping_attrs = (
+        "original_to_group",
+        "group_to_originals",
+        "all_original_levels",
+        "grouped_levels",
+    )
+    level_grouping_metadata = {"class_name": type(grouping).__name__}
+    for attr_name in level_grouping_attrs:
+        candidate = _safe_getattr(grouping, attr_name)
+        if candidate is not None:
+            level_grouping_metadata[attr_name] = _json_value(candidate)
+    if len(level_grouping_metadata) > 1:
+        return level_grouping_metadata
 
     for attr_name in ("mapping", "groups", "grouping", "_mapping", "_groups"):
         candidate = _safe_getattr(grouping, attr_name)
@@ -317,6 +332,45 @@ def _unknown_metadata(name: str, spec: Any) -> dict[str, Any]:
     return metadata
 
 
+def _offset_metadata(offset_contract: OffsetExportContract) -> dict[str, Any]:
+    if (
+        offset_contract.handling != "EXPORTED_FACTOR"
+        or offset_contract.source_factor_name is None
+        or offset_contract.published_factor_name is None
+        or offset_contract.source_name is None
+        or offset_contract.label is None
+    ):
+        raise ValueError("offset term metadata requires an EXPORTED_FACTOR offset contract")
+    return {
+        "feature_kind": "offset",
+        "superglm_class": "Offset",
+        "source_term_name": offset_contract.source_factor_name,
+        "published_term_name": offset_contract.published_factor_name,
+        "offset_handling": offset_contract.handling,
+        "fixed_log_coefficient": 1.0,
+        "coefficient_source": "offset",
+        "offset_factor_name": offset_contract.published_factor_name,
+        "offset_source_name": offset_contract.source_name,
+        "offset_label": offset_contract.label,
+        "declared": {
+            "source_name": offset_contract.source_name,
+            "label": offset_contract.label,
+        },
+        "effective": {
+            "encoding": "fixed_log_coefficient",
+            "coefficient": 1.0,
+        },
+        "fitted": {},
+    }
+
+
+def _superglm_version() -> str:
+    try:
+        return package_version("superglm")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def _iter_model_specs(model: Any) -> list[tuple[str, Any]]:
     for specs_attr, order_attr in (
         ("_specs", "_feature_order"),
@@ -412,6 +466,16 @@ def build_superglm_publication_receipt(
         published_sources[published_name] = source_name
         term_metadata[published_name] = _json_value(metadata)
 
+    if offset_contract.handling == "EXPORTED_FACTOR":
+        offset_published_name = str(offset_contract.published_factor_name)
+        if offset_published_name in published_sources:
+            first_source = published_sources[offset_published_name]
+            raise ValueError(
+                "canonical term name collision: "
+                f"{offset_published_name!r} from {first_source!r} and offset contract"
+            )
+        term_metadata[offset_published_name] = _json_value(_offset_metadata(offset_contract))
+
     package_metadata = {
         "model": {
             "family": _safe_getattr(model, "family"),
@@ -424,7 +488,7 @@ def build_superglm_publication_receipt(
         schema_name="superglm_publication_receipt",
         schema_version=1,
         metadata_origin="SUPERGLM_FITTED_MODEL",
-        superglm_version=getattr(superglm, "__version__", "unknown"),
+        superglm_version=_superglm_version(),
         extractor_version=EXTRACTOR_VERSION,
         package_metadata=_json_value(package_metadata),
         term_metadata=term_metadata,

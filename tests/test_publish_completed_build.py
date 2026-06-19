@@ -130,6 +130,27 @@ def test_completed_model_build_rejects_bad_receipt_hash():
     assert "64-character lowercase hex SHA-256 digest" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "publication_receipt_path": "/tmp/superglm_publication_receipt.json",
+        },
+        {
+            "publication_receipt_sha256": "a" * 64,
+        },
+    ],
+)
+def test_completed_model_build_requires_receipt_path_and_hash_together(payload):
+    with pytest.raises(CompletedModelBuildError, match="publication_receipt_path.*sha256"):
+        CompletedModelBuild(
+            rating_workbook_path="/tmp/rating.xlsx",
+            model_version="v1",
+            effective_from="2026-06-19",
+            **payload,
+        )
+
+
 def test_completed_model_build_rejects_unknown_mapping_keys():
     with pytest.raises(CompletedModelBuildError, match="unknown completed build field"):
         CompletedModelBuild.from_mapping(

@@ -415,6 +415,7 @@ def _publication_receipt(
     *,
     handling: str = "EXPORTED_FACTOR",
     published_factor_name: str | None = "TermMonths",
+    term_metadata: dict[str, dict[str, object]] | None = None,
 ) -> SuperGLMPublicationReceipt:
     if handling == "EXPORTED_FACTOR":
         offset_contract = OffsetExportContract(
@@ -424,7 +425,7 @@ def _publication_receipt(
             source_name="Exposure",
             label="Policy exposure term",
         )
-        term_metadata = {
+        default_term_metadata = {
             "TermMonths": {
                 "feature_kind": "offset",
                 "source_column": "Exposure",
@@ -436,10 +437,10 @@ def _publication_receipt(
             source_name="Exposure",
             label="Policy exposure term",
         )
-        term_metadata = {}
+        default_term_metadata = {}
     else:
         offset_contract = OffsetExportContract(handling="NONE")
-        term_metadata = {}
+        default_term_metadata = {}
 
     return SuperGLMPublicationReceipt(
         schema_name="superglm_publication_receipt",
@@ -448,7 +449,7 @@ def _publication_receipt(
         superglm_version="1.0.0",
         extractor_version="unit-test",
         package_metadata={"model": {"family": "poisson", "link": "log"}},
-        term_metadata=term_metadata,
+        term_metadata=term_metadata if term_metadata is not None else default_term_metadata,
         offset_contract=offset_contract,
     )
 
@@ -601,6 +602,112 @@ def test_stage_rating_export_rejects_missing_exported_offset_factor(
             replace=True,
             model_id=1,
         )
+
+
+def test_stage_rating_export_requires_receipt_metadata_for_staged_terms(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(
+        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+    )
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(
+        _publication_receipt(handling="NONE", term_metadata={}),
+        receipt_path,
+    )
+
+    with pytest.raises(ValueError, match="receipt metadata is missing"):
+        load_superglm_excel_to_staging.stage_rating_export(
+            engine,
+            workbook_path=workbook_path,
+            export_id="export-1",
+            model_name="MTPL_FREQ",
+            model_version="20260427",
+            effective_from="2026-04-27",
+            publication_receipt_path=receipt_path,
+            publication_receipt_sha256=digest,
+            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+            replace=True,
+            model_id=1,
+        )
+
+
+def test_stage_rating_export_rejects_operational_receipt_terms_missing_from_workbook(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(
+        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+    )
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(
+        _publication_receipt(
+            handling="NONE",
+            term_metadata={
+                "LogDensity": {"feature_kind": "numeric"},
+                "MissingTerm": {"feature_kind": "categorical"},
+            },
+        ),
+        receipt_path,
+    )
+
+    with pytest.raises(ValueError, match="not present in staged workbook"):
+        load_superglm_excel_to_staging.stage_rating_export(
+            engine,
+            workbook_path=workbook_path,
+            export_id="export-1",
+            model_name="MTPL_FREQ",
+            model_version="20260427",
+            effective_from="2026-04-27",
+            publication_receipt_path=receipt_path,
+            publication_receipt_sha256=digest,
+            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+            replace=True,
+            model_id=1,
+        )
+
+
+def test_stage_rating_export_uses_receipt_metadata_for_term_type(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(
+        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+    )
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(
+        _publication_receipt(
+            handling="NONE",
+            term_metadata={"LogDensity": {"feature_kind": "numeric"}},
+        ),
+        receipt_path,
+    )
+
+    load_superglm_excel_to_staging.stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=1,
+    )
+
+    with engine.begin() as con:
+        term_type = con.execute(
+            text(
+                "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
+                "WHERE export_id = :export_id AND term_name = :term_name"
+            ),
+            {"export_id": "export-1", "term_name": "LogDensity"},
+        ).scalar_one()
+
+    assert term_type == "NUMERIC_MAIN"
 
 
 def test_stage_rating_export_replace_deletes_old_term_metadata(
@@ -1114,6 +1221,8 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         rating_workbook_path="/tmp/rating_tables.xlsx",
         run_status="SUCCESS",
         created_by="airflow",
+        publication_receipt_path="/tmp/superglm_publication_receipt.json",
+        publication_receipt_sha256="c" * 64,
     )
 
     assert len(events) == 5
@@ -1127,6 +1236,8 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
     assert "tgt.model_id = src.model_id" in sql
     assert "SYSUTCDATETIME()" in sql
     assert ":dag_id" in sql
+    assert "publication_receipt_path" in sql
+    assert "publication_receipt_sha256" in sql
     assert params == {
         "dag_id": "dag",
         "airflow_run_id": "scheduled__2026-04-27",
@@ -1143,6 +1254,8 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "rating_workbook_path": "/tmp/rating_tables.xlsx",
         "run_status": "SUCCESS",
         "created_by": "airflow",
+        "publication_receipt_path": "/tmp/superglm_publication_receipt.json",
+        "publication_receipt_sha256": "c" * 64,
     }
 
 
@@ -1652,6 +1765,8 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "rating_workbook_path": str(workbook_path),
             "run_status": "SUCCESS",
             "created_by": "airflow",
+            "publication_receipt_path": None,
+            "publication_receipt_sha256": None,
         },
     )
 
@@ -1858,6 +1973,8 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
     monkeypatch,
     tmp_path: Path,
 ):
+    calls = []
+
     class FakePublisher:
         def __init__(self, engine, config):
             pass
@@ -1866,6 +1983,7 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
             return 17
 
         def publish_training_export(self, export):
+            calls.append(("publish_training_export", export))
             return SimpleNamespace(
                 mlflow_run_id="mlflow-run-1",
                 export_id=export.export_id,
@@ -1877,7 +1995,11 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
             )
 
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
-    monkeypatch.setattr(pipeline, "record_model_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        pipeline,
+        "record_model_run",
+        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
+    )
     engine = object()
     export = ModelExportResult(
         model_id=17,
@@ -1904,3 +2026,6 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
 
     assert result["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
     assert result["publication_receipt_sha256"] == "d" * 64
+    record_call = next(call for call in calls if call[0] == "record_model_run")
+    assert record_call[2]["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
+    assert record_call[2]["publication_receipt_sha256"] == "d" * 64

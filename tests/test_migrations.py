@@ -143,6 +143,18 @@ def test_migration_runner_tracks_checksum_status_and_uses_application_lock():
     assert "Migration checksum mismatch" in source
 
 
+def test_publication_receipt_migration_enforces_hash_shape():
+    source = Path("db/migrations/V022__superglm_publication_receipt_metadata.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CK_PRICING_RATE_PACKAGE_PUBLICATION_RECEIPT_SHA256" in source
+    assert "publication_receipt_sha256 IS NULL" in source
+    assert "LIKE '%[^0-9a-f]%'" in source
+    assert "LEN(publication_receipt_sha256) = 64" in source
+    assert "publication_receipt_sha256 COLLATE Latin1_General_BIN2" in source
+
+
 def test_migration_recorder_insert_is_idempotent_when_row_appears_after_precheck(
     tmp_path,
     monkeypatch,

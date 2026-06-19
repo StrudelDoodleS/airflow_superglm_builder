@@ -204,6 +204,57 @@ GO
 IF NOT EXISTS (
     SELECT 1
     FROM sys.check_constraints
+    WHERE name = 'CK_PRICING_RATE_PACKAGE_PUBLICATION_RECEIPT_SHA256'
+      AND parent_object_id = OBJECT_ID('pricing.PRICING_RATE_PACKAGE')
+)
+ALTER TABLE pricing.PRICING_RATE_PACKAGE WITH CHECK
+ADD CONSTRAINT CK_PRICING_RATE_PACKAGE_PUBLICATION_RECEIPT_SHA256
+    CHECK (
+        publication_receipt_sha256 IS NULL
+        OR (
+            LEN(publication_receipt_sha256) = 64
+            AND publication_receipt_sha256 COLLATE Latin1_General_BIN2 NOT LIKE '%[^0-9a-f]%'
+        )
+    );
+GO
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM sys.check_constraints
+    WHERE name = 'CK_MODEL_RUN_PUBLICATION_RECEIPT_SHA256'
+      AND parent_object_id = OBJECT_ID('pricing.MODEL_RUN')
+)
+ALTER TABLE pricing.MODEL_RUN WITH CHECK
+ADD CONSTRAINT CK_MODEL_RUN_PUBLICATION_RECEIPT_SHA256
+    CHECK (
+        publication_receipt_sha256 IS NULL
+        OR (
+            LEN(publication_receipt_sha256) = 64
+            AND publication_receipt_sha256 COLLATE Latin1_General_BIN2 NOT LIKE '%[^0-9a-f]%'
+        )
+    );
+GO
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM sys.check_constraints
+    WHERE name = 'CK_STG_RATING_EXPORT_PUBLICATION_RECEIPT_SHA256'
+      AND parent_object_id = OBJECT_ID('pricing_stg.STG_RATING_EXPORT')
+)
+ALTER TABLE pricing_stg.STG_RATING_EXPORT WITH CHECK
+ADD CONSTRAINT CK_STG_RATING_EXPORT_PUBLICATION_RECEIPT_SHA256
+    CHECK (
+        publication_receipt_sha256 IS NULL
+        OR (
+            LEN(publication_receipt_sha256) = 64
+            AND publication_receipt_sha256 COLLATE Latin1_General_BIN2 NOT LIKE '%[^0-9a-f]%'
+        )
+    );
+GO
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM sys.check_constraints
     WHERE name = 'CK_PRICING_TERM_METADATA_JSON'
       AND parent_object_id = OBJECT_ID('pricing.PRICING_TERM')
 )
