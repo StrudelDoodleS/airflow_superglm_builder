@@ -36,6 +36,12 @@ def export_rating_tables(
     exposure,
     output_path: Path,
     *,
+    offset=None,
+    offset_source=None,
+    offset_name: str | None = None,
+    offset_kind: str | None = None,
+    offset_max_exact_levels: int | None = None,
+    n_bins: int = 150,
     mlflow_client=_DEFAULT_MLFLOW_CLIENT,
 ) -> Path:
     export_fn = getattr(model, "export_rating_tables", None)
@@ -46,10 +52,23 @@ def export_rating_tables(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    export_fn(output_path, X, y, sample_weight=exposure, n_bins=150)
-    resolved_mlflow_client = (
-        mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
-    )
+    export_kwargs = {
+        "sample_weight": exposure,
+        "n_bins": n_bins,
+    }
+    if offset is not None:
+        export_kwargs["offset"] = offset
+    if offset_source is not None:
+        export_kwargs["offset_source"] = offset_source
+    if offset_name is not None:
+        export_kwargs["offset_name"] = offset_name
+    if offset_kind is not None:
+        export_kwargs["offset_kind"] = offset_kind
+    if offset_max_exact_levels is not None:
+        export_kwargs["offset_max_exact_levels"] = offset_max_exact_levels
+
+    export_fn(output_path, X, y, **export_kwargs)
+    resolved_mlflow_client = mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
     optional_mlflow_client(resolved_mlflow_client).log_artifact(
         str(output_path),
         artifact_path="rating_tables",
