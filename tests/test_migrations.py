@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pricing_pipeline.infra.migrations import (
     _ensure_schema_configuration,
+    apply_migrations_in_transaction,
     migration_files,
     migration_checksum,
     render_migration_sql,
@@ -140,6 +141,59 @@ def test_migration_runner_tracks_checksum_status_and_uses_application_lock():
     assert "status NVARCHAR(32)" in source
     assert "error_message NVARCHAR(4000)" in source
     assert "Migration checksum mismatch" in source
+
+
+def test_migration_recorder_insert_is_idempotent_when_row_appears_after_precheck(
+    tmp_path,
+    monkeypatch,
+):
+    migration = tmp_path / "V001__race.sql"
+    migration.write_text("CREATE TABLE pricing.EXAMPLE(id INT);\n", encoding="utf-8")
+
+    class MappingResult:
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class RowsResult:
+        def all(self):
+            return []
+
+    class ScalarResult:
+        def __init__(self, value=None):
+            self.value = value
+
+        def scalar_one(self):
+            return self.value
+
+    class FakeConnection:
+        def __init__(self):
+            self.tracking_insert_sql = None
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            if "INSERT INTO dbo.SCHEMA_MIGRATION" in sql:
+                self.tracking_insert_sql = sql
+                if "IF NOT EXISTS" not in sql:
+                    raise AssertionError("migration tracking insert is not idempotent")
+            if "FROM dbo.SCHEMA_CONFIGURATION" in sql:
+                return RowsResult()
+            if "FROM dbo.SCHEMA_MIGRATION" in sql:
+                return MappingResult()
+            return ScalarResult()
+
+    con = FakeConnection()
+    monkeypatch.setattr("pricing_pipeline.infra.migrations.getpass.getuser", lambda: "tester")
+
+    assert apply_migrations_in_transaction(
+        con,
+        tmp_path,
+        schemas=SchemaNames(pricing="pricing", pricing_staging="pricing_stg", mlops="mlops"),
+        acquire_lock=False,
+    ) == ["V001__race.sql"]
+    assert con.tracking_insert_sql is not None
 
 
 def test_render_migration_sql_supports_custom_schema_names():
