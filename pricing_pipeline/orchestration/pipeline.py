@@ -139,9 +139,11 @@ def publish_model_export(
         rating_workbook_path=str(publish_result.rating_workbook_path),
         run_status="SUCCESS",
         created_by=export_result.created_by,
+        publication_receipt_path=export_result.publication_receipt_path,
+        publication_receipt_sha256=export_result.publication_receipt_sha256,
     )
 
-    return {
+    result: dict[str, str | bool] = {
         "mlflow_run_id": str(publish_result.mlflow_run_id),
         "export_id": str(publish_result.export_id),
         "rate_package_id": str(publish_result.rate_package_id),
@@ -150,6 +152,11 @@ def publish_model_export(
         "rating_workbook_path": str(publish_result.rating_workbook_path),
         "was_existing": bool(getattr(publish_result, "was_existing", False)),
     }
+    if export_result.publication_receipt_path is not None:
+        result["publication_receipt_path"] = export_result.publication_receipt_path
+    if export_result.publication_receipt_sha256 is not None:
+        result["publication_receipt_sha256"] = export_result.publication_receipt_sha256
+    return result
 
 
 def run_training_export_publish(
@@ -164,7 +171,7 @@ def run_training_export_publish(
     spec: ModelSpec,
     model_config: ModelBuildConfig,
     created_by: str = "airflow",
-) -> dict[str, str]:
+) -> dict[str, str | bool]:
     export = train_and_export_model(
         engine,
         settings=settings,

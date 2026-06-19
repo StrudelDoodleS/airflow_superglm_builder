@@ -8,7 +8,7 @@ from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import text
 
 from pricing_pipeline.data.manifest import (
@@ -79,6 +79,8 @@ class CompletedModelBuild(BaseModel):
     manifest_id: str | None = None
     split_set_id: str | None = None
     model_artifact_path: str | None = None
+    publication_receipt_path: str | None = None
+    publication_receipt_sha256: str | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
@@ -106,7 +108,12 @@ class CompletedModelBuild(BaseModel):
         return cls(**data)
 
     def to_dict(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
+        payload = self.model_dump(mode="json")
+        if self.publication_receipt_path is None:
+            payload.pop("publication_receipt_path")
+        if self.publication_receipt_sha256 is None:
+            payload.pop("publication_receipt_sha256")
+        return payload
 
     @field_validator("rating_workbook_path", "model_version", mode="before")
     @classmethod
@@ -129,6 +136,7 @@ class CompletedModelBuild(BaseModel):
         "manifest_id",
         "split_set_id",
         "model_artifact_path",
+        "publication_receipt_path",
         mode="before",
     )
     @classmethod
@@ -137,6 +145,30 @@ class CompletedModelBuild(BaseModel):
             return None
         cleaned = str(value).strip()
         return cleaned or None
+
+    @field_validator("publication_receipt_sha256", mode="before")
+    @classmethod
+    def _optional_sha256(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        digest = str(value).strip()
+        if (
+            len(digest) != 64
+            or digest.lower() != digest
+            or not all(char in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError(
+                "publication_receipt_sha256 must be a 64-character lowercase hex SHA-256 digest"
+            )
+        return digest
+
+    @model_validator(mode="after")
+    def _receipt_path_and_hash_are_paired(self) -> "CompletedModelBuild":
+        if (self.publication_receipt_path is None) != (self.publication_receipt_sha256 is None):
+            raise ValueError(
+                "publication_receipt_path and publication_receipt_sha256 must be supplied together"
+            )
+        return self
 
     @field_validator("metrics", mode="before")
     @classmethod
@@ -175,6 +207,8 @@ class CompletedModelPublishResult:
     package_status: str
     rating_workbook_path: str
     mlflow_run_id: str | None = None
+    publication_receipt_path: str | None = None
+    publication_receipt_sha256: str | None = None
     was_existing: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -294,6 +328,8 @@ def publish_completed_model_build(
         effective_from=effective_from,
         created_by=resolved_created_by,
         package_status=resolved_package_status,
+        publication_receipt_path=build.publication_receipt_path,
+        publication_receipt_sha256=build.publication_receipt_sha256,
     )
     publish_config = replace(
         model_config,
@@ -319,6 +355,16 @@ def publish_completed_model_build(
             publish_result.get("rating_workbook_path") or rating_workbook_path
         ),
         mlflow_run_id=str(publish_result.get("mlflow_run_id") or build.mlflow_run_id or "") or None,
+        publication_receipt_path=str(
+            publish_result.get("publication_receipt_path") or build.publication_receipt_path or ""
+        )
+        or None,
+        publication_receipt_sha256=str(
+            publish_result.get("publication_receipt_sha256")
+            or build.publication_receipt_sha256
+            or ""
+        )
+        or None,
         was_existing=bool(publish_result.get("was_existing", False)),
     )
 

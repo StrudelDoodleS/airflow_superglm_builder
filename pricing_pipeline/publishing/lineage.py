@@ -20,6 +20,8 @@ def record_model_run(
     rating_workbook_path: str,
     run_status: str,
     created_by: str,
+    publication_receipt_path: str | None = None,
+    publication_receipt_sha256: str | None = None,
     dataset_role: str = "training",
     split_role: str = "validation",
 ) -> int:
@@ -37,6 +39,8 @@ def record_model_run(
         "rating_workbook_path": rating_workbook_path,
         "run_status": run_status,
         "created_by": created_by,
+        "publication_receipt_path": publication_receipt_path,
+        "publication_receipt_sha256": publication_receipt_sha256,
         "dataset_role": dataset_role,
         "split_role": split_role,
     }
@@ -65,6 +69,8 @@ def record_model_run(
                         model_version = :model_version,
                         rate_package_id = :rate_package_id,
                         rating_workbook_path = :rating_workbook_path,
+                        publication_receipt_path = :publication_receipt_path,
+                        publication_receipt_sha256 = :publication_receipt_sha256,
                         run_status = :run_status,
                         completed_ts = SYSUTCDATETIME(),
                         created_by = :created_by
@@ -80,6 +86,8 @@ def record_model_run(
                         model_version,
                         rate_package_id,
                         rating_workbook_path,
+                        publication_receipt_path,
+                        publication_receipt_sha256,
                         run_status,
                         completed_ts,
                         created_by
@@ -95,6 +103,8 @@ def record_model_run(
                         :model_version,
                         :rate_package_id,
                         :rating_workbook_path,
+                        :publication_receipt_path,
+                        :publication_receipt_sha256,
                         :run_status,
                         SYSUTCDATETIME(),
                         :created_by

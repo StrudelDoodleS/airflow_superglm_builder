@@ -45,6 +45,8 @@ def completed_model_build_payload(
     split_set_id: str | None,
     mlflow_run_id: str | None = None,
     model_artifact_path: str | Path | None = None,
+    publication_receipt_path: str | Path | None = None,
+    publication_receipt_sha256: str | None = None,
     metrics: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if manifest_id is None or not str(manifest_id).strip():
@@ -60,5 +62,9 @@ def completed_model_build_payload(
         split_set_id=split_set_id,
         mlflow_run_id=mlflow_run_id,
         model_artifact_path=(str(model_artifact_path) if model_artifact_path is not None else None),
+        publication_receipt_path=(
+            str(publication_receipt_path) if publication_receipt_path is not None else None
+        ),
+        publication_receipt_sha256=publication_receipt_sha256,
         metrics=metrics or {},
     ).to_dict()

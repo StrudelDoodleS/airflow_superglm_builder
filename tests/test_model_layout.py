@@ -203,9 +203,12 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
                 effective_df=3.25,
                 phi=1.0,
             )
+            self._specs = {"VehAge": modeling.Numeric()}
+            self._feature_order = ["VehAge"]
 
         def fit_reml(self, X, y, *, offset=None, verbose=False):
             calls.append(("fit_reml", list(X.columns), len(y), verbose))
+            self._fit_used_offset = offset is not None
             print("POI iter 1  obj=10.5  |grad|=2.5  delta_obj=inf  [VehAge=0.1, DrivAge=0.2]")
             print("POI iter 2  obj=8.25  |grad|=1.25  delta_obj=2.25  [VehAge=0.3, DrivAge=0.4]")
             return self
@@ -264,9 +267,33 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
 
             return FakeSpanContext()
 
-    def fake_export_rating_tables(model, X, y, exposure, *, output_path, mlflow_client):
+    def fake_export_rating_tables(
+        model,
+        X,
+        y,
+        exposure,
+        *,
+        output_path,
+        offset,
+        offset_source,
+        offset_name,
+        offset_kind,
+        offset_max_exact_levels,
+        mlflow_client,
+    ):
         Path(output_path).write_text("workbook", encoding="utf-8")
-        calls.append(("export_rating_tables", Path(output_path).name, mlflow_client))
+        calls.append(
+            (
+                "export_rating_tables",
+                Path(output_path).name,
+                offset.copy(),
+                offset_source.copy(),
+                offset_name,
+                offset_kind,
+                offset_max_exact_levels,
+                mlflow_client,
+            )
+        )
         return output_path
 
     monkeypatch.setattr(modeling, "build_model", FakeModel)
@@ -325,6 +352,12 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
     assert "superglm_phi" not in logged_metric_names
     assert "superglm_lambda_VehAge" not in logged_metric_names
     assert "superglm_lambda_DrivAge" not in logged_metric_names
+    export_call = next(call for call in calls if call[0] == "export_rating_tables")
+    np.testing.assert_allclose(export_call[2], np.log(frame["Exposure"].to_numpy(dtype=float)))
+    pd.testing.assert_series_equal(export_call[3].reset_index(drop=True), frame["Exposure"])
+    assert export_call[4] == "Exposure"
+    assert export_call[5] == "discrete"
+    assert export_call[6] == 4
     assert ("log_artifact", "superglm_model.pkl", "model") in calls
     assert ("log_artifact", "model_summary.txt", "model") in calls
     assert ("log_artifact", "superglm_fit.log", "training_diagnostics") in calls

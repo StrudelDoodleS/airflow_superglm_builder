@@ -143,6 +143,18 @@ def test_migration_runner_tracks_checksum_status_and_uses_application_lock():
     assert "Migration checksum mismatch" in source
 
 
+def test_publication_receipt_migration_enforces_hash_shape():
+    source = Path("db/migrations/V022__superglm_publication_receipt_metadata.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CK_PRICING_RATE_PACKAGE_PUBLICATION_RECEIPT_SHA256" in source
+    assert "publication_receipt_sha256 IS NULL" in source
+    assert "LIKE '%[^0-9a-f]%'" in source
+    assert "LEN(publication_receipt_sha256) = 64" in source
+    assert "publication_receipt_sha256 COLLATE Latin1_General_BIN2" in source
+
+
 def test_migration_recorder_insert_is_idempotent_when_row_appears_after_precheck(
     tmp_path,
     monkeypatch,
@@ -394,6 +406,22 @@ def test_model_name_unification_migration_replaces_model_key_contract():
     assert "UQ_PRICING_MODEL_NAME" in migration
     assert "model_name" in migration
     assert migration.count("model_key") == 2
+
+
+def test_superglm_publication_receipt_migration_adds_metadata_columns():
+    migration = Path("db/migrations/V022__superglm_publication_receipt_metadata.sql").read_text(
+        encoding="utf-8",
+    )
+
+    assert "publication_receipt_json" in migration
+    assert "publication_receipt_sha256" in migration
+    assert "package_metadata_json" in migration
+    assert "revision_metadata_json" in migration
+    assert "offset_handling" in migration
+    assert "STG_TERM_METADATA" in migration
+    assert "term_metadata_json" in migration
+    assert "ISJSON(publication_receipt_json)" in migration
+    assert "ALREADY_APPLIED_SQL_EXPOSURE" in migration
 
 
 def test_package_writer_allocates_version_under_lock():

@@ -4,6 +4,18 @@ import sqlite3
 from pathlib import Path
 
 
+def test_offline_sqlite_ddl_contains_publication_receipt_metadata():
+    pricing_sql = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
+    staging_sql = Path("db/offline_sqlite/pricing_stg.sql").read_text(encoding="utf-8")
+
+    assert "publication_receipt_json" in pricing_sql
+    assert "publication_receipt_sha256" in pricing_sql
+    assert "revision_metadata_json" in pricing_sql
+    assert "term_metadata_json" in pricing_sql
+    assert "publication_receipt_json" in staging_sql
+    assert "STG_TERM_METADATA" in staging_sql
+
+
 def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tmp_path):
     from scripts import run_mtpl_frequency_offline_sqlite
 
@@ -70,6 +82,7 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     ]:
         assert result["tables"]["pricing"][table_name] > 0
     assert result["tables"]["pricing_stg"]["STG_RATING_EXPORT"] == 1
+    assert result["tables"]["pricing_stg"]["STG_TERM_METADATA"] > 0
     assert result["tables"]["pricing_stg"]["STG_RATE_CELL"] > 0
     assert result["tables"]["pricing_stg"]["STG_CELL_LEVEL"] > 0
 
@@ -81,8 +94,28 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
             "SELECT split_mode, fold_count, artifact_uri FROM CV_SPLIT_SET"
         ).fetchone()
         package = con.execute(
-            "SELECT model_version, package_status, source_export_id FROM PRICING_RATE_PACKAGE"
+            """
+            SELECT
+                model_version,
+                package_status,
+                source_export_id,
+                publication_receipt_sha256,
+                offset_handling,
+                offset_factor_name,
+                offset_source_name,
+                publication_receipt_json
+            FROM PRICING_RATE_PACKAGE
+            """
         ).fetchone()
+        offset_terms = con.execute(
+            "SELECT term_name FROM PRICING_TERM WHERE term_type = 'OFFSET_FACTOR'"
+        ).fetchall()
+        model_run = con.execute(
+            "SELECT publication_receipt_path, publication_receipt_sha256 FROM MODEL_RUN"
+        ).fetchone()
+        term_metadata_count = con.execute(
+            "SELECT COUNT(*) FROM PRICING_TERM WHERE term_metadata_json IS NOT NULL"
+        ).fetchone()[0]
         rate_cells = con.execute(
             """
             SELECT t.term_name, c.cell_key_text, c.multiplier
@@ -108,7 +141,16 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert split[0] == "MATERIALIZED"
     assert split[1] == 5
     assert Path(split[2]).exists()
-    assert package == ("v1", "PUBLISHED", result["export_id"])
+    assert package[:3] == ("v1", "PUBLISHED", result["export_id"])
+    assert package[3] is not None
+    assert package[4] == "EXPORTED_FACTOR"
+    assert package[5] == "Exposure"
+    assert package[6] == "Exposure"
+    assert package[7] is not None
+    assert offset_terms == [("Exposure",)]
+    assert model_run[0] is not None
+    assert model_run[1] == package[3]
+    assert term_metadata_count > 0
     assert rate_cells
     assert all(multiplier > 0 for _, _, multiplier in rate_cells)
     assert compiled_bands
