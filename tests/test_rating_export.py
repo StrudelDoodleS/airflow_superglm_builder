@@ -975,6 +975,64 @@ def test_train_and_export_model_validates_registered_model_without_creating(
     assert ("log_param", "model_id", 17) in calls
 
 
+def test_model_export_result_to_dict_omits_unset_publication_receipt_fields(
+    tmp_path: Path,
+):
+    export = ModelExportResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        dag_id="pricing_dag",
+        airflow_run_id="manual__1",
+        mlflow_run_id="mlflow-run-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+        package_status="PUBLISHED",
+    )
+
+    payload = export.to_dict()
+
+    assert "publication_receipt_path" not in payload
+    assert "publication_receipt_sha256" not in payload
+
+
+def test_model_export_result_to_dict_includes_publication_receipt_fields_when_set(
+    tmp_path: Path,
+):
+    export = ModelExportResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        dag_id="pricing_dag",
+        airflow_run_id="manual__1",
+        mlflow_run_id="mlflow-run-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+        package_status="PUBLISHED",
+        publication_receipt_path="/tmp/superglm_publication_receipt.json",
+        publication_receipt_sha256="c" * 64,
+    )
+
+    payload = export.to_dict()
+
+    assert payload["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
+    assert payload["publication_receipt_sha256"] == "c" * 64
+
+
 class FakePipelineModel:
     family = "poisson"
 
@@ -1414,4 +1472,58 @@ def test_publish_model_export_returns_candidate_without_deploying(
     assert result["package_version"] == "4"
     assert result["package_status"] == "DRAFT"
     assert result["was_existing"] is True
+    assert "publication_receipt_path" not in result
+    assert "publication_receipt_sha256" not in result
     assert ("validate_registered_model",) in calls
+
+
+def test_publish_model_export_includes_publication_receipt_fields_when_set(
+    monkeypatch,
+    tmp_path: Path,
+):
+    class FakePublisher:
+        def __init__(self, engine, config):
+            pass
+
+        def validate_registered_model(self):
+            return 17
+
+        def publish_training_export(self, export):
+            return SimpleNamespace(
+                mlflow_run_id="mlflow-run-1",
+                export_id=export.export_id,
+                rate_package_id=123,
+                package_version=4,
+                package_status="DRAFT",
+                was_existing=False,
+                rating_workbook_path=export.rating_workbook_path,
+            )
+
+    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    monkeypatch.setattr(pipeline, "record_model_run", lambda *args, **kwargs: None)
+    engine = object()
+    export = ModelExportResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        dag_id="pricing_dag",
+        airflow_run_id="manual__1",
+        mlflow_run_id="mlflow-run-1",
+        split_set_id=None,
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+        package_status="PUBLISHED",
+        publication_receipt_path="/tmp/superglm_publication_receipt.json",
+        publication_receipt_sha256="d" * 64,
+    )
+
+    result = pipeline.publish_model_export(engine, export, model_config=MODEL_CONFIG)
+
+    assert result["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
+    assert result["publication_receipt_sha256"] == "d" * 64

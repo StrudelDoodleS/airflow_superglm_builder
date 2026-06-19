@@ -68,7 +68,12 @@ class ModelExportResult:
     publication_receipt_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.publication_receipt_path is None:
+            payload.pop("publication_receipt_path")
+        if self.publication_receipt_sha256 is None:
+            payload.pop("publication_receipt_sha256")
+        return payload
 
     @classmethod
     def from_mapping(cls, value: "ModelExportResult | Mapping[str, Any]") -> "ModelExportResult":
