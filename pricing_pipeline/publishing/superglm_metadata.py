@@ -76,7 +76,7 @@ def _json_value(value: Any) -> Any:
     if callable(item):
         try:
             return _json_value(item())
-        except (TypeError, ValueError):
+        except TypeError:
             pass
 
     try:
@@ -85,7 +85,7 @@ def _json_value(value: Any) -> Any:
     except (TypeError, ValueError):
         pass
 
-    return repr(value)
+    raise ValueError(f"unsupported SuperGLM metadata value: {type(value).__name__}")
 
 
 def _spline_kind(spec: Any) -> str:
@@ -136,7 +136,7 @@ def _grouping_metadata(grouping: Any) -> Any:
             if isinstance(candidate, Mapping):
                 return _json_value(candidate)
 
-    return repr(grouping)
+    return {"class_name": type(grouping).__name__}
 
 
 def _base_feature_metadata(name: str, spec: Any, feature_kind: str) -> dict[str, Any]:
@@ -363,6 +363,18 @@ def _model_link_name(model: Any) -> str | None:
     return None
 
 
+def _validate_offset_contract(fit_used_offset: bool, offset_contract: OffsetExportContract) -> None:
+    if fit_used_offset and offset_contract.handling == "NONE":
+        raise ValueError(
+            "offset contract handling must describe an exported or pre-applied offset "
+            "when the SuperGLM model was fit with an offset"
+        )
+    if not fit_used_offset and offset_contract.handling != "NONE":
+        raise ValueError(
+            "offset contract handling must be NONE when the SuperGLM model was fit without an offset"
+        )
+
+
 def build_superglm_publication_receipt(
     model: Any,
     *,
@@ -372,8 +384,14 @@ def build_superglm_publication_receipt(
     overrides = source_to_published_names or {}
     term_metadata: dict[str, dict[str, Any]] = {}
     published_sources: dict[str, str] = {}
+    fit_used_offset = bool(_safe_getattr(model, "_fit_used_offset", False))
+    _validate_offset_contract(fit_used_offset, offset_contract)
 
-    for source_name, spec in _iter_model_specs(model):
+    model_specs = _iter_model_specs(model)
+    if not model_specs:
+        raise ValueError("SuperGLM model has no feature specs to publish")
+
+    for source_name, spec in model_specs:
         metadata = _feature_metadata(source_name, spec)
         published_name = overrides.get(source_name, metadata["published_term_name"])
         metadata["published_term_name"] = published_name
@@ -391,7 +409,7 @@ def build_superglm_publication_receipt(
         "model": {
             "family": _safe_getattr(model, "family"),
             "link": _model_link_name(model),
-            "fit_used_offset": bool(_safe_getattr(model, "_fit_used_offset", False)),
+            "fit_used_offset": fit_used_offset,
         }
     }
 

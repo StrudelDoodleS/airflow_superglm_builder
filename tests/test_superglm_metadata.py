@@ -186,6 +186,49 @@ def test_offset_contract_is_preserved_when_fit_used_offset():
     assert receipt.model_dump(mode="json")["offset_contract"] == contract.model_dump(mode="json")
 
 
+def test_offset_fitted_model_rejects_none_offset_contract():
+    n = 90
+    offset = np.log(np.full(n, 0.75))
+    model = _fit_model({"num": Numeric()}, offset=offset)
+
+    with pytest.raises(ValueError, match="offset contract"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_non_offset_model_rejects_exported_offset_contract():
+    model = _fit_model({"num": Numeric()})
+    contract = OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="Term Months",
+        published_factor_name="Term_Months",
+        source_name="TermMonths",
+        label="log(TermMonths / 12)",
+    )
+
+    with pytest.raises(ValueError, match="offset contract"):
+        build_superglm_publication_receipt(model, offset_contract=contract)
+
+
 def test_json_value_rejects_non_finite_floats():
     with pytest.raises(ValueError, match="non-finite"):
         _json_value({"value": np.float64(math.nan)})
+
+
+def test_json_value_rejects_unknown_objects():
+    with pytest.raises(ValueError, match="unsupported"):
+        _json_value(object())
+
+
+def test_model_without_feature_specs_is_rejected():
+    class EmptyModel:
+        family = "poisson"
+        _fit_used_offset = False
+
+    with pytest.raises(ValueError, match="no feature specs"):
+        build_superglm_publication_receipt(
+            EmptyModel(),
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
