@@ -138,6 +138,14 @@ def _staged_meta(**overrides):
         "effective_from_date": "2026-05-29",
         "effective_to_date": None,
         "source_file": "/tmp/export/rating_tables.xlsx",
+        "publication_receipt_json": None,
+        "publication_receipt_sha256": None,
+        "package_metadata_json": None,
+        "offset_handling": None,
+        "offset_factor_name": None,
+        "offset_source_name": None,
+        "offset_label": None,
+        "metadata_origin": None,
     }
     row.update(overrides)
     return row
@@ -155,6 +163,7 @@ def _existing_package(**overrides):
         "package_status": "DRAFT",
         "source_export_id": "export-1",
         "source_file": "/tmp/export/rating_tables.xlsx",
+        "publication_receipt_sha256": None,
     }
     row.update(overrides)
     return row
@@ -349,6 +358,31 @@ def test_package_writer_rejects_existing_source_export_with_different_source_fil
     )
 
 
+def test_package_writer_rejects_existing_source_export_with_different_receipt_hash():
+    args = type(
+        "Args",
+        (),
+        {
+            "export_id": "export-1",
+            "created_by": "airflow",
+            "package_status": "PUBLISHED",
+            "set_pointer": None,
+        },
+    )()
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(publication_receipt_sha256="a" * 64),
+        existing_package=_existing_package(publication_receipt_sha256="b" * 64),
+    )
+
+    with pytest.raises(ValueError, match="publication_receipt_sha256"):
+        load_staging_to_rating_package(engine, args)
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
 def test_package_writer_allows_existing_source_export_when_old_source_file_is_unknown():
     args = type(
         "Args",
@@ -369,3 +403,17 @@ def test_package_writer_allows_existing_source_export_when_old_source_file_is_un
 
     assert rate_package_id == 42
     assert args.was_existing is True
+
+
+def test_package_writer_publishes_receipt_and_term_metadata_columns():
+    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "publication_receipt_json" in writer
+    assert "publication_receipt_sha256" in writer
+    assert "package_metadata_json" in writer
+    assert "revision_metadata_json" in writer
+    assert "offset_handling" in writer
+    assert "STG_TERM_METADATA" in writer
+    assert "term_metadata_json" in writer

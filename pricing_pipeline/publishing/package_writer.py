@@ -22,6 +22,7 @@ def _existing_export_conflicts(existing_package, meta) -> list[str]:
         "effective_from_date",
         "effective_to_date",
         "source_file",
+        "publication_receipt_sha256",
     ):
         existing_value = _identity_text(existing_package[field_name])
         staged_value = _identity_text(meta[field_name])
@@ -54,7 +55,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 base_rate,
                 effective_from_date,
                 effective_to_date,
-                source_file
+                source_file,
+                publication_receipt_json,
+                publication_receipt_sha256,
+                package_metadata_json,
+                offset_handling,
+                offset_factor_name,
+                offset_source_name,
+                offset_label,
+                metadata_origin
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """), {"export_id": args.export_id}).mappings().one()
@@ -77,7 +86,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 effective_to_date,
                 package_status,
                 source_export_id,
-                source_file
+                source_file,
+                publication_receipt_sha256
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
@@ -98,6 +108,42 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             args.was_existing = True
             return int(existing_package["rate_package_id"])
 
+        offset_handling = meta["offset_handling"] or "UNKNOWN"
+        offset_factor_name = meta["offset_factor_name"]
+        if offset_handling == "EXPORTED_FACTOR":
+            if not offset_factor_name:
+                raise ValueError(
+                    "staged export declares EXPORTED_FACTOR offset handling but "
+                    "does not include offset_factor_name"
+                )
+            offset_factor_exists = con.execute(text("""
+                SELECT TOP 1 1
+                FROM pricing_stg.STG_RATE_CELL
+                WHERE export_id = :export_id
+                  AND term_name = :offset_factor_name
+                  AND term_type = 'OFFSET_FACTOR'
+            """), {
+                "export_id": args.export_id,
+                "offset_factor_name": offset_factor_name,
+            }).scalar_one_or_none()
+            if offset_factor_exists is None:
+                raise ValueError(
+                    "staged export declares EXPORTED_FACTOR offset handling but "
+                    f"has no OFFSET_FACTOR term named {offset_factor_name!r}"
+                )
+        elif offset_handling == "ALREADY_APPLIED_SQL_EXPOSURE":
+            staged_offset_factor = con.execute(text("""
+                SELECT TOP 1 1
+                FROM pricing_stg.STG_RATE_CELL
+                WHERE export_id = :export_id
+                  AND term_type = 'OFFSET_FACTOR'
+            """), {"export_id": args.export_id}).scalar_one_or_none()
+            if staged_offset_factor is not None:
+                raise ValueError(
+                    "staged export declares ALREADY_APPLIED_SQL_EXPOSURE but "
+                    "also contains an OFFSET_FACTOR term"
+                )
+
         package_version = con.execute(text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
@@ -117,6 +163,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 package_status,
                 source_export_id,
                 source_file,
+                publication_receipt_json,
+                publication_receipt_sha256,
+                package_metadata_json,
+                revision_metadata_json,
+                offset_handling,
+                offset_factor_name,
+                offset_source_name,
+                offset_label,
+                metadata_origin,
                 created_by
             )
             OUTPUT INSERTED.rate_package_id
@@ -132,6 +187,15 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :package_status,
                 :source_export_id,
                 :source_file,
+                :publication_receipt_json,
+                :publication_receipt_sha256,
+                :package_metadata_json,
+                NULL,
+                :offset_handling,
+                :offset_factor_name,
+                :offset_source_name,
+                :offset_label,
+                :metadata_origin,
                 :created_by
             )
         """), {
@@ -145,6 +209,14 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             "package_status": "DRAFT",
             "source_export_id": args.export_id,
             "source_file": meta["source_file"],
+            "publication_receipt_json": meta["publication_receipt_json"],
+            "publication_receipt_sha256": meta["publication_receipt_sha256"],
+            "package_metadata_json": meta["package_metadata_json"],
+            "offset_handling": offset_handling,
+            "offset_factor_name": offset_factor_name,
+            "offset_source_name": meta["offset_source_name"],
+            "offset_label": meta["offset_label"],
+            "metadata_origin": meta["metadata_origin"],
             "created_by": args.created_by,
         }).scalar_one()
 
@@ -253,14 +325,19 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 rate_package_id,
                 term_name,
                 term_type,
-                sequence_no
+                sequence_no,
+                term_metadata_json
             )
             SELECT DISTINCT
                 :rate_package_id,
                 c.term_name,
                 c.term_type,
-                c.sequence_no
+                c.sequence_no,
+                tm.term_metadata_json
             FROM pricing_stg.STG_RATE_CELL c
+            LEFT JOIN pricing_stg.STG_TERM_METADATA tm
+              ON tm.export_id = c.export_id
+             AND tm.term_name = c.term_name
             WHERE c.export_id = :export_id;
         """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
 
