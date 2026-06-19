@@ -1022,6 +1022,7 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
                 "created_by": "airflow",
                 "replace": True,
                 "model_id": 17,
+                "metadata_mode": "ALLOW_WORKBOOK_ONLY",
             },
         ),
         (

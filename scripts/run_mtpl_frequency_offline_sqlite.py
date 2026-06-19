@@ -977,6 +977,7 @@ def run_mtpl_frequency_offline_sqlite(
         created_by=created_by,
         replace=True,
         model_id=model_id,
+        metadata_mode="ALLOW_WORKBOOK_ONLY",
     )
     package = publish_offline_rating_package(
         engine,

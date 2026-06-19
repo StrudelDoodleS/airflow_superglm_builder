@@ -133,19 +133,28 @@ class ModelPublisher:
             self.config,
             model_id=model_id,
         )
-        stage_rating_export(
-            self.engine,
-            workbook_path=Path(export_result.rating_workbook_path),
-            export_id=export_result.export_id,
-            model_name=self.config.model_name,
-            model_version=export_result.model_version,
-            target_name=self.config.target_name,
-            model_type=self.config.model_type,
-            effective_from=export_result.effective_from,
-            created_by=export_result.created_by,
-            replace=True,
-            model_id=model_id,
-        )
+        staging_kwargs = {
+            "workbook_path": Path(export_result.rating_workbook_path),
+            "export_id": export_result.export_id,
+            "model_name": self.config.model_name,
+            "model_version": export_result.model_version,
+            "target_name": self.config.target_name,
+            "model_type": self.config.model_type,
+            "effective_from": export_result.effective_from,
+            "created_by": export_result.created_by,
+            "replace": True,
+            "model_id": model_id,
+            "metadata_mode": "ALLOW_WORKBOOK_ONLY",
+        }
+        if export_result.publication_receipt_path is not None:
+            staging_kwargs.update(
+                {
+                    "publication_receipt_path": export_result.publication_receipt_path,
+                    "publication_receipt_sha256": export_result.publication_receipt_sha256,
+                    "metadata_mode": "REQUIRE_SUPERGLM_RECEIPT",
+                }
+            )
+        stage_rating_export(self.engine, **staging_kwargs)
         result = publish_rating_package(
             self.engine,
             export_id=export_result.export_id,
