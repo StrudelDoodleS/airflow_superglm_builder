@@ -4,6 +4,18 @@ import sqlite3
 from pathlib import Path
 
 
+def test_offline_sqlite_ddl_contains_publication_receipt_metadata():
+    pricing_sql = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
+    staging_sql = Path("db/offline_sqlite/pricing_stg.sql").read_text(encoding="utf-8")
+
+    assert "publication_receipt_json" in pricing_sql
+    assert "publication_receipt_sha256" in pricing_sql
+    assert "revision_metadata_json" in pricing_sql
+    assert "term_metadata_json" in pricing_sql
+    assert "publication_receipt_json" in staging_sql
+    assert "STG_TERM_METADATA" in staging_sql
+
+
 def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tmp_path):
     from scripts import run_mtpl_frequency_offline_sqlite
 

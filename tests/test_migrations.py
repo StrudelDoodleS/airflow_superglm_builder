@@ -396,6 +396,22 @@ def test_model_name_unification_migration_replaces_model_key_contract():
     assert migration.count("model_key") == 2
 
 
+def test_superglm_publication_receipt_migration_adds_metadata_columns():
+    migration = Path("db/migrations/V022__superglm_publication_receipt_metadata.sql").read_text(
+        encoding="utf-8",
+    )
+
+    assert "publication_receipt_json" in migration
+    assert "publication_receipt_sha256" in migration
+    assert "package_metadata_json" in migration
+    assert "revision_metadata_json" in migration
+    assert "offset_handling" in migration
+    assert "STG_TERM_METADATA" in migration
+    assert "term_metadata_json" in migration
+    assert "ISJSON(publication_receipt_json)" in migration
+    assert "ALREADY_APPLIED_SQL_EXPOSURE" in migration
+
+
 def test_package_writer_allocates_version_under_lock():
     writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 

@@ -7,6 +7,14 @@ CREATE TABLE IF NOT EXISTS pricing_stg.STG_RATING_EXPORT (
     effective_from_date TEXT NOT NULL,
     effective_to_date TEXT,
     source_file TEXT,
+    publication_receipt_json TEXT,
+    publication_receipt_sha256 TEXT,
+    package_metadata_json TEXT,
+    offset_handling TEXT,
+    offset_factor_name TEXT,
+    offset_source_name TEXT,
+    offset_label TEXT,
+    metadata_origin TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );
@@ -44,4 +52,12 @@ CREATE TABLE IF NOT EXISTS pricing_stg.STG_CELL_LEVEL (
     is_missing INTEGER NOT NULL DEFAULT 0,
     is_other INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (export_id, row_id, position_no)
+);
+
+CREATE TABLE IF NOT EXISTS pricing_stg.STG_TERM_METADATA (
+    export_id TEXT NOT NULL,
+    term_name TEXT NOT NULL,
+    term_metadata_json TEXT NOT NULL,
+    PRIMARY KEY (export_id, term_name),
+    FOREIGN KEY (export_id) REFERENCES STG_RATING_EXPORT(export_id)
 );
