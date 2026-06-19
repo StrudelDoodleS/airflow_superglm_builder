@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pickle
+import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -11,10 +12,16 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from sqlalchemy import text
 
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.publishing import lineage, rating_export, rating_package, staging
 from pricing_pipeline.publishing.lifecycle import PublishResult
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    OffsetExportContract,
+    SuperGLMPublicationReceipt,
+    write_publication_receipt,
+)
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
 from pricing_pipeline.models.config import ModelBuildConfig
@@ -216,9 +223,10 @@ def test_smoke_check_reports_missing_rating_export_without_failing(capsys):
 
 
 class FakeFrame:
-    def __init__(self, label: str, events: list[tuple]):
+    def __init__(self, label: str, events: list[tuple], *, empty: bool = False):
         self.label = label
         self.events = events
+        self.empty = empty
 
     def to_sql(self, name, con, schema=None, if_exists=None, index=None, chunksize=None):
         self.events.append(("to_sql", self.label, name, con, schema, if_exists, index, chunksize))
@@ -334,6 +342,275 @@ def test_package_staging_module_exposes_excel_staging_functions():
     assert callable(staging.stage_rating_export)
 
 
+def _offline_staging_engine(tmp_path: Path):
+    from scripts.run_mtpl_frequency_offline_sqlite import (
+        apply_offline_ddl,
+        sqlite_engine_with_offline_schemas,
+    )
+
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    return engine
+
+
+def _minimal_rating_workbook(path: Path, term_name: str = "TermMonths") -> Path:
+    raw = pd.DataFrame([[None] * 3 for _ in range(8)])
+    raw.iat[1, 2] = 0.123
+    raw.iat[4, 0] = term_name
+    raw.iloc[6, 0:3] = [term_name, "Relativity", "Weight"]
+    raw.iloc[7, 0:3] = ["12", 1.0, 10.0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw.to_excel(path, sheet_name="Rating Tables", header=False, index=False)
+    return path
+
+
+def _publication_receipt(
+    *,
+    handling: str = "EXPORTED_FACTOR",
+    published_factor_name: str | None = "TermMonths",
+) -> SuperGLMPublicationReceipt:
+    if handling == "EXPORTED_FACTOR":
+        offset_contract = OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name="term_months",
+            published_factor_name=published_factor_name,
+            source_name="Exposure",
+            label="Policy exposure term",
+        )
+        term_metadata = {
+            "TermMonths": {
+                "feature_kind": "offset",
+                "source_column": "Exposure",
+            }
+        }
+    elif handling == "ALREADY_APPLIED_SQL_EXPOSURE":
+        offset_contract = OffsetExportContract(
+            handling="ALREADY_APPLIED_SQL_EXPOSURE",
+            source_name="Exposure",
+            label="Policy exposure term",
+        )
+        term_metadata = {}
+    else:
+        offset_contract = OffsetExportContract(handling="NONE")
+        term_metadata = {}
+
+    return SuperGLMPublicationReceipt(
+        schema_name="superglm_publication_receipt",
+        schema_version=1,
+        metadata_origin="SUPERGLM_FITTED_MODEL",
+        superglm_version="1.0.0",
+        extractor_version="unit-test",
+        package_metadata={"model": {"family": "poisson", "link": "log"}},
+        term_metadata=term_metadata,
+        offset_contract=offset_contract,
+    )
+
+
+def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(_publication_receipt(), receipt_path)
+
+    load_superglm_excel_to_staging.stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=1,
+    )
+
+    with engine.begin() as con:
+        export = con.execute(
+            text(
+                "SELECT publication_receipt_sha256, offset_handling, offset_factor_name "
+                "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
+            ),
+            {"export_id": "export-1"},
+        ).mappings().one()
+        term = con.execute(
+            text(
+                "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
+                "WHERE export_id = :export_id AND term_name = :term_name"
+            ),
+            {"export_id": "export-1", "term_name": "TermMonths"},
+        ).mappings().one()
+        metadata = con.execute(
+            text(
+                "SELECT term_metadata_json FROM pricing_stg.STG_TERM_METADATA "
+                "WHERE export_id = :export_id AND term_name = :term_name"
+            ),
+            {"export_id": "export-1", "term_name": "TermMonths"},
+        ).mappings().one()
+
+    assert export["publication_receipt_sha256"] == digest
+    assert export["offset_handling"] == "EXPORTED_FACTOR"
+    assert export["offset_factor_name"] == "TermMonths"
+    assert term["term_type"] == "OFFSET_FACTOR"
+    assert json.loads(metadata["term_metadata_json"])["feature_kind"] == "offset"
+
+
+def test_stage_rating_export_requires_publication_receipt_in_strict_metadata_mode(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+
+    with pytest.raises(ValueError, match="publication receipt is required"):
+        load_superglm_excel_to_staging.stage_rating_export(
+            engine,
+            workbook_path=workbook_path,
+            export_id="export-1",
+            model_name="MTPL_FREQ",
+            model_version="20260427",
+            effective_from="2026-04-27",
+            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+            model_id=1,
+        )
+
+
+def test_stage_rating_export_allows_explicit_workbook_only_metadata_mode(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+
+    load_superglm_excel_to_staging.stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        metadata_mode="ALLOW_WORKBOOK_ONLY",
+        replace=True,
+        model_id=1,
+    )
+
+    with engine.begin() as con:
+        export = con.execute(
+            text(
+                "SELECT publication_receipt_sha256, offset_handling "
+                "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
+            ),
+            {"export_id": "export-1"},
+        ).mappings().one()
+        term_metadata_count = con.execute(
+            text(
+                "SELECT COUNT(*) FROM pricing_stg.STG_TERM_METADATA "
+                "WHERE export_id = :export_id"
+            ),
+            {"export_id": "export-1"},
+        ).scalar_one()
+
+    assert export["publication_receipt_sha256"] is None
+    assert export["offset_handling"] is None
+    assert term_metadata_count == 0
+
+
+def test_stage_rating_export_rejects_missing_exported_offset_factor(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(
+        _publication_receipt(published_factor_name="MissingOffsetFactor"),
+        receipt_path,
+    )
+
+    with pytest.raises(ValueError, match="MissingOffsetFactor"):
+        load_superglm_excel_to_staging.stage_rating_export(
+            engine,
+            workbook_path=workbook_path,
+            export_id="export-1",
+            model_name="MTPL_FREQ",
+            model_version="20260427",
+            effective_from="2026-04-27",
+            publication_receipt_path=receipt_path,
+            publication_receipt_sha256=digest,
+            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+            replace=True,
+            model_id=1,
+        )
+
+
+def test_stage_rating_export_replace_deletes_old_term_metadata(
+    tmp_path: Path,
+):
+    engine = _offline_staging_engine(tmp_path)
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    digest = write_publication_receipt(_publication_receipt(), receipt_path)
+
+    load_superglm_excel_to_staging.stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=1,
+    )
+
+    with engine.begin() as con:
+        con.execute(
+            text(
+                "INSERT INTO pricing_stg.STG_TERM_METADATA "
+                "(export_id, term_name, term_metadata_json) "
+                "VALUES (:export_id, :term_name, :term_metadata_json)"
+            ),
+            {
+                "export_id": "export-1",
+                "term_name": "StaleTerm",
+                "term_metadata_json": '{"feature_kind":"stale"}',
+            },
+        )
+
+    load_superglm_excel_to_staging.stage_rating_export(
+        engine,
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="20260427",
+        effective_from="2026-04-27",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=1,
+    )
+
+    with engine.begin() as con:
+        term_names = con.execute(
+            text(
+                "SELECT term_name FROM pricing_stg.STG_TERM_METADATA "
+                "WHERE export_id = :export_id ORDER BY term_name"
+            ),
+            {"export_id": "export-1"},
+        ).scalars().all()
+
+    assert term_names == ["TermMonths"]
+
+
 def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     monkeypatch, tmp_path: Path
 ):
@@ -362,6 +639,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         effective_to=None,
         created_by="airflow",
         replace=True,
+        metadata_mode="ALLOW_WORKBOOK_ONLY",
     )
 
     args = captured_args[0]
@@ -381,6 +659,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     delete_sql = [event[1] for event in events if event[0] == "execute"]
     assert delete_sql == [
         "\n                SELECT model_id,\n                    model_name,\n                    model_label,\n                    target_name,\n                    model_type,\n                    model_status\n                FROM pricing.PRICING_MODEL\n                WHERE model_name = :model_name\n                ",
+        "DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
@@ -388,6 +667,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
     ]
     assert [event[2] for event in events if event[0] == "execute"] == [
         {"model_name": "MTPL_FREQ"},
+        {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
@@ -435,6 +715,44 @@ def test_insert_staging_frames_uses_configured_staging_schema_for_to_sql():
         "python_pricing_stg",
         "python_pricing_stg",
         "python_pricing_stg",
+    ]
+
+
+def test_insert_staging_frames_writes_term_metadata_after_cell_levels():
+    events = []
+    engine = FakeEngine(events)
+    args = SimpleNamespace(
+        model_name="MTPL_FREQ",
+        model_label=None,
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_status="ACTIVE",
+        created_by="unit-test",
+        replace=False,
+        export_id="export-1",
+        model_id=17,
+    )
+
+    staging.insert_staging_frames(
+        engine,
+        args,
+        FakeFrame("export", events),
+        FakeFrame("rate", events),
+        FakeFrame("level", events),
+        FakeFrame("term_metadata", events),
+    )
+
+    assert [event[1] for event in events if event[0] == "to_sql"] == [
+        "export",
+        "rate",
+        "level",
+        "term_metadata",
+    ]
+    assert [event[2] for event in events if event[0] == "to_sql"] == [
+        "STG_RATING_EXPORT",
+        "STG_RATE_CELL",
+        "STG_CELL_LEVEL",
+        "STG_TERM_METADATA",
     ]
 
 

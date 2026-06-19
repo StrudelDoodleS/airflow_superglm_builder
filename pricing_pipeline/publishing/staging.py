@@ -5,7 +5,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,12 @@ from sqlalchemy import text
 
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.publishing.model_registry import ModelRegistryError, get_pricing_model
+from pricing_pipeline.publishing.naming import clean_identifier
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    SuperGLMPublicationReceipt,
+    canonical_receipt_bytes,
+    load_publication_receipt,
+)
 
 INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
@@ -36,12 +42,6 @@ def clean_text(x: Any) -> str | None:
         return None
     s = str(x).strip()
     return s if s else None
-
-
-def clean_identifier(s: str) -> str:
-    s = re.sub(r"[^A-Za-z0-9_]+", "_", s.strip())
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s or "unknown"
 
 
 def parse_interval(level: str) -> tuple[float | None, float | None, float | None]:
@@ -271,18 +271,90 @@ def _resolve_registered_model_id(con, args: argparse.Namespace) -> int:
     return record.model_id
 
 
+def _deterministic_json(data: Any) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+
+def _empty_term_metadata_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["export_id", "term_name", "term_metadata_json"])
+
+
+def _term_metadata_frame(
+    export_id: str,
+    receipt: SuperGLMPublicationReceipt,
+) -> pd.DataFrame:
+    receipt_data = receipt.model_dump(mode="json")
+    term_metadata = receipt_data["term_metadata"]
+    rows = [
+        {
+            "export_id": export_id,
+            "term_name": term_name,
+            "term_metadata_json": _deterministic_json(term_metadata[term_name]),
+        }
+        for term_name in sorted(term_metadata)
+    ]
+    return pd.DataFrame(rows, columns=["export_id", "term_name", "term_metadata_json"])
+
+
+def _apply_publication_receipt_metadata(
+    *,
+    args: argparse.Namespace,
+    export_df: pd.DataFrame,
+    rate_df: pd.DataFrame,
+    receipt: SuperGLMPublicationReceipt | None,
+    receipt_sha256: str | None,
+) -> pd.DataFrame:
+    if receipt is None:
+        return _empty_term_metadata_frame()
+
+    offset_contract = receipt.offset_contract
+    if offset_contract.handling == "EXPORTED_FACTOR":
+        offset_factor_name = offset_contract.published_factor_name
+        matching_term = rate_df["term_name"] == offset_factor_name
+        if not matching_term.any():
+            raise ValueError(
+                "publication receipt declares exported offset factor "
+                f"{offset_factor_name!r}, but no staged workbook term matches"
+            )
+        rate_df.loc[matching_term, "term_type"] = "OFFSET_FACTOR"
+    elif offset_contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE" and (
+        rate_df["term_type"] == "OFFSET_FACTOR"
+    ).any():
+        raise ValueError(
+            "publication receipt offset handling ALREADY_APPLIED_SQL_EXPOSURE "
+            "cannot stage OFFSET_FACTOR terms"
+        )
+
+    receipt_data = receipt.model_dump(mode="json")
+    export_df["publication_receipt_json"] = canonical_receipt_bytes(receipt).decode("utf-8")
+    export_df["publication_receipt_sha256"] = receipt_sha256
+    export_df["package_metadata_json"] = _deterministic_json(receipt_data["package_metadata"])
+    export_df["offset_handling"] = offset_contract.handling
+    export_df["offset_factor_name"] = offset_contract.published_factor_name
+    export_df["offset_source_name"] = offset_contract.source_name
+    export_df["offset_label"] = offset_contract.label
+    export_df["metadata_origin"] = receipt.metadata_origin
+
+    return _term_metadata_frame(args.export_id, receipt)
+
+
 def insert_staging_frames(
     engine,
     args: argparse.Namespace,
     export_df: pd.DataFrame,
     rate_df: pd.DataFrame,
     level_df: pd.DataFrame,
+    term_metadata_df: pd.DataFrame | None = None,
 ) -> None:
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         model_id = _resolve_registered_model_id(con, args)
 
         if args.replace:
+            con.execute(
+                text("DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id"),
+                {"export_id": args.export_id},
+            )
             con.execute(
                 text("DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id"),
                 {"export_id": args.export_id},
@@ -326,6 +398,15 @@ def insert_staging_frames(
             index=False,
             chunksize=5000,
         )
+        if term_metadata_df is not None and not term_metadata_df.empty:
+            term_metadata_df.to_sql(
+                "STG_TERM_METADATA",
+                con,
+                schema=schemas.pricing_staging,
+                if_exists="append",
+                index=False,
+                chunksize=5000,
+            )
 
 
 def stage_rating_export(
@@ -342,7 +423,33 @@ def stage_rating_export(
     created_by: str = "python",
     replace: bool = False,
     model_id: int | None = None,
+    publication_receipt_path: str | Path | None = None,
+    publication_receipt_sha256: str | None = None,
+    metadata_mode: Literal[
+        "REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"
+    ] = "REQUIRE_SUPERGLM_RECEIPT",
 ) -> None:
+    if metadata_mode not in {"REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"}:
+        raise ValueError(f"unknown metadata_mode: {metadata_mode}")
+
+    receipt: SuperGLMPublicationReceipt | None = None
+    if publication_receipt_path is not None:
+        if publication_receipt_sha256 is None:
+            raise ValueError(
+                "publication_receipt_sha256 is required when publication_receipt_path is supplied"
+            )
+        receipt = load_publication_receipt(
+            publication_receipt_path,
+            expected_sha256=publication_receipt_sha256,
+        )
+    elif publication_receipt_sha256 is not None:
+        raise ValueError(
+            "publication_receipt_path is required when publication_receipt_sha256 is supplied"
+        )
+
+    if metadata_mode == "REQUIRE_SUPERGLM_RECEIPT" and receipt is None:
+        raise ValueError("publication receipt is required")
+
     args = argparse.Namespace(
         xlsx=workbook_path,
         sheet="Rating Tables",
@@ -367,4 +474,11 @@ def stage_rating_export(
         model_id=model_id,
     )
     export_df, rate_df, level_df = build_staging_frames(args)
-    insert_staging_frames(engine, args, export_df, rate_df, level_df)
+    term_metadata_df = _apply_publication_receipt_metadata(
+        args=args,
+        export_df=export_df,
+        rate_df=rate_df,
+        receipt=receipt,
+        receipt_sha256=publication_receipt_sha256,
+    )
+    insert_staging_frames(engine, args, export_df, rate_df, level_df, term_metadata_df)
