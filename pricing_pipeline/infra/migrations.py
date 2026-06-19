@@ -210,18 +210,50 @@ def apply_migrations_in_transaction(
         con.execute(
             text(
                 """
-                INSERT INTO dbo.SCHEMA_MIGRATION(
-                    version_file,
-                    checksum_sha256,
-                    applied_by,
-                    status
+                IF EXISTS (
+                    SELECT 1
+                    FROM dbo.SCHEMA_MIGRATION
+                    WHERE version_file = :name
+                      AND checksum_sha256 IS NOT NULL
+                      AND checksum_sha256 <> :checksum
                 )
-                VALUES (
-                    :name,
-                    :checksum,
-                    :applied_by,
-                    'APPLIED'
+                BEGIN
+                    THROW 51010, 'Migration checksum mismatch for existing tracking row.', 1;
+                END;
+
+                IF EXISTS (
+                    SELECT 1
+                    FROM dbo.SCHEMA_MIGRATION
+                    WHERE version_file = :name
+                      AND checksum_sha256 IS NULL
                 )
+                BEGIN
+                    UPDATE dbo.SCHEMA_MIGRATION
+                    SET checksum_sha256 = :checksum,
+                        applied_by = COALESCE(applied_by, :applied_by),
+                        status = 'APPLIED',
+                        error_message = NULL
+                    WHERE version_file = :name;
+                END;
+                ELSE IF NOT EXISTS (
+                    SELECT 1
+                    FROM dbo.SCHEMA_MIGRATION
+                    WHERE version_file = :name
+                )
+                BEGIN
+                    INSERT INTO dbo.SCHEMA_MIGRATION(
+                        version_file,
+                        checksum_sha256,
+                        applied_by,
+                        status
+                    )
+                    VALUES (
+                        :name,
+                        :checksum,
+                        :applied_by,
+                        'APPLIED'
+                    );
+                END;
                 """
             ),
             {"name": path.name, "checksum": checksum, "applied_by": applied_by},
