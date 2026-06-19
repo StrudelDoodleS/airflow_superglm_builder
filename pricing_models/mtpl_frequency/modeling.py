@@ -332,14 +332,19 @@ def fit_validate_export_rating_tables(
         y,
         exposure,
         output_path=workbook_path,
+        offset=offset,
+        offset_source=frame[MODEL_FRAME.weight_column],
+        offset_name=MODEL_FRAME.weight_column,
+        offset_kind="discrete",
+        offset_max_exact_levels=int(frame[MODEL_FRAME.weight_column].nunique(dropna=True)),
         mlflow_client=mlflow_client,
     )
     receipt = build_superglm_publication_receipt(
         fitted,
         offset_contract=OffsetExportContract(
             handling="EXPORTED_FACTOR",
-            source_factor_name="Offset Multiplier",
-            published_factor_name="Offset_Multiplier",
+            source_factor_name=MODEL_FRAME.weight_column,
+            published_factor_name=MODEL_FRAME.weight_column,
             source_name=MODEL_FRAME.weight_column,
             label=f"log({MODEL_FRAME.weight_column})",
         ),

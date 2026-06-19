@@ -101,10 +101,15 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
                 source_export_id,
                 publication_receipt_sha256,
                 offset_handling,
+                offset_factor_name,
+                offset_source_name,
                 publication_receipt_json
             FROM PRICING_RATE_PACKAGE
             """
         ).fetchone()
+        offset_terms = con.execute(
+            "SELECT term_name FROM PRICING_TERM WHERE term_type = 'OFFSET_FACTOR'"
+        ).fetchall()
         model_run = con.execute(
             "SELECT publication_receipt_path, publication_receipt_sha256 FROM MODEL_RUN"
         ).fetchone()
@@ -138,8 +143,11 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert Path(split[2]).exists()
     assert package[:3] == ("v1", "PUBLISHED", result["export_id"])
     assert package[3] is not None
-    assert package[4] in {"EXPORTED_FACTOR", "ALREADY_APPLIED_SQL_EXPOSURE", "NONE"}
-    assert package[5] is not None
+    assert package[4] == "EXPORTED_FACTOR"
+    assert package[5] == "Exposure"
+    assert package[6] == "Exposure"
+    assert package[7] is not None
+    assert offset_terms == [("Exposure",)]
     assert model_run[0] is not None
     assert model_run[1] == package[3]
     assert term_metadata_count > 0

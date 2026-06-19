@@ -36,6 +36,12 @@ def export_rating_tables(
     exposure,
     output_path: Path,
     *,
+    offset=None,
+    offset_source=None,
+    offset_name: str | None = None,
+    offset_kind: str | None = None,
+    offset_max_exact_levels: int | None = None,
+    n_bins: int = 150,
     mlflow_client=_DEFAULT_MLFLOW_CLIENT,
 ) -> Path:
     export_fn = getattr(model, "export_rating_tables", None)
@@ -46,7 +52,22 @@ def export_rating_tables(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    export_fn(output_path, X, y, sample_weight=exposure, n_bins=150)
+    export_kwargs = {"sample_weight": exposure, "n_bins": n_bins}
+    optional_export_kwargs = {
+        "offset": offset,
+        "offset_source": offset_source,
+        "offset_name": offset_name,
+        "offset_kind": offset_kind,
+        "offset_max_exact_levels": offset_max_exact_levels,
+    }
+    export_kwargs.update(
+        {
+            key: value
+            for key, value in optional_export_kwargs.items()
+            if value is not None
+        }
+    )
+    export_fn(output_path, X, y, **export_kwargs)
     resolved_mlflow_client = (
         mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
     )

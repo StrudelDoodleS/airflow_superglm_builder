@@ -137,6 +137,47 @@ def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_pa
     assert mlflow_calls == [(str(output_path), "rating_tables")]
 
 
+def test_export_rating_tables_forwards_offset_export_kwargs(monkeypatch, tmp_path: Path):
+    model = FakeExportModel()
+    monkeypatch.setattr(rating_export, "mlflow", None)
+
+    output_path = tmp_path / "rating_tables.xlsx"
+    X = pd.DataFrame({"x": [1, 2]})
+    y = np.array([0.0, 1.0])
+    exposure = np.array([1.0, 1.0])
+    offset = np.log(np.array([1.0, 3.0]))
+    offset_source = pd.Series([12, 36], name="TermMonths")
+
+    result = rating_export.export_rating_tables(
+        model,
+        X,
+        y,
+        exposure,
+        output_path=output_path,
+        offset=offset,
+        offset_source=offset_source,
+        offset_name="TermMonths",
+        offset_kind="discrete",
+        offset_max_exact_levels=50,
+    )
+
+    assert result == output_path
+    assert model.calls == [
+        (
+            (output_path, X, y),
+            {
+                "sample_weight": exposure,
+                "n_bins": 150,
+                "offset": offset,
+                "offset_source": offset_source,
+                "offset_name": "TermMonths",
+                "offset_kind": "discrete",
+                "offset_max_exact_levels": 50,
+            },
+        )
+    ]
+
+
 def test_export_rating_tables_requires_superglm_rating_export_support(monkeypatch, tmp_path: Path):
     mlflow_calls = []
     fake_mlflow = SimpleNamespace(
