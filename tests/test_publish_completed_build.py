@@ -91,6 +91,19 @@ def test_completed_model_build_round_trips_plain_dict(tmp_path):
     assert CompletedModelBuild.from_mapping(build) is build
 
 
+def test_completed_model_build_to_dict_omits_unset_publication_receipt_fields():
+    build = CompletedModelBuild(
+        rating_workbook_path="/tmp/rating.xlsx",
+        model_version="v1",
+        effective_from="2026-06-19",
+    )
+
+    payload = build.to_dict()
+
+    assert "publication_receipt_path" not in payload
+    assert "publication_receipt_sha256" not in payload
+
+
 def test_completed_model_build_accepts_publication_receipt_fields():
     build = CompletedModelBuild(
         rating_workbook_path="/tmp/rating.xlsx",

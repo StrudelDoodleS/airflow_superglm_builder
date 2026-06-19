@@ -108,7 +108,12 @@ class CompletedModelBuild(BaseModel):
         return cls(**data)
 
     def to_dict(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
+        payload = self.model_dump(mode="json")
+        if self.publication_receipt_path is None:
+            payload.pop("publication_receipt_path")
+        if self.publication_receipt_sha256 is None:
+            payload.pop("publication_receipt_sha256")
+        return payload
 
     @field_validator("rating_workbook_path", "model_version", mode="before")
     @classmethod
