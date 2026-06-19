@@ -118,7 +118,7 @@ def publish_model_export(
     export: ModelExportResult | dict,
     *,
     model_config: ModelBuildConfig,
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | None]:
     export_result = ModelExportResult.from_mapping(export)
     publisher = ModelPublisher(engine, model_config)
     publisher.validate_registered_model()
@@ -148,6 +148,8 @@ def publish_model_export(
         "package_version": str(publish_result.package_version),
         "package_status": str(publish_result.package_status),
         "rating_workbook_path": str(publish_result.rating_workbook_path),
+        "publication_receipt_path": export_result.publication_receipt_path,
+        "publication_receipt_sha256": export_result.publication_receipt_sha256,
         "was_existing": bool(getattr(publish_result, "was_existing", False)),
     }
 
@@ -164,7 +166,7 @@ def run_training_export_publish(
     spec: ModelSpec,
     model_config: ModelBuildConfig,
     created_by: str = "airflow",
-) -> dict[str, str]:
+) -> dict[str, str | bool | None]:
     export = train_and_export_model(
         engine,
         settings=settings,

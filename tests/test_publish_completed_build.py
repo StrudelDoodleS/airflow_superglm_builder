@@ -91,6 +91,32 @@ def test_completed_model_build_round_trips_plain_dict(tmp_path):
     assert CompletedModelBuild.from_mapping(build) is build
 
 
+def test_completed_model_build_accepts_publication_receipt_fields():
+    build = CompletedModelBuild(
+        rating_workbook_path="/tmp/rating.xlsx",
+        model_version="v1",
+        effective_from="2026-06-19",
+        publication_receipt_path="/tmp/superglm_publication_receipt.json",
+        publication_receipt_sha256="a" * 64,
+    )
+
+    assert build.publication_receipt_path == "/tmp/superglm_publication_receipt.json"
+    assert build.publication_receipt_sha256 == "a" * 64
+    assert build.to_dict()["publication_receipt_sha256"] == "a" * 64
+
+
+def test_completed_model_build_rejects_bad_receipt_hash():
+    with pytest.raises(CompletedModelBuildError, match="publication_receipt_sha256") as exc:
+        CompletedModelBuild(
+            rating_workbook_path="/tmp/rating.xlsx",
+            model_version="v1",
+            effective_from="2026-06-19",
+            publication_receipt_sha256="not-a-hash",
+        )
+
+    assert "64-character lowercase hex SHA-256 digest" in str(exc.value)
+
+
 def test_completed_model_build_rejects_unknown_mapping_keys():
     with pytest.raises(CompletedModelBuildError, match="unknown completed build field"):
         CompletedModelBuild.from_mapping(
@@ -348,6 +374,66 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
     assert calls[0] == ("validate", engine, _config())
     assert calls[1][0] == "manifest"
     assert calls[2][0] == "publish"
+
+
+def test_publish_completed_model_build_carries_publication_receipt_fields(
+    tmp_path,
+    monkeypatch,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    receipt_path = tmp_path / "superglm_publication_receipt.json"
+    receipt_sha256 = "b" * 64
+    engine = object()
+    published_exports = []
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
+        lambda engine_arg, manifest_id: None,
+    )
+
+    def fake_publish(engine_arg, export, *, model_config):
+        published_exports.append(export)
+        return {
+            "mlflow_run_id": "",
+            "export_id": export.export_id,
+            "rate_package_id": "42",
+            "package_version": "7",
+            "rating_workbook_path": export.rating_workbook_path,
+            "publication_receipt_path": export.publication_receipt_path,
+            "publication_receipt_sha256": export.publication_receipt_sha256,
+        }
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        fake_publish,
+    )
+
+    result = publish_completed_model_build(
+        engine,
+        settings=_settings(tmp_path),
+        model_config=_config(),
+        dataset=None,
+        completed_build={
+            "rating_workbook_path": str(workbook),
+            "model_version": "20260603",
+            "effective_from": "2026-06-03",
+            "export_id": "export-1",
+            "manifest_id": "manifest-existing",
+            "created_by": "airflow",
+            "publication_receipt_path": str(receipt_path),
+            "publication_receipt_sha256": receipt_sha256,
+        },
+    )
+
+    assert published_exports[0].publication_receipt_path == str(receipt_path)
+    assert published_exports[0].publication_receipt_sha256 == receipt_sha256
+    assert result.publication_receipt_path == str(receipt_path)
+    assert result.publication_receipt_sha256 == receipt_sha256
 
 
 def test_publish_completed_model_build_configures_engine_with_settings_schema_names(

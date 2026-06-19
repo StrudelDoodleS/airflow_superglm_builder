@@ -64,6 +64,8 @@ class ModelExportResult:
     effective_from: str
     created_by: str
     package_status: str = "DRAFT"
+    publication_receipt_path: str | None = None
+    publication_receipt_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
