@@ -82,6 +82,7 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     ]:
         assert result["tables"]["pricing"][table_name] > 0
     assert result["tables"]["pricing_stg"]["STG_RATING_EXPORT"] == 1
+    assert result["tables"]["pricing_stg"]["STG_TERM_METADATA"] > 0
     assert result["tables"]["pricing_stg"]["STG_RATE_CELL"] > 0
     assert result["tables"]["pricing_stg"]["STG_CELL_LEVEL"] > 0
 
@@ -93,8 +94,23 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
             "SELECT split_mode, fold_count, artifact_uri FROM CV_SPLIT_SET"
         ).fetchone()
         package = con.execute(
-            "SELECT model_version, package_status, source_export_id FROM PRICING_RATE_PACKAGE"
+            """
+            SELECT
+                model_version,
+                package_status,
+                source_export_id,
+                publication_receipt_sha256,
+                offset_handling,
+                publication_receipt_json
+            FROM PRICING_RATE_PACKAGE
+            """
         ).fetchone()
+        model_run = con.execute(
+            "SELECT publication_receipt_path, publication_receipt_sha256 FROM MODEL_RUN"
+        ).fetchone()
+        term_metadata_count = con.execute(
+            "SELECT COUNT(*) FROM PRICING_TERM WHERE term_metadata_json IS NOT NULL"
+        ).fetchone()[0]
         rate_cells = con.execute(
             """
             SELECT t.term_name, c.cell_key_text, c.multiplier
@@ -120,7 +136,13 @@ def test_mtpl_offline_sqlite_runner_populates_inspectable_tables(monkeypatch, tm
     assert split[0] == "MATERIALIZED"
     assert split[1] == 5
     assert Path(split[2]).exists()
-    assert package == ("v1", "PUBLISHED", result["export_id"])
+    assert package[:3] == ("v1", "PUBLISHED", result["export_id"])
+    assert package[3] is not None
+    assert package[4] in {"EXPORTED_FACTOR", "ALREADY_APPLIED_SQL_EXPOSURE", "NONE"}
+    assert package[5] is not None
+    assert model_run[0] is not None
+    assert model_run[1] == package[3]
+    assert term_metadata_count > 0
     assert rate_cells
     assert all(multiplier > 0 for _, _, multiplier in rate_cells)
     assert compiled_bands

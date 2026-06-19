@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from pricing_models.mtpl_frequency.data import MODEL_FRAME, SOURCE_SQL  # noqa: E402
 from pricing_models.mtpl_frequency.modeling import (  # noqa: E402
     MLFLOW_EXPERIMENT,
+    PUBLICATION_RECEIPT_FILENAME,
     build_final_model_frame,
     fit_validate_export_rating_tables,
     read_prepared_source,
@@ -75,6 +76,7 @@ INSPECTABLE_TABLES = {
     ],
     "pricing_stg": [
         "STG_RATING_EXPORT",
+        "STG_TERM_METADATA",
         "STG_RATE_CELL",
         "STG_CELL_LEVEL",
     ],
@@ -426,7 +428,15 @@ def publish_offline_rating_package(
                         base_rate,
                         effective_from_date,
                         effective_to_date,
-                        source_file
+                        source_file,
+                        publication_receipt_json,
+                        publication_receipt_sha256,
+                        package_metadata_json,
+                        offset_handling,
+                        offset_factor_name,
+                        offset_source_name,
+                        offset_label,
+                        metadata_origin
                     FROM pricing_stg.STG_RATING_EXPORT
                     WHERE export_id = :export_id
                     """
@@ -440,7 +450,7 @@ def publish_offline_rating_package(
             con.execute(
                 text(
                     """
-                    SELECT rate_package_id, package_version
+                    SELECT rate_package_id, package_version, publication_receipt_sha256
                     FROM pricing.PRICING_RATE_PACKAGE
                     WHERE model_id = :model_id
                       AND source_export_id = :export_id
@@ -452,11 +462,18 @@ def publish_offline_rating_package(
             .one_or_none()
         )
         if existing is not None:
+            if existing["publication_receipt_sha256"] != export_row["publication_receipt_sha256"]:
+                raise ValueError(
+                    f"export_id {export_id!r} is already published with a different "
+                    "publication_receipt_sha256"
+                )
             return {
                 "rate_package_id": int(existing["rate_package_id"]),
                 "package_version": int(existing["package_version"]),
                 "was_existing": True,
             }
+
+        offset_handling = export_row["offset_handling"] or "UNKNOWN"
 
         package_version = (
             int(
@@ -488,6 +505,15 @@ def publish_offline_rating_package(
                     package_status,
                     source_export_id,
                     source_file,
+                    publication_receipt_json,
+                    publication_receipt_sha256,
+                    package_metadata_json,
+                    revision_metadata_json,
+                    offset_handling,
+                    offset_factor_name,
+                    offset_source_name,
+                    offset_label,
+                    metadata_origin,
                     manifest_id,
                     split_set_id,
                     rating_workbook_path,
@@ -505,6 +531,15 @@ def publish_offline_rating_package(
                     :package_status,
                     :source_export_id,
                     :source_file,
+                    :publication_receipt_json,
+                    :publication_receipt_sha256,
+                    :package_metadata_json,
+                    NULL,
+                    :offset_handling,
+                    :offset_factor_name,
+                    :offset_source_name,
+                    :offset_label,
+                    :metadata_origin,
                     :manifest_id,
                     :split_set_id,
                     :rating_workbook_path,
@@ -524,6 +559,14 @@ def publish_offline_rating_package(
                 "package_status": MODEL_CONFIG.default_package_status,
                 "source_export_id": export_id,
                 "source_file": export_row["source_file"],
+                "publication_receipt_json": export_row["publication_receipt_json"],
+                "publication_receipt_sha256": export_row["publication_receipt_sha256"],
+                "package_metadata_json": export_row["package_metadata_json"],
+                "offset_handling": offset_handling,
+                "offset_factor_name": export_row["offset_factor_name"],
+                "offset_source_name": export_row["offset_source_name"],
+                "offset_label": export_row["offset_label"],
+                "metadata_origin": export_row["metadata_origin"],
                 "manifest_id": completed_build["manifest_id"],
                 "split_set_id": completed_build.get("split_set_id"),
                 "rating_workbook_path": completed_build["rating_workbook_path"],
@@ -565,11 +608,43 @@ def publish_offline_rating_package(
         )
         if not rate_rows or not level_rows:
             raise ValueError(f"staged export {export_id!r} has no rating cells")
+        if offset_handling == "EXPORTED_FACTOR":
+            offset_factor_name = export_row["offset_factor_name"]
+            if not offset_factor_name or not any(
+                row["term_name"] == offset_factor_name and row["term_type"] == "OFFSET_FACTOR"
+                for row in rate_rows
+            ):
+                raise ValueError(
+                    "staged export declares EXPORTED_FACTOR offset handling but "
+                    f"has no OFFSET_FACTOR term named {offset_factor_name!r}"
+                )
+        elif offset_handling == "ALREADY_APPLIED_SQL_EXPOSURE" and any(
+            row["term_type"] == "OFFSET_FACTOR" for row in rate_rows
+        ):
+            raise ValueError(
+                "staged export declares ALREADY_APPLIED_SQL_EXPOSURE but also "
+                "contains an OFFSET_FACTOR term"
+            )
 
         rate_by_row_id = {int(row["row_id"]): row for row in rate_rows}
         levels_by_row: dict[int, list[Mapping[str, Any]]] = {}
         for row in level_rows:
             levels_by_row.setdefault(int(row["row_id"]), []).append(row)
+        term_metadata = {
+            str(row["term_name"]): row["term_metadata_json"]
+            for row in con.execute(
+                text(
+                    """
+                    SELECT term_name, term_metadata_json
+                    FROM pricing_stg.STG_TERM_METADATA
+                    WHERE export_id = :export_id
+                    """
+                ),
+                {"export_id": export_id},
+            )
+            .mappings()
+            .all()
+        }
 
         feature_ids: dict[str, int] = {}
         level_set_ids: dict[tuple[str, str], int] = {}
@@ -609,9 +684,11 @@ def publish_offline_rating_package(
                 text(
                     """
                     INSERT INTO pricing.PRICING_TERM (
-                        rate_package_id, term_name, term_type, sequence_no
+                        rate_package_id, term_name, term_type, sequence_no,
+                        term_metadata_json
                     ) VALUES (
-                        :rate_package_id, :term_name, :term_type, :sequence_no
+                        :rate_package_id, :term_name, :term_type, :sequence_no,
+                        :term_metadata_json
                     )
                     """
                 ),
@@ -620,6 +697,7 @@ def publish_offline_rating_package(
                     "term_name": term_name,
                     "term_type": row["term_type"],
                     "sequence_no": row["sequence_no"],
+                    "term_metadata_json": term_metadata.get(term_name),
                 },
             )
             term_ids[term_name] = _scalar_int(result.lastrowid)
@@ -813,11 +891,13 @@ def insert_offline_model_run_rows(
                     model_run_id, model_id, dag_id, airflow_run_id, mlflow_run_id,
                     model_version, export_id, manifest_id, split_set_id, rate_package_id,
                     model_name, rating_workbook_path, model_artifact_path, effective_from,
+                    publication_receipt_path, publication_receipt_sha256,
                     run_status, completed_ts, created_by
                 ) VALUES (
                     :model_run_id, :model_id, :dag_id, :airflow_run_id, :mlflow_run_id,
                     :model_version, :export_id, :manifest_id, :split_set_id, :rate_package_id,
                     :model_name, :rating_workbook_path, :model_artifact_path, :effective_from,
+                    :publication_receipt_path, :publication_receipt_sha256,
                     :run_status, CURRENT_TIMESTAMP, :created_by
                 )
                 """
@@ -837,6 +917,8 @@ def insert_offline_model_run_rows(
                 "rating_workbook_path": completed_build["rating_workbook_path"],
                 "model_artifact_path": completed_build.get("model_artifact_path"),
                 "effective_from": completed_build["effective_from"],
+                "publication_receipt_path": completed_build.get("publication_receipt_path"),
+                "publication_receipt_sha256": completed_build.get("publication_receipt_sha256"),
                 "run_status": "SUCCEEDED",
                 "created_by": created_by,
             },
@@ -944,6 +1026,8 @@ def run_mtpl_frequency_offline_sqlite(
             mlflow_client=mlflow_client,
         )
         mlflow_run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "") or "")
+    publication_receipt_path = Path(model_artifact_path).parent / PUBLICATION_RECEIPT_FILENAME
+    publication_receipt_sha256 = hashlib.sha256(publication_receipt_path.read_bytes()).hexdigest()
     manifest = create_model_frame_manifest_with_split(
         engine,
         frame=frame,
@@ -963,6 +1047,8 @@ def run_mtpl_frequency_offline_sqlite(
         split_set_id=manifest.split_set_id,
         mlflow_run_id=mlflow_run_id or None,
         model_artifact_path=model_artifact_path,
+        publication_receipt_path=publication_receipt_path,
+        publication_receipt_sha256=publication_receipt_sha256,
         metrics=metrics,
     )
     stage_rating_export(
@@ -977,7 +1063,9 @@ def run_mtpl_frequency_offline_sqlite(
         created_by=created_by,
         replace=True,
         model_id=model_id,
-        metadata_mode="ALLOW_WORKBOOK_ONLY",
+        publication_receipt_path=publication_receipt_path,
+        publication_receipt_sha256=publication_receipt_sha256,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
     )
     package = publish_offline_rating_package(
         engine,

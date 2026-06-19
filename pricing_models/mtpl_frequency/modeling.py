@@ -11,6 +11,7 @@ import json
 import logging
 import pickle
 import re
+import hashlib
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Mapping
@@ -36,6 +37,11 @@ from pricing_pipeline.orchestration.completed_build_helpers import (
 )
 from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
 from pricing_pipeline.publishing.rating_export import build_export_id, export_rating_tables
+from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    OffsetExportContract,
+    write_publication_receipt,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +60,7 @@ FEATURE_COLUMNS = [
     "Region",
 ]
 MLFLOW_EXPERIMENT = "pricing-mtpl-frequency"
+PUBLICATION_RECEIPT_FILENAME = "superglm_publication_receipt.json"
 _POI_ITER_PATTERN = re.compile(
     r"POI iter\s+(?P<iteration>\d+)\s+"
     r"obj=(?P<objective>[^\s]+)\s+"
@@ -232,6 +239,13 @@ def _log_superglm_trace_metrics(mlflow_client, rows: list[dict[str, object]]) ->
             mlflow_client.log_metric("superglm_reml_gradient_norm", gradient, step=step)
 
 
+def _publication_receipt_info(artifact_path: str | Path | None) -> tuple[Path | None, str | None]:
+    if artifact_path is None:
+        return None, None
+    receipt_path = Path(artifact_path).parent / PUBLICATION_RECEIPT_FILENAME
+    return receipt_path, hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+
+
 def fit_validate_export_rating_tables(
     frame: pd.DataFrame,
     *,
@@ -250,6 +264,7 @@ def fit_validate_export_rating_tables(
 
     workbook_path = artifact_dir / f"rating_tables_{model_version}_{effective_from}.xlsx"
     model_path = artifact_dir / "superglm_model.pkl"
+    receipt_path = artifact_dir / PUBLICATION_RECEIPT_FILENAME
     summary_path = artifact_dir / "model_summary.txt"
     fit_log_path = artifact_dir / "superglm_fit.log"
     diagnostics_path = artifact_dir / "superglm_diagnostics.json"
@@ -319,6 +334,19 @@ def fit_validate_export_rating_tables(
         output_path=workbook_path,
         mlflow_client=mlflow_client,
     )
+    receipt = build_superglm_publication_receipt(
+        fitted,
+        offset_contract=OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name="Offset Multiplier",
+            published_factor_name="Offset_Multiplier",
+            source_name=MODEL_FRAME.weight_column,
+            label=f"log({MODEL_FRAME.weight_column})",
+        ),
+    )
+    write_publication_receipt(receipt, receipt_path)
+    mlflow_client.log_artifact(str(receipt_path), artifact_path="publication_receipt")
+
     with model_path.open("wb") as handle:
         pickle.dump(fitted, handle)
     summary_path.write_text(str(fitted.summary(detail="compact")), encoding="utf-8")
@@ -391,6 +419,9 @@ def train_validate_export_model(
             mlflow_client=mlflow_client,
         )
         mlflow_run_id = str(getattr(getattr(mlflow_run, "info", None), "run_id", "") or "")
+    publication_receipt_path, publication_receipt_sha256 = _publication_receipt_info(
+        model_artifact_path
+    )
     manifest = create_model_frame_manifest_with_split(
         engine,
         frame=frame,
@@ -411,5 +442,7 @@ def train_validate_export_model(
         split_set_id=manifest.split_set_id,
         mlflow_run_id=mlflow_run_id or None,
         model_artifact_path=model_artifact_path,
+        publication_receipt_path=publication_receipt_path,
+        publication_receipt_sha256=publication_receipt_sha256,
         metrics=metrics,
     )
