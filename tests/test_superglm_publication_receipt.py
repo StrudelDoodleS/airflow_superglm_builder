@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 import json
 
 import pytest
@@ -99,6 +101,42 @@ def test_canonical_receipt_rejects_non_finite_package_metadata():
 
     with pytest.raises(ValueError, match="non-finite"):
         canonical_receipt_bytes(receipt)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"bad": datetime(2026, 1, 1)},
+        {"bad": Decimal("1.25")},
+        {"bad": ("tuple",)},
+        {1: "not a string key"},
+        {"nested": {"bad": float("-inf")}},
+    ],
+)
+def test_receipt_rejects_non_json_native_package_metadata(metadata):
+    payload = _receipt().model_dump(mode="python")
+    payload["package_metadata"] = metadata
+
+    with pytest.raises(ValueError, match="metadata"):
+        SuperGLMPublicationReceipt(**payload)
+
+
+def test_receipt_rejects_nested_non_finite_term_metadata():
+    payload = _receipt().model_dump(mode="python")
+    payload["term_metadata"] = {"TermMonths": {"nested": [1.0, float("inf")]}}
+
+    with pytest.raises(ValueError, match="metadata"):
+        SuperGLMPublicationReceipt(**payload)
+
+
+def test_receipt_metadata_cannot_mutate_after_construction():
+    receipt = _receipt()
+    digest = publication_receipt_sha256(receipt)
+
+    with pytest.raises(TypeError):
+        receipt.package_metadata["model"]["family"] = "gamma"
+
+    assert publication_receipt_sha256(receipt) == digest
 
 
 def test_receipt_loader_rejects_noncanonical_equivalent_json(tmp_path):
