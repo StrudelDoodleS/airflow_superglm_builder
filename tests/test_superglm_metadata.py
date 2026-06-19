@@ -6,7 +6,16 @@ from importlib.metadata import version
 import numpy as np
 import pandas as pd
 import pytest
-from superglm import Categorical, Numeric, OrderedCategorical, Polynomial, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    NegativeBinomial,
+    Numeric,
+    OrderedCategorical,
+    Polynomial,
+    Spline,
+    SuperGLM,
+    Tweedie,
+)
 from superglm.features.spline import PSpline
 
 from pricing_pipeline.publishing.superglm_metadata import (
@@ -17,7 +26,7 @@ from pricing_pipeline.publishing.superglm_metadata import (
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
-def _fit_model(features, *, offset=None):
+def _fit_model(features, *, family="poisson", offset=None):
     n = 90
     rng = np.random.default_rng(20260619)
     x = pd.DataFrame(
@@ -33,7 +42,7 @@ def _fit_model(features, *, offset=None):
     )
     y = rng.poisson(np.exp(-2.0 + 0.01 * x["age"].to_numpy()))
     model = SuperGLM(
-        family="poisson",
+        family=family,
         features=features,
         selection_penalty=0.0,
         discrete=True,
@@ -74,6 +83,7 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert receipt.schema_version == 1
     assert receipt.metadata_origin == "SUPERGLM_FITTED_MODEL"
     assert receipt.package_metadata["model"]["family"] == "poisson"
+    assert receipt.package_metadata["model"]["family_params"] == {}
     assert receipt.package_metadata["model"]["fit_used_offset"] is False
 
     cat = receipt.term_metadata["cat"]
@@ -92,7 +102,17 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     spline = receipt.term_metadata["age"]
     assert spline["feature_kind"] == "spline"
     assert spline["declared"]["kind"] == "ps"
+    assert spline["declared"]["spline_degree"] == 3
+    assert "degree" not in spline["declared"]
     assert spline["declared"]["knot_strategy"] == "quantile"
+    assert "knot_alpha" not in spline["declared"]
+    assert "discrete" not in spline["declared"]
+    assert "n_bins" not in spline["declared"]
+    assert spline["declared"]["constraint_kind"] is None
+    assert spline["declared"]["constraint_mode"] is None
+    assert "degree" not in spline["effective"]
+    assert "discrete" not in spline["effective"]
+    assert "n_bins" not in spline["effective"]
     assert list(spline["fitted"]["boundary"]) == [18.0, 90.0]
     assert spline["fitted"]["raw_basis_count"] > 0
 
@@ -106,6 +126,30 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert numeric["feature_kind"] == "numeric"
     assert numeric["declared"] == {}
     assert numeric["effective"]["encoding"] == "identity"
+
+
+def test_extracts_tweedie_family_metadata():
+    model = _fit_model({"age": Numeric()}, family=Tweedie(p=1.5))
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    assert receipt.package_metadata["model"]["family"] == "tweedie"
+    assert receipt.package_metadata["model"]["family_params"] == {"p": 1.5}
+
+
+def test_extracts_distribution_family_params_generically():
+    model = _fit_model({"age": Numeric()}, family=NegativeBinomial(theta=2.5))
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    assert receipt.package_metadata["model"]["family"] == "negative_binomial"
+    assert receipt.package_metadata["model"]["family_params"] == {"theta": 2.5}
 
 
 def test_spline_factory_and_direct_pspline_normalize_to_same_kind():
@@ -125,6 +169,28 @@ def test_spline_factory_and_direct_pspline_normalize_to_same_kind():
     assert receipt.term_metadata["poly"]["effective"]["kind"] == "ps"
     assert receipt.term_metadata["age"]["fitted"]["class_name"] == "PSpline"
     assert receipt.term_metadata["poly"]["fitted"]["class_name"] == "PSpline"
+
+
+def test_spline_metadata_includes_knot_alpha_only_when_strategy_uses_it():
+    model = _fit_model(
+        {
+            "age": Spline(
+                kind="ps",
+                n_knots=4,
+                knot_strategy="quantile_tempered",
+                knot_alpha=0.7,
+            )
+        }
+    )
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    spline = receipt.term_metadata["age"]
+    assert spline["declared"]["knot_strategy"] == "quantile_tempered"
+    assert spline["declared"]["knot_alpha"] == 0.7
 
 
 def test_ordered_categorical_step_has_no_nested_spline():

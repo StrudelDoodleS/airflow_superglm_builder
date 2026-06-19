@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
@@ -36,6 +37,7 @@ _SPLINE_KIND_BY_CLASS = {
     CubicRegressionSpline: "cr",
     CardinalCRSpline: "cr_cardinal",
 }
+_KNOT_ALPHA_STRATEGIES = {"quantile_tempered"}
 
 
 def _json_value(value: Any) -> Any:
@@ -189,34 +191,34 @@ def _categorical_metadata(name: str, spec: Categorical) -> dict[str, Any]:
 
 def _spline_metadata(name: str, spec: _SplineBase) -> dict[str, Any]:
     r_inv = _safe_getattr(spec, "_R_inv")
+    constraint_kind = _safe_getattr(spec, "constraint_kind")
+    knot_strategy = _safe_getattr(spec, "knot_strategy")
+    declared = {
+        "kind": _spline_kind(spec),
+        "n_knots": _safe_getattr(spec, "n_knots"),
+        "spline_degree": _safe_getattr(spec, "degree"),
+        "knot_strategy": knot_strategy,
+        "penalty": _safe_getattr(spec, "penalty"),
+        "select": _safe_getattr(spec, "select"),
+        "extrapolation": _safe_getattr(spec, "extrapolation"),
+        "constraint_kind": constraint_kind,
+        "constraint_mode": _safe_getattr(spec, "constraint_mode") if constraint_kind else None,
+        "m": _safe_getattr(spec, "_m_orders"),
+        "knots": _safe_getattr(spec, "_explicit_knots"),
+        "boundary": _safe_getattr(spec, "_explicit_boundary"),
+        "lambda_policy": _safe_getattr(spec, "_lambda_policy"),
+    }
+    if knot_strategy in _KNOT_ALPHA_STRATEGIES:
+        declared["knot_alpha"] = _safe_getattr(spec, "knot_alpha")
+
     metadata = _base_feature_metadata(name, spec, "spline")
     metadata.update(
         {
-            "declared": {
-                "kind": _spline_kind(spec),
-                "n_knots": _safe_getattr(spec, "n_knots"),
-                "degree": _safe_getattr(spec, "degree"),
-                "knot_strategy": _safe_getattr(spec, "knot_strategy"),
-                "penalty": _safe_getattr(spec, "penalty"),
-                "select": _safe_getattr(spec, "select"),
-                "discrete": _safe_getattr(spec, "discrete"),
-                "n_bins": _safe_getattr(spec, "n_bins"),
-                "extrapolation": _safe_getattr(spec, "extrapolation"),
-                "constraint_kind": _safe_getattr(spec, "constraint_kind"),
-                "constraint_mode": _safe_getattr(spec, "constraint_mode"),
-                "m": _safe_getattr(spec, "_m_orders"),
-                "knot_alpha": _safe_getattr(spec, "knot_alpha"),
-                "knots": _safe_getattr(spec, "_explicit_knots"),
-                "boundary": _safe_getattr(spec, "_explicit_boundary"),
-                "lambda_policy": _safe_getattr(spec, "_lambda_policy"),
-            },
+            "declared": declared,
             "effective": {
                 "kind": _spline_kind(spec),
                 "class_name": type(spec).__name__,
                 "n_knots": _safe_getattr(spec, "n_knots"),
-                "degree": _safe_getattr(spec, "degree"),
-                "discrete": _safe_getattr(spec, "discrete"),
-                "n_bins": _safe_getattr(spec, "n_bins"),
                 "knot_strategy_actual": _safe_getattr(spec, "_knot_strategy_actual"),
             },
             "fitted": {
@@ -424,6 +426,24 @@ def _model_link_name(model: Any) -> str | None:
     return None
 
 
+def _snake_case_name(value: str) -> str:
+    step_one = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step_one).lower()
+
+
+def _model_family_metadata(model: Any) -> tuple[str | None, dict[str, Any]]:
+    family = _safe_getattr(model, "family")
+    if family is None:
+        return None, {}
+    if isinstance(family, str):
+        return family, {}
+
+    params = {
+        str(name): value for name, value in vars(family).items() if not str(name).startswith("_")
+    }
+    return _snake_case_name(type(family).__name__), _json_value(params)
+
+
 def _validate_offset_contract(fit_used_offset: bool, offset_contract: OffsetExportContract) -> None:
     if fit_used_offset and offset_contract.handling == "NONE":
         raise ValueError(
@@ -476,9 +496,11 @@ def build_superglm_publication_receipt(
             )
         term_metadata[offset_published_name] = _json_value(_offset_metadata(offset_contract))
 
+    family_name, family_params = _model_family_metadata(model)
     package_metadata = {
         "model": {
-            "family": _safe_getattr(model, "family"),
+            "family": family_name,
+            "family_params": family_params,
             "link": _model_link_name(model),
             "fit_used_offset": fit_used_offset,
         }
