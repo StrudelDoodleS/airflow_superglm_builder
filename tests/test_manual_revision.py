@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,15 @@ def metadata_row(**overrides):
         "effective_to_date": None,
         "package_status": "PUBLISHED",
         "created_by": "unit-test",
+        "publication_receipt_json": '{"schema_version":1}',
+        "publication_receipt_sha256": "a" * 64,
+        "package_metadata_json": '{"model":{"family":"poisson"}}',
+        "revision_metadata_json": None,
+        "offset_handling": "NONE",
+        "offset_factor_name": None,
+        "offset_source_name": None,
+        "offset_label": None,
+        "metadata_origin": "SUPERGLM_FITTED_MODEL",
     }
     row.update(overrides)
     return row
@@ -60,11 +70,15 @@ def rate_cells() -> pd.DataFrame:
     )
 
 
-def snapshot(**metadata_overrides) -> RatePackageSnapshot:
+def snapshot(
+    terms: pd.DataFrame | None = None,
+    rate_cells_frame: pd.DataFrame | None = None,
+    **metadata_overrides,
+) -> RatePackageSnapshot:
     return RatePackageSnapshot(
         metadata=metadata_row(**metadata_overrides),
-        terms=pd.DataFrame(),
-        rate_cells=rate_cells(),
+        terms=terms if terms is not None else pd.DataFrame(),
+        rate_cells=rate_cells_frame if rate_cells_frame is not None else rate_cells(),
         cell_levels=pd.DataFrame(),
         compiled_rate_cells=pd.DataFrame(),
         compiled_1d_bands=pd.DataFrame(),
@@ -505,6 +519,15 @@ def test_write_manual_revision_creates_child_package_and_copies_children():
     )
     assert "parent_rate_package_id" in insert_sql
     assert "package_status" in insert_sql
+    expected_revision_metadata = json.dumps(
+        {
+            "parent_rate_package_id": 202,
+            "reason": "pricing correction",
+            "revision_kind": "MANUAL",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     assert insert_params == {
         "parent_rate_package_id": 202,
         "model_id": 17,
@@ -515,6 +538,15 @@ def test_write_manual_revision_creates_child_package_and_copies_children():
         "effective_from_date": "2026-01-01",
         "effective_to_date": None,
         "package_status": "DRAFT",
+        "publication_receipt_json": '{"schema_version":1}',
+        "publication_receipt_sha256": "a" * 64,
+        "package_metadata_json": '{"model":{"family":"poisson"}}',
+        "revision_metadata_json": expected_revision_metadata,
+        "offset_handling": "NONE",
+        "offset_factor_name": None,
+        "offset_source_name": None,
+        "offset_label": None,
+        "metadata_origin": "SUPERGLM_FITTED_MODEL",
         "created_by": "pricing-user",
     }
 
@@ -555,6 +587,52 @@ def test_write_manual_revision_creates_child_package_and_copies_children():
     )
     assert "SET package_status = 'PUBLISHED'" in finalize_sql
     assert finalize_params == {"rate_package_id": 303}
+
+
+def test_write_manual_revision_copies_receipt_and_term_metadata():
+    engine = FakeEngine()
+    parent = snapshot(rate_package_id=202, model_id=17, package_version=4)
+    diff = pd.DataFrame(
+        {
+            "cell_id": [31],
+            "old_multiplier": [1.10],
+            "new_multiplier": [1.25],
+            "old_log_coefficient": [0.09531],
+        },
+    )
+
+    _write_manual_revision(
+        engine,
+        config(),
+        parent=parent,
+        edited_rate_cells=rate_cells(),
+        diff=diff,
+        reason="pricing correction",
+        created_by="pricing-user",
+    )
+
+    calls = engine.connection.calls
+    statements = "\n".join(statement for statement, _params in calls)
+    insert_sql, insert_params = next(
+        (statement, params)
+        for statement, params in calls
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in statement
+        and "OUTPUT INSERTED.rate_package_id" in statement
+    )
+
+    assert "publication_receipt_json" in insert_sql
+    assert "publication_receipt_sha256" in insert_sql
+    assert "revision_metadata_json" in insert_sql
+    assert insert_params["publication_receipt_sha256"] == "a" * 64
+    assert insert_params["package_metadata_json"] == '{"model":{"family":"poisson"}}'
+    assert insert_params["offset_handling"] == "NONE"
+    revision_metadata = json.loads(insert_params["revision_metadata_json"])
+    assert revision_metadata == {
+        "parent_rate_package_id": 202,
+        "reason": "pricing correction",
+        "revision_kind": "MANUAL",
+    }
+    assert "term_metadata_json" in statements
 
 
 def test_write_manual_revision_payload_args_are_keyword_only():
@@ -617,6 +695,34 @@ def test_create_manual_revision_rejects_non_published_parent(monkeypatch):
             object(),
             config(),
             parent=snapshot(package_status="DRAFT"),
+            edited_rate_cells=edited,
+            reason="pricing correction",
+            created_by="pricing-user",
+        )
+
+
+def test_create_manual_revision_rejects_offset_factor_edits_before_writer(monkeypatch):
+    parent = snapshot(
+        terms=pd.DataFrame(
+            {
+                "term_id": [11, 12],
+                "term_name": ["Offset_Multiplier", "Area"],
+                "term_type": ["OFFSET_FACTOR", "CATEGORICAL_MAIN"],
+            }
+        )
+    )
+    edited = parent.rate_cells.copy()
+    edited.loc[edited["cell_id"] == 31, "multiplier"] = 1.25
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.manual_revision._write_manual_revision",
+        lambda *args, **kwargs: pytest.fail("writer should not be called"),
+    )
+
+    with pytest.raises(ManualRevisionError, match="OFFSET_FACTOR"):
+        create_manual_revision(
+            object(),
+            config(),
+            parent=parent,
             edited_rate_cells=edited,
             reason="pricing correction",
             created_by="pricing-user",

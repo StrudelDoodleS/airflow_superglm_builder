@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
@@ -209,6 +211,61 @@ def _validate_revision_parent_model(
             )
 
 
+def _manual_revision_metadata(parent_rate_package_id: int, reason: str) -> str:
+    return json.dumps(
+        {
+            "parent_rate_package_id": parent_rate_package_id,
+            "reason": reason,
+            "revision_kind": "MANUAL",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _offset_factor_terms_for_diff(
+    parent: RatePackageSnapshot,
+    diff: pd.DataFrame,
+) -> list[str]:
+    if parent.terms.empty or "term_type" not in parent.terms.columns:
+        return []
+    if "term_id" not in parent.terms.columns or "term_id" not in parent.rate_cells.columns:
+        return []
+
+    edited_cell_ids = set(pd.to_numeric(diff["cell_id"], errors="coerce").dropna().astype("int64"))
+    edited_cells = parent.rate_cells.loc[parent.rate_cells["cell_id"].isin(edited_cell_ids)]
+    if edited_cells.empty:
+        return []
+
+    offset_terms = parent.terms.loc[
+        parent.terms["term_type"].astype(str).eq("OFFSET_FACTOR"),
+        ["term_id", "term_name"],
+    ]
+    if offset_terms.empty:
+        return []
+
+    offset_term_ids = set(pd.to_numeric(offset_terms["term_id"], errors="coerce").dropna().astype("int64"))
+    edited_offset_term_ids = set(
+        pd.to_numeric(edited_cells["term_id"], errors="coerce").dropna().astype("int64")
+    ) & offset_term_ids
+    if not edited_offset_term_ids:
+        return []
+
+    return sorted(
+        str(row.term_name)
+        for row in offset_terms.itertuples(index=False)
+        if int(row.term_id) in edited_offset_term_ids
+    )
+
+
+def _reject_offset_factor_edits(parent: RatePackageSnapshot, diff: pd.DataFrame) -> None:
+    term_names = _offset_factor_terms_for_diff(parent, diff)
+    if term_names:
+        raise ManualRevisionError(
+            "manual revisions cannot edit OFFSET_FACTOR cells: " + ", ".join(term_names)
+        )
+
+
 def _write_manual_revision(
     engine,
     config: ModelBuildConfig,
@@ -233,6 +290,7 @@ def _write_manual_revision(
     parent_metadata = parent.metadata
     parent_rate_package_id = int(parent_metadata["rate_package_id"])
     model_id = int(parent_metadata["model_id"])
+    revision_metadata_json = _manual_revision_metadata(parent_rate_package_id, reason)
 
     with engine.begin() as con:
         con.execute(
@@ -264,6 +322,15 @@ def _write_manual_revision(
                 effective_from_date,
                 effective_to_date,
                 package_status,
+                publication_receipt_json,
+                publication_receipt_sha256,
+                package_metadata_json,
+                revision_metadata_json,
+                offset_handling,
+                offset_factor_name,
+                offset_source_name,
+                offset_label,
+                metadata_origin,
                 created_by
             )
             OUTPUT INSERTED.rate_package_id
@@ -277,6 +344,15 @@ def _write_manual_revision(
                 :effective_from_date,
                 :effective_to_date,
                 :package_status,
+                :publication_receipt_json,
+                :publication_receipt_sha256,
+                :package_metadata_json,
+                :revision_metadata_json,
+                :offset_handling,
+                :offset_factor_name,
+                :offset_source_name,
+                :offset_label,
+                :metadata_origin,
                 :created_by
             );
         """),
@@ -290,6 +366,15 @@ def _write_manual_revision(
                 "effective_from_date": parent_metadata["effective_from_date"],
                 "effective_to_date": parent_metadata["effective_to_date"],
                 "package_status": "DRAFT",
+                "publication_receipt_json": parent_metadata.get("publication_receipt_json"),
+                "publication_receipt_sha256": parent_metadata.get("publication_receipt_sha256"),
+                "package_metadata_json": parent_metadata.get("package_metadata_json"),
+                "revision_metadata_json": revision_metadata_json,
+                "offset_handling": parent_metadata.get("offset_handling") or "UNKNOWN",
+                "offset_factor_name": parent_metadata.get("offset_factor_name"),
+                "offset_source_name": parent_metadata.get("offset_source_name"),
+                "offset_label": parent_metadata.get("offset_label"),
+                "metadata_origin": parent_metadata.get("metadata_origin"),
                 "created_by": created_by,
             },
         ).scalar_one()
@@ -341,7 +426,8 @@ def _write_manual_revision(
                     sequence_no,
                     default_multiplier,
                     default_log_coefficient,
-                    active_flag
+                    active_flag,
+                    term_metadata_json
                 FROM pricing.PRICING_TERM
                 WHERE rate_package_id = :parent_rate_package_id
             ) AS src
@@ -354,7 +440,8 @@ def _write_manual_revision(
                     sequence_no,
                     default_multiplier,
                     default_log_coefficient,
-                    active_flag
+                    active_flag,
+                    term_metadata_json
                 )
                 VALUES (
                     :rate_package_id,
@@ -363,7 +450,8 @@ def _write_manual_revision(
                     src.sequence_no,
                     src.default_multiplier,
                     src.default_log_coefficient,
-                    src.active_flag
+                    src.active_flag,
+                    src.term_metadata_json
                 )
             OUTPUT
                 src.old_term_id,
@@ -594,6 +682,7 @@ def create_manual_revision(
         raise ManualRevisionError("manual revisions require a PUBLISHED parent package")
 
     diff = validate_rate_cell_edits(parent.rate_cells, edited_rate_cells)
+    _reject_offset_factor_edits(parent, diff)
     rate_package_id, package_version = _write_manual_revision(
         engine,
         config,
@@ -631,6 +720,15 @@ def _metadata_query(selector: RatePackageSelector):
                 rp.effective_from_date,
                 rp.effective_to_date,
                 rp.package_status,
+                rp.publication_receipt_json,
+                rp.publication_receipt_sha256,
+                rp.package_metadata_json,
+                rp.revision_metadata_json,
+                rp.offset_handling,
+                rp.offset_factor_name,
+                rp.offset_source_name,
+                rp.offset_label,
+                rp.metadata_origin,
                 rp.created_ts,
                 rp.created_by
             FROM pricing.PRICING_RATE_PACKAGE AS rp
@@ -654,6 +752,15 @@ def _metadata_query(selector: RatePackageSelector):
             rp.effective_from_date,
             rp.effective_to_date,
             rp.package_status,
+            rp.publication_receipt_json,
+            rp.publication_receipt_sha256,
+            rp.package_metadata_json,
+            rp.revision_metadata_json,
+            rp.offset_handling,
+            rp.offset_factor_name,
+            rp.offset_source_name,
+            rp.offset_label,
+            rp.metadata_origin,
             rp.created_ts,
             rp.created_by
         FROM pricing.PRICING_RATE_PACKAGE AS rp
