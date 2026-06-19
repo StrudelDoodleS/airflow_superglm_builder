@@ -46,15 +46,14 @@ def normalize_schema_names(
     if len(set(normalized)) != len(normalized):
         raise ValueError("schema names must be unique")
     result = tuple(normalized)
+    forbidden = {"dbo", "sys", "information_schema"}
+    invalid = [name for name in result if name.lower() in forbidden]
+    if invalid:
+        raise ValueError("reset schema is not configured runtime schema: " + ", ".join(invalid))
     if allowed and result != allowed:
         raise ValueError(
             "reset schema is not configured runtime schema; expected exactly: " + ", ".join(allowed)
         )
-    if not allowed:
-        forbidden = {"dbo", "sys", "information_schema"}
-        invalid = [name for name in result if name.lower() in forbidden]
-        if invalid:
-            raise ValueError("reset schema is not configured runtime schema: " + ", ".join(invalid))
     return result
 
 

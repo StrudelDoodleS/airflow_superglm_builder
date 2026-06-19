@@ -29,6 +29,14 @@ def test_normalize_schema_names_rejects_schemas_outside_runtime_allowlist():
         normalize_schema_names(("pricing", "pricing_stg", "dbo"))
 
 
+def test_normalize_schema_names_rejects_forbidden_schema_even_when_runtime_configured():
+    with pytest.raises(ValueError, match="not configured runtime schema"):
+        normalize_schema_names(
+            ("pricing", "pricing_stg", "dbo"),
+            allowed_schema_names=("pricing", "pricing_stg", "dbo"),
+        )
+
+
 def test_normalize_schema_names_accepts_runtime_configured_names():
     assert normalize_schema_names(("python_pricing", "python_stg", "python_mlops")) == (
         "python_pricing",
