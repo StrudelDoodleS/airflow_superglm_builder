@@ -14,7 +14,7 @@ dependencies = [
   "python-dotenv",
   "scikit-learn",
   "sqlalchemy",
-  "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@72feaf5dd98452c0562b9f86ee834702da90f23b",
+  "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@42e8c05f01ab358b280050bad4e09753386245e6",
 ]
 
 [project.optional-dependencies]
