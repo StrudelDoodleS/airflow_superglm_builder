@@ -107,12 +107,14 @@ def _reject_non_finite(value: Any) -> None:
     if isinstance(value, dict):
         for item in value.values():
             _reject_non_finite(item)
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         for item in value:
             _reject_non_finite(item)
 
 
 def canonical_receipt_bytes(receipt: SuperGLMPublicationReceipt) -> bytes:
+    _reject_non_finite(receipt.package_metadata)
+    _reject_non_finite(receipt.term_metadata)
     data = receipt.model_dump(mode="json")
     _reject_non_finite(data)
     return json.dumps(
@@ -143,7 +145,6 @@ def _reject_json_constant(value: str) -> None:
 
 def load_publication_receipt(
     path: str | Path,
-    *,
     expected_sha256: str,
 ) -> SuperGLMPublicationReceipt:
     if _SHA256_HEX_RE.fullmatch(expected_sha256) is None:

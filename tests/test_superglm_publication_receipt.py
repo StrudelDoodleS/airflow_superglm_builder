@@ -91,6 +91,14 @@ def test_canonical_receipt_hash_uses_exact_canonical_bytes(tmp_path):
     assert path.read_bytes() == expected
     assert digest == publication_receipt_sha256(receipt)
     assert load_publication_receipt(path, expected_sha256=digest) == receipt
+    assert load_publication_receipt(path, digest) == receipt
+
+
+def test_canonical_receipt_rejects_non_finite_package_metadata():
+    receipt = _receipt().model_copy(update={"package_metadata": {"bad": float("nan")}})
+
+    with pytest.raises(ValueError, match="non-finite"):
+        canonical_receipt_bytes(receipt)
 
 
 def test_receipt_loader_rejects_noncanonical_equivalent_json(tmp_path):
