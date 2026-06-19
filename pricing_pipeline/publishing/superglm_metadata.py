@@ -66,7 +66,12 @@ def _json_value(value: Any) -> Any:
     if value is pd.NA or value is pd.NaT:
         return None
     if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("SuperGLM metadata mapping keys must be strings")
+            normalized[key] = _json_value(item)
+        return normalized
     if isinstance(value, list | tuple):
         return [_json_value(item) for item in value]
     if isinstance(value, set | frozenset):

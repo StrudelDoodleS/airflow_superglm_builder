@@ -222,6 +222,11 @@ def test_json_value_rejects_unknown_objects():
         _json_value(object())
 
 
+def test_json_value_rejects_non_string_mapping_keys():
+    with pytest.raises(ValueError, match="keys must be strings"):
+        _json_value({object(): "x"})
+
+
 def test_model_without_feature_specs_is_rejected():
     class EmptyModel:
         family = "poisson"
