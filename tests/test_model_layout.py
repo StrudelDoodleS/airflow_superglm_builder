@@ -196,15 +196,15 @@ def test_mtpl_frequency_fit_export_logs_visible_superglm_mlflow_diagnostics(
         family = "poisson"
 
         def __init__(self):
-                self.result = SimpleNamespace(
-                    deviance=8.5,
-                    n_iter=3,
-                    converged=True,
-                    effective_df=3.25,
-                    phi=1.0,
-                )
-                self._specs = {"VehAge": modeling.Numeric()}
-                self._feature_order = ["VehAge"]
+            self.result = SimpleNamespace(
+                deviance=8.5,
+                n_iter=3,
+                converged=True,
+                effective_df=3.25,
+                phi=1.0,
+            )
+            self._specs = {"VehAge": modeling.Numeric()}
+            self._feature_order = ["VehAge"]
 
         def fit_reml(self, X, y, *, offset=None, verbose=False):
             calls.append(("fit_reml", list(X.columns), len(y), verbose))

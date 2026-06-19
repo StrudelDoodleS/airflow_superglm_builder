@@ -87,7 +87,7 @@ def _json_value(value: Any) -> Any:
     try:
         if pd.isna(value):
             return None
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         pass
 
     raise ValueError(f"unsupported SuperGLM metadata value: {type(value).__name__}")
@@ -261,7 +261,9 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
             "effective": {
                 "basis": _ordered_basis_value(spec),
                 "kind": _spline_kind(spline) if spline is not None else _safe_getattr(spec, "kind"),
-                "n_knots_effective": _safe_getattr(spline, "n_knots") if spline is not None else None,
+                "n_knots_effective": _safe_getattr(spline, "n_knots")
+                if spline is not None
+                else None,
                 "n_levels": _safe_getattr(spec, "_n_levels"),
                 "ordered_levels": _safe_getattr(spec, "_ordered_levels"),
                 "level_values": _safe_getattr(spec, "_level_to_value"),

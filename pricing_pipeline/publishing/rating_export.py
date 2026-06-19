@@ -61,16 +61,10 @@ def export_rating_tables(
         "offset_max_exact_levels": offset_max_exact_levels,
     }
     export_kwargs.update(
-        {
-            key: value
-            for key, value in optional_export_kwargs.items()
-            if value is not None
-        }
+        {key: value for key, value in optional_export_kwargs.items() if value is not None}
     )
     export_fn(output_path, X, y, **export_kwargs)
-    resolved_mlflow_client = (
-        mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
-    )
+    resolved_mlflow_client = mlflow if mlflow_client is _DEFAULT_MLFLOW_CLIENT else mlflow_client
     optional_mlflow_client(resolved_mlflow_client).log_artifact(
         str(output_path),
         artifact_path="rating_tables",

@@ -476,27 +476,39 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
     )
 
     with engine.begin() as con:
-        export = con.execute(
-            text(
-                "SELECT publication_receipt_sha256, offset_handling, offset_factor_name "
-                "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
-            ),
-            {"export_id": "export-1"},
-        ).mappings().one()
-        term = con.execute(
-            text(
-                "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
-                "WHERE export_id = :export_id AND term_name = :term_name"
-            ),
-            {"export_id": "export-1", "term_name": "TermMonths"},
-        ).mappings().one()
-        metadata = con.execute(
-            text(
-                "SELECT term_metadata_json FROM pricing_stg.STG_TERM_METADATA "
-                "WHERE export_id = :export_id AND term_name = :term_name"
-            ),
-            {"export_id": "export-1", "term_name": "TermMonths"},
-        ).mappings().one()
+        export = (
+            con.execute(
+                text(
+                    "SELECT publication_receipt_sha256, offset_handling, offset_factor_name "
+                    "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
+                ),
+                {"export_id": "export-1"},
+            )
+            .mappings()
+            .one()
+        )
+        term = (
+            con.execute(
+                text(
+                    "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
+                    "WHERE export_id = :export_id AND term_name = :term_name"
+                ),
+                {"export_id": "export-1", "term_name": "TermMonths"},
+            )
+            .mappings()
+            .one()
+        )
+        metadata = (
+            con.execute(
+                text(
+                    "SELECT term_metadata_json FROM pricing_stg.STG_TERM_METADATA "
+                    "WHERE export_id = :export_id AND term_name = :term_name"
+                ),
+                {"export_id": "export-1", "term_name": "TermMonths"},
+            )
+            .mappings()
+            .one()
+        )
 
     assert export["publication_receipt_sha256"] == digest
     assert export["offset_handling"] == "EXPORTED_FACTOR"
@@ -543,18 +555,19 @@ def test_stage_rating_export_allows_explicit_workbook_only_metadata_mode(
     )
 
     with engine.begin() as con:
-        export = con.execute(
-            text(
-                "SELECT publication_receipt_sha256, offset_handling "
-                "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
-            ),
-            {"export_id": "export-1"},
-        ).mappings().one()
+        export = (
+            con.execute(
+                text(
+                    "SELECT publication_receipt_sha256, offset_handling "
+                    "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
+                ),
+                {"export_id": "export-1"},
+            )
+            .mappings()
+            .one()
+        )
         term_metadata_count = con.execute(
-            text(
-                "SELECT COUNT(*) FROM pricing_stg.STG_TERM_METADATA "
-                "WHERE export_id = :export_id"
-            ),
+            text("SELECT COUNT(*) FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id"),
             {"export_id": "export-1"},
         ).scalar_one()
 
@@ -641,13 +654,17 @@ def test_stage_rating_export_replace_deletes_old_term_metadata(
     )
 
     with engine.begin() as con:
-        term_names = con.execute(
-            text(
-                "SELECT term_name FROM pricing_stg.STG_TERM_METADATA "
-                "WHERE export_id = :export_id ORDER BY term_name"
-            ),
-            {"export_id": "export-1"},
-        ).scalars().all()
+        term_names = (
+            con.execute(
+                text(
+                    "SELECT term_name FROM pricing_stg.STG_TERM_METADATA "
+                    "WHERE export_id = :export_id ORDER BY term_name"
+                ),
+                {"export_id": "export-1"},
+            )
+            .scalars()
+            .all()
+        )
 
     assert term_names == ["TermMonths"]
 

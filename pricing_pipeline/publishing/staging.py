@@ -317,9 +317,10 @@ def _apply_publication_receipt_metadata(
                 f"{offset_factor_name!r}, but no staged workbook term matches"
             )
         rate_df.loc[matching_term, "term_type"] = "OFFSET_FACTOR"
-    elif offset_contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE" and (
-        rate_df["term_type"] == "OFFSET_FACTOR"
-    ).any():
+    elif (
+        offset_contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE"
+        and (rate_df["term_type"] == "OFFSET_FACTOR").any()
+    ):
         raise ValueError(
             "publication receipt offset handling ALREADY_APPLIED_SQL_EXPOSURE "
             "cannot stage OFFSET_FACTOR terms"

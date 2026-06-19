@@ -1,4 +1,5 @@
 """Convert staged SuperGLM rating export into normalized pricing tables."""
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +47,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
     with engine.begin() as con:
         args.was_existing = False
         requested_package_status = args.package_status
-        meta = con.execute(text("""
+        meta = (
+            con.execute(
+                text("""
             SELECT
                 export_id,
                 model_id,
@@ -66,7 +69,12 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 metadata_origin
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
-        """), {"export_id": args.export_id}).mappings().one()
+        """),
+                {"export_id": args.export_id},
+            )
+            .mappings()
+            .one()
+        )
 
         model_id = meta["model_id"]
         if model_id is None:
@@ -75,7 +83,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 f"model before staging export_id={args.export_id!r}"
             )
 
-        existing_package = con.execute(text("""
+        existing_package = (
+            con.execute(
+                text("""
             SELECT
                 rate_package_id,
                 package_version,
@@ -91,17 +101,21 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
-        """), {
-            "model_id": model_id,
-            "export_id": args.export_id,
-        }).mappings().one_or_none()
+        """),
+                {
+                    "model_id": model_id,
+                    "export_id": args.export_id,
+                },
+            )
+            .mappings()
+            .one_or_none()
+        )
         if existing_package is not None:
             conflicts = _existing_export_conflicts(existing_package, meta)
             if conflicts:
                 raise ValueError(
                     f"export_id {args.export_id!r} is already published with "
-                    "incompatible metadata: "
-                    + "; ".join(conflicts)
+                    "incompatible metadata: " + "; ".join(conflicts)
                 )
             args.package_version = int(existing_package["package_version"])
             args.package_status = str(existing_package["package_status"])
@@ -116,41 +130,51 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     "staged export declares EXPORTED_FACTOR offset handling but "
                     "does not include offset_factor_name"
                 )
-            offset_factor_exists = con.execute(text("""
+            offset_factor_exists = con.execute(
+                text("""
                 SELECT TOP 1 1
                 FROM pricing_stg.STG_RATE_CELL
                 WHERE export_id = :export_id
                   AND term_name = :offset_factor_name
                   AND term_type = 'OFFSET_FACTOR'
-            """), {
-                "export_id": args.export_id,
-                "offset_factor_name": offset_factor_name,
-            }).scalar_one_or_none()
+            """),
+                {
+                    "export_id": args.export_id,
+                    "offset_factor_name": offset_factor_name,
+                },
+            ).scalar_one_or_none()
             if offset_factor_exists is None:
                 raise ValueError(
                     "staged export declares EXPORTED_FACTOR offset handling but "
                     f"has no OFFSET_FACTOR term named {offset_factor_name!r}"
                 )
         elif offset_handling == "ALREADY_APPLIED_SQL_EXPOSURE":
-            staged_offset_factor = con.execute(text("""
+            staged_offset_factor = con.execute(
+                text("""
                 SELECT TOP 1 1
                 FROM pricing_stg.STG_RATE_CELL
                 WHERE export_id = :export_id
                   AND term_type = 'OFFSET_FACTOR'
-            """), {"export_id": args.export_id}).scalar_one_or_none()
+            """),
+                {"export_id": args.export_id},
+            ).scalar_one_or_none()
             if staged_offset_factor is not None:
                 raise ValueError(
                     "staged export declares ALREADY_APPLIED_SQL_EXPOSURE but "
                     "also contains an OFFSET_FACTOR term"
                 )
 
-        package_version = con.execute(text("""
+        package_version = con.execute(
+            text("""
             SELECT ISNULL(MAX(package_version), 0) + 1
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
-        """), {"model_id": model_id}).scalar_one()
+        """),
+            {"model_id": model_id},
+        ).scalar_one()
 
-        rate_package_id = con.execute(text("""
+        rate_package_id = con.execute(
+            text("""
             INSERT INTO pricing.PRICING_RATE_PACKAGE (
                 parent_rate_package_id,
                 model_id,
@@ -198,30 +222,33 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :metadata_origin,
                 :created_by
             )
-        """), {
-            "model_id": model_id,
-            "model_name": meta["model_name"],
-            "model_version": meta["model_version"],
-            "package_version": package_version,
-            "base_rate": meta["base_rate"],
-            "effective_from_date": meta["effective_from_date"],
-            "effective_to_date": meta["effective_to_date"],
-            "package_status": "DRAFT",
-            "source_export_id": args.export_id,
-            "source_file": meta["source_file"],
-            "publication_receipt_json": meta["publication_receipt_json"],
-            "publication_receipt_sha256": meta["publication_receipt_sha256"],
-            "package_metadata_json": meta["package_metadata_json"],
-            "offset_handling": offset_handling,
-            "offset_factor_name": offset_factor_name,
-            "offset_source_name": meta["offset_source_name"],
-            "offset_label": meta["offset_label"],
-            "metadata_origin": meta["metadata_origin"],
-            "created_by": args.created_by,
-        }).scalar_one()
+        """),
+            {
+                "model_id": model_id,
+                "model_name": meta["model_name"],
+                "model_version": meta["model_version"],
+                "package_version": package_version,
+                "base_rate": meta["base_rate"],
+                "effective_from_date": meta["effective_from_date"],
+                "effective_to_date": meta["effective_to_date"],
+                "package_status": "DRAFT",
+                "source_export_id": args.export_id,
+                "source_file": meta["source_file"],
+                "publication_receipt_json": meta["publication_receipt_json"],
+                "publication_receipt_sha256": meta["publication_receipt_sha256"],
+                "package_metadata_json": meta["package_metadata_json"],
+                "offset_handling": offset_handling,
+                "offset_factor_name": offset_factor_name,
+                "offset_source_name": meta["offset_source_name"],
+                "offset_label": meta["offset_label"],
+                "metadata_origin": meta["metadata_origin"],
+                "created_by": args.created_by,
+            },
+        ).scalar_one()
 
         # Features
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_FEATURE (
                 feature_name,
                 feature_value_type,
@@ -238,10 +265,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   FROM pricing.PRICING_FEATURE f
                   WHERE f.feature_name = s.feature_name
               );
-        """), {"export_id": args.export_id})
+        """),
+            {"export_id": args.export_id},
+        )
 
         # Level sets
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_FEATURE_LEVEL_SET (
                 feature_id,
                 model_id,
@@ -272,10 +302,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     AND ls.feature_id = f.feature_id
                     AND ls.level_set_name = s.level_set_name
               );
-        """), {"export_id": args.export_id, "model_id": model_id})
+        """),
+            {"export_id": args.export_id, "model_id": model_id},
+        )
 
         # Levels
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_FEATURE_LEVEL (
                 level_set_id,
                 level_code,
@@ -317,10 +350,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 s.lower_bound,
                 s.upper_bound,
                 s.level_code;
-        """), {"export_id": args.export_id, "model_id": model_id})
+        """),
+            {"export_id": args.export_id, "model_id": model_id},
+        )
 
         # Terms
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_TERM (
                 rate_package_id,
                 term_name,
@@ -339,10 +375,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
               ON tm.export_id = c.export_id
              AND tm.term_name = c.term_name
             WHERE c.export_id = :export_id;
-        """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
+        """),
+            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+        )
 
         # Term features
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_TERM_FEATURE (
                 term_id,
                 position_no,
@@ -370,14 +409,17 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
              AND ls.feature_id = f.feature_id
              AND ls.level_set_name = s.level_set_name
             WHERE s.export_id = :export_id;
-        """), {
-            "export_id": args.export_id,
-            "rate_package_id": rate_package_id,
-            "model_id": model_id,
-        })
+        """),
+            {
+                "export_id": args.export_id,
+                "rate_package_id": rate_package_id,
+                "model_id": model_id,
+            },
+        )
 
         # Cells
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_RATE_CELL (
                 term_id,
                 cell_key_text,
@@ -404,10 +446,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
               ON t.rate_package_id = :rate_package_id
              AND t.term_name = c.term_name
             WHERE c.export_id = :export_id;
-        """), {"export_id": args.export_id, "rate_package_id": rate_package_id})
+        """),
+            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+        )
 
         # Cell-level mapping
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_RATE_CELL_LEVEL (
                 cell_id,
                 position_no,
@@ -437,14 +482,17 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
               ON fl.level_set_id = ls.level_set_id
              AND fl.level_code = s.level_code
             WHERE s.export_id = :export_id;
-        """), {
-            "export_id": args.export_id,
-            "rate_package_id": rate_package_id,
-            "model_id": model_id,
-        })
+        """),
+            {
+                "export_id": args.export_id,
+                "rate_package_id": rate_package_id,
+                "model_id": model_id,
+            },
+        )
 
         # Minimal compile step: flat rate cells
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_COMPILED_RATE_CELL (
                 rate_package_id,
                 term_id,
@@ -479,10 +527,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
               ON c.term_id = t.term_id
             WHERE t.rate_package_id = :rate_package_id
               AND c.is_deleted = 0;
-        """), {"rate_package_id": rate_package_id})
+        """),
+            {"rate_package_id": rate_package_id},
+        )
 
         # Compile 1D bands for spline/numeric-band terms
-        con.execute(text("""
+        con.execute(
+            text("""
             INSERT INTO pricing.PRICING_COMPILED_1D_RATE_BAND (
                 rate_package_id,
                 term_id,
@@ -531,16 +582,21 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 fl.lower_bound,
                 fl.upper_bound,
                 fl.level_code;
-        """), {"rate_package_id": rate_package_id})
+        """),
+            {"rate_package_id": rate_package_id},
+        )
 
-        con.execute(text("""
+        con.execute(
+            text("""
             UPDATE pricing.PRICING_RATE_PACKAGE
             SET package_status = :package_status
             WHERE rate_package_id = :rate_package_id;
-        """), {
-            "package_status": requested_package_status,
-            "rate_package_id": rate_package_id,
-        })
+        """),
+            {
+                "package_status": requested_package_status,
+                "rate_package_id": rate_package_id,
+            },
+        )
 
         args.package_version = package_version
 

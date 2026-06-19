@@ -244,10 +244,13 @@ def _offset_factor_terms_for_diff(
     if offset_terms.empty:
         return []
 
-    offset_term_ids = set(pd.to_numeric(offset_terms["term_id"], errors="coerce").dropna().astype("int64"))
-    edited_offset_term_ids = set(
-        pd.to_numeric(edited_cells["term_id"], errors="coerce").dropna().astype("int64")
-    ) & offset_term_ids
+    offset_term_ids = set(
+        pd.to_numeric(offset_terms["term_id"], errors="coerce").dropna().astype("int64")
+    )
+    edited_offset_term_ids = (
+        set(pd.to_numeric(edited_cells["term_id"], errors="coerce").dropna().astype("int64"))
+        & offset_term_ids
+    )
     if not edited_offset_term_ids:
         return []
 

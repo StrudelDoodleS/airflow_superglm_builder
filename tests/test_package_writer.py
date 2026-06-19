@@ -26,9 +26,7 @@ def test_package_writer_rejects_legacy_pointer_deployment():
 
 
 def test_package_writer_does_not_write_deployment_tables_during_publish():
-    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(
-        encoding="utf-8"
-    )
+    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
     assert "PRICING_MODEL_DEPLOYMENT" not in writer
     assert "PRICING_PACKAGE_POINTER" not in writer
@@ -406,9 +404,7 @@ def test_package_writer_allows_existing_source_export_when_old_source_file_is_un
 
 
 def test_package_writer_publishes_receipt_and_term_metadata_columns():
-    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(
-        encoding="utf-8"
-    )
+    writer = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
     assert "publication_receipt_json" in writer
     assert "publication_receipt_sha256" in writer

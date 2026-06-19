@@ -152,12 +152,13 @@ class CompletedModelBuild(BaseModel):
         if value is None:
             return None
         digest = str(value).strip()
-        if len(digest) != 64 or digest.lower() != digest or not all(
-            char in "0123456789abcdef" for char in digest
+        if (
+            len(digest) != 64
+            or digest.lower() != digest
+            or not all(char in "0123456789abcdef" for char in digest)
         ):
             raise ValueError(
-                "publication_receipt_sha256 must be a 64-character lowercase hex "
-                "SHA-256 digest"
+                "publication_receipt_sha256 must be a 64-character lowercase hex SHA-256 digest"
             )
         return digest
 
@@ -347,9 +348,7 @@ def publish_completed_model_build(
         ),
         mlflow_run_id=str(publish_result.get("mlflow_run_id") or build.mlflow_run_id or "") or None,
         publication_receipt_path=str(
-            publish_result.get("publication_receipt_path")
-            or build.publication_receipt_path
-            or ""
+            publish_result.get("publication_receipt_path") or build.publication_receipt_path or ""
         )
         or None,
         publication_receipt_sha256=str(
