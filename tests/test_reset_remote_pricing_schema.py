@@ -290,6 +290,15 @@ def test_execute_uses_single_transaction_for_drop_and_migrations(
     statements = "\n".join(engine.connection.executed)
     assert "DROP TABLE" in statements
     assert "CREATE TABLE pricing.EXAMPLE" in statements
+    lock_position = next(
+        index
+        for index, statement in enumerate(engine.connection.executed)
+        if "sp_getapplock" in statement
+    )
+    first_drop_position = next(
+        index for index, statement in enumerate(engine.connection.executed) if "DROP " in statement
+    )
+    assert lock_position < first_drop_position
 
 
 def test_schema_config_key_order_is_stable():

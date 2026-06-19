@@ -80,7 +80,7 @@ def _ensure_schema_migration_table(con) -> None:
         )
 
 
-def _acquire_migration_lock(con) -> None:
+def acquire_migration_lock(con) -> None:
     lock_result = con.execute(
         text(
             """
@@ -155,12 +155,14 @@ def apply_migrations_in_transaction(
     migrations_dir: Path,
     *,
     schemas: SchemaNames | None = None,
+    acquire_lock: bool = True,
 ) -> list[str]:
     schemas = schemas or schema_names_from_connectable(con)
     applied_by = getpass.getuser()
     applied: list[str] = []
     _ensure_schema_migration_table(con)
-    _acquire_migration_lock(con)
+    if acquire_lock:
+        acquire_migration_lock(con)
     _ensure_schema_configuration(con, schemas)
 
     for path in migration_files(migrations_dir):

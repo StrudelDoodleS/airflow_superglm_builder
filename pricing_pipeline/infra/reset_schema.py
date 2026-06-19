@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra.migrations import (
+    acquire_migration_lock,
     apply_migrations_in_transaction,
     migration_files,
 )
@@ -197,6 +198,7 @@ def reset_and_reseed_schema(
     with configured_engine.begin() as con:
         actual_database = verify_expected_database(con, expected_database)
         if execute:
+            acquire_migration_lock(con)
             for batch in drop_batches:
                 con.execute(text(batch))
             applied = tuple(
@@ -204,6 +206,7 @@ def reset_and_reseed_schema(
                     con,
                     migrations_dir,
                     schemas=schema_config,
+                    acquire_lock=False,
                 )
             )
 
