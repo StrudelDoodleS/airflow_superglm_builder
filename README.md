@@ -907,6 +907,8 @@ Rows with a non-null `effective_to_ts` are closed historical deployments; use
 
 Convenience views expose the current state:
 
+- `pricing.V_MODEL_RELATIVITY` (main BI/reporting view for all package relativities)
+- `pricing.V_PUBLISHED_MODEL_RELATIVITY` (published package relativities only)
 - `pricing.V_ACTIVE_MODEL`
 - `pricing.V_CURRENT_RATE_PACKAGE`
 - `pricing.V_CURRENT_RATE_CELL`
@@ -1064,34 +1066,40 @@ FROM pricing.PRICING_RATE_PACKAGE
 ORDER BY rate_package_id;
 
 SELECT
-    rp.model_name,
-    rp.model_version,
-    t.term_name,
-    c.cell_key_text,
-    c.multiplier
-FROM pricing.PRICING_RATE_PACKAGE rp
-JOIN pricing.PRICING_TERM t
-  ON t.rate_package_id = rp.rate_package_id
-JOIN pricing.PRICING_RATE_CELL c
-  ON c.term_id = t.term_id
-WHERE rp.model_name = 'MTPL_SEV_DEMO'
-  AND t.term_name = 'VehBrand'
-  AND c.cell_key_text = 'VehBrand=B12'
-ORDER BY rp.package_version;
+    model_name,
+    package_status,
+    package_version,
+    feature_sequence_no,
+    feature_name,
+    term_name,
+    term_type,
+    term_level,
+    lower_bound,
+    upper_bound,
+    relativity,
+    relativity_source
+FROM pricing.V_MODEL_RELATIVITY
+WHERE model_name = 'MTPL_SEV_DEMO'
+  AND term_name = 'VehBrand'
+  AND term_level = 'VehBrand=B12'
+ORDER BY package_version, feature_sequence_no, COALESCE(level_sort_order, 0), term_level;
 
 SELECT
-    rp.model_name,
-    rp.model_version,
-    t.term_name,
-    c.cell_key_text,
-    c.multiplier
-FROM pricing.PRICING_RATE_PACKAGE rp
-JOIN pricing.PRICING_TERM t
-  ON t.rate_package_id = rp.rate_package_id
-JOIN pricing.PRICING_RATE_CELL c
-  ON c.term_id = t.term_id
-WHERE rp.model_name = 'MTPL_FREQ_DEMO'
-  AND t.term_name = 'VehAge'
-  AND c.cell_key_text = 'VehAge=[10, 20)'
-ORDER BY rp.package_version;
+    model_name,
+    package_status,
+    package_version,
+    feature_sequence_no,
+    feature_name,
+    term_name,
+    term_type,
+    term_level,
+    lower_bound,
+    upper_bound,
+    relativity,
+    relativity_source
+FROM pricing.V_MODEL_RELATIVITY
+WHERE model_name = 'MTPL_FREQ_DEMO'
+  AND term_name = 'VehAge'
+  AND term_level = '[10, 20)'
+ORDER BY package_version, feature_sequence_no, COALESCE(level_sort_order, 0), term_level;
 ```

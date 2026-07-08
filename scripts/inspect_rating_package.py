@@ -25,8 +25,9 @@ def main() -> None:
         if args.pointer:
             rate_package_id = con.execute(text("""
                 SELECT rate_package_id
-                FROM pricing.PRICING_PACKAGE_POINTER
-                WHERE pointer_name = :pointer
+                FROM pricing.PRICING_MODEL_DEPLOYMENT
+                WHERE deployment_slot = :pointer
+                  AND effective_to_ts IS NULL
             """), {"pointer": args.pointer}).scalar_one()
         else:
             rate_package_id = args.rate_package_id

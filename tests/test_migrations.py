@@ -443,6 +443,28 @@ def test_model_registry_migration_exposes_current_views_not_mutable_active_flags
     assert "active_flag" not in migration.lower()
 
 
+def test_model_relativity_views_union_bands_and_non_banded_cells_for_bi():
+    migration = Path("db/migrations/V023__model_relativity_bi_views.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE OR ALTER VIEW pricing.V_MODEL_RELATIVITY" in migration
+    assert "CREATE OR ALTER VIEW pricing.V_PUBLISHED_MODEL_RELATIVITY" in migration
+    assert "m.model_name" in migration
+    assert "rp.model_name AS package_model_name" in migration
+    assert "JOIN pricing.PRICING_COMPILED_1D_RATE_BAND b" in migration
+    assert "JOIN pricing.PRICING_COMPILED_RATE_CELL c" in migration
+    assert "UNION ALL" in migration
+    assert "NOT EXISTS" in migration
+    assert "t.term_type" in migration
+    assert "b.multiplier AS relativity" in migration
+    assert "c.multiplier AS relativity" in migration
+    assert "'1D_RATE_BAND' AS relativity_source" in migration
+    assert "'RATE_CELL' AS relativity_source" in migration
+    assert "package_status = 'PUBLISHED'" in migration
+    assert "ORDER BY" not in migration.upper()
+
+
 def test_compiled_band_sort_order_migration_backfills_and_rekeys_table():
     migration = Path("db/migrations/V008__compiled_band_sort_order.sql").read_text(encoding="utf-8")
 
@@ -548,6 +570,7 @@ def test_prediction_proc_migration_scores_current_package_from_compiled_views():
     assert "TRY_CONVERT(FLOAT" in migration
     assert "EXP(SUM(log_coefficient))" in migration
     assert "base_rate * @exposure * EXP(SUM(log_coefficient)) AS prediction" in migration
+    assert "@matched_terms AS matched_terms\n    FROM @matched;" in migration
     assert "@include_breakdown" in migration
     assert "Input features did not match every required term" in migration
 
