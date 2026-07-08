@@ -768,6 +768,28 @@ def test_interactive_shell_launcher_runs_when_called_with_zsh():
     assert "no coprocess" not in result.stderr
 
 
+def test_apply_schema_direct_script_import_resolves_repo_package():
+    script_path = Path("scripts/apply_schema.py").resolve()
+    scripts_dir = script_path.parent
+    repo_root = script_path.parents[1]
+    code = (
+        "import runpy, sys\n"
+        f"repo_root = {str(repo_root)!r}\n"
+        f"scripts_dir = {str(scripts_dir)!r}\n"
+        "sys.path = [scripts_dir] + [path for path in sys.path if path not in {'', repo_root}]\n"
+        f"runpy.run_path({str(script_path)!r}, run_name='apply_schema_import_check')\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_path):
     from scripts import start_airflow_local
 

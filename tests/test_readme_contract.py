@@ -38,6 +38,7 @@ README_CONTRACT_STRINGS = [
     "DatasetSpec",
     "pricing_models/<model_name>/",
     "create_model_frame_manifest_with_split",
+    "pricing.V_MODEL_RELATIVITY",
     "pricing_mtpl_frequency",
     "scripts/run_mtpl_frequency_custom.py",
     "SQL Prediction Validation",
