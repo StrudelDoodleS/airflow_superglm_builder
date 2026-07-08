@@ -18,6 +18,13 @@ if str(ROOT) not in sys.path:
 
 from pricing_pipeline.publishing.rating_export import export_rating_tables  # noqa: E402
 from pricing_pipeline.publishing.staging import stage_rating_export  # noqa: E402
+from pricing_pipeline.publishing.superglm_metadata import (  # noqa: E402
+    build_superglm_publication_receipt,
+)
+from pricing_pipeline.publishing.superglm_publication_receipt import (  # noqa: E402
+    OffsetExportContract,
+    write_publication_receipt,
+)
 from scripts.run_mtpl_frequency_offline_sqlite import (  # noqa: E402
     SCHEMA_DB_FILES,
     apply_offline_ddl,
@@ -118,7 +125,7 @@ def fit_and_export_offset_workbook(
     frame: pd.DataFrame,
     *,
     output_path: Path,
-) -> Path:
+) -> tuple[Path, Path, str]:
     X = frame[["Region"]].copy()
     y = frame[TARGET_NAME].to_numpy(dtype=float)
     exposure = frame["Exposure"].to_numpy(dtype=float)
@@ -141,7 +148,7 @@ def fit_and_export_offset_workbook(
     if fitted is None:
         fitted = model
 
-    return export_rating_tables(
+    workbook_path = export_rating_tables(
         fitted,
         X,
         y,
@@ -153,6 +160,19 @@ def fit_and_export_offset_workbook(
         offset_kind="auto",
         n_bins=64,
     )
+    receipt = build_superglm_publication_receipt(
+        fitted,
+        offset_contract=OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name=OFFSET_FACTOR_NAME,
+            published_factor_name=OFFSET_FACTOR_NAME,
+            source_name=OFFSET_FACTOR_NAME,
+            label="Policy term months",
+        ),
+    )
+    receipt_path = output_path.with_name("superglm_publication_receipt.json")
+    receipt_sha256 = write_publication_receipt(receipt, receipt_path)
+    return workbook_path, receipt_path, receipt_sha256
 
 
 def query_offset_rows(engine, *, export_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -267,7 +287,10 @@ def run_offset_export_smoke(
     export_id = f"{MODEL_NAME}__{effective_from.replace('-', '')}"
     workbook_path = artifact_root / "rating_tables" / f"{export_id}.xlsx"
     frame = offset_smoke_frame()
-    fit_and_export_offset_workbook(frame, output_path=workbook_path)
+    workbook_path, receipt_path, receipt_sha256 = fit_and_export_offset_workbook(
+        frame,
+        output_path=workbook_path,
+    )
 
     stage_rating_export(
         engine,
@@ -281,6 +304,9 @@ def run_offset_export_smoke(
         created_by=created_by,
         replace=True,
         model_id=model_id,
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=receipt_sha256,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
     )
     completed_build = {
         "export_id": export_id,
@@ -303,6 +329,8 @@ def run_offset_export_smoke(
         "db_paths": {schema: str(path) for schema, path in db_paths.items()},
         "artifact_root": str(artifact_root),
         "workbook_path": str(workbook_path),
+        "publication_receipt_path": str(receipt_path),
+        "publication_receipt_sha256": receipt_sha256,
         "export_id": export_id,
         "model_id": model_id,
         "rate_package_id": package["rate_package_id"],
