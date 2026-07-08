@@ -454,6 +454,13 @@ def test_model_relativity_views_union_bands_and_non_banded_cells_for_bi():
     assert "rp.model_name AS package_model_name" in migration
     assert "JOIN pricing.PRICING_COMPILED_1D_RATE_BAND b" in migration
     assert "JOIN pricing.PRICING_COMPILED_RATE_CELL c" in migration
+    assert "JOIN pricing.PRICING_RATE_CELL_LEVEL rcl" in migration
+    assert "JOIN pricing.PRICING_RATE_CELL rc" in migration
+    assert "JOIN pricing.PRICING_COMPILED_RATE_CELL crc" in migration
+    assert "crc.exposure_weight" in migration
+    assert "crc.record_count" in migration
+    assert "crc.is_default" in migration
+    assert "crc.is_reference" in migration
     assert "UNION ALL" in migration
     assert "NOT EXISTS" in migration
     assert "t.term_type" in migration

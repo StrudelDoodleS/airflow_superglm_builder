@@ -31,10 +31,10 @@ SELECT
     b.representative_value,
     b.multiplier AS relativity,
     b.log_coefficient,
-    CAST(NULL AS DECIMAL(19,4)) AS exposure_weight,
-    CAST(NULL AS BIGINT) AS record_count,
-    CAST(0 AS BIT) AS is_default,
-    CAST(0 AS BIT) AS is_reference,
+    crc.exposure_weight,
+    crc.record_count,
+    crc.is_default,
+    crc.is_reference,
     '1D_RATE_BAND' AS relativity_source
 FROM pricing.PRICING_MODEL m
 JOIN pricing.PRICING_RATE_PACKAGE rp
@@ -43,6 +43,17 @@ JOIN pricing.PRICING_COMPILED_1D_RATE_BAND b
   ON b.rate_package_id = rp.rate_package_id
 JOIN pricing.PRICING_TERM t
   ON t.term_id = b.term_id
+JOIN pricing.PRICING_RATE_CELL_LEVEL rcl
+  ON rcl.feature_level_id = b.feature_level_id
+ AND rcl.position_no = 1
+JOIN pricing.PRICING_RATE_CELL rc
+  ON rc.cell_id = rcl.cell_id
+ AND rc.term_id = b.term_id
+ AND rc.is_deleted = 0
+JOIN pricing.PRICING_COMPILED_RATE_CELL crc
+  ON crc.rate_package_id = b.rate_package_id
+ AND crc.term_id = b.term_id
+ AND crc.cell_key_digest = rc.cell_key_digest
 
 UNION ALL
 

@@ -35,3 +35,25 @@ def test_offset_export_smoke_publishes_transformed_offset_factor(tmp_path):
     assert tables["pricing_stg"]["STG_RATING_EXPORT"] == 1
     assert tables["pricing"]["PRICING_RATE_PACKAGE"] == 1
     assert tables["pricing"]["PRICING_TERM"] >= 2
+
+
+def test_offset_export_smoke_scopes_result_rows_to_current_package(tmp_path):
+    db_root = tmp_path / "offset_export_smoke"
+    first = run_offset_export_smoke(
+        db_root=db_root,
+        effective_from="2026-06-19",
+        reset=True,
+    )
+    second = run_offset_export_smoke(
+        db_root=db_root,
+        effective_from="2026-06-20",
+        reset=False,
+    )
+
+    assert first["rate_package_id"] != second["rate_package_id"]
+    assert [row["level_code"] for row in second["final_offset_rows"]] == ["12", "36"]
+    assert [row["cell_key_text"] for row in second["compiled_offset_rows"]] == [
+        "TermMonths=12",
+        "TermMonths=36",
+    ]
+    assert second["tables"]["pricing"]["PRICING_RATE_PACKAGE"] == 2

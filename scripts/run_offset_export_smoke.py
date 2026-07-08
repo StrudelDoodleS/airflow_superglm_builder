@@ -175,7 +175,12 @@ def fit_and_export_offset_workbook(
     return workbook_path, receipt_path, receipt_sha256
 
 
-def query_offset_rows(engine, *, export_id: str) -> dict[str, list[dict[str, Any]]]:
+def query_offset_rows(
+    engine,
+    *,
+    export_id: str,
+    rate_package_id: int,
+) -> dict[str, list[dict[str, Any]]]:
     with engine.begin() as con:
         staging_rows = (
             con.execute(
@@ -227,10 +232,11 @@ def query_offset_rows(engine, *, export_id: str) -> dict[str, list[dict[str, Any
                     JOIN pricing.PRICING_FEATURE AS f
                       ON f.feature_id = fls.feature_id
                     WHERE t.term_name = :term_name
+                      AND t.rate_package_id = :rate_package_id
                     ORDER BY CAST(c.cell_key_text AS INTEGER)
                     """
                 ),
-                {"term_name": OFFSET_FACTOR_NAME},
+                {"term_name": OFFSET_FACTOR_NAME, "rate_package_id": rate_package_id},
             )
             .mappings()
             .all()
@@ -247,10 +253,11 @@ def query_offset_rows(engine, *, export_id: str) -> dict[str, list[dict[str, Any
                         log_coefficient
                     FROM pricing.PRICING_COMPILED_RATE_CELL
                     WHERE term_name = :term_name
+                      AND rate_package_id = :rate_package_id
                     ORDER BY CAST(cell_key_text AS INTEGER)
                     """
                 ),
-                {"term_name": OFFSET_FACTOR_NAME},
+                {"term_name": OFFSET_FACTOR_NAME, "rate_package_id": rate_package_id},
             )
             .mappings()
             .all()
@@ -324,7 +331,11 @@ def run_offset_export_smoke(
         created_by=created_by,
     )
 
-    rows = query_offset_rows(engine, export_id=export_id)
+    rows = query_offset_rows(
+        engine,
+        export_id=export_id,
+        rate_package_id=package["rate_package_id"],
+    )
     return {
         "db_paths": {schema: str(path) for schema, path in db_paths.items()},
         "artifact_root": str(artifact_root),
