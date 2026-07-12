@@ -18,6 +18,8 @@ multi-user application or solve shared enterprise artifact storage.
 
 - The default output of `scripts/scaffold_pricing_model.py` is the product blueprint.
   Demo packages such as MTPL remain regression examples, not the analyst contract.
+- `scripts/scaffold_pricing_model.py` is the only supported model/DAG authoring path for
+  this prototype. The legacy generic DAG builder remains untouched and unused.
 - Analysts own source access, frame construction, SuperGLM configuration, and validation
   decisions. Shared code owns versions, manifests, artifact hashes, receipts, publication,
   and Airflow handoffs.
@@ -65,6 +67,7 @@ multi-user application or solve shared enterprise artifact storage.
 - Removing TOML. The prototype will reveal whether the small housekeeping file earns its
   place; changing discovery is a separate decision.
 - Production authorization or two-person approval rules.
+- Refactoring, extending, or routing new models through the legacy generic DAG builder.
 
 ### Runtime shape
 
