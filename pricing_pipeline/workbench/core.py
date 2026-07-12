@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_models.registry import get_model_config
 from pricing_pipeline.workbench.artifacts import CandidateBundle, load_candidate_bundle
+from pricing_pipeline.workbench.airflow import AirflowClient
 
 
 _FRIENDLY_COLUMNS = [
@@ -50,6 +51,38 @@ class Candidate:
     model_run_id: int
     bundle: CandidateBundle
     technical: dict[str, Any]
+    editor_session: Any | None = field(default=None, init=False, repr=False)
+    editor_widget: Any | None = field(default=None, init=False, repr=False)
+
+    def editor(self):
+        """Open this candidate in one retained, live SuperGLM editor session."""
+        if self.editor_session is None:
+            self.editor_session = self.workbench.create_editor_session(self.bundle)
+            self.editor_widget = self.editor_session.widget()
+        return self.editor_widget
+
+    def submit_edits(self, *, reason: str):
+        cleaned_reason = str(reason).strip()
+        if not cleaned_reason:
+            raise ValueError("A non-empty reason is required to submit editor changes")
+        if self.editor_session is None or self.editor_widget is None:
+            raise RuntimeError("Open the candidate editor before submitting edits")
+        from pricing_pipeline.workbench.submission import create_editor_submission
+
+        return create_editor_submission(
+            self,
+            editor_session=self.editor_session,
+            reason=cleaned_reason,
+            airflow_client=self.workbench.airflow_client,
+        )
+
+    def close_editor(self) -> None:
+        if self.editor_widget is not None:
+            close = getattr(self.editor_widget, "close", None)
+            if callable(close):
+                close()
+        self.editor_widget = None
+        self.editor_session = None
 
 
 class Workbench:
@@ -59,15 +92,40 @@ class Workbench:
         engine,
         settings: Settings,
         config_loader: Callable[[str], Any] = get_model_config,
+        editor_session_factory: Callable[..., Any] | None = None,
+        airflow_client: AirflowClient | Any | None = None,
     ) -> None:
         self.engine = engine
         self.settings = settings
         self._config_loader = config_loader
+        self._editor_session_factory = editor_session_factory
+        self._airflow_client = airflow_client
 
     @classmethod
     def from_runtime(cls, runtime_module: str | None = None) -> "Workbench":
         runtime = runtime_from_env_or_module(runtime_module)
         return cls(engine=runtime.get_engine(), settings=runtime.settings)
+
+    @property
+    def airflow_client(self) -> AirflowClient | Any:
+        if self._airflow_client is None:
+            self._airflow_client = AirflowClient(
+                self.settings.airflow_api_url,
+                token=self.settings.airflow_api_token,
+            )
+        return self._airflow_client
+
+    def create_editor_session(self, bundle: CandidateBundle):
+        factory = self._editor_session_factory
+        if factory is None:
+            from superglm.editor import EditorSession
+
+            factory = EditorSession.from_model
+        return factory(
+            bundle.fitted_model,
+            train_data=(bundle.X, bundle.y, bundle.sample_weight, bundle.offset),
+            cv_report=bundle.cv_report,
+        )
 
     def candidates(
         self,
