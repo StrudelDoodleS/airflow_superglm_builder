@@ -13,6 +13,7 @@ from pricing_pipeline.workbench.submission import (
     SUBMISSION_FORMAT,
     EditorSubmission,
     EditorSubmissionError,
+    SubmissionStatus,
     load_verified_submission,
 )
 
@@ -29,6 +30,7 @@ __all__ = [
     "CandidateLineageError",
     "EditorSubmission",
     "EditorSubmissionError",
+    "SubmissionStatus",
     "Workbench",
     "load_candidate_bundle",
     "load_verified_submission",

@@ -127,6 +127,55 @@ class Workbench:
             cv_report=bundle.cv_report,
         )
 
+    def model_config(self, model_name: str):
+        return self._config_loader(self._required_model_name(model_name))
+
+    def resolve_editor_publication(self, submission) -> dict[str, Any]:
+        schemas = schema_names_from_connectable(self.engine)
+        export_id = f"editor__{submission.submission_id.replace('-', '_')}"
+        query = text(
+            f"""
+            SELECT
+                pm.model_name,
+                rp.rate_package_id,
+                rp.package_version,
+                rp.package_status,
+                rp.parent_rate_package_id,
+                mr.model_run_id,
+                mr.run_status
+            FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+            JOIN {schemas.pricing}.PRICING_MODEL AS pm
+              ON pm.model_id = rp.model_id
+            JOIN {schemas.pricing}.MODEL_RUN AS mr
+              ON mr.rate_package_id = rp.rate_package_id
+            WHERE pm.model_name = :model_name
+              AND rp.parent_rate_package_id = :parent_rate_package_id
+              AND rp.source_export_id = :export_id
+            """
+        )
+        with self.engine.begin() as connection:
+            rows = list(
+                connection.execute(
+                    query,
+                    {
+                        "model_name": submission.model_name,
+                        "parent_rate_package_id": submission.parent_rate_package_id,
+                        "export_id": export_id,
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        if len(rows) != 1:
+            raise CandidateLineageError(
+                "successful editor publication must resolve exactly one child package/run; "
+                f"found {len(rows)}"
+            )
+        row = dict(rows[0])
+        if row.get("package_status") != "PUBLISHED" or row.get("run_status") != "SUCCESS":
+            raise CandidateLineageError("editor child package/run is not successfully published")
+        return row
+
     def candidates(
         self,
         model_name: str,

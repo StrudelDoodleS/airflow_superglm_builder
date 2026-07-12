@@ -29,10 +29,23 @@ class EditorSubmissionError(RuntimeError):
     """Raised when an editor submission is incomplete or fails verification."""
 
 
+@dataclass(frozen=True)
+class SubmissionStatus:
+    state: str
+    model_name: str
+    source_package_version: int
+    package_version: int | None
+    rate_package_id: int | None
+    model_run_id: int | None
+    airflow_url: str
+    message: str | None = None
+
+
 @dataclass
 class EditorSubmission:
     submission_id: str
     model_name: str
+    deployment_slot: str
     source_package_version: int
     parent_rate_package_id: int
     parent_model_run_id: int
@@ -63,12 +76,17 @@ class EditorSubmission:
     dag_run_id: str | None = None
     state: str = "saved"
     _airflow_client: AirflowClient | Any | None = field(default=None, repr=False)
+    _workbench: Any | None = field(default=None, repr=False)
+    published_package_version: int | None = field(default=None, repr=False)
+    published_rate_package_id: int | None = field(default=None, repr=False)
+    published_model_run_id: int | None = field(default=None, repr=False)
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "format": SUBMISSION_FORMAT,
             "submission_id": self.submission_id,
             "model_name": self.model_name,
+            "deployment_slot": self.deployment_slot,
             "source_package_version": self.source_package_version,
             "parent_rate_package_id": self.parent_rate_package_id,
             "parent_model_run_id": self.parent_model_run_id,
@@ -94,6 +112,81 @@ class EditorSubmission:
             "baseline_candidate_superglm_version": self.baseline_candidate_superglm_version,
             "model_source_sha256": self.model_source_sha256,
         }
+
+    def status(self) -> SubmissionStatus:
+        if self._airflow_client is None or self.dag_run_id is None:
+            raise RuntimeError("This submission has no live Airflow run handle")
+        run = self._airflow_client.get_dag_run(self.dag_id, self.dag_run_id)
+        airflow_url = self._airflow_client.dag_run_ui_url(self.dag_id, self.dag_run_id)
+        state = str(run.state).lower()
+        message = None
+        if state in {"queued", "scheduled", "deferred", "up_for_retry"}:
+            friendly_state = "queued"
+        elif state in {"running", "restarting"}:
+            friendly_state = "running"
+        elif state == "success":
+            if self._workbench is None:
+                raise RuntimeError("This submission cannot resolve its published SQL lineage")
+            resolved = self._workbench.resolve_editor_publication(self)
+            self.published_package_version = int(resolved["package_version"])
+            self.published_rate_package_id = int(resolved["rate_package_id"])
+            self.published_model_run_id = int(resolved["model_run_id"])
+            friendly_state = "published"
+        elif state in {"failed", "upstream_failed"}:
+            friendly_state = "failed"
+            message = "Airflow could not publish the edited candidate"
+        else:
+            friendly_state = state
+        self.state = friendly_state
+        return SubmissionStatus(
+            state=friendly_state,
+            model_name=self.model_name,
+            source_package_version=self.source_package_version,
+            package_version=self.published_package_version,
+            rate_package_id=self.published_rate_package_id,
+            model_run_id=self.published_model_run_id,
+            airflow_url=airflow_url,
+            message=message,
+        )
+
+    def request_deployment(
+        self,
+        *,
+        reason: str,
+        deployment_slot: str | None = None,
+    ):
+        cleaned_reason = str(reason).strip()
+        if not cleaned_reason:
+            raise ValueError("A non-empty reason is required to request deployment")
+        if self.state != "published" or self.published_package_version is None:
+            raise RuntimeError("The edited candidate must be published before deployment")
+        if self._airflow_client is None:
+            raise RuntimeError("This submission has no live Airflow client")
+        slot = str(deployment_slot or self.deployment_slot).strip()
+        if not slot:
+            raise ValueError("deployment_slot is required")
+        deployment_identity = json.dumps(
+            {
+                "submission_id": self.submission_id,
+                "package_version": self.published_package_version,
+                "deployment_slot": slot,
+                "reason": cleaned_reason,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        suffix = hashlib.sha256(deployment_identity).hexdigest()[:12]
+        return self._airflow_client.trigger_dag(
+            "pricing_deploy_rate_package",
+            run_id=f"manual__deploy__{self.submission_id}__{suffix}",
+            conf={
+                "model_name": self.model_name,
+                "package_version": self.published_package_version,
+                "deployment_slot": slot,
+                "deployment_reason": cleaned_reason,
+                "deployed_by": self.claimed_identity,
+            },
+        )
 
 
 def _superglm_version() -> str:
@@ -233,6 +326,9 @@ def create_editor_submission(
         submission = EditorSubmission(
             submission_id=submission_id,
             model_name=candidate.model_name,
+            deployment_slot=candidate.workbench.model_config(
+                candidate.model_name
+            ).deployment_slot,
             source_package_version=candidate.package_version,
             parent_rate_package_id=candidate.rate_package_id,
             parent_model_run_id=candidate.model_run_id,
@@ -264,6 +360,7 @@ def create_editor_submission(
             path=str(submission_path),
             sha256="",
             _airflow_client=airflow_client,
+            _workbench=candidate.workbench,
         )
         _write_json_atomic(submission.to_payload(), submission_path)
         submission.sha256 = sha256_file(submission_path)

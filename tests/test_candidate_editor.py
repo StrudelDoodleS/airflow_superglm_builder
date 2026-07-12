@@ -41,10 +41,22 @@ class FakeEditorSession:
 class FakeAirflowClient:
     def __init__(self) -> None:
         self.triggered = []
+        self.run_state = "queued"
 
     def trigger_dag(self, dag_id, *, run_id, conf):
         self.triggered.append(SimpleNamespace(dag_id=dag_id, run_id=run_id, conf=conf))
         return SimpleNamespace(dag_id=dag_id, dag_run_id=run_id, state="queued", payload={})
+
+    def get_dag_run(self, dag_id, run_id):
+        return SimpleNamespace(
+            dag_id=dag_id,
+            dag_run_id=run_id,
+            state=self.run_state,
+            payload={},
+        )
+
+    def dag_run_ui_url(self, dag_id, run_id):
+        return f"http://airflow.test/dags/{dag_id}/runs/{run_id}"
 
 
 def _bundle() -> CandidateBundle:
@@ -184,3 +196,62 @@ def test_close_editor_stops_local_widget_server_and_discards_session(tmp_path):
     assert session.widget_value.closed is True
     assert candidate.editor_session is None
     assert candidate.editor_widget is None
+
+
+def test_submission_status_resolves_published_child_and_requests_deployment(tmp_path):
+    session = FakeEditorSession()
+    airflow_client = FakeAirflowClient()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Sparse-age market calibration")
+    candidate.workbench.resolve_editor_publication = lambda loaded_submission: {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "model_run_id": 908,
+        "package_status": "PUBLISHED",
+    }
+    airflow_client.run_state = "success"
+
+    status = submission.status()
+    deployment_run = submission.request_deployment(
+        reason="Approved market calibration",
+    )
+
+    assert status.state == "published"
+    assert status.model_name == "HOME_FREQ"
+    assert status.package_version == 8
+    assert status.rate_package_id == 108
+    assert status.airflow_url.endswith(
+        "/dags/pricing_publish_editor_candidate/runs/"
+        f"manual__{submission.submission_id}"
+    )
+    assert deployment_run.state == "queued"
+    trigger = airflow_client.triggered[-1]
+    assert trigger.dag_id == "pricing_deploy_rate_package"
+    assert trigger.conf == {
+        "model_name": "HOME_FREQ",
+        "package_version": 8,
+        "deployment_slot": "HOME_FREQ_UAT",
+        "deployment_reason": "Approved market calibration",
+        "deployed_by": "prototype-local-not-authenticated",
+    }
+
+
+def test_deployment_request_requires_published_submission_and_reason(tmp_path):
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Market calibration")
+
+    with pytest.raises(RuntimeError, match="published"):
+        submission.request_deployment(reason="Approved")
+    with pytest.raises(ValueError, match="reason"):
+        submission.request_deployment(reason=" ")

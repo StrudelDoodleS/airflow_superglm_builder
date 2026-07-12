@@ -62,6 +62,14 @@ class AirflowClient:
     def close(self) -> None:
         self._client.close()
 
+    def dag_run_ui_url(self, dag_id: str, run_id: str) -> str:
+        ui_root = self.api_url
+        if ui_root.endswith("/api/v2"):
+            ui_root = ui_root[: -len("/api/v2")]
+        encoded_dag_id = quote(self._required(dag_id, "dag_id"), safe="")
+        encoded_run_id = quote(self._required(run_id, "run_id"), safe="")
+        return f"{ui_root}/dags/{encoded_dag_id}/runs/{encoded_run_id}"
+
     def _dag_runs_url(self, dag_id: str) -> str:
         encoded_dag_id = quote(self._required(dag_id, "dag_id"), safe="")
         return f"{self.api_url}/dags/{encoded_dag_id}/dagRuns"
