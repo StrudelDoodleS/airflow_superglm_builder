@@ -104,6 +104,7 @@ def run_scaffolded_workflow_smoke(tmp_path, monkeypatch):
     inputs = ModelInputs(
         X=frame[["age"]],
         y=frame["claim_count"].to_numpy(),
+        row_ids=frame[["policy_id"]].copy(),
     )
     folds = [
         (np.array([2, 3]), np.array([0, 1])),

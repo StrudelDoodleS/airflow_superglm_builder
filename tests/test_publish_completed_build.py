@@ -6,6 +6,8 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from pricing_pipeline.data.manifest import DatasetManifestResult
@@ -18,6 +20,7 @@ from pricing_pipeline.orchestration.publish_completed_build import (
     CompletedModelPublishResult,
     publish_completed_model_build,
 )
+from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
 
 
 def _install_fake_airflow_taskflow(monkeypatch, context):
@@ -69,7 +72,44 @@ def _settings(tmp_path) -> Settings:
         mlflow_enabled=False,
         rating_export_root=tmp_path / "rating_exports",
         validation_split_artifact_root=tmp_path / "validation_splits",
+        workbench_artifact_root=tmp_path / "workbench",
     )
+
+
+def _candidate_metadata(
+    artifact_root,
+    *,
+    manifest_id="manifest-existing",
+    split_set_id=None,
+    model_source_sha256="c" * 64,
+):
+    metadata = save_candidate_bundle(
+        CandidateBundle(
+            fitted_model=SimpleNamespace(name="candidate"),
+            X=pd.DataFrame({"age": [20.0]}),
+            y=np.array([0.0]),
+            sample_weight=None,
+            offset=None,
+            export_weight=None,
+            cv_report={},
+            manifest_id=manifest_id,
+            split_set_id=split_set_id,
+            pk_columns=("policy_id",),
+            row_order_sha256="d" * 64,
+            model_source_sha256=model_source_sha256,
+            offset_contract={"handling": "NONE"},
+        ),
+        Path(artifact_root) / "candidate.joblib",
+    )
+    return {
+        "candidate_artifact_path": metadata.path,
+        "candidate_artifact_sha256": metadata.sha256,
+        "candidate_artifact_format": metadata.format,
+        "candidate_artifact_size_bytes": metadata.size_bytes,
+        "candidate_python_version": metadata.python_version,
+        "candidate_superglm_version": metadata.superglm_version,
+        "model_source_sha256": model_source_sha256,
+    }
 
 
 def test_completed_model_build_round_trips_plain_dict(tmp_path):
@@ -491,6 +531,9 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
     receipt_sha256 = "b" * 64
     engine = object()
     published_exports = []
+    candidate_metadata = _candidate_metadata(
+        _settings(tmp_path).workbench_artifact_root,
+    )
 
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
@@ -532,13 +575,7 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
             "created_by": "airflow",
             "publication_receipt_path": str(receipt_path),
             "publication_receipt_sha256": receipt_sha256,
-            "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
-            "candidate_artifact_sha256": "a" * 64,
-            "candidate_artifact_format": "superglm-candidate-joblib-v1",
-            "candidate_artifact_size_bytes": 123,
-            "candidate_python_version": "3.14.4",
-            "candidate_superglm_version": "0.11.0",
-            "model_source_sha256": "c" * 64,
+            **candidate_metadata,
             "metrics": {"cv_pooled_deviance": 0.42},
             "metric_scopes": {"cv_pooled_deviance": "cv"},
             "fold_metrics": (
@@ -549,11 +586,128 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
 
     assert published_exports[0].publication_receipt_path == str(receipt_path)
     assert published_exports[0].publication_receipt_sha256 == receipt_sha256
-    assert published_exports[0].candidate_artifact_path == str(tmp_path / "candidate.joblib")
+    assert published_exports[0].candidate_artifact_path == candidate_metadata[
+        "candidate_artifact_path"
+    ]
     assert published_exports[0].metrics == {"cv_pooled_deviance": 0.42}
     assert published_exports[0].fold_metrics[0]["metric_name"] == "deviance"
     assert result.publication_receipt_path == str(receipt_path)
     assert result.publication_receipt_sha256 == receipt_sha256
+
+
+@pytest.mark.parametrize("artifact_state", ["missing", "tampered", "outside-root"])
+def test_publish_completed_model_build_rejects_untrusted_candidate_before_publish(
+    tmp_path,
+    monkeypatch,
+    artifact_state,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    settings = _settings(tmp_path)
+    artifact_root = (
+        tmp_path / "outside-workbench"
+        if artifact_state == "outside-root"
+        else settings.workbench_artifact_root
+    )
+    candidate_metadata = _candidate_metadata(artifact_root)
+    artifact_path = Path(candidate_metadata["candidate_artifact_path"])
+    if artifact_state == "missing":
+        artifact_path.unlink()
+    elif artifact_state == "tampered":
+        artifact_path.write_bytes(artifact_path.read_bytes() + b"tampered")
+
+    publish_calls = []
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
+        lambda engine_arg, manifest_id: None,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        lambda *args, **kwargs: publish_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(CompletedModelBuildError, match="candidate artifact"):
+        publish_completed_model_build(
+            object(),
+            settings=settings,
+            model_config=_config(),
+            dataset=None,
+            completed_build={
+                "rating_workbook_path": str(workbook),
+                "model_version": "20260603",
+                "effective_from": "2026-06-03",
+                "export_id": "export-1",
+                "manifest_id": "manifest-existing",
+                "created_by": "airflow",
+                **candidate_metadata,
+            },
+        )
+
+    assert publish_calls == []
+
+
+@pytest.mark.parametrize(
+    ("lineage_field", "published_value"),
+    [
+        ("manifest_id", "manifest-published"),
+        ("split_set_id", "split-published"),
+        ("model_source_sha256", "e" * 64),
+    ],
+)
+def test_publish_completed_model_build_rejects_candidate_lineage_mismatch(
+    tmp_path,
+    monkeypatch,
+    lineage_field,
+    published_value,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    settings = _settings(tmp_path)
+    candidate_metadata = _candidate_metadata(
+        settings.workbench_artifact_root,
+        manifest_id="manifest-existing",
+        split_set_id="split-existing",
+    )
+    completed_build = {
+        "rating_workbook_path": str(workbook),
+        "model_version": "20260603",
+        "effective_from": "2026-06-03",
+        "export_id": "export-1",
+        "manifest_id": "manifest-existing",
+        "split_set_id": "split-existing",
+        "created_by": "airflow",
+        **candidate_metadata,
+    }
+    completed_build[lineage_field] = published_value
+
+    publish_calls = []
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
+        lambda engine_arg, manifest_id: None,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        lambda *args, **kwargs: publish_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(CompletedModelBuildError, match=lineage_field):
+        publish_completed_model_build(
+            object(),
+            settings=settings,
+            model_config=_config(),
+            dataset=None,
+            completed_build=completed_build,
+        )
+
+    assert publish_calls == []
 
 
 def test_publish_completed_model_build_configures_engine_with_settings_schema_names(

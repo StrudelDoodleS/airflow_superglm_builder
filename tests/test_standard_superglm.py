@@ -180,6 +180,197 @@ def test_run_cross_validation_rejects_non_converged_fold():
         )
 
 
+def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="requires ModelInputs.row_ids"):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=api.ModelInputs(
+                X=frame[["age"]],
+                y=frame["target"].to_numpy(),
+            ),
+            model_factory=_FakeModel,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_name="HOME_FREQ",
+            model_version="v1",
+            export_id="export-1",
+            effective_from="2026-07-12",
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            validation_split=ValidationSplitConfig.custom(materialize=True),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
+                "CV must not run before canonical-row validation"
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "input_builder", "match"),
+    [
+        (
+            "filtered",
+            lambda frame: (
+                frame.iloc[:2][["age"]].copy(),
+                frame.iloc[:2][["policy_id"]].copy(),
+            ),
+            "row count",
+        ),
+        (
+            "reordered",
+            lambda frame: (
+                frame.iloc[::-1][["age"]].copy(),
+                frame.iloc[::-1][["policy_id"]].copy(),
+            ),
+            "index/order",
+        ),
+        (
+            "reset-index",
+            lambda frame: (
+                frame[["age"]].reset_index(drop=True),
+                frame[["policy_id"]].reset_index(drop=True),
+            ),
+            "index/order",
+        ),
+        (
+            "wrong-pk",
+            lambda frame: (
+                frame[["age"]].copy(),
+                frame[["policy_id"]].rename(columns={"policy_id": "account_id"}),
+            ),
+            "primary-key columns",
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
+    tmp_path,
+    case,
+    input_builder,
+    match,
+):
+    del case
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        },
+        index=[10, 11, 12],
+    )
+    X, row_ids = input_builder(frame)
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=api.ModelInputs(
+                X=X,
+                y=np.zeros(len(X)),
+                row_ids=row_ids,
+            ),
+            model_factory=_FakeModel,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_name="HOME_FREQ",
+            model_version="v1",
+            export_id="export-1",
+            effective_from="2026-07-12",
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            validation_split=ValidationSplitConfig.custom(materialize=True),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
+                "CV must not run before canonical-row validation"
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("pk_values", "match"),
+    [
+        ([1, None, 3], "null"),
+        ([1, 1, 3], "duplicate"),
+    ],
+)
+def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
+    tmp_path,
+    pk_values,
+    match,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": pk_values,
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=api.ModelInputs(
+                X=frame[["age"]],
+                y=frame["target"].to_numpy(),
+                row_ids=frame[["policy_id"]].copy(),
+            ),
+            model_factory=_FakeModel,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_name="HOME_FREQ",
+            model_version="v1",
+            export_id="export-1",
+            effective_from="2026-07-12",
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            validation_split=ValidationSplitConfig.custom(materialize=True),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
+                "CV must not run before canonical-row validation"
+            ),
+        )
+
+
 def test_model_local_log_density_review_is_separate_from_canonical_export(tmp_path):
     api = _api()
     canonical = pd.DataFrame(
@@ -293,6 +484,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             inputs=api.ModelInputs(
                 X=frame[["age"]],
                 y=frame["target"].to_numpy(),
+                row_ids=frame[["policy_id"]].copy(),
             ),
             model_factory=_FakeModel,
             split_indices=_folds(),
@@ -376,7 +568,11 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         Path(output_path).write_bytes(b"presentation only")
         return output_path
 
-    inputs = api.ModelInputs(X=frame[["age"]], y=frame["target"].to_numpy())
+    inputs = api.ModelInputs(
+        X=frame[["age"]],
+        y=frame["target"].to_numpy(),
+        row_ids=frame[["policy_id"]].copy(),
+    )
     build_kwargs = {
         "frame": frame,
         "inputs": inputs,

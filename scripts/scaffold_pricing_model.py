@@ -347,6 +347,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
                 sample_weight=weight,
                 offset=None,
                 export_weight=weight,
+                row_ids=frame.loc[:, list(PK_COLUMNS)].copy(),
             )
 
 

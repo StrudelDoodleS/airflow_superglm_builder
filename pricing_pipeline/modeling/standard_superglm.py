@@ -45,6 +45,7 @@ class ModelInputs:
     offset: pd.Series | np.ndarray | None = None
     export_weight: pd.Series | np.ndarray | None = None
     export_weight_name: str | None = None
+    row_ids: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,69 @@ def _validate_input_lengths(inputs: ModelInputs) -> None:
             raise StandardSuperGLMError(
                 f"{name} length {len(value)} does not match X row count {row_count}"
             )
+
+
+def _validate_canonical_row_ids(
+    frame: pd.DataFrame,
+    inputs: ModelInputs,
+    *,
+    pk_columns: tuple[str, ...],
+) -> None:
+    row_ids = inputs.row_ids
+    if row_ids is None:
+        raise StandardSuperGLMError(
+            "a publishable standard build requires ModelInputs.row_ids"
+        )
+    if not isinstance(row_ids, pd.DataFrame):
+        raise StandardSuperGLMError("ModelInputs.row_ids must be a pandas DataFrame")
+
+    expected_columns = list(pk_columns)
+    if list(row_ids.columns) != expected_columns:
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids primary-key columns must exactly match manifest "
+            f"pk_columns in order: expected={expected_columns!r}, "
+            f"actual={list(row_ids.columns)!r}"
+        )
+    missing_frame_columns = [column for column in expected_columns if column not in frame]
+    if missing_frame_columns:
+        raise StandardSuperGLMError(
+            "canonical frame is missing manifest primary-key columns: "
+            + ", ".join(missing_frame_columns)
+        )
+
+    frame_row_count = len(frame)
+    if len(inputs.X) != frame_row_count:
+        raise StandardSuperGLMError(
+            "ModelInputs.X row count does not match canonical frame row count: "
+            f"X={len(inputs.X)}, frame={frame_row_count}"
+        )
+    if len(row_ids) != frame_row_count:
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids row count does not match canonical frame row count: "
+            f"row_ids={len(row_ids)}, frame={frame_row_count}"
+        )
+    if not inputs.X.index.equals(frame.index):
+        raise StandardSuperGLMError(
+            "ModelInputs.X index/order does not match the canonical frame"
+        )
+    if not row_ids.index.equals(frame.index):
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids index/order does not match the canonical frame and X"
+        )
+
+    canonical_row_ids = frame.loc[:, expected_columns]
+    if not row_ids.equals(canonical_row_ids):
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids primary-key values/order do not match the canonical frame"
+        )
+    if row_ids.isna().any().any():
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids primary-key columns contain null values"
+        )
+    if row_ids.duplicated(subset=expected_columns).any():
+        raise StandardSuperGLMError(
+            "ModelInputs.row_ids primary-key columns contain duplicate values"
+        )
 
 
 def run_cross_validation(
@@ -481,6 +545,11 @@ def run_standard_superglm_build(
     cross_validate_fn: Callable[..., Any] = cross_validate,
 ) -> StandardBuildResult:
     _validate_input_lengths(inputs)
+    _validate_canonical_row_ids(
+        frame,
+        inputs,
+        pk_columns=manifest_spec.pk_columns,
+    )
     if offset_export_options and "offset" in offset_export_options:
         raise StandardSuperGLMError(
             "offset_export_options must not contain 'offset'; set ModelInputs.offset once"

@@ -24,6 +24,7 @@ from pricing_pipeline.models.spec import DatasetSpec, ModelExportResult
 from pricing_pipeline.orchestration.pipeline import publish_model_export
 from pricing_pipeline.publishing.publisher import validate_model_on_engine
 from pricing_pipeline.publishing.rating_export import build_export_id
+from pricing_pipeline.workbench.artifacts import load_candidate_bundle
 
 
 _DEFAULT_PYTHON_DAG_ID = "python_publish_completed_model_build"
@@ -383,6 +384,45 @@ def validate_existing_manifest(engine, manifest_id: str) -> None:
         raise CompletedModelBuildError(f"manifest_id {manifest_id!r} was not found")
 
 
+def _verify_candidate_artifact(
+    build: CompletedModelBuild,
+    *,
+    manifest_id: str,
+    split_set_id: str | None,
+    allowed_root: str | Path,
+) -> None:
+    if build.candidate_artifact_path is None:
+        return
+
+    try:
+        bundle = load_candidate_bundle(
+            build.candidate_artifact_path,
+            expected_sha256=build.candidate_artifact_sha256,
+            expected_size_bytes=build.candidate_artifact_size_bytes,
+            expected_format=build.candidate_artifact_format,
+            expected_python_version=build.candidate_python_version,
+            expected_superglm_version=build.candidate_superglm_version,
+            allowed_root=allowed_root,
+        )
+    except Exception as exc:
+        raise CompletedModelBuildError(
+            f"candidate artifact verification failed: {exc}"
+        ) from exc
+
+    expected_lineage = {
+        "manifest_id": manifest_id,
+        "split_set_id": split_set_id,
+        "model_source_sha256": build.model_source_sha256,
+    }
+    for field_name, expected_value in expected_lineage.items():
+        actual_value = getattr(bundle, field_name)
+        if actual_value != expected_value:
+            raise CompletedModelBuildError(
+                f"candidate artifact {field_name} does not match completed-build "
+                f"lineage: expected={expected_value!r}, actual={actual_value!r}"
+            )
+
+
 def publish_completed_model_build(
     engine,
     *,
@@ -435,6 +475,13 @@ def publish_completed_model_build(
         manifest_id = _required_text(build.manifest_id, "manifest_id")
         validate_existing_manifest(engine, manifest_id)
         split_set_id = build.split_set_id
+
+    _verify_candidate_artifact(
+        build,
+        manifest_id=manifest_id,
+        split_set_id=split_set_id,
+        allowed_root=settings.workbench_artifact_root,
+    )
 
     export = ModelExportResult(
         model_id=model_id,

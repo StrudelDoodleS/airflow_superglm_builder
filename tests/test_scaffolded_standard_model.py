@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 
 import pricing_models
-from pricing_pipeline.modeling.standard_superglm import ModelInputs
 from scripts.scaffold_pricing_model import ScaffoldOptions, scaffold_pricing_model
 
 
@@ -48,14 +47,7 @@ def test_fresh_custom_scaffold_delegates_to_standard_runner(tmp_path, monkeypatc
     monkeypatch.setattr(modeling, "PK_COLUMNS", ("policy_id",))
     monkeypatch.setattr(modeling, "read_prepared_source", lambda prepared: frame.copy())
     monkeypatch.setattr(modeling, "build_final_model_frame", lambda raw: raw.copy())
-    monkeypatch.setattr(
-        modeling,
-        "build_training_inputs",
-        lambda final: ModelInputs(
-            X=final[["age"]],
-            y=final["claim_count"].to_numpy(),
-        ),
-    )
+    monkeypatch.setattr(modeling, "FEATURE_COLUMNS", ("age",))
     monkeypatch.setattr(modeling, "build_model", lambda: object())
     monkeypatch.setattr(
         modeling,
@@ -93,6 +85,9 @@ def test_fresh_custom_scaffold_delegates_to_standard_runner(tmp_path, monkeypatc
     assert len(calls) == 1
     runner_kwargs = calls[0][1]
     assert runner_kwargs["frame"]["policy_id"].tolist() == [1, 2, 3]
+    assert runner_kwargs["inputs"].row_ids.equals(
+        runner_kwargs["frame"][["policy_id"]]
+    )
     assert runner_kwargs["output_dir"] == (
         tmp_path / "workbench" / "SCAFFOLD_FREQ" / runner_kwargs["export_id"]
     )
