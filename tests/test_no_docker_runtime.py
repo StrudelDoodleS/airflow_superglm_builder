@@ -924,13 +924,16 @@ def test_local_airflow_path_helpers_expand_user_and_canonicalize(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
-@pytest.mark.parametrize("windows_path", [r"C:\pricing\project", "D:/pricing/project"])
-def test_local_airflow_rejects_windows_absolute_paths_under_posix(
+@pytest.mark.parametrize(
+    "windows_path",
+    [r"C:\pricing\project", "D:/pricing/project", r"C:pricing\project"],
+)
+def test_local_airflow_rejects_windows_drive_paths_under_posix(
     windows_path,
 ):
     from scripts import start_airflow_local
 
-    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+    with pytest.raises(ValueError, match="Windows drive-qualified path.*POSIX/WSL"):
         start_airflow_local._repo_path(windows_path)
 
 

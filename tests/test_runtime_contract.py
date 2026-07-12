@@ -407,9 +407,11 @@ def test_settings_expands_user_for_project_and_artifact_roots(monkeypatch, tmp_p
     [
         ("PRICING_PROJECT_ROOT", r"C:\pricing\project"),
         ("WORKBENCH_ARTIFACT_ROOT", "D:/pricing/workbench"),
+        ("PRICING_PROJECT_ROOT", r"C:pricing\project"),
+        ("WORKBENCH_ARTIFACT_ROOT", "D:pricing/workbench"),
     ],
 )
-def test_settings_rejects_windows_absolute_paths_under_posix(
+def test_settings_rejects_windows_drive_paths_under_posix(
     tmp_path,
     env_name,
     windows_path,
@@ -417,7 +419,7 @@ def test_settings_rejects_windows_absolute_paths_under_posix(
     env = {"PRICING_PROJECT_ROOT": str(tmp_path / "project")}
     env[env_name] = windows_path
 
-    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+    with pytest.raises(ValueError, match="Windows drive-qualified path.*POSIX/WSL"):
         Settings.from_env(env)
 
 

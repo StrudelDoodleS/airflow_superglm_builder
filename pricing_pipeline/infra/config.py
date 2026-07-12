@@ -22,9 +22,9 @@ def canonicalize_path(
 ) -> Path:
     raw_value = os.fspath(value)
     path = Path(raw_value).expanduser()
-    if os.name != "nt" and PureWindowsPath(raw_value).is_absolute():
+    if os.name != "nt" and PureWindowsPath(raw_value).drive:
         raise ValueError(
-            f"Windows absolute path {raw_value!r} is unsupported under POSIX/WSL; "
+            f"Windows drive-qualified path {raw_value!r} is unsupported under POSIX/WSL; "
             "use a path in the current POSIX namespace"
         )
     if not path.is_absolute():

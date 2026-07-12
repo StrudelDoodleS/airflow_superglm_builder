@@ -123,7 +123,7 @@ def test_runtime_provider_normalizes_settings_instance_roots_from_project_root(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
 def test_runtime_import_paths_reject_windows_project_root_under_posix():
-    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+    with pytest.raises(ValueError, match="Windows drive-qualified path.*POSIX/WSL"):
         ensure_runtime_import_paths(
             env={"PRICING_PROJECT_ROOT": r"C:\pricing\project"},
         )
