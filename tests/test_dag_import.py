@@ -136,6 +136,17 @@ def test_pricing_deploy_rate_package_dag_imports_without_airflow(monkeypatch):
     assert hasattr(module, "pricing_deploy_rate_package")
 
 
+def test_pricing_publish_editor_candidate_dag_imports_without_airflow(monkeypatch):
+    _install_fake_airflow(monkeypatch)
+
+    module = _import_dag_module(
+        "pricing_publish_editor_candidate_test",
+        "pricing_publish_editor_candidate.py",
+    )
+
+    assert hasattr(module, "pricing_publish_editor_candidate")
+
+
 def test_demo_custom_publish_dag_uses_custom_tasks_and_publish_task(monkeypatch):
     task_outputs = _install_fake_airflow(monkeypatch)
 

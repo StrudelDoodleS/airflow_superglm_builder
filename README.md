@@ -345,10 +345,10 @@ By default, the helper writes a custom-DAG starter:
   and return small run metadata such as output paths, `effective_from`, and
   `data_as_of_date`.
 - `pricing_models/<model_name>/modeling.py`: where you edit
-  `read_prepared_source(...)`, `build_final_model_frame(...)`, and
-  `fit_validate_export_rating_tables(...)`. If you use
-  `validation_split.method = "custom"`, edit
-  `validation_split_indices_for_model(...)` to return your model's
+  `read_prepared_source(...)`, `build_final_model_frame(...)`,
+  `build_training_inputs(...)`, `build_model(...)`, and
+  `validation_splitter(...)`. If you use
+  `validation_split.method = "custom"`, edit `validation_splitter(...)` to return your model's
   zero-based `(train_idx, test_idx)` folds. The generated
   `train_validate_export_model(...)` recipe wires those functions into
   versioning, frame-backed manifest creation, and the completed-build payload;
@@ -366,9 +366,10 @@ examples, not framework-required field names.
 It creates missing scaffold files and leaves existing files unchanged; pass
 `--force` only when you intentionally want to overwrite existing scaffold files.
 Model configs are auto-discovered from `pricing_models/<model_name>/model.toml`;
-no registry import edits are needed for normal use. The older all-in-one
-`ModelSpec` / `build_pricing_model_dag(...)` scaffold is still available with
-`--template factory`.
+no registry import edits are needed for normal use.
+`scripts/scaffold_pricing_model.py` is the supported model-authoring path. The
+legacy generic `ModelSpec` / `build_pricing_model_dag(...)` builder is not used
+by the candidate workbench workflow.
 
 - Global code in `pricing_pipeline/` owns SQL lifecycle access for schema
   application, dataset manifests, rating export publishing, and lineage writes.
@@ -377,8 +378,8 @@ no registry import edits are needed for normal use. The older all-in-one
   model frames and the older factory/demo flow. New custom DAGs should usually
   create the manifest from the final pandas model frame instead of re-reading
   source SQL.
-- `ModelSpec` is only needed for the older all-in-one factory path. Custom DAGs
-  can ignore it.
+- `ModelSpec` belongs to the legacy demo/factory path. Scaffolded candidate
+  models do not use it.
 - `target_name` is the final training DataFrame column after your data/modeling
   code runs; it does not need to be a physical source column. Use your model
   data prep code for derived targets, exposure/offset columns, filters, and
@@ -404,11 +405,41 @@ no registry import edits are needed for normal use. The older all-in-one
 - `pricing_models/registry.py` scans model folders for `model.toml`. Config-only
   paths such as deployment read TOML without importing model code; full model
   builds lazy-load only the selected model's `spec.py`.
-- Add one DAG per model in `dags/`. Prefer the explicit custom TaskFlow shape:
+- Add one DAG per model in `dags/`. Use the explicit custom TaskFlow shape:
   register the model, prepare source data, train/export/create the frame
-  manifest, then bolt on the completed-build publish task. The older
-  `build_pricing_model_dag(...)` helper remains available only for the
-  `--template factory` compatibility scaffold.
+  manifest, then bolt on the completed-build publish task.
+
+### Candidate Workbench
+
+Scheduled training, human editing, and deployment are three separate runs:
+
+1. The model's scaffolded scheduled DAG trains on new data and publishes an
+   immutable candidate. Analysts do not edit models on a weekly schedule.
+2. When a pricing change is needed, an analyst opens
+   `tutorials/scaffolded_candidate_workbench.ipynb`, selects a friendly package
+   number, and uses the live SuperGLM editor.
+3. Submitting the live session triggers the manual
+   `pricing_publish_editor_candidate` DAG. It re-exports the authoritative
+   edited model and publishes an immutable child package; it never deploys it.
+4. After review, `submission.request_deployment(reason=...)` triggers the
+   existing `pricing_deploy_rate_package` DAG.
+
+The analyst supplies model decisions and two business reasons. The pipeline
+automatically records model/package versions, the data-as-of date, primary-key
+and row-order fingerprints, dataset manifest, exact validation folds, fit and
+export weight use, offset handling, source hashes, CV metrics, parent/champion
+comparisons, artifact hashes, and Airflow lineage.
+
+SQL stores audit and lookup metadata. Verified joblib bundles beneath
+`WORKBENCH_ARTIFACT_ROOT` store the fitted Python model and the exact editor
+inputs needed on the single-host Cloud PC. That shared artifact directory must
+be visible to the notebook and Airflow processes.
+
+A model-local `write_review_workbook(...)` hook may translate prepared axes for
+presentation, such as showing `exp(LogDensity)` as raw density. The resulting
+`rating_tables_review.xlsx` is presentation-only, is integrity-tracked, and is
+never staged for SQL scoring. The canonical prepared-feature workbook remains
+the operational export.
 
 ### Custom DAG Publish Task
 

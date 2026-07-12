@@ -81,6 +81,10 @@ class EditorSubmission:
     published_rate_package_id: int | None = field(default=None, repr=False)
     published_model_run_id: int | None = field(default=None, repr=False)
 
+    @property
+    def parent_package_version(self) -> int:
+        return self.source_package_version
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "format": SUBMISSION_FORMAT,

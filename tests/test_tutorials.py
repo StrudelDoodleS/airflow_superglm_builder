@@ -5,6 +5,7 @@ from pathlib import Path
 TUTORIAL_NOTEBOOK = Path("tutorials/basic_sql_etl_and_schema_walkthrough.ipynb")
 TUTORIAL_DDL = Path("tutorials/schema/pricing_useful_tables_ddl.sql")
 REFERENCE_DDL = Path("docs/pricing_useful_tables_ddl.sql")
+CANDIDATE_WORKBENCH_NOTEBOOK = Path("tutorials/scaffolded_candidate_workbench.ipynb")
 
 
 def _notebook_text() -> str:
@@ -107,3 +108,22 @@ def test_basic_sql_etl_notebook_explains_model_revision_and_deployment_rules():
         "historical packages remain",
     ]:
         assert expected in text
+
+
+def test_candidate_workbench_notebook_uses_runtime_facade_and_no_sql_ids():
+    notebook = json.loads(CANDIDATE_WORKBENCH_NOTEBOOK.read_text(encoding="utf-8"))
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") in {"markdown", "code"}
+    )
+
+    assert "Workbench.from_runtime()" in source
+    assert 'workbench.candidates("MY_MODEL")' in source
+    assert "candidate.editor()" in source
+    assert "candidate.submit_edits(" in source
+    assert "submission.status()" in source
+    assert "submission.request_deployment(" in source
+    assert "rate_package_id=" not in source
+    assert "create_engine(" not in source
+    assert "AIRFLOW_API_TOKEN" not in source
