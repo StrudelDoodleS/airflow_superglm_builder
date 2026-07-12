@@ -1225,7 +1225,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         publication_receipt_sha256="c" * 64,
     )
 
-    assert len(events) == 5
+    assert len(events) == 8
     sql = events[1][1]
     params = events[1][2]
     assert "MERGE pricing.MODEL_RUN" in sql
@@ -1305,20 +1305,140 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
     executed_sql = [event[1] for event in events if event[0] == "execute"]
     assert "MERGE pricing.MODEL_RUN" in executed_sql[0]
     assert "SELECT model_run_id" in executed_sql[1]
-    assert "MERGE mlops.MODEL_RUN_DATASET" in executed_sql[2]
-    assert "MERGE mlops.MODEL_RUN_SPLIT_SET" in executed_sql[3]
-    assert events[3][2] == {
+    dataset_upsert = next(
+        event
+        for event in events
+        if event[0] == "execute" and "MERGE mlops.MODEL_RUN_DATASET" in event[1]
+    )
+    split_upsert = next(
+        event
+        for event in events
+        if event[0] == "execute" and "MERGE mlops.MODEL_RUN_SPLIT_SET" in event[1]
+    )
+    assert dataset_upsert[2] == {
         "model_run_id": 501,
         "manifest_id": "manifest-1",
         "dataset_role": "training",
     }
-    assert events[4][2] == {
+    assert split_upsert[2] == {
         "model_run_id": 501,
         "manifest_id": "manifest-1",
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
         "split_role": "validation",
     }
+
+
+def test_record_model_run_cleans_superseded_primary_lineage_before_upserts():
+    events = []
+    engine = FakeLineageEngine(events)
+
+    lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-07-12",
+        mlflow_run_id="mlflow-2",
+        manifest_id="manifest-2",
+        split_set_id="split-2",
+        export_id="export-2",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v2",
+        rate_package_id=43,
+        rating_workbook_path="/tmp/attempt-2/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+    )
+
+    executed = [event for event in events if event[0] == "execute"]
+    fold_cleanup = next(event for event in executed if "DELETE fold_metric" in event[1])
+    split_cleanup = next(
+        event
+        for event in executed
+        if "DELETE split_link" in event[1] and "MODEL_RUN_SPLIT_SET" in event[1]
+    )
+    dataset_cleanup = next(
+        event
+        for event in executed
+        if "DELETE dataset_link" in event[1] and "MODEL_RUN_DATASET" in event[1]
+    )
+    dataset_upsert = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_DATASET" in event[1]
+        and ":parent_model_run_id" not in event[1]
+    )
+    split_upsert = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_SPLIT_SET" in event[1]
+        and ":parent_model_run_id" not in event[1]
+    )
+    split_params = {
+        "model_run_id": 501,
+        "manifest_id": "manifest-2",
+        "split_set_id": "split-2",
+        "dataset_role": "training",
+        "split_role": "validation",
+    }
+    assert fold_cleanup[2] == split_params
+    assert split_cleanup[2] == split_params
+    assert dataset_cleanup[2] == {
+        "model_run_id": 501,
+        "manifest_id": "manifest-2",
+        "dataset_role": "training",
+    }
+    assert (
+        executed.index(fold_cleanup)
+        < executed.index(split_cleanup)
+        < executed.index(dataset_cleanup)
+        < executed.index(dataset_upsert)
+        < executed.index(split_upsert)
+    )
+
+
+def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
+    events = []
+    engine = FakeLineageEngine(events)
+
+    lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-07-12",
+        mlflow_run_id="mlflow-2",
+        manifest_id="manifest-2",
+        split_set_id=None,
+        export_id="export-2",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v2",
+        rate_package_id=43,
+        rating_workbook_path="/tmp/attempt-2/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+    )
+
+    executed = [event for event in events if event[0] == "execute"]
+    fold_cleanup = next(event for event in executed if "DELETE fold_metric" in event[1])
+    split_cleanup = next(
+        event
+        for event in executed
+        if "DELETE split_link" in event[1] and "MODEL_RUN_SPLIT_SET" in event[1]
+    )
+    expected_params = {
+        "model_run_id": 501,
+        "manifest_id": "manifest-2",
+        "split_set_id": None,
+        "dataset_role": "training",
+        "split_role": "validation",
+    }
+    assert fold_cleanup[2] == expected_params
+    assert split_cleanup[2] == expected_params
+    assert not any(
+        "MERGE mlops.MODEL_RUN_SPLIT_SET" in event[1]
+        and ":parent_model_run_id" not in event[1]
+        for event in executed
+    )
 
 
 def test_record_model_run_on_connection_inherits_all_parent_associations_idempotently():

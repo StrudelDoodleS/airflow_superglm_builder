@@ -142,6 +142,42 @@ def test_candidates_can_return_explicit_technical_view(monkeypatch):
     assert history.iloc[0]["candidate_artifact_sha256"] == "c" * 64
 
 
+def test_candidate_history_binds_validation_split_to_current_manifest():
+    statements = []
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Connection:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    workbench = _api().Workbench(
+        engine=Engine(),
+        settings=_settings(),
+        config_loader=lambda name: SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+    )
+
+    assert workbench._candidate_rows("HOME_FREQ", "HOME_FREQ_UAT") == []
+    assert "split_link.manifest_id = mr.manifest_id" in statements[0][0]
+
+
 def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypatch):
     api = _api()
     metadata = save_candidate_bundle(_bundle(), tmp_path / "candidate.joblib")

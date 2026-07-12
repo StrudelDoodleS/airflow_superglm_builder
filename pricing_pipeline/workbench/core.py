@@ -303,6 +303,7 @@ class Workbench:
               ON manifest.manifest_id = mr.manifest_id
             LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
               ON split_link.model_run_id = mr.model_run_id
+             AND split_link.manifest_id = mr.manifest_id
              AND split_link.split_role = 'validation'
             LEFT JOIN {schemas.mlops}.MODEL_RUN_METRIC AS cv
               ON cv.model_run_id = mr.model_run_id

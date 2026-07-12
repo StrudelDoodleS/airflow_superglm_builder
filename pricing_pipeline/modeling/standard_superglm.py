@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,9 @@ from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate
 
 class StandardSuperGLMError(ValueError):
     """Raised when the shared SuperGLM build contract is violated."""
+
+
+_SAFE_ATTEMPT_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -333,6 +337,27 @@ def hash_file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _manifest_attempt_directory(output_dir: str | Path, manifest_id: str) -> Path:
+    if not isinstance(manifest_id, str) or not _SAFE_ATTEMPT_COMPONENT.fullmatch(manifest_id):
+        raise StandardSuperGLMError(
+            "manifest_id must be a safe path component using letters, numbers, '.', '_', or '-'"
+        )
+    output_root = Path(output_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    attempt_dir = (output_root / manifest_id).resolve()
+    if attempt_dir.parent != output_root:
+        raise StandardSuperGLMError(
+            f"manifest attempt directory is outside run output directory {output_root}"
+        )
+    try:
+        attempt_dir.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise StandardSuperGLMError(
+            f"manifest attempt directory already exists; refusing to overwrite: {attempt_dir}"
+        ) from exc
+    return attempt_dir
+
+
 def call_review_hook(
     hook: Callable[..., str | Path | None] | None,
     *,
@@ -488,8 +513,16 @@ def run_standard_superglm_build(
         else fit_weight_name
     )
 
-    run_dir = Path(output_dir).resolve()
-    run_dir.mkdir(parents=True, exist_ok=True)
+    manifest = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=manifest_spec,
+        validation_split=validation_split,
+        validation_split_artifact_root=Path(split_artifact_root),
+        split_indices=list(evidence.fold_indices),
+        created_by=created_by,
+    )
+    run_dir = _manifest_attempt_directory(output_dir, manifest.manifest_id)
     workbook_path = run_dir / "rating_tables.xlsx"
     export_options = dict(offset_export_options or {})
     if inputs.offset is not None:
@@ -519,15 +552,6 @@ def run_standard_superglm_build(
         allowed_root=run_dir,
     )
 
-    manifest = create_model_frame_manifest_with_split(
-        engine,
-        frame=frame,
-        spec=manifest_spec,
-        validation_split=validation_split,
-        validation_split_artifact_root=Path(split_artifact_root),
-        split_indices=list(evidence.fold_indices),
-        created_by=created_by,
-    )
     source_sha256 = hash_model_source(model_source_root)
     cv_report = dict(evidence.report)
     cv_report["full_fit_telemetry"] = telemetry

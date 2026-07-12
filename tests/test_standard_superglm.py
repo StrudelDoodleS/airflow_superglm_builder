@@ -240,6 +240,20 @@ def test_review_hook_rejects_artifact_outside_run_directory(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "manifest_id",
+    ("../escape", "nested/manifest", "manifest id", ".", ""),
+)
+def test_manifest_attempt_directory_rejects_unsafe_path_components(
+    tmp_path,
+    manifest_id,
+):
+    api = _api()
+
+    with pytest.raises(api.StandardSuperGLMError, match="safe path component"):
+        api._manifest_attempt_directory(tmp_path / "run", manifest_id)
+
+
 def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metadata(
     tmp_path,
     monkeypatch,
@@ -270,12 +284,15 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         Path(output_path).write_bytes(b"canonical workbook")
         return Path(output_path)
 
+    manifest_ids = iter(("manifest-1", "manifest-2"))
+
     def fake_manifest(engine, **kwargs):
         captured["manifest"] = kwargs
+        manifest_id = next(manifest_ids)
         return SimpleNamespace(
-            manifest_id="manifest-1",
-            split_set_id="split-1",
-            split_artifact_uri=str(tmp_path / "splits" / "split-1.npz"),
+            manifest_id=manifest_id,
+            split_set_id=f"{manifest_id}-split",
+            split_artifact_uri=str(tmp_path / "splits" / f"{manifest_id}-split.npz"),
         )
 
     def fake_receipt_writer(receipt, path):
@@ -293,46 +310,34 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         return output_path
 
     inputs = api.ModelInputs(X=frame[["age"]], y=frame["target"].to_numpy())
-    result = api.run_standard_superglm_build(
-        object(),
-        frame=frame,
-        inputs=inputs,
-        model_factory=model_factory,
-        split_indices=_folds(),
-        fit_mode="fit_reml",
-        scoring=("deviance",),
-        cross_validate_fn=lambda *args, **kwargs: _cv_result(),
-        output_dir=tmp_path / "run",
-        model_name="HOME_FREQ",
-        model_version="v1",
-        export_id="export-1",
-        effective_from="2026-07-12",
-        manifest_spec=ModelFrameManifestSpec(
+    build_kwargs = {
+        "frame": frame,
+        "inputs": inputs,
+        "model_factory": model_factory,
+        "split_indices": _folds(),
+        "fit_mode": "fit_reml",
+        "scoring": ("deviance",),
+        "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
+        "output_dir": tmp_path / "run",
+        "model_name": "HOME_FREQ",
+        "model_version": "v1",
+        "export_id": "export-1",
+        "effective_from": "2026-07-12",
+        "manifest_spec": ModelFrameManifestSpec(
             dataset_name="home_freq_frame",
             source_system="pytest",
             data_as_of_date="2026-06-30",
             pk_columns=("policy_id",),
             target_column="target",
         ),
-        validation_split=ValidationSplitConfig.custom(materialize=True),
-        split_artifact_root=tmp_path / "splits",
-        model_source_root=source_root,
-        created_by="pytest",
-        review_workbook_hook=write_review_workbook,
-    )
+        "validation_split": ValidationSplitConfig.custom(materialize=True),
+        "split_artifact_root": tmp_path / "splits",
+        "model_source_root": source_root,
+        "created_by": "pytest",
+        "review_workbook_hook": write_review_workbook,
+    }
+    result = api.run_standard_superglm_build(object(), **build_kwargs)
 
-    assert [test.tolist() for _, test in captured["manifest"]["split_indices"]] == [
-        [2],
-        [0],
-    ]
-    assert models[1].fit_X.equals(inputs.X)
-    assert captured["export_weight"] is None
-    assert result.completed_build["manifest_id"] == "manifest-1"
-    assert result.completed_build["split_set_id"] == "split-1"
-    assert Path(result.completed_build["candidate_artifact_path"]).exists()
-    assert result.completed_build["candidate_artifact_sha256"]
-    assert result.completed_build["model_source_sha256"]
-    assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     from pricing_pipeline.workbench.artifacts import load_candidate_bundle
 
     bundle = load_candidate_bundle(
@@ -344,9 +349,60 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         expected_superglm_version=result.completed_build["candidate_superglm_version"],
         allowed_root=tmp_path / "run",
     )
+    assert bundle.review_artifact is not None
+    first_paths = {
+        "workbook": Path(result.completed_build["rating_workbook_path"]),
+        "receipt": Path(result.completed_build["publication_receipt_path"]),
+        "candidate": Path(result.completed_build["candidate_artifact_path"]),
+        "review": Path(bundle.review_artifact["path"]),
+    }
+    first_bytes = {name: path.read_bytes() for name, path in first_paths.items()}
+    second_result = api.run_standard_superglm_build(object(), **build_kwargs)
+
+    assert [test.tolist() for _, test in captured["manifest"]["split_indices"]] == [
+        [2],
+        [0],
+    ]
+    assert models[1].fit_X.equals(inputs.X)
+    assert captured["export_weight"] is None
+    assert result.completed_build["manifest_id"] == "manifest-1"
+    assert result.completed_build["split_set_id"] == "manifest-1-split"
+    assert second_result.completed_build["manifest_id"] == "manifest-2"
+    second_bundle = load_candidate_bundle(
+        second_result.completed_build["candidate_artifact_path"],
+        expected_sha256=second_result.completed_build["candidate_artifact_sha256"],
+        expected_size_bytes=second_result.completed_build["candidate_artifact_size_bytes"],
+        expected_format=second_result.completed_build["candidate_artifact_format"],
+        expected_python_version=second_result.completed_build["candidate_python_version"],
+        expected_superglm_version=second_result.completed_build["candidate_superglm_version"],
+        allowed_root=tmp_path / "run",
+    )
+    assert second_bundle.review_artifact is not None
+    second_paths = {
+        "workbook": Path(second_result.completed_build["rating_workbook_path"]),
+        "receipt": Path(second_result.completed_build["publication_receipt_path"]),
+        "candidate": Path(second_result.completed_build["candidate_artifact_path"]),
+        "review": Path(second_bundle.review_artifact["path"]),
+    }
+    assert {path.parent for path in first_paths.values()} == {
+        (tmp_path / "run" / "manifest-1").resolve()
+    }
+    assert {path.parent for path in second_paths.values()} == {
+        (tmp_path / "run" / "manifest-2").resolve()
+    }
+    assert set(first_paths.values()).isdisjoint(second_paths.values())
+    assert {name: path.read_bytes() for name, path in first_paths.items()} == first_bytes
+    assert Path(result.completed_build["candidate_artifact_path"]).exists()
+    assert result.completed_build["candidate_artifact_sha256"]
+    assert result.completed_build["model_source_sha256"]
+    assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert bundle.review_artifact == {
-        "path": str((tmp_path / "run" / "rating_tables_review.xlsx").resolve()),
-        "sha256": api.hash_file_sha256(tmp_path / "run" / "rating_tables_review.xlsx"),
+        "path": str(
+            (tmp_path / "run" / "manifest-1" / "rating_tables_review.xlsx").resolve()
+        ),
+        "sha256": api.hash_file_sha256(
+            tmp_path / "run" / "manifest-1" / "rating_tables_review.xlsx"
+        ),
         "size_bytes": len(b"presentation only"),
     }
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
