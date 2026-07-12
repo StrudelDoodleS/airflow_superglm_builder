@@ -128,6 +128,23 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert numeric["effective"]["encoding"] == "identity"
 
 
+def test_receipt_records_actual_fit_and_export_weight_usage():
+    model = _fit_model({"age": Numeric()})
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+        fit_sample_weight_name="Exposure",
+        export_weight_name="PortfolioExposure",
+    )
+
+    model_metadata = receipt.package_metadata["model"]
+    assert model_metadata["fit_sample_weight_used"] is True
+    assert model_metadata["fit_sample_weight_name"] == "Exposure"
+    assert model_metadata["export_weight_used"] is True
+    assert model_metadata["export_weight_name"] == "PortfolioExposure"
+
+
 def test_extracts_tweedie_family_metadata():
     model = _fit_model({"age": Numeric()}, family=Tweedie(p=1.5))
 

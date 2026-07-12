@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from superglm import cross_validate
+
+from pricing_pipeline.data.manifest import (
+    ModelFrameManifestSpec,
+    create_model_frame_manifest_with_split,
+)
+from pricing_pipeline.data.row_identity import compute_row_order_sha256
+from pricing_pipeline.models.config import ValidationSplitConfig
+from pricing_pipeline.orchestration.completed_build_helpers import completed_model_build_payload
+from pricing_pipeline.publishing.rating_export import export_rating_tables
+from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    OffsetExportContract,
+    write_publication_receipt,
+)
+from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
 
 
 class StandardSuperGLMError(ValueError):
@@ -38,6 +55,14 @@ class CVEvidence:
     report: dict[str, Any]
     metrics: dict[str, float]
     fold_metrics: tuple[FoldMetric, ...]
+
+
+@dataclass(frozen=True)
+class StandardBuildResult:
+    completed_build: dict[str, Any]
+    fold_indices: tuple[tuple[np.ndarray, np.ndarray], ...]
+    cv_report: dict[str, Any]
+    metrics: dict[str, float]
 
 
 class PrecomputedSplitter:
@@ -253,4 +278,231 @@ def run_cross_validation(
         report=report,
         metrics=metrics,
         fold_metrics=fold_metrics,
+    )
+
+
+def hash_model_source(root: str | Path) -> str:
+    source_root = Path(root).resolve()
+    if not source_root.is_dir():
+        raise StandardSuperGLMError(f"model source root does not exist: {source_root}")
+    paths = sorted(
+        path
+        for path in source_root.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".py", ".sql", ".toml"}
+    )
+    if not paths:
+        raise StandardSuperGLMError(
+            f"model source root contains no .py, .sql, or .toml files: {source_root}"
+        )
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.relative_to(source_root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _weight_name(
+    value: pd.Series | np.ndarray | None,
+    explicit_name: str | None,
+    *,
+    role: str,
+) -> str | None:
+    if value is None:
+        if explicit_name is not None:
+            raise StandardSuperGLMError(f"{role}_name was supplied without {role}")
+        return None
+    if explicit_name is not None and str(explicit_name).strip():
+        return str(explicit_name).strip()
+    if isinstance(value, pd.Series) and value.name is not None and str(value.name).strip():
+        return str(value.name).strip()
+    raise StandardSuperGLMError(
+        f"{role} uses an unnamed array; supply {role}_name once in ModelInputs"
+    )
+
+
+def fit_full_model(model, inputs: ModelInputs, *, fit_mode: str):
+    if fit_mode not in {"fit", "fit_reml"}:
+        raise StandardSuperGLMError(f"unsupported fit_mode {fit_mode!r}")
+    fit_fn = getattr(model, fit_mode, None)
+    if not callable(fit_fn):
+        raise StandardSuperGLMError(f"model has no callable {fit_mode} method")
+    fitted = fit_fn(
+        inputs.X,
+        inputs.y,
+        sample_weight=inputs.sample_weight,
+        offset=inputs.offset,
+    )
+    telemetry_fn = getattr(fitted, "training_telemetry", None)
+    telemetry = telemetry_fn() if callable(telemetry_fn) else {}
+    if telemetry.get("converged") is False:
+        raise StandardSuperGLMError("full training fit did not converge")
+    return fitted, _json_primitive(telemetry)
+
+
+def _resolved_offset_contract(
+    inputs: ModelInputs,
+    offset_contract: OffsetExportContract | None,
+) -> OffsetExportContract:
+    if inputs.offset is None:
+        if offset_contract is None:
+            return OffsetExportContract(handling="NONE")
+        if offset_contract.handling != "NONE":
+            raise StandardSuperGLMError(
+                "offset contract must use handling='NONE' when fit offset is absent"
+            )
+        return offset_contract
+    if offset_contract is None or offset_contract.handling == "NONE":
+        raise StandardSuperGLMError(
+            "a fitted offset requires a model-owned non-NONE OffsetExportContract"
+        )
+    return offset_contract
+
+
+def run_standard_superglm_build(
+    engine,
+    *,
+    frame: pd.DataFrame,
+    inputs: ModelInputs,
+    model_factory: Callable[[], Any],
+    split_indices: Iterable[tuple[Any, Any]],
+    fit_mode: str,
+    scoring: str | Callable | Sequence[str | Callable],
+    output_dir: str | Path,
+    model_name: str,
+    model_version: str,
+    export_id: str,
+    effective_from: str,
+    manifest_spec: ModelFrameManifestSpec,
+    validation_split: ValidationSplitConfig,
+    split_artifact_root: str | Path,
+    model_source_root: str | Path,
+    created_by: str,
+    offset_contract: OffsetExportContract | None = None,
+    offset_export_options: dict[str, Any] | None = None,
+    cross_validate_fn: Callable[..., Any] = cross_validate,
+) -> StandardBuildResult:
+    _validate_input_lengths(inputs)
+    folds = list(split_indices)
+    evidence = run_cross_validation(
+        model_factory(),
+        inputs,
+        split_indices=folds,
+        fit_mode=fit_mode,
+        scoring=scoring,
+        cross_validate_fn=cross_validate_fn,
+    )
+    fitted, telemetry = fit_full_model(model_factory(), inputs, fit_mode=fit_mode)
+    resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
+    fit_weight_name = _weight_name(
+        inputs.sample_weight,
+        inputs.sample_weight_name,
+        role="sample_weight",
+    )
+    export_weight = (
+        inputs.export_weight if inputs.export_weight is not None else inputs.sample_weight
+    )
+    export_weight_name = (
+        _weight_name(
+            inputs.export_weight,
+            inputs.export_weight_name,
+            role="export_weight",
+        )
+        if inputs.export_weight is not None
+        else fit_weight_name
+    )
+
+    run_dir = Path(output_dir).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = run_dir / "rating_tables.xlsx"
+    export_options = dict(offset_export_options or {})
+    if inputs.offset is not None:
+        export_options["offset"] = inputs.offset
+    export_rating_tables(
+        fitted,
+        inputs.X,
+        inputs.y,
+        export_weight,
+        output_path=workbook_path,
+        mlflow_client=None,
+        **export_options,
+    )
+    receipt = build_superglm_publication_receipt(
+        fitted,
+        offset_contract=resolved_offset_contract,
+        fit_sample_weight_name=fit_weight_name,
+        export_weight_name=export_weight_name,
+    )
+    receipt_path = run_dir / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(receipt, receipt_path)
+
+    manifest = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=manifest_spec,
+        validation_split=validation_split,
+        validation_split_artifact_root=Path(split_artifact_root),
+        split_indices=list(evidence.fold_indices),
+        created_by=created_by,
+    )
+    source_sha256 = hash_model_source(model_source_root)
+    cv_report = dict(evidence.report)
+    cv_report["full_fit_telemetry"] = telemetry
+    bundle = CandidateBundle(
+        fitted_model=fitted,
+        X=inputs.X.copy(),
+        y=np.asarray(inputs.y).copy(),
+        sample_weight=(
+            None if inputs.sample_weight is None else np.asarray(inputs.sample_weight).copy()
+        ),
+        offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
+        export_weight=None if export_weight is None else np.asarray(export_weight).copy(),
+        cv_report=cv_report,
+        manifest_id=manifest.manifest_id,
+        split_set_id=manifest.split_set_id,
+        pk_columns=manifest_spec.pk_columns,
+        row_order_sha256=compute_row_order_sha256(
+            frame,
+            pk_columns=manifest_spec.pk_columns,
+        ),
+        model_source_sha256=source_sha256,
+        offset_contract=resolved_offset_contract.model_dump(mode="json"),
+    )
+    artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
+    fold_metric_records = tuple(
+        {
+            "fold_no": metric.fold_no,
+            "metric_name": metric.metric_name,
+            "metric_value": metric.metric_value,
+        }
+        for metric in evidence.fold_metrics
+    )
+    completed_build = completed_model_build_payload(
+        rating_workbook_path=workbook_path,
+        model_version=model_version,
+        effective_from=effective_from,
+        export_id=export_id,
+        created_by=created_by,
+        manifest_id=manifest.manifest_id,
+        split_set_id=manifest.split_set_id,
+        candidate_artifact_path=artifact.path,
+        candidate_artifact_sha256=artifact.sha256,
+        candidate_artifact_format=artifact.format,
+        candidate_artifact_size_bytes=artifact.size_bytes,
+        candidate_python_version=artifact.python_version,
+        candidate_superglm_version=artifact.superglm_version,
+        model_source_sha256=source_sha256,
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=receipt_sha256,
+        metrics=evidence.metrics,
+        metric_scopes={name: "cv" for name in evidence.metrics},
+        fold_metrics=fold_metric_records,
+    )
+    cv_report["model_name"] = model_name
+    return StandardBuildResult(
+        completed_build=completed_build,
+        fold_indices=evidence.fold_indices,
+        cv_report=cv_report,
+        metrics=evidence.metrics,
     )

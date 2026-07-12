@@ -2,11 +2,33 @@ from __future__ import annotations
 
 import importlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from pricing_pipeline.data.manifest import ModelFrameManifestSpec
+from pricing_pipeline.models.config import ValidationSplitConfig
+
+
+class _FakeModel:
+    def __init__(self):
+        self.fit_X = None
+        self.fit_y = None
+        self.fit_sample_weight = None
+        self.fit_offset = None
+
+    def fit_reml(self, X, y, sample_weight=None, offset=None):
+        self.fit_X = X.copy()
+        self.fit_y = y.copy()
+        self.fit_sample_weight = sample_weight
+        self.fit_offset = offset
+        return self
+
+    def training_telemetry(self):
+        return {"converged": True, "n_iter": 4}
 
 
 def _api():
@@ -156,3 +178,92 @@ def test_run_cross_validation_rejects_non_converged_fold():
                 converged=(True, False)
             ),
         )
+
+
+def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    source_root = tmp_path / "pricing_models" / "home_freq"
+    (source_root / "sql").mkdir(parents=True)
+    (source_root / "modeling.py").write_text("FIT_MODE = 'fit_reml'\n", encoding="utf-8")
+    (source_root / "model.toml").write_text('model_name = "HOME_FREQ"\n', encoding="utf-8")
+    (source_root / "sql" / "source.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    captured = {}
+    models = []
+
+    def model_factory():
+        model = _FakeModel()
+        models.append(model)
+        return model
+
+    def fake_export(model, X, y, exposure, output_path, **kwargs):
+        captured["export_weight"] = exposure
+        Path(output_path).write_bytes(b"canonical workbook")
+        return Path(output_path)
+
+    def fake_manifest(engine, **kwargs):
+        captured["manifest"] = kwargs
+        return SimpleNamespace(
+            manifest_id="manifest-1",
+            split_set_id="split-1",
+            split_artifact_uri=str(tmp_path / "splits" / "split-1.npz"),
+        )
+
+    def fake_receipt_writer(receipt, path):
+        Path(path).write_bytes(b"canonical receipt")
+        return "c" * 64
+
+    monkeypatch.setattr(api, "export_rating_tables", fake_export)
+    monkeypatch.setattr(api, "create_model_frame_manifest_with_split", fake_manifest)
+    monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
+    monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
+
+    inputs = api.ModelInputs(X=frame[["age"]], y=frame["target"].to_numpy())
+    result = api.run_standard_superglm_build(
+        object(),
+        frame=frame,
+        inputs=inputs,
+        model_factory=model_factory,
+        split_indices=_folds(),
+        fit_mode="fit_reml",
+        scoring=("deviance",),
+        cross_validate_fn=lambda *args, **kwargs: _cv_result(),
+        output_dir=tmp_path / "run",
+        model_name="HOME_FREQ",
+        model_version="v1",
+        export_id="export-1",
+        effective_from="2026-07-12",
+        manifest_spec=ModelFrameManifestSpec(
+            dataset_name="home_freq_frame",
+            source_system="pytest",
+            data_as_of_date="2026-06-30",
+            pk_columns=("policy_id",),
+            target_column="target",
+        ),
+        validation_split=ValidationSplitConfig.custom(materialize=True),
+        split_artifact_root=tmp_path / "splits",
+        model_source_root=source_root,
+        created_by="pytest",
+    )
+
+    assert [test.tolist() for _, test in captured["manifest"]["split_indices"]] == [
+        [2],
+        [0],
+    ]
+    assert models[1].fit_X.equals(inputs.X)
+    assert captured["export_weight"] is None
+    assert result.completed_build["manifest_id"] == "manifest-1"
+    assert result.completed_build["split_set_id"] == "split-1"
+    assert Path(result.completed_build["candidate_artifact_path"]).exists()
+    assert result.completed_build["candidate_artifact_sha256"]
+    assert result.completed_build["model_source_sha256"]
+    assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)

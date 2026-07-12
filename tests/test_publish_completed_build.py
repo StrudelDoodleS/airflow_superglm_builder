@@ -91,6 +91,40 @@ def test_completed_model_build_round_trips_plain_dict(tmp_path):
     assert CompletedModelBuild.from_mapping(build) is build
 
 
+def test_completed_model_build_accepts_complete_candidate_metadata():
+    build = CompletedModelBuild(
+        rating_workbook_path="rating.xlsx",
+        model_version="v1",
+        effective_from="2026-07-12",
+        candidate_artifact_path="candidate.joblib",
+        candidate_artifact_sha256="a" * 64,
+        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_size_bytes=123,
+        candidate_python_version="3.14.4",
+        candidate_superglm_version="0.11.0",
+        model_source_sha256="b" * 64,
+        metrics={"cv_pooled_deviance": 0.42},
+        metric_scopes={"cv_pooled_deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
+
+    assert build.candidate_artifact_size_bytes == 123
+    assert build.metric_scopes["cv_pooled_deviance"] == "cv"
+    assert build.fold_metrics[0]["metric_name"] == "deviance"
+
+
+def test_completed_model_build_rejects_partial_candidate_metadata():
+    with pytest.raises(CompletedModelBuildError, match="candidate artifact fields"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from="2026-07-12",
+            candidate_artifact_path="candidate.joblib",
+        )
+
+
 def test_completed_model_build_to_dict_omits_unset_publication_receipt_fields():
     build = CompletedModelBuild(
         rating_workbook_path="/tmp/rating.xlsx",

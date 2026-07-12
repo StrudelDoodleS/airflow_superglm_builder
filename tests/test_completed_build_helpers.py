@@ -64,6 +64,35 @@ def test_completed_model_build_payload_includes_optional_mlflow_run_id():
     }
 
 
+def test_completed_model_build_payload_carries_candidate_artifact_and_metrics():
+    payload = completed_model_build_payload(
+        rating_workbook_path="/tmp/rating.xlsx",
+        model_version="v4",
+        effective_from="2026-06-05",
+        export_id="model__run_1",
+        created_by="airflow",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        candidate_artifact_path="/tmp/candidate.joblib",
+        candidate_artifact_sha256="a" * 64,
+        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_size_bytes=123,
+        candidate_python_version="3.14.4",
+        candidate_superglm_version="0.11.0",
+        model_source_sha256="b" * 64,
+        metrics={"cv_pooled_deviance": 0.42},
+        metric_scopes={"cv_pooled_deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
+
+    assert payload["candidate_artifact_path"] == "/tmp/candidate.joblib"
+    assert payload["candidate_artifact_size_bytes"] == 123
+    assert payload["metric_scopes"] == {"cv_pooled_deviance": "cv"}
+    assert payload["fold_metrics"][0]["fold_no"] == 1
+
+
 @pytest.mark.parametrize("manifest_id", [None, "", "   "])
 def test_completed_model_build_payload_requires_manifest_id(manifest_id):
     with pytest.raises(ValueError, match="manifest_id"):

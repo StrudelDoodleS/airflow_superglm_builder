@@ -461,6 +461,8 @@ def build_superglm_publication_receipt(
     *,
     offset_contract: OffsetExportContract,
     source_to_published_names: Mapping[str, str] | None = None,
+    fit_sample_weight_name: str | None = None,
+    export_weight_name: str | None = None,
 ) -> SuperGLMPublicationReceipt:
     overrides = source_to_published_names or {}
     term_metadata: dict[str, dict[str, Any]] = {}
@@ -503,6 +505,10 @@ def build_superglm_publication_receipt(
             "family_params": family_params,
             "link": _model_link_name(model),
             "fit_used_offset": fit_used_offset,
+            "fit_sample_weight_used": fit_sample_weight_name is not None,
+            "fit_sample_weight_name": fit_sample_weight_name,
+            "export_weight_used": export_weight_name is not None,
+            "export_weight_name": export_weight_name,
         }
     }
 

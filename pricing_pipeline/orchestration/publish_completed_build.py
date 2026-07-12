@@ -79,9 +79,18 @@ class CompletedModelBuild(BaseModel):
     manifest_id: str | None = None
     split_set_id: str | None = None
     model_artifact_path: str | None = None
+    candidate_artifact_path: str | None = None
+    candidate_artifact_sha256: str | None = None
+    candidate_artifact_format: str | None = None
+    candidate_artifact_size_bytes: int | None = None
+    candidate_python_version: str | None = None
+    candidate_superglm_version: str | None = None
+    model_source_sha256: str | None = None
     publication_receipt_path: str | None = None
     publication_receipt_sha256: str | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
+    metric_scopes: dict[str, str] = Field(default_factory=dict)
+    fold_metrics: tuple[dict[str, int | str | float], ...] = ()
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -109,10 +118,25 @@ class CompletedModelBuild(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json")
+        if self.candidate_artifact_path is None:
+            for field_name in (
+                "candidate_artifact_path",
+                "candidate_artifact_sha256",
+                "candidate_artifact_format",
+                "candidate_artifact_size_bytes",
+                "candidate_python_version",
+                "candidate_superglm_version",
+                "model_source_sha256",
+            ):
+                payload.pop(field_name)
         if self.publication_receipt_path is None:
             payload.pop("publication_receipt_path")
         if self.publication_receipt_sha256 is None:
             payload.pop("publication_receipt_sha256")
+        if not self.metric_scopes:
+            payload.pop("metric_scopes")
+        if not self.fold_metrics:
+            payload.pop("fold_metrics")
         return payload
 
     @field_validator("rating_workbook_path", "model_version", mode="before")
@@ -136,6 +160,10 @@ class CompletedModelBuild(BaseModel):
         "manifest_id",
         "split_set_id",
         "model_artifact_path",
+        "candidate_artifact_path",
+        "candidate_artifact_format",
+        "candidate_python_version",
+        "candidate_superglm_version",
         "publication_receipt_path",
         mode="before",
     )
@@ -162,11 +190,57 @@ class CompletedModelBuild(BaseModel):
             )
         return digest
 
+    @field_validator("candidate_artifact_sha256", "model_source_sha256", mode="before")
+    @classmethod
+    def _optional_candidate_sha256(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        digest = str(value).strip()
+        if (
+            len(digest) != 64
+            or digest.lower() != digest
+            or not all(char in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError("must be a 64-character lowercase hex SHA-256 digest")
+        return digest
+
+    @field_validator("candidate_artifact_size_bytes", mode="before")
+    @classmethod
+    def _optional_positive_size(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("must be a positive integer")
+        size = int(value)
+        if size <= 0:
+            raise ValueError("must be a positive integer")
+        return size
+
     @model_validator(mode="after")
     def _receipt_path_and_hash_are_paired(self) -> "CompletedModelBuild":
         if (self.publication_receipt_path is None) != (self.publication_receipt_sha256 is None):
             raise ValueError(
                 "publication_receipt_path and publication_receipt_sha256 must be supplied together"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _candidate_artifact_fields_are_complete(self) -> "CompletedModelBuild":
+        field_names = (
+            "candidate_artifact_path",
+            "candidate_artifact_sha256",
+            "candidate_artifact_format",
+            "candidate_artifact_size_bytes",
+            "candidate_python_version",
+            "candidate_superglm_version",
+            "model_source_sha256",
+        )
+        present = [name for name in field_names if getattr(self, name) is not None]
+        if present and len(present) != len(field_names):
+            missing = [name for name in field_names if name not in present]
+            raise ValueError(
+                "candidate artifact fields must be supplied together; missing: "
+                + ", ".join(missing)
             )
         return self
 
@@ -192,6 +266,57 @@ class CompletedModelBuild(BaseModel):
             metrics[metric_name] = metric_value
 
         return metrics
+
+    @field_validator("metric_scopes", mode="before")
+    @classmethod
+    def _metric_scope_values(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("metric_scopes must be a mapping")
+        scopes: dict[str, str] = {}
+        for key, raw_scope in value.items():
+            metric_name = str(key).strip()
+            scope = str(raw_scope).strip()
+            if not metric_name or not scope:
+                raise ValueError("metric scope names and values must be non-empty")
+            scopes[metric_name] = scope
+        return scopes
+
+    @field_validator("fold_metrics", mode="before")
+    @classmethod
+    def _fold_metric_values(cls, value: Any) -> tuple[dict[str, int | str | float], ...]:
+        if value is None:
+            return ()
+        records: list[dict[str, int | str | float]] = []
+        for raw in value:
+            if not isinstance(raw, Mapping):
+                raise ValueError("fold_metrics entries must be mappings")
+            try:
+                fold_no = int(raw["fold_no"])
+                metric_name = str(raw["metric_name"]).strip()
+                metric_value = float(raw["metric_value"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "fold_metrics entries require fold_no, metric_name, and metric_value"
+                ) from exc
+            if fold_no <= 0 or not metric_name or not math.isfinite(metric_value):
+                raise ValueError("fold_metrics entries must contain valid finite values")
+            records.append(
+                {
+                    "fold_no": fold_no,
+                    "metric_name": metric_name,
+                    "metric_value": metric_value,
+                }
+            )
+        return tuple(records)
+
+    @model_validator(mode="after")
+    def _metric_scopes_reference_metrics(self) -> "CompletedModelBuild":
+        unknown = sorted(set(self.metric_scopes) - set(self.metrics))
+        if unknown:
+            raise ValueError("metric_scopes reference unknown metrics: " + ", ".join(unknown))
+        return self
 
 
 @dataclass(frozen=True)

@@ -45,9 +45,18 @@ def completed_model_build_payload(
     split_set_id: str | None,
     mlflow_run_id: str | None = None,
     model_artifact_path: str | Path | None = None,
+    candidate_artifact_path: str | Path | None = None,
+    candidate_artifact_sha256: str | None = None,
+    candidate_artifact_format: str | None = None,
+    candidate_artifact_size_bytes: int | None = None,
+    candidate_python_version: str | None = None,
+    candidate_superglm_version: str | None = None,
+    model_source_sha256: str | None = None,
     publication_receipt_path: str | Path | None = None,
     publication_receipt_sha256: str | None = None,
     metrics: dict[str, float] | None = None,
+    metric_scopes: dict[str, str] | None = None,
+    fold_metrics: tuple[dict[str, int | str | float], ...] = (),
 ) -> dict[str, Any]:
     if manifest_id is None or not str(manifest_id).strip():
         raise ValueError("manifest_id is required")
@@ -62,9 +71,20 @@ def completed_model_build_payload(
         split_set_id=split_set_id,
         mlflow_run_id=mlflow_run_id,
         model_artifact_path=(str(model_artifact_path) if model_artifact_path is not None else None),
+        candidate_artifact_path=(
+            str(candidate_artifact_path) if candidate_artifact_path is not None else None
+        ),
+        candidate_artifact_sha256=candidate_artifact_sha256,
+        candidate_artifact_format=candidate_artifact_format,
+        candidate_artifact_size_bytes=candidate_artifact_size_bytes,
+        candidate_python_version=candidate_python_version,
+        candidate_superglm_version=candidate_superglm_version,
+        model_source_sha256=model_source_sha256,
         publication_receipt_path=(
             str(publication_receipt_path) if publication_receipt_path is not None else None
         ),
         publication_receipt_sha256=publication_receipt_sha256,
         metrics=metrics or {},
+        metric_scopes=metric_scopes or {},
+        fold_metrics=fold_metrics,
     ).to_dict()
