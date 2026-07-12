@@ -10,6 +10,7 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.workbench.artifacts import CandidateBundle
+from pricing_pipeline.workbench import load_verified_submission
 from pricing_pipeline.workbench.submission import EditorSubmissionError
 
 
@@ -169,6 +170,40 @@ def test_candidate_retains_live_editor_session_until_submission(tmp_path):
     assert payload["split_set_id"] == "split-1"
     assert payload["baseline_candidate_sha256"] == "c" * 64
     assert payload["claimed_identity"] == "prototype-local-not-authenticated"
+
+
+def test_public_submission_loader_rejects_omitted_allowed_root(tmp_path):
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Boundary contract")
+
+    with pytest.raises(TypeError, match="allowed_root"):
+        load_verified_submission(
+            Path(submission.path).resolve(),
+            submission.sha256,
+        )
+
+
+def test_public_submission_loader_rejects_absolute_path_outside_allowed_root(tmp_path):
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Boundary contract")
+    configured_root = tmp_path / "different-configured-root"
+
+    with pytest.raises(EditorSubmissionError, match="outside configured artifact root"):
+        load_verified_submission(
+            Path(submission.path).resolve(),
+            submission.sha256,
+            allowed_root=configured_root,
+        )
 
 
 def test_submit_requires_reason_and_an_open_live_session(tmp_path):

@@ -486,15 +486,14 @@ def load_verified_submission(
     path: str | Path,
     expected_sha256: str,
     *,
-    allowed_root: str | Path | None = None,
+    allowed_root: str | Path,
 ) -> EditorSubmission:
     submission_path = Path(path).expanduser().resolve()
-    if allowed_root is not None:
-        root = Path(allowed_root).expanduser().resolve()
-        if not submission_path.is_relative_to(root):
-            raise EditorSubmissionError(
-                f"submission is outside configured artifact root {root}: {submission_path}"
-            )
+    root = Path(allowed_root).expanduser().resolve()
+    if not submission_path.is_relative_to(root):
+        raise EditorSubmissionError(
+            f"submission is outside configured artifact root {root}: {submission_path}"
+        )
     if not submission_path.is_file():
         raise EditorSubmissionError(f"submission does not exist: {submission_path}")
     actual_sha256 = sha256_file(submission_path)
@@ -507,7 +506,7 @@ def load_verified_submission(
     session_path = Path(payload["editor_session_path"]).expanduser().resolve()
     model_path = Path(payload["edited_model_path"]).expanduser().resolve()
     for artifact_path in (session_path, model_path):
-        if allowed_root is not None and not artifact_path.is_relative_to(root):
+        if not artifact_path.is_relative_to(root):
             raise EditorSubmissionError(f"submission artifact is outside {root}: {artifact_path}")
         if not artifact_path.is_file():
             raise EditorSubmissionError(f"submission artifact does not exist: {artifact_path}")
