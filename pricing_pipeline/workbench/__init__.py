@@ -6,12 +6,16 @@ from pricing_pipeline.workbench.artifacts import (
     load_candidate_bundle,
     save_candidate_bundle,
 )
+from pricing_pipeline.workbench.core import Candidate, CandidateLineageError, Workbench
 
 __all__ = [
     "BUNDLE_FORMAT",
     "CandidateArtifactError",
     "CandidateArtifactMetadata",
     "CandidateBundle",
+    "Candidate",
+    "CandidateLineageError",
+    "Workbench",
     "load_candidate_bundle",
     "save_candidate_bundle",
 ]
