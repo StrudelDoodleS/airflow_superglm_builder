@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 
+import pytest
 import yaml
 
 from pricing_pipeline.infra.config import Settings
@@ -356,12 +358,12 @@ def test_settings_resolves_relative_artifact_roots_from_cwd_without_project_root
     assert settings.workbench_artifact_root == launch_root / "workbench"
 
 
-def test_settings_keeps_absolute_artifact_roots_absolute(tmp_path):
+def test_settings_canonicalizes_absolute_artifact_roots(tmp_path):
     project_root = tmp_path / "project"
     absolute_roots = {
-        "RATING_EXPORT_ROOT": tmp_path / "external-rating",
-        "VALIDATION_SPLIT_ARTIFACT_ROOT": tmp_path / "external-splits",
-        "WORKBENCH_ARTIFACT_ROOT": tmp_path / "external-workbench",
+        "RATING_EXPORT_ROOT": tmp_path / "external" / ".." / "external-rating",
+        "VALIDATION_SPLIT_ARTIFACT_ROOT": tmp_path / "external" / "../external-splits",
+        "WORKBENCH_ARTIFACT_ROOT": tmp_path / "external" / "../external-workbench",
     }
 
     settings = Settings.from_env(
@@ -371,11 +373,52 @@ def test_settings_keeps_absolute_artifact_roots_absolute(tmp_path):
         }
     )
 
-    assert settings.rating_export_root == absolute_roots["RATING_EXPORT_ROOT"]
+    assert settings.rating_export_root == absolute_roots["RATING_EXPORT_ROOT"].resolve()
     assert settings.validation_split_artifact_root == absolute_roots[
         "VALIDATION_SPLIT_ARTIFACT_ROOT"
-    ]
-    assert settings.workbench_artifact_root == absolute_roots["WORKBENCH_ARTIFACT_ROOT"]
+    ].resolve()
+    assert settings.workbench_artifact_root == absolute_roots[
+        "WORKBENCH_ARTIFACT_ROOT"
+    ].resolve()
+
+
+def test_settings_expands_user_for_project_and_artifact_roots(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": "~/pricing/../project",
+            "RATING_EXPORT_ROOT": "~/artifacts/../rating",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "state/../splits",
+            "WORKBENCH_ARTIFACT_ROOT": "work/../workbench",
+        }
+    )
+
+    assert settings.rating_export_root == home / "rating"
+    assert settings.validation_split_artifact_root == home / "project/splits"
+    assert settings.workbench_artifact_root == home / "project/workbench"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
+@pytest.mark.parametrize(
+    ("env_name", "windows_path"),
+    [
+        ("PRICING_PROJECT_ROOT", r"C:\pricing\project"),
+        ("WORKBENCH_ARTIFACT_ROOT", "D:/pricing/workbench"),
+    ],
+)
+def test_settings_rejects_windows_absolute_paths_under_posix(
+    tmp_path,
+    env_name,
+    windows_path,
+):
+    env = {"PRICING_PROJECT_ROOT": str(tmp_path / "project")}
+    env[env_name] = windows_path
+
+    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+        Settings.from_env(env)
 
 
 def test_settings_repr_hides_database_and_airflow_secrets():

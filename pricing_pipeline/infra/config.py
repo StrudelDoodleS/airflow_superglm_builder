@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Mapping
 
 from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
@@ -14,12 +15,29 @@ def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def canonicalize_path(
+    value: str | Path,
+    *,
+    relative_to: str | Path | None = None,
+) -> Path:
+    raw_value = os.fspath(value)
+    path = Path(raw_value).expanduser()
+    if os.name != "nt" and PureWindowsPath(raw_value).is_absolute():
+        raise ValueError(
+            f"Windows absolute path {raw_value!r} is unsupported under POSIX/WSL; "
+            "use a path in the current POSIX namespace"
+        )
+    if not path.is_absolute():
+        base = Path.cwd() if relative_to is None else canonicalize_path(relative_to)
+        path = base / path
+    return path.resolve()
+
+
 def resolve_project_path(value: str | Path, env: Mapping[str, str]) -> Path:
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return path
-    project_root = Path(env.get("PRICING_PROJECT_ROOT") or Path.cwd()).expanduser().resolve()
-    return (project_root / path).resolve()
+    project_root = canonicalize_path(
+        env.get("PRICING_PROJECT_ROOT") or Path.cwd()
+    )
+    return canonicalize_path(value, relative_to=project_root)
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,11 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra import db as shared_db
-from pricing_pipeline.infra.config import Settings, resolve_project_path
+from pricing_pipeline.infra.config import (
+    Settings,
+    canonicalize_path,
+    resolve_project_path,
+)
 from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
 
 
@@ -42,7 +46,9 @@ def ensure_runtime_import_paths(
     env: Mapping[str, str] | None = None,
 ) -> None:
     env = env or os.environ
-    root = Path(project_root or env.get("PRICING_PROJECT_ROOT", Path.cwd())).resolve()
+    root = canonicalize_path(
+        project_root or env.get("PRICING_PROJECT_ROOT", Path.cwd())
+    )
     for path in (root, root / "src"):
         if path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
@@ -126,7 +132,26 @@ def _settings_from_module(module: ModuleType, *, env: Mapping[str, str]) -> Sett
             pricing_staging_schema=schema_names.pricing_staging,
             mlops_schema=schema_names.mlops,
         )
-    return settings
+    return _normalize_artifact_roots(settings, env=env)
+
+
+def _normalize_artifact_roots(
+    settings: Settings,
+    *,
+    env: Mapping[str, str],
+) -> Settings:
+    return replace(
+        settings,
+        rating_export_root=resolve_project_path(settings.rating_export_root, env),
+        validation_split_artifact_root=resolve_project_path(
+            settings.validation_split_artifact_root,
+            env,
+        ),
+        workbench_artifact_root=resolve_project_path(
+            settings.workbench_artifact_root,
+            env,
+        ),
+    )
 
 
 def _settings_from_mapping(

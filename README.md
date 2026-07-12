@@ -153,6 +153,12 @@ runs Airflow and MLflow on the host and writes durable local artifacts under
 `state/`. SQL Server connectivity and source-data access should live in Python
 modules that your DAGs import.
 
+On Windows, run the entire no-Docker workflow inside one WSL2 environment.
+Airflow, the Jupyter kernel, model code, and `WORKBENCH_ARTIFACT_ROOT` must use
+the same WSL2 distro and POSIX path namespace. Native Windows Airflow is unsupported.
+Cross-Windows/WSL artifact paths are unsupported; this prototype does not translate
+paths such as `C:\\pricing\\artifacts` into WSL mount paths.
+
 Prerequisites:
 
 - Python 3.14 and `uv`.

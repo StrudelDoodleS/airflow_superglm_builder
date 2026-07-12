@@ -895,6 +895,57 @@ def test_local_airflow_resolves_relative_artifact_roots_from_project_root(
     )
 
 
+def test_local_airflow_path_helpers_expand_user_and_canonicalize(
+    monkeypatch,
+    tmp_path,
+):
+    from scripts import start_airflow_local
+
+    home = tmp_path / "home"
+    repo_root = tmp_path / "repo"
+    home.mkdir()
+    repo_root.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(start_airflow_local, "ROOT", repo_root)
+
+    project_root = start_airflow_local._repo_path("~/pricing/../project")
+    artifact_root = start_airflow_local._project_path(
+        "~/artifacts/../workbench",
+        project_root=project_root,
+    )
+    absolute_root = start_airflow_local._project_path(
+        tmp_path / "absolute/../rating",
+        project_root=project_root,
+    )
+
+    assert project_root == home / "project"
+    assert artifact_root == home / "workbench"
+    assert absolute_root == tmp_path / "rating"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
+@pytest.mark.parametrize("windows_path", [r"C:\pricing\project", "D:/pricing/project"])
+def test_local_airflow_rejects_windows_absolute_paths_under_posix(
+    windows_path,
+):
+    from scripts import start_airflow_local
+
+    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+        start_airflow_local._repo_path(windows_path)
+
+
+def test_no_docker_docs_require_one_wsl2_posix_namespace():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    for statement in (
+        "same WSL2 distro and POSIX path namespace",
+        "Airflow, the Jupyter kernel, model code, and `WORKBENCH_ARTIFACT_ROOT`",
+        "Native Windows Airflow is unsupported",
+        "Cross-Windows/WSL artifact paths are unsupported",
+    ):
+        assert statement in readme
+
+
 def test_local_airflow_configures_predictable_simple_auth(monkeypatch, tmp_path):
     from scripts import start_airflow_local
 

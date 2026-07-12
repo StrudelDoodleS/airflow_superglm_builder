@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import os
 import sys
 import types
+from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 
 import scripts.pricing_db as script_db
-from pricing_pipeline.infra.runtime import runtime_from_module
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.runtime import ensure_runtime_import_paths, runtime_from_module
 from pricing_pipeline.infra.schema import SchemaNames, schema_names_from_connectable
 
 
@@ -83,6 +87,46 @@ def get_runtime_settings():
 
     imported = sys.modules["work_runtime.database"]
     assert imported.last_database == "PricingWork"
+
+
+def test_runtime_provider_normalizes_settings_instance_roots_from_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    project_root = tmp_path / "project"
+    launch_root = tmp_path / "different-launch-cwd"
+    project_root.mkdir()
+    launch_root.mkdir()
+    monkeypatch.chdir(launch_root)
+    runtime_module = types.ModuleType("settings_instance_runtime_provider")
+    runtime_module.get_engine = lambda database=None: create_engine("sqlite://")
+    runtime_module.get_runtime_settings = lambda: Settings(
+        rating_export_root=Path("state/../rating"),
+        validation_split_artifact_root=Path("state/splits"),
+        workbench_artifact_root=Path("state/workbench"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "settings_instance_runtime_provider",
+        runtime_module,
+    )
+
+    runtime = runtime_from_module(
+        "settings_instance_runtime_provider",
+        env={"PRICING_PROJECT_ROOT": str(project_root)},
+    )
+
+    assert runtime.settings.rating_export_root == project_root / "rating"
+    assert runtime.settings.validation_split_artifact_root == project_root / "state/splits"
+    assert runtime.settings.workbench_artifact_root == project_root / "state/workbench"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
+def test_runtime_import_paths_reject_windows_project_root_under_posix():
+    with pytest.raises(ValueError, match="Windows absolute path.*POSIX/WSL"):
+        ensure_runtime_import_paths(
+            env={"PRICING_PROJECT_ROOT": r"C:\pricing\project"},
+        )
 
 
 def test_script_get_engine_uses_runtime_module_from_env(monkeypatch):
