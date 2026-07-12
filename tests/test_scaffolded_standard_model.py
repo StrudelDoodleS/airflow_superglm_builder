@@ -98,3 +98,4 @@ def test_fresh_custom_scaffold_delegates_to_standard_runner(tmp_path, monkeypatc
     )
     assert runner_kwargs["manifest_spec"].pk_columns == ("policy_id",)
     assert runner_kwargs["model_source_root"] == Path(modeling.__file__).parent
+    assert runner_kwargs["review_workbook_hook"] is modeling.write_review_workbook

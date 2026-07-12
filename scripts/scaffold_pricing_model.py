@@ -459,6 +459,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
                 split_artifact_root=settings.validation_split_artifact_root,
                 model_source_root=Path(__file__).resolve().parent,
                 created_by=created_by,
+                review_workbook_hook=write_review_workbook,
             )
             return result.completed_build
         """

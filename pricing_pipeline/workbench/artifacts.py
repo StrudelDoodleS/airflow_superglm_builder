@@ -40,6 +40,8 @@ class CandidateBundle:
     fit_sample_weight_name: str | None = None
     export_weight_name: str | None = None
     offset_export_options: dict[str, Any] | None = None
+    review_hook_module: str | None = None
+    review_hook_name: str | None = None
 
 
 @dataclass(frozen=True)

@@ -180,6 +180,66 @@ def test_run_cross_validation_rejects_non_converged_fold():
         )
 
 
+def test_model_local_log_density_review_is_separate_from_canonical_export(tmp_path):
+    api = _api()
+    canonical = pd.DataFrame(
+        {
+            "log_lower": [0.0, 1.0],
+            "log_upper": [1.0, 2.0],
+            "log_representative": [0.5, 1.5],
+            "relativity": [0.8, 1.2],
+        }
+    )
+
+    def write_review_workbook(*, fitted_model, inputs, output_path):
+        del fitted_model, inputs
+        review = canonical.assign(
+            density_lower=np.exp(canonical["log_lower"]),
+            density_upper=np.exp(canonical["log_upper"]),
+            density_representative=np.exp(canonical["log_representative"]),
+        )
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            review.to_excel(writer, sheet_name="PRESENTATION ONLY", index=False)
+        return output_path
+
+    result = api.call_review_hook(
+        write_review_workbook,
+        fitted_model=object(),
+        inputs=api.ModelInputs(
+            X=pd.DataFrame({"LogDensity": [0.5, 1.5]}),
+            y=np.array([0.0, 1.0]),
+        ),
+        output_path=tmp_path / "run" / "rating_tables_review.xlsx",
+        allowed_root=tmp_path / "run",
+    )
+
+    assert result is not None
+    review = pd.read_excel(result.path, sheet_name="PRESENTATION ONLY")
+    assert review["density_lower"].tolist() == pytest.approx([1.0, np.e])
+    assert result.sha256
+    assert result.size_bytes > 0
+    assert canonical["log_lower"].tolist() == [0.0, 1.0]
+
+
+def test_review_hook_rejects_artifact_outside_run_directory(tmp_path):
+    api = _api()
+
+    def unsafe_hook(*, fitted_model, inputs, output_path):
+        del fitted_model, inputs, output_path
+        outside = tmp_path / "outside.xlsx"
+        outside.write_bytes(b"not allowed")
+        return outside
+
+    with pytest.raises(api.StandardSuperGLMError, match="outside run output"):
+        api.call_review_hook(
+            unsafe_hook,
+            fitted_model=object(),
+            inputs=api.ModelInputs(X=pd.DataFrame({"x": [1.0]}), y=np.array([1.0])),
+            output_path=tmp_path / "run" / "review.xlsx",
+            allowed_root=tmp_path / "run",
+        )
+
+
 def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metadata(
     tmp_path,
     monkeypatch,
@@ -227,6 +287,11 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
     monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
 
+    def write_review_workbook(*, fitted_model, inputs, output_path):
+        del fitted_model, inputs
+        Path(output_path).write_bytes(b"presentation only")
+        return output_path
+
     inputs = api.ModelInputs(X=frame[["age"]], y=frame["target"].to_numpy())
     result = api.run_standard_superglm_build(
         object(),
@@ -253,6 +318,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         split_artifact_root=tmp_path / "splits",
         model_source_root=source_root,
         created_by="pytest",
+        review_workbook_hook=write_review_workbook,
     )
 
     assert [test.tolist() for _, test in captured["manifest"]["split_indices"]] == [
@@ -267,3 +333,19 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     assert result.completed_build["candidate_artifact_sha256"]
     assert result.completed_build["model_source_sha256"]
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
+    from pricing_pipeline.workbench.artifacts import load_candidate_bundle
+
+    bundle = load_candidate_bundle(
+        result.completed_build["candidate_artifact_path"],
+        expected_sha256=result.completed_build["candidate_artifact_sha256"],
+        expected_size_bytes=result.completed_build["candidate_artifact_size_bytes"],
+        expected_format=result.completed_build["candidate_artifact_format"],
+        expected_python_version=result.completed_build["candidate_python_version"],
+        expected_superglm_version=result.completed_build["candidate_superglm_version"],
+        allowed_root=tmp_path / "run",
+    )
+    assert bundle.review_artifact == {
+        "path": str((tmp_path / "run" / "rating_tables_review.xlsx").resolve()),
+        "sha256": api.hash_file_sha256(tmp_path / "run" / "rating_tables_review.xlsx"),
+        "size_bytes": len(b"presentation only"),
+    }

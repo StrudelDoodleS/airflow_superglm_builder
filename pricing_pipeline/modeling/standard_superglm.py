@@ -65,6 +65,13 @@ class StandardBuildResult:
     metrics: dict[str, float]
 
 
+@dataclass(frozen=True)
+class ReviewArtifactMetadata:
+    path: str
+    sha256: str
+    size_bytes: int
+
+
 class PrecomputedSplitter:
     def __init__(
         self,
@@ -303,6 +310,54 @@ def hash_model_source(root: str | Path) -> str:
     return digest.hexdigest()
 
 
+def hash_file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def call_review_hook(
+    hook: Callable[..., str | Path | None] | None,
+    *,
+    fitted_model: Any,
+    inputs: ModelInputs,
+    output_path: str | Path,
+    allowed_root: str | Path,
+) -> ReviewArtifactMetadata | None:
+    if hook is None:
+        return None
+    root = Path(allowed_root).expanduser().resolve()
+    requested_path = Path(output_path).expanduser().resolve()
+    if not requested_path.is_relative_to(root):
+        raise StandardSuperGLMError(
+            f"review output path is outside run output directory {root}: {requested_path}"
+        )
+    requested_path.parent.mkdir(parents=True, exist_ok=True)
+    returned_path = hook(
+        fitted_model=fitted_model,
+        inputs=inputs,
+        output_path=requested_path,
+    )
+    if returned_path is None:
+        return None
+    artifact_path = Path(returned_path).expanduser().resolve()
+    if not artifact_path.is_relative_to(root):
+        raise StandardSuperGLMError(
+            f"review artifact is outside run output directory {root}: {artifact_path}"
+        )
+    if not artifact_path.is_file():
+        raise StandardSuperGLMError(
+            f"review hook did not create the returned artifact: {artifact_path}"
+        )
+    return ReviewArtifactMetadata(
+        path=str(artifact_path),
+        sha256=hash_file_sha256(artifact_path),
+        size_bytes=artifact_path.stat().st_size,
+    )
+
+
 def _weight_name(
     value: pd.Series | np.ndarray | None,
     explicit_name: str | None,
@@ -381,6 +436,7 @@ def run_standard_superglm_build(
     created_by: str,
     offset_contract: OffsetExportContract | None = None,
     offset_export_options: dict[str, Any] | None = None,
+    review_workbook_hook: Callable[..., str | Path | None] | None = None,
     cross_validate_fn: Callable[..., Any] = cross_validate,
 ) -> StandardBuildResult:
     _validate_input_lengths(inputs)
@@ -436,6 +492,13 @@ def run_standard_superglm_build(
     )
     receipt_path = run_dir / "publication_receipt.json"
     receipt_sha256 = write_publication_receipt(receipt, receipt_path)
+    review_artifact = call_review_hook(
+        review_workbook_hook,
+        fitted_model=fitted,
+        inputs=inputs,
+        output_path=run_dir / "rating_tables_review.xlsx",
+        allowed_root=run_dir,
+    )
 
     manifest = create_model_frame_manifest_with_split(
         engine,
@@ -468,9 +531,24 @@ def run_standard_superglm_build(
         ),
         model_source_sha256=source_sha256,
         offset_contract=resolved_offset_contract.model_dump(mode="json"),
+        review_artifact=(
+            None
+            if review_artifact is None
+            else {
+                "path": review_artifact.path,
+                "sha256": review_artifact.sha256,
+                "size_bytes": review_artifact.size_bytes,
+            }
+        ),
         fit_sample_weight_name=fit_weight_name,
         export_weight_name=export_weight_name,
         offset_export_options=dict(offset_export_options or {}),
+        review_hook_module=(
+            None if review_workbook_hook is None else review_workbook_hook.__module__
+        ),
+        review_hook_name=(
+            None if review_workbook_hook is None else review_workbook_hook.__name__
+        ),
     )
     artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
     fold_metric_records = tuple(

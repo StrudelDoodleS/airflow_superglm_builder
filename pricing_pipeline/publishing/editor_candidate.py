@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import platform
@@ -18,6 +19,7 @@ from pricing_models.registry import get_model_config
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.modeling.standard_superglm import ModelInputs, call_review_hook
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.rating_export import export_rating_tables
@@ -452,10 +454,42 @@ def export_edited_model(
             "available": False,
             "reason": champion_reason or "champion artifact comparison is unavailable",
         }
+    review_hook = None
+    if parent.bundle.review_hook_module and parent.bundle.review_hook_name:
+        review_module = importlib.import_module(parent.bundle.review_hook_module)
+        review_hook = getattr(review_module, parent.bundle.review_hook_name, None)
+        if not callable(review_hook):
+            raise EditorSubmissionError(
+                "model-local review hook can no longer be imported: "
+                f"{parent.bundle.review_hook_module}.{parent.bundle.review_hook_name}"
+            )
+    review_artifact = call_review_hook(
+        review_hook,
+        fitted_model=edited_model,
+        inputs=ModelInputs(
+            X=parent.bundle.X,
+            y=parent.bundle.y,
+            sample_weight=parent.bundle.sample_weight,
+            sample_weight_name=parent.bundle.fit_sample_weight_name,
+            offset=parent.bundle.offset,
+            export_weight=parent.bundle.export_weight,
+            export_weight_name=parent.bundle.export_weight_name,
+        ),
+        output_path=output_dir / "rating_tables_review.xlsx",
+        allowed_root=output_dir,
+    )
     edited_bundle = replace(
         parent.bundle,
         fitted_model=edited_model,
-        review_artifact=None,
+        review_artifact=(
+            None
+            if review_artifact is None
+            else {
+                "path": review_artifact.path,
+                "sha256": review_artifact.sha256,
+                "size_bytes": review_artifact.size_bytes,
+            }
+        ),
     )
     artifact: CandidateArtifactMetadata = save_candidate_bundle(
         edited_bundle,
