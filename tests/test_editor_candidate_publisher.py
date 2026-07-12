@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -313,6 +314,159 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
     assert len(connection.calls) == 5
     assert all(params["rate_package_id"] == 108 for _sql, params in connection.calls)
     assert all("PREDICT_RATE_PACKAGE" in sql for sql, _params in connection.calls)
+
+
+class _ParityResult:
+    def __init__(self, prediction):
+        self.prediction = prediction
+
+    def mappings(self):
+        return self
+
+    def one(self):
+        return {"prediction": self.prediction}
+
+
+class _ParityConnection:
+    def __init__(self, *, allow_execute=True):
+        self.allow_execute = allow_execute
+        self.calls = []
+
+    def execute(self, statement, params):
+        if not self.allow_execute:
+            raise AssertionError("SQL must not execute for an invalid offset source")
+        self.calls.append(params)
+        return _ParityResult(params["x_prediction"])
+
+
+def _offset_parity_bundle(*, handling, offset_source=None):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    raw_exposure = np.array([2.0, 4.0])
+    fitted_offset = np.log(raw_exposure)
+
+    class Model:
+        def predict(self, X, offset=None):
+            np.testing.assert_allclose(offset, fitted_offset)
+            return np.asarray(X["x"], dtype=float) + np.exp(offset)
+
+    if handling == "EXPORTED_FACTOR":
+        contract = {
+            "handling": handling,
+            "source_factor_name": "Exposure",
+            "published_factor_name": "Exposure",
+            "source_name": "Exposure",
+            "label": "log(Exposure)",
+        }
+        export_options = {"offset_source": offset_source}
+    else:
+        contract = {
+            "handling": handling,
+            "source_name": "Exposure",
+            "label": "log(Exposure)",
+        }
+        export_options = None
+
+    return CandidateBundle(
+        fitted_model=Model(),
+        X=pd.DataFrame({"x": [1.0, 3.0], "Exposure": raw_exposure}),
+        y=np.ones(2),
+        sample_weight=None,
+        offset=fitted_offset,
+        export_weight=None,
+        cv_report={},
+        manifest_id="manifest-1",
+        split_set_id=None,
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract=contract,
+        offset_export_options=export_options,
+    ), raw_exposure
+
+
+@pytest.mark.parametrize("source_kind", ["column", "series", "array"])
+def test_package_sql_parity_uses_published_offset_source_for_exported_factor(source_kind):
+    import pandas as pd
+
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+
+    raw_exposure = pd.Series([2.0, 4.0], name="Exposure")
+    offset_sources = {
+        "column": "Exposure",
+        "series": raw_exposure,
+        "array": raw_exposure.to_numpy(),
+    }
+    bundle, expected_exposure = _offset_parity_bundle(
+        handling="EXPORTED_FACTOR",
+        offset_source=offset_sources[source_kind],
+    )
+    connection = _ParityConnection()
+
+    verify_package_sql_parity(
+        connection,
+        rate_package_id=108,
+        edited_model=bundle.fitted_model,
+        bundle=bundle,
+        sample_size=2,
+        execute_params_hook=lambda params, expected: {
+            **params,
+            "x_prediction": expected,
+        },
+    )
+
+    assert [
+        json.loads(params["features_json"])["Exposure"] for params in connection.calls
+    ] == expected_exposure.tolist()
+
+
+def test_package_sql_parity_rejects_misaligned_exported_offset_source_before_sql():
+    import numpy as np
+
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+    from pricing_pipeline.workbench.submission import EditorSubmissionError
+
+    bundle, _raw_exposure = _offset_parity_bundle(
+        handling="EXPORTED_FACTOR",
+        offset_source=np.array([2.0]),
+    )
+
+    with pytest.raises(
+        EditorSubmissionError,
+        match="offset_source length 1 does not match candidate row count 2",
+    ):
+        verify_package_sql_parity(
+            _ParityConnection(allow_execute=False),
+            rate_package_id=108,
+            edited_model=bundle.fitted_model,
+            bundle=bundle,
+        )
+
+
+def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+
+    bundle, raw_exposure = _offset_parity_bundle(
+        handling="ALREADY_APPLIED_SQL_EXPOSURE"
+    )
+    connection = _ParityConnection()
+
+    verify_package_sql_parity(
+        connection,
+        rate_package_id=108,
+        edited_model=bundle.fitted_model,
+        bundle=bundle,
+        sample_size=2,
+        execute_params_hook=lambda params, expected: {
+            **params,
+            "x_prediction": expected,
+        },
+    )
+
+    assert [params["exposure"] for params in connection.calls] == raw_exposure.tolist()
 
 
 def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():

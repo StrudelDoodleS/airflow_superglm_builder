@@ -647,6 +647,53 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
+def _published_offset_source(bundle: CandidateBundle) -> np.ndarray:
+    options = bundle.offset_export_options or {}
+    if "offset_source" not in options or options["offset_source"] is None:
+        raise EditorSubmissionError(
+            "EXPORTED_FACTOR SQL parity requires "
+            "bundle.offset_export_options['offset_source']"
+        )
+
+    source = options["offset_source"]
+    if isinstance(source, str):
+        if source not in bundle.X.columns:
+            raise EditorSubmissionError(
+                f"EXPORTED_FACTOR offset_source column {source!r} is missing from bundle.X"
+            )
+        source = bundle.X[source]
+
+    try:
+        raw_values = np.asarray(source)
+    except (TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            "EXPORTED_FACTOR offset_source must be a one-dimensional array-like"
+        ) from exc
+    if raw_values.ndim != 1:
+        raise EditorSubmissionError(
+            "EXPORTED_FACTOR offset_source must be one-dimensional; "
+            f"received shape {raw_values.shape}"
+        )
+    if len(raw_values) != len(bundle.X):
+        raise EditorSubmissionError(
+            f"EXPORTED_FACTOR offset_source length {len(raw_values)} does not match "
+            f"candidate row count {len(bundle.X)}"
+        )
+    try:
+        values = np.asarray(raw_values, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            "EXPORTED_FACTOR offset_source must contain only non-missing finite "
+            "numeric values"
+        ) from exc
+    if not np.isfinite(values).all():
+        raise EditorSubmissionError(
+            "EXPORTED_FACTOR offset_source must contain only non-missing finite "
+            "numeric values"
+        )
+    return values
+
+
 def verify_package_sql_parity(
     connection,
     *,
@@ -670,6 +717,11 @@ def verify_package_sql_parity(
     else:
         expected = np.asarray(edited_model.predict(sample, offset=sample_offset), dtype=float)
     contract = OffsetExportContract.model_validate(bundle.offset_contract)
+    sample_published_offset_source = (
+        _published_offset_source(bundle)[:count]
+        if contract.handling == "EXPORTED_FACTOR"
+        else None
+    )
 
     schemas = schema_names_from_connectable(connection)
     statement = text(
@@ -684,8 +736,10 @@ def verify_package_sql_parity(
     for position, (_, row) in enumerate(sample.iterrows()):
         features = {str(name): _json_value(value) for name, value in row.items()}
         exposure = 1.0
-        if sample_offset is not None and contract.handling == "EXPORTED_FACTOR":
-            features[str(contract.published_factor_name)] = float(sample_offset[position])
+        if sample_published_offset_source is not None:
+            features[str(contract.published_factor_name)] = float(
+                sample_published_offset_source[position]
+            )
         elif sample_offset is not None and contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE":
             exposure = float(np.exp(sample_offset[position]))
         params: dict[str, Any] = {
