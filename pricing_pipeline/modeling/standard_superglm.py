@@ -39,7 +39,7 @@ _SAFE_ATTEMPT_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 @dataclass(frozen=True)
 class ModelInputs:
     X: pd.DataFrame
-    y: np.ndarray
+    y: pd.Series | pd.DataFrame | np.ndarray
     sample_weight: pd.Series | np.ndarray | None = None
     sample_weight_name: str | None = None
     offset: pd.Series | np.ndarray | None = None
@@ -258,6 +258,20 @@ def _validate_input_lengths(inputs: ModelInputs) -> None:
             )
 
 
+def canonical_row_identity_index(row_ids: pd.DataFrame) -> pd.Index:
+    """Build the stable PK identity index carried by publishable model inputs."""
+    if len(row_ids.columns) == 1:
+        column = row_ids.columns[0]
+        return pd.Index(
+            row_ids.iloc[:, 0].to_numpy(copy=True),
+            name=column,
+        )
+    return pd.MultiIndex.from_frame(
+        row_ids,
+        names=list(row_ids.columns),
+    )
+
+
 def _validate_canonical_row_ids(
     frame: pd.DataFrame,
     inputs: ModelInputs,
@@ -297,13 +311,9 @@ def _validate_canonical_row_ids(
             "ModelInputs.row_ids row count does not match canonical frame row count: "
             f"row_ids={len(row_ids)}, frame={frame_row_count}"
         )
-    if not inputs.X.index.equals(frame.index):
-        raise StandardSuperGLMError(
-            "ModelInputs.X index/order does not match the canonical frame"
-        )
     if not row_ids.index.equals(frame.index):
         raise StandardSuperGLMError(
-            "ModelInputs.row_ids index/order does not match the canonical frame and X"
+            "ModelInputs.row_ids index/order does not match the canonical frame"
         )
 
     canonical_row_ids = frame.loc[:, expected_columns]
@@ -319,6 +329,28 @@ def _validate_canonical_row_ids(
         raise StandardSuperGLMError(
             "ModelInputs.row_ids primary-key columns contain duplicate values"
         )
+
+    identity_index = canonical_row_identity_index(row_ids)
+    aligned_values = {
+        "X": inputs.X,
+        "y": inputs.y,
+        "sample_weight": inputs.sample_weight,
+        "offset": inputs.offset,
+        "export_weight": inputs.export_weight,
+    }
+    for name, value in aligned_values.items():
+        if value is None:
+            continue
+        if not isinstance(value, pd.Series | pd.DataFrame):
+            raise StandardSuperGLMError(
+                f"ModelInputs.{name} must be a pandas Series/DataFrame carrying "
+                "the canonical PK identity index"
+            )
+        if not value.index.identical(identity_index):
+            raise StandardSuperGLMError(
+                f"ModelInputs.{name} identity index/order does not exactly match "
+                "the canonical PK identity index"
+            )
 
 
 def run_cross_validation(

@@ -340,11 +340,7 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
         api.run_standard_superglm_build(
             object(),
             frame=frame,
-            inputs=api.ModelInputs(
-                X=frame[["age"]],
-                y=frame["target"].to_numpy(),
-                row_ids=frame[["policy_id"]].copy(),
-            ),
+            inputs=_identity_bound_inputs(api, frame),
             model_factory=_FakeModel,
             split_indices=_folds(),
             fit_mode="fit_reml",
@@ -369,6 +365,81 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
                 "CV must not run before canonical-row validation"
             ),
         )
+
+
+def _identity_bound_inputs(api, frame, **overrides):
+    row_ids = frame[["policy_id"]].copy()
+    identity = pd.Index(row_ids["policy_id"].to_numpy(copy=True), name="policy_id")
+    X = frame[["age"]].copy()
+    X.index = identity
+    values = {
+        "X": X,
+        "y": pd.Series(
+            frame["target"].to_numpy(copy=True),
+            index=identity,
+            name="target",
+        ),
+        "row_ids": row_ids,
+    }
+    values.update(overrides)
+    return api.ModelInputs(**values)
+
+
+def test_canonical_validation_rejects_reversed_then_reset_feature_frame():
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [0, 1, 2],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    inputs = _identity_bound_inputs(
+        api,
+        frame,
+        X=frame.iloc[::-1][["age"]].reset_index(drop=True),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="ModelInputs.X.*identity index"):
+        api._validate_canonical_row_ids(frame, inputs, pk_columns=("policy_id",))
+
+
+def test_canonical_validation_rejects_reordered_target_series():
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [0, 1, 2],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    inputs = _identity_bound_inputs(api, frame)
+    reordered_y = inputs.y.iloc[::-1]
+    inputs = _identity_bound_inputs(api, frame, y=reordered_y)
+
+    with pytest.raises(api.StandardSuperGLMError, match="ModelInputs.y.*identity index"):
+        api._validate_canonical_row_ids(frame, inputs, pk_columns=("policy_id",))
+
+
+@pytest.mark.parametrize("field_name", ["sample_weight", "offset", "export_weight"])
+def test_canonical_validation_rejects_reordered_optional_row_inputs(field_name):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [0, 1, 2],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    identity = pd.Index([2, 1, 0], name="policy_id")
+    reordered = pd.Series([1.0, 1.0, 1.0], index=identity, name=field_name)
+    inputs = _identity_bound_inputs(api, frame, **{field_name: reordered})
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match=rf"ModelInputs.{field_name}.*identity index",
+    ):
+        api._validate_canonical_row_ids(frame, inputs, pk_columns=("policy_id",))
 
 
 def test_model_local_log_density_review_is_separate_from_canonical_export(tmp_path):
@@ -481,11 +552,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
         api.run_standard_superglm_build(
             object(),
             frame=frame,
-            inputs=api.ModelInputs(
-                X=frame[["age"]],
-                y=frame["target"].to_numpy(),
-                row_ids=frame[["policy_id"]].copy(),
-            ),
+            inputs=_identity_bound_inputs(api, frame),
             model_factory=_FakeModel,
             split_indices=_folds(),
             fit_mode="fit_reml",
@@ -568,11 +635,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         Path(output_path).write_bytes(b"presentation only")
         return output_path
 
-    inputs = api.ModelInputs(
-        X=frame[["age"]],
-        y=frame["target"].to_numpy(),
-        row_ids=frame[["policy_id"]].copy(),
-    )
+    inputs = _identity_bound_inputs(api, frame)
     build_kwargs = {
         "frame": frame,
         "inputs": inputs,

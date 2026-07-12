@@ -101,10 +101,18 @@ def run_scaffolded_workflow_smoke(tmp_path, monkeypatch):
             "claim_count": [0.0, 1.0, 0.0, 1.0],
         }
     )
+    row_ids = frame[["policy_id"]].copy()
+    identity = pd.Index(row_ids["policy_id"].to_numpy(copy=True), name="policy_id")
+    X = frame[["age"]].copy()
+    X.index = identity
     inputs = ModelInputs(
-        X=frame[["age"]],
-        y=frame["claim_count"].to_numpy(),
-        row_ids=frame[["policy_id"]].copy(),
+        X=X,
+        y=pd.Series(
+            frame["claim_count"].to_numpy(copy=True),
+            index=identity,
+            name="claim_count",
+        ),
+        row_ids=row_ids,
     )
     folds = [
         (np.array([2, 3]), np.array([0, 1])),

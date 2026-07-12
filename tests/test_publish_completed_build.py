@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import DatasetSpec, ModelExportResult
 from pricing_pipeline.orchestration.publish_completed_build import (
+    CandidateSQLLineage,
     CompletedModelBuild,
     CompletedModelBuildError,
     CompletedModelPublishResult,
@@ -82,20 +84,23 @@ def _candidate_metadata(
     manifest_id="manifest-existing",
     split_set_id=None,
     model_source_sha256="c" * 64,
+    pk_columns=("policy_id",),
+    row_count=1,
+    row_order_sha256="d" * 64,
 ):
     metadata = save_candidate_bundle(
         CandidateBundle(
             fitted_model=SimpleNamespace(name="candidate"),
-            X=pd.DataFrame({"age": [20.0]}),
-            y=np.array([0.0]),
+            X=pd.DataFrame({"age": np.arange(row_count, dtype=float)}),
+            y=np.zeros(row_count),
             sample_weight=None,
             offset=None,
             export_weight=None,
             cv_report={},
             manifest_id=manifest_id,
             split_set_id=split_set_id,
-            pk_columns=("policy_id",),
-            row_order_sha256="d" * 64,
+            pk_columns=pk_columns,
+            row_order_sha256=row_order_sha256,
             model_source_sha256=model_source_sha256,
             offset_contract={"handling": "NONE"},
         ),
@@ -110,6 +115,55 @@ def _candidate_metadata(
         "candidate_superglm_version": metadata.superglm_version,
         "model_source_sha256": model_source_sha256,
     }
+
+
+class _FakeMappingResult:
+    def __init__(self, row):
+        self.row = row
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+
+class _FakeCandidateLineageEngine:
+    def __init__(self, *, manifest_row, split_row):
+        self.manifest_row = manifest_row
+        self.split_row = split_row
+        self.queries = []
+
+    def begin(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, statement, params):
+        sql = str(statement)
+        self.queries.append((sql, params))
+        if "DATASET_MANIFEST" in sql:
+            return _FakeMappingResult(self.manifest_row)
+        if "CV_SPLIT_SET" in sql:
+            return _FakeMappingResult(self.split_row)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+def _patch_candidate_sql_lineage(monkeypatch):
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.load_candidate_sql_lineage",
+        lambda engine, *, manifest_id, split_set_id: CandidateSQLLineage(
+            manifest_id=manifest_id,
+            row_count=1,
+            pk_columns=("policy_id",),
+            split_set_id=split_set_id,
+            split_row_order_sha256=(None if split_set_id is None else "d" * 64),
+        ),
+    )
 
 
 def test_completed_model_build_round_trips_plain_dict(tmp_path):
@@ -136,6 +190,7 @@ def test_completed_model_build_accepts_complete_candidate_metadata():
         rating_workbook_path="rating.xlsx",
         model_version="v1",
         effective_from="2026-07-12",
+        manifest_id="manifest-existing",
         candidate_artifact_path="candidate.joblib",
         candidate_artifact_sha256="a" * 64,
         candidate_artifact_format="superglm-candidate-joblib-v1",
@@ -153,6 +208,22 @@ def test_completed_model_build_accepts_complete_candidate_metadata():
     assert build.candidate_artifact_size_bytes == 123
     assert build.metric_scopes["cv_pooled_deviance"] == "cv"
     assert build.fold_metrics[0]["metric_name"] == "deviance"
+
+
+def test_completed_model_build_rejects_candidate_without_existing_manifest_id():
+    with pytest.raises(CompletedModelBuildError, match="candidate.*existing manifest_id"):
+        CompletedModelBuild(
+            rating_workbook_path="rating.xlsx",
+            model_version="v1",
+            effective_from="2026-07-12",
+            candidate_artifact_path="candidate.joblib",
+            candidate_artifact_sha256="a" * 64,
+            candidate_artifact_format="superglm-candidate-joblib-v1",
+            candidate_artifact_size_bytes=123,
+            candidate_python_version="3.14.4",
+            candidate_superglm_version="0.11.0",
+            model_source_sha256="b" * 64,
+        )
 
 
 def test_model_export_result_round_trips_candidate_metadata():
@@ -521,6 +592,148 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
     assert calls[2][0] == "publish"
 
 
+def test_candidate_build_requires_existing_manifest_before_database_work(
+    tmp_path,
+    monkeypatch,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    settings = _settings(tmp_path)
+    candidate_metadata = _candidate_metadata(settings.workbench_artifact_root)
+    database_calls = []
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda *args, **kwargs: database_calls.append("validate_model"),
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.create_dataset_manifest_with_split",
+        lambda *args, **kwargs: database_calls.append("create_manifest"),
+    )
+
+    with pytest.raises(CompletedModelBuildError, match="candidate.*existing manifest_id"):
+        publish_completed_model_build(
+            object(),
+            settings=settings,
+            model_config=_config(),
+            dataset=_dataset(),
+            completed_build={
+                "rating_workbook_path": str(workbook),
+                "model_version": "20260603",
+                "effective_from": "2026-06-03",
+                "export_id": "export-1",
+                "created_by": "airflow",
+                **candidate_metadata,
+            },
+        )
+
+    assert database_calls == []
+
+
+@pytest.mark.parametrize(
+    ("case", "manifest_overrides", "split_overrides", "split_missing", "match"),
+    [
+        (
+            "pk-columns",
+            {"pk_columns_json": json.dumps(["account_id"])},
+            {},
+            False,
+            "pk_columns",
+        ),
+        ("row-count", {"row_count": 2}, {}, False, "row count"),
+        ("missing-split", {}, {}, True, "split_set_id.*not found"),
+        (
+            "split-owner",
+            {},
+            {"manifest_id": "manifest-other"},
+            False,
+            "does not belong",
+        ),
+        (
+            "split-row-order",
+            {},
+            {"row_order_sha256": "f" * 64},
+            False,
+            "row_order_sha256",
+        ),
+    ],
+)
+def test_candidate_publication_rejects_untrusted_sql_lineage_before_publish(
+    tmp_path,
+    monkeypatch,
+    case,
+    manifest_overrides,
+    split_overrides,
+    split_missing,
+    match,
+):
+    del case
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    settings = _settings(tmp_path)
+    candidate_metadata = _candidate_metadata(
+        settings.workbench_artifact_root,
+        split_set_id="split-existing",
+    )
+    manifest_row = {
+        "manifest_id": "manifest-existing",
+        "row_count": 1,
+        "pk_columns_json": json.dumps(["policy_id"]),
+        **manifest_overrides,
+    }
+    split_row = None if split_missing else {
+        "split_set_id": "split-existing",
+        "manifest_id": "manifest-existing",
+        "row_count": 1,
+        "row_order_sha256": "d" * 64,
+        **split_overrides,
+    }
+    engine = _FakeCandidateLineageEngine(
+        manifest_row=manifest_row,
+        split_row=split_row,
+    )
+    publish_calls = []
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.configure_engine",
+        lambda engine_arg, schemas: engine_arg,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.schema_names_from_connectable",
+        lambda engine_arg: settings.schema_names,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_existing_manifest",
+        lambda engine_arg, manifest_id: None,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        lambda *args, **kwargs: publish_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(CompletedModelBuildError, match=match):
+        publish_completed_model_build(
+            engine,
+            settings=settings,
+            model_config=_config(),
+            dataset=None,
+            completed_build={
+                "rating_workbook_path": str(workbook),
+                "model_version": "20260603",
+                "effective_from": "2026-06-03",
+                "export_id": "export-1",
+                "manifest_id": "manifest-existing",
+                "split_set_id": "split-existing",
+                "created_by": "airflow",
+                **candidate_metadata,
+            },
+        )
+
+    assert publish_calls == []
+
+
 def test_publish_completed_model_build_carries_publication_receipt_fields(
     tmp_path,
     monkeypatch,
@@ -531,6 +744,7 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
     receipt_sha256 = "b" * 64
     engine = object()
     published_exports = []
+    _patch_candidate_sql_lineage(monkeypatch)
     candidate_metadata = _candidate_metadata(
         _settings(tmp_path).workbench_artifact_root,
     )
@@ -604,6 +818,7 @@ def test_publish_completed_model_build_rejects_untrusted_candidate_before_publis
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_text("fake workbook", encoding="utf-8")
     settings = _settings(tmp_path)
+    _patch_candidate_sql_lineage(monkeypatch)
     artifact_root = (
         tmp_path / "outside-workbench"
         if artifact_state == "outside-root"
@@ -667,6 +882,7 @@ def test_publish_completed_model_build_rejects_candidate_lineage_mismatch(
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_text("fake workbook", encoding="utf-8")
     settings = _settings(tmp_path)
+    _patch_candidate_sql_lineage(monkeypatch)
     candidate_metadata = _candidate_metadata(
         settings.workbench_artifact_root,
         manifest_id="manifest-existing",

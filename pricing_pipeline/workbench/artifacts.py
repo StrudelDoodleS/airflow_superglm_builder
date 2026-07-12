@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import platform
 import tempfile
@@ -162,20 +163,26 @@ def load_candidate_bundle(
 
     if not artifact_path.is_file():
         raise CandidateArtifactError(f"candidate artifact does not exist: {artifact_path}")
-    actual_size = artifact_path.stat().st_size
+    try:
+        artifact_bytes = artifact_path.read_bytes()
+    except OSError as exc:
+        raise CandidateArtifactError(
+            f"candidate artifact could not be read: {artifact_path}"
+        ) from exc
+    actual_size = len(artifact_bytes)
     if actual_size != int(expected_size_bytes):
         raise CandidateArtifactError(
             "candidate artifact byte size does not match SQL metadata: "
             f"expected={expected_size_bytes}, actual={actual_size}"
         )
-    actual_sha256 = _sha256(artifact_path)
+    actual_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
     if actual_sha256 != expected_sha256:
         raise CandidateArtifactError(
             "candidate artifact SHA-256 does not match SQL metadata: "
             f"expected={expected_sha256}, actual={actual_sha256}"
         )
 
-    envelope = joblib.load(artifact_path)
+    envelope = joblib.load(io.BytesIO(artifact_bytes))
     if not isinstance(envelope, dict) or envelope.get("format") != BUNDLE_FORMAT:
         raise CandidateArtifactError("candidate artifact envelope has an invalid format")
     if envelope.get("python_version") != expected_python_version:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import json
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from numbers import Real
@@ -243,6 +244,10 @@ class CompletedModelBuild(BaseModel):
                 "candidate artifact fields must be supplied together; missing: "
                 + ", ".join(missing)
             )
+        if present and self.manifest_id is None:
+            raise ValueError(
+                "a candidate-bearing completed build requires an existing manifest_id"
+            )
         return self
 
     @field_validator("metrics", mode="before")
@@ -341,6 +346,15 @@ class CompletedModelPublishResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class CandidateSQLLineage:
+    manifest_id: str
+    row_count: int
+    pk_columns: tuple[str, ...]
+    split_set_id: str | None
+    split_row_order_sha256: str | None
+
+
 def _required_text(value: str | None, field_name: str) -> str:
     if value is None or not str(value).strip():
         raise CompletedModelBuildError(f"{field_name} is required")
@@ -384,11 +398,96 @@ def validate_existing_manifest(engine, manifest_id: str) -> None:
         raise CompletedModelBuildError(f"manifest_id {manifest_id!r} was not found")
 
 
+def load_candidate_sql_lineage(
+    engine,
+    *,
+    manifest_id: str,
+    split_set_id: str | None,
+) -> CandidateSQLLineage:
+    schemas = schema_names_from_connectable(engine)
+    with engine.begin() as con:
+        manifest_row = (
+            con.execute(
+                text(
+                    f"""
+                    SELECT manifest_id, row_count, pk_columns_json
+                    FROM {schemas.pricing}.DATASET_MANIFEST
+                    WHERE manifest_id = :manifest_id
+                    """
+                ),
+                {"manifest_id": manifest_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if manifest_row is None:
+            raise CompletedModelBuildError(f"manifest_id {manifest_id!r} was not found")
+
+        split_row = None
+        if split_set_id is not None:
+            split_row = (
+                con.execute(
+                    text(
+                        f"""
+                        SELECT
+                            split_set_id,
+                            manifest_id,
+                            row_count,
+                            row_order_sha256
+                        FROM {schemas.pricing}.CV_SPLIT_SET
+                        WHERE split_set_id = :split_set_id
+                        """
+                    ),
+                    {"split_set_id": split_set_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+
+    try:
+        raw_pk_columns = json.loads(str(manifest_row["pk_columns_json"]))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise CompletedModelBuildError(
+            f"manifest_id {manifest_id!r} has invalid pk_columns_json"
+        ) from exc
+    if not isinstance(raw_pk_columns, list) or not all(
+        isinstance(column, str) and column for column in raw_pk_columns
+    ):
+        raise CompletedModelBuildError(
+            f"manifest_id {manifest_id!r} has invalid pk_columns_json"
+        )
+
+    if split_set_id is not None:
+        if split_row is None:
+            raise CompletedModelBuildError(f"split_set_id {split_set_id!r} was not found")
+        if split_row["manifest_id"] != manifest_id:
+            raise CompletedModelBuildError(
+                f"split_set_id {split_set_id!r} does not belong to manifest_id "
+                f"{manifest_id!r}"
+            )
+        if int(split_row["row_count"]) != int(manifest_row["row_count"]):
+            raise CompletedModelBuildError(
+                f"split_set_id {split_set_id!r} row count does not match manifest_id "
+                f"{manifest_id!r}"
+            )
+
+    return CandidateSQLLineage(
+        manifest_id=manifest_id,
+        row_count=int(manifest_row["row_count"]),
+        pk_columns=tuple(raw_pk_columns),
+        split_set_id=split_set_id,
+        split_row_order_sha256=(
+            None if split_row is None else str(split_row["row_order_sha256"])
+        ),
+    )
+
+
 def _verify_candidate_artifact(
     build: CompletedModelBuild,
     *,
     manifest_id: str,
     split_set_id: str | None,
+    sql_lineage: CandidateSQLLineage,
     allowed_root: str | Path,
 ) -> None:
     if build.candidate_artifact_path is None:
@@ -421,6 +520,25 @@ def _verify_candidate_artifact(
                 f"candidate artifact {field_name} does not match completed-build "
                 f"lineage: expected={expected_value!r}, actual={actual_value!r}"
             )
+    if bundle.pk_columns != sql_lineage.pk_columns:
+        raise CompletedModelBuildError(
+            "candidate artifact pk_columns do not match SQL manifest lineage: "
+            f"expected={sql_lineage.pk_columns!r}, actual={bundle.pk_columns!r}"
+        )
+    if len(bundle.X) != sql_lineage.row_count:
+        raise CompletedModelBuildError(
+            "candidate artifact row count does not match SQL manifest lineage: "
+            f"expected={sql_lineage.row_count}, actual={len(bundle.X)}"
+        )
+    if (
+        sql_lineage.split_set_id is not None
+        and bundle.row_order_sha256 != sql_lineage.split_row_order_sha256
+    ):
+        raise CompletedModelBuildError(
+            "candidate artifact row_order_sha256 does not match SQL split lineage: "
+            f"expected={sql_lineage.split_row_order_sha256!r}, "
+            f"actual={bundle.row_order_sha256!r}"
+        )
 
 
 def publish_completed_model_build(
@@ -473,15 +591,25 @@ def publish_completed_model_build(
         split_set_id = manifest_result.split_set_id
     else:
         manifest_id = _required_text(build.manifest_id, "manifest_id")
-        validate_existing_manifest(engine, manifest_id)
         split_set_id = build.split_set_id
+        if build.candidate_artifact_path is None:
+            validate_existing_manifest(engine, manifest_id)
 
-    _verify_candidate_artifact(
-        build,
-        manifest_id=manifest_id,
-        split_set_id=split_set_id,
-        allowed_root=settings.workbench_artifact_root,
-    )
+    candidate_sql_lineage = None
+    if build.candidate_artifact_path is not None:
+        candidate_sql_lineage = load_candidate_sql_lineage(
+            engine,
+            manifest_id=manifest_id,
+            split_set_id=split_set_id,
+        )
+
+        _verify_candidate_artifact(
+            build,
+            manifest_id=manifest_id,
+            split_set_id=split_set_id,
+            sql_lineage=candidate_sql_lineage,
+            allowed_root=settings.workbench_artifact_root,
+        )
 
     export = ModelExportResult(
         model_id=model_id,

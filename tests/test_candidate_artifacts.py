@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -118,3 +119,29 @@ def test_candidate_bundle_rejects_incompatible_python_before_deserializing(
         )
 
     assert deserialized is False
+
+
+def test_candidate_bundle_deserializes_the_verified_snapshot_when_path_is_replaced(
+    tmp_path,
+    monkeypatch,
+):
+    _, _, _, save_candidate_bundle = _artifact_api()
+    trusted_path = tmp_path / "candidate.joblib"
+    replacement_path = tmp_path / "replacement.joblib"
+    trusted_metadata = save_candidate_bundle(_minimal_bundle(), trusted_path)
+    replacement_bundle = replace(_minimal_bundle(), manifest_id="manifest-replaced")
+    save_candidate_bundle(replacement_bundle, replacement_path)
+    real_joblib_load = importlib.import_module("joblib").load
+
+    def replace_path_then_deserialize(source):
+        replacement_path.replace(trusted_path)
+        return real_joblib_load(source)
+
+    monkeypatch.setattr(
+        "pricing_pipeline.workbench.artifacts.joblib.load",
+        replace_path_then_deserialize,
+    )
+
+    loaded = _load(trusted_path, trusted_metadata, allowed_root=tmp_path)
+
+    assert loaded.manifest_id == "manifest-1"

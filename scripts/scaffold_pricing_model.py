@@ -286,6 +286,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
         )
         from pricing_pipeline.modeling.standard_superglm import (
             ModelInputs,
+            canonical_row_identity_index,
             run_standard_superglm_build,
         )
         from pricing_pipeline.orchestration.completed_build_helpers import (
@@ -336,18 +337,31 @@ def _custom_modeling_template(*, package_name: str) -> str:
             missing = [column for column in required if column not in frame.columns]
             if missing:
                 raise ValueError("missing final model frame columns: " + ", ".join(missing))
+            row_ids = frame.loc[:, list(PK_COLUMNS)].copy()
+            identity_index = canonical_row_identity_index(row_ids)
+            X = frame.loc[:, list(FEATURE_COLUMNS)].copy()
+            X.index = identity_index
+            target = pd.Series(
+                frame[MODEL_CONFIG.target_name].to_numpy(dtype=float),
+                index=identity_index,
+                name=MODEL_CONFIG.target_name,
+            )
             weight = (
                 None
                 if WEIGHT_COLUMN is None
-                else frame[WEIGHT_COLUMN].astype(float).rename(WEIGHT_COLUMN)
+                else pd.Series(
+                    frame[WEIGHT_COLUMN].to_numpy(dtype=float),
+                    index=identity_index,
+                    name=WEIGHT_COLUMN,
+                )
             )
             return ModelInputs(
-                X=frame.loc[:, list(FEATURE_COLUMNS)].copy(),
-                y=frame[MODEL_CONFIG.target_name].to_numpy(dtype=float),
+                X=X,
+                y=target,
                 sample_weight=weight,
                 offset=None,
                 export_weight=weight,
-                row_ids=frame.loc[:, list(PK_COLUMNS)].copy(),
+                row_ids=row_ids,
             )
 
 

@@ -88,6 +88,9 @@ def test_fresh_custom_scaffold_delegates_to_standard_runner(tmp_path, monkeypatc
     assert runner_kwargs["inputs"].row_ids.equals(
         runner_kwargs["frame"][["policy_id"]]
     )
+    expected_identity = pd.Index([1, 2, 3], name="policy_id")
+    assert runner_kwargs["inputs"].X.index.identical(expected_identity)
+    assert runner_kwargs["inputs"].y.index.identical(expected_identity)
     assert runner_kwargs["output_dir"] == (
         tmp_path / "workbench" / "SCAFFOLD_FREQ" / runner_kwargs["export_id"]
     )
