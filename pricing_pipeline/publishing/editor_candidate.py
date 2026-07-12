@@ -647,7 +647,7 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
-def _published_offset_source(bundle: CandidateBundle) -> np.ndarray:
+def _published_offset_source(bundle: CandidateBundle) -> pd.Series:
     options = bundle.offset_export_options or {}
     if "offset_source" not in options or options["offset_source"] is None:
         raise EditorSubmissionError(
@@ -655,41 +655,43 @@ def _published_offset_source(bundle: CandidateBundle) -> np.ndarray:
             "bundle.offset_export_options['offset_source']"
         )
 
-    source = options["offset_source"]
-    if isinstance(source, str):
-        if source not in bundle.X.columns:
+    raw_source = options["offset_source"]
+    if isinstance(raw_source, str):
+        if raw_source not in bundle.X.columns:
             raise EditorSubmissionError(
-                f"EXPORTED_FACTOR offset_source column {source!r} is missing from bundle.X"
+                f"EXPORTED_FACTOR offset_source column {raw_source!r} is missing "
+                "from bundle.X"
             )
-        source = bundle.X[source]
+        raw_source = bundle.X[raw_source]
 
-    try:
-        raw_values = np.asarray(source)
-    except (TypeError, ValueError) as exc:
+    if isinstance(raw_source, pd.Series):
+        values = raw_source.reset_index(drop=True)
+    else:
+        try:
+            raw_values = np.asarray(raw_source)
+        except (TypeError, ValueError) as exc:
+            raise EditorSubmissionError(
+                "EXPORTED_FACTOR offset_source must be a one-dimensional array-like"
+            ) from exc
+        if raw_values.ndim != 1:
+            raise EditorSubmissionError(
+                "EXPORTED_FACTOR offset_source must be one-dimensional; "
+                f"received shape {raw_values.shape}"
+            )
+        values = pd.Series(raw_values)
+
+    if len(values) != len(bundle.X):
         raise EditorSubmissionError(
-            "EXPORTED_FACTOR offset_source must be a one-dimensional array-like"
-        ) from exc
-    if raw_values.ndim != 1:
-        raise EditorSubmissionError(
-            "EXPORTED_FACTOR offset_source must be one-dimensional; "
-            f"received shape {raw_values.shape}"
-        )
-    if len(raw_values) != len(bundle.X):
-        raise EditorSubmissionError(
-            f"EXPORTED_FACTOR offset_source length {len(raw_values)} does not match "
+            f"EXPORTED_FACTOR offset_source length {len(values)} does not match "
             f"candidate row count {len(bundle.X)}"
         )
-    try:
-        values = np.asarray(raw_values, dtype=float)
-    except (TypeError, ValueError) as exc:
+    if values.isna().any():
+        raise EditorSubmissionError("EXPORTED_FACTOR offset_source contains missing values")
+    if pd.api.types.is_float_dtype(values.dtype) and not np.isfinite(
+        values.to_numpy(dtype=float)
+    ).all():
         raise EditorSubmissionError(
-            "EXPORTED_FACTOR offset_source must contain only non-missing finite "
-            "numeric values"
-        ) from exc
-    if not np.isfinite(values).all():
-        raise EditorSubmissionError(
-            "EXPORTED_FACTOR offset_source must contain only non-missing finite "
-            "numeric values"
+            "EXPORTED_FACTOR offset_source contains non-finite numeric values"
         )
     return values
 
@@ -718,7 +720,7 @@ def verify_package_sql_parity(
         expected = np.asarray(edited_model.predict(sample, offset=sample_offset), dtype=float)
     contract = OffsetExportContract.model_validate(bundle.offset_contract)
     sample_published_offset_source = (
-        _published_offset_source(bundle)[:count]
+        _published_offset_source(bundle).iloc[:count]
         if contract.handling == "EXPORTED_FACTOR"
         else None
     )
@@ -737,8 +739,8 @@ def verify_package_sql_parity(
         features = {str(name): _json_value(value) for name, value in row.items()}
         exposure = 1.0
         if sample_published_offset_source is not None:
-            features[str(contract.published_factor_name)] = float(
-                sample_published_offset_source[position]
+            features[str(contract.published_factor_name)] = _json_value(
+                sample_published_offset_source.iloc[position]
             )
         elif sample_offset is not None and contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE":
             exposure = float(np.exp(sample_offset[position]))
