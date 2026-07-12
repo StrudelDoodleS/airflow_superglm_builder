@@ -668,17 +668,17 @@ def _published_offset_source(bundle: CandidateBundle) -> pd.Series:
         values = raw_source.reset_index(drop=True)
     else:
         try:
-            raw_values = np.asarray(raw_source)
+            values = pd.Series(raw_source).reset_index(drop=True)
         except (TypeError, ValueError) as exc:
+            shape = getattr(raw_source, "shape", None)
+            if shape is not None and len(shape) > 1:
+                raise EditorSubmissionError(
+                    "EXPORTED_FACTOR offset_source must be one-dimensional; "
+                    f"received shape {shape}"
+                ) from exc
             raise EditorSubmissionError(
                 "EXPORTED_FACTOR offset_source must be a one-dimensional array-like"
             ) from exc
-        if raw_values.ndim != 1:
-            raise EditorSubmissionError(
-                "EXPORTED_FACTOR offset_source must be one-dimensional; "
-                f"received shape {raw_values.shape}"
-            )
-        values = pd.Series(raw_values)
 
     if len(values) != len(bundle.X):
         raise EditorSubmissionError(

@@ -462,6 +462,33 @@ def test_package_sql_parity_preserves_categorical_offset_levels_positionally(sou
     ] == published_levels.tolist()
 
 
+def test_package_sql_parity_normalizes_mapping_offset_source_positionally():
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+
+    offset_source = {101: "basic", 303: "premium"}
+    bundle, _raw_exposure = _offset_parity_bundle(
+        handling="EXPORTED_FACTOR",
+        offset_source=offset_source,
+    )
+    connection = _ParityConnection()
+
+    verify_package_sql_parity(
+        connection,
+        rate_package_id=108,
+        edited_model=bundle.fitted_model,
+        bundle=bundle,
+        sample_size=2,
+        execute_params_hook=lambda params, expected: {
+            **params,
+            "x_prediction": expected,
+        },
+    )
+
+    assert [
+        json.loads(params["features_json"])["Exposure"] for params in connection.calls
+    ] == list(offset_source.values())
+
+
 @pytest.mark.parametrize(
     ("offset_source", "message"),
     [
