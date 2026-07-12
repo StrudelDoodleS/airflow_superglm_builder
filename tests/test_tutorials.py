@@ -119,7 +119,7 @@ def test_candidate_workbench_notebook_uses_runtime_facade_and_no_sql_ids():
     )
 
     assert "Workbench.from_runtime()" in source
-    assert 'workbench.candidates("MY_MODEL")' in source
+    assert "workbench.candidates(MODEL_NAME)" in source
     assert "candidate.editor()" in source
     assert "candidate.submit_edits(" in source
     assert "submission.status()" in source

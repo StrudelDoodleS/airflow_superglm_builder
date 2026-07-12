@@ -554,6 +554,8 @@ def _custom_dag_template(*, package_name: str, dag_id: str, model_name: str) -> 
 
         from __future__ import annotations
 
+        from datetime import datetime
+
         from airflow.sdk import dag
 
         from pricing_models.{package_name}.airflow_tasks import (
@@ -569,9 +571,14 @@ def _custom_dag_template(*, package_name: str, dag_id: str, model_name: str) -> 
         )
 
 
+        # Set a cron expression or timedelta when this model is ready for scheduled builds.
+        MODEL_BUILD_SCHEDULE = None
+
+
         @dag(
             dag_id="{dag_id}",
-            schedule=None,
+            start_date=datetime(2026, 1, 1),
+            schedule=MODEL_BUILD_SCHEDULE,
             catchup=False,
             tags=["pricing", "{tag}"],
         )

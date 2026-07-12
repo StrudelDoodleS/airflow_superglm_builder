@@ -72,6 +72,15 @@ def _string_id(value: int | None) -> str:
     return str(value)
 
 
+def deployment_params_from_context(context: Mapping[str, object]) -> dict[str, object]:
+    params = dict(context.get("params") or {})
+    dag_run = context.get("dag_run")
+    triggering_user_name = getattr(dag_run, "triggering_user_name", None)
+    if triggering_user_name and str(triggering_user_name).strip():
+        params["deployed_by"] = str(triggering_user_name).strip()
+    return params
+
+
 def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, str]:
     model_name = str(params.get("model_name", "")).strip()
     if not model_name:
@@ -113,7 +122,9 @@ def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, s
 def _pricing_deploy_rate_package():
     @task
     def deploy_package() -> dict[str, str]:
-        return deploy_rate_package_from_params(get_current_context()["params"])
+        return deploy_rate_package_from_params(
+            deployment_params_from_context(get_current_context())
+        )
 
     deploy_package()
 

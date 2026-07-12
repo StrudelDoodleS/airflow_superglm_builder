@@ -109,7 +109,9 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert [name for name, _value in calls] == ["stage", "publish", "lineage"]
     publish_kwargs = calls[1][1]
     assert publish_kwargs["parent_rate_package_id"] == submission.parent_rate_package_id
-    assert publish_kwargs["revision_metadata_json"] == exported.revision_metadata_json
+    assert publish_kwargs["revision_metadata_json"] == (
+        '{"kind":"SUPERGLM_EDITOR","published_by":"analyst@example.test"}'
+    )
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id
     assert lineage_kwargs["manifest_id"] == submission.manifest_id
@@ -127,6 +129,9 @@ def test_training_comparison_metrics_are_stable_and_scoped():
     class Model:
         def __init__(self, prediction):
             self.prediction = np.asarray(prediction, dtype=float)
+            self._distribution = SimpleNamespace(
+                deviance_unit=lambda y, mu: (np.asarray(y) - np.asarray(mu)) ** 2
+            )
 
         def predict(self, X, offset=None):
             assert len(X) == 3
@@ -159,8 +164,92 @@ def test_training_comparison_metrics_are_stable_and_scoped():
         0.175
     )
     assert metrics["editor_training_parent_max_absolute_prediction_delta"] == pytest.approx(0.2)
-    assert "editor_training_deviance_delta" in metrics
+    assert metrics["editor_training_deviance_delta"] == pytest.approx(-0.2675)
     assert set(scopes.values()) == {"editor_training_parent"}
+
+
+def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(tmp_path):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing.editor_candidate import _load_champion_bundle
+    from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+
+    parent = CandidateBundle(
+        fitted_model={"model": "parent"},
+        X=pd.DataFrame({"x": [1.0, 2.0]}),
+        y=np.array([0.0, 1.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="parent-manifest",
+        split_set_id="parent-split",
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    champion = CandidateBundle(
+        fitted_model={"model": "champion"},
+        X=pd.DataFrame({"x": [8.0, 9.0, 10.0]}),
+        y=np.array([1.0, 0.0, 1.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="champion-manifest",
+        split_set_id="champion-split",
+        pk_columns=("id",),
+        row_order_sha256="c" * 64,
+        model_source_sha256="d" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    artifact = save_candidate_bundle(champion, tmp_path / "champion.joblib")
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "run_status": "SUCCESS",
+                    "candidate_artifact_path": artifact.path,
+                    "candidate_artifact_sha256": artifact.sha256,
+                    "candidate_artifact_format": artifact.format,
+                    "candidate_artifact_size_bytes": artifact.size_bytes,
+                    "candidate_python_version": artifact.python_version,
+                    "candidate_superglm_version": artifact.superglm_version,
+                }
+            ]
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    loaded, reason = _load_champion_bundle(
+        Engine(),
+        model_id=17,
+        deployment_slot="HOME_FREQ_UAT",
+        allowed_root=tmp_path,
+        parent_bundle=parent,
+    )
+
+    assert reason is None
+    assert loaded is not None
+    assert loaded.manifest_id == "champion-manifest"
 
 
 def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
@@ -224,3 +313,42 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
     assert len(connection.calls) == 5
     assert all(params["rate_package_id"] == 108 for _sql, params in connection.calls)
     assert all("PREDICT_RATE_PACKAGE" in sql for sql, _params in connection.calls)
+
+
+def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing.editor_candidate import inherited_cv_metrics
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    bundle = CandidateBundle(
+        fitted_model=object(),
+        X=pd.DataFrame({"x": [1.0]}),
+        y=np.array([0.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={
+            "mean_scores": {"deviance": 0.48},
+            "pooled_scores": {"deviance": 0.47},
+            "std_scores": {"deviance": 0.03},
+            "oof_coverage": 1.0,
+        },
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+
+    metrics, scopes = inherited_cv_metrics(bundle)
+
+    assert metrics == {
+        "cv_mean_deviance": 0.48,
+        "cv_pooled_deviance": 0.47,
+        "cv_std_deviance": 0.03,
+        "cv_oof_coverage": 1.0,
+    }
+    assert set(scopes.values()) == {"inherited_cv"}

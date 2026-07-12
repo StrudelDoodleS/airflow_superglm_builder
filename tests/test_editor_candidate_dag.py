@@ -84,12 +84,12 @@ def test_editor_candidate_dag_publishes_from_dag_run_conf(monkeypatch, tmp_path)
         "dag": types.SimpleNamespace(dag_id="pricing_publish_editor_candidate"),
         "dag_run": types.SimpleNamespace(
             run_id="manual__submission-1",
+            triggering_user_name="analyst@example.test",
             conf={
                 "submission_path": str(tmp_path / "submission.json"),
                 "submission_sha256": "a" * 64,
             },
         ),
-        "triggering_user_name": "analyst@example.test",
     }
 
     result = module.publish_editor_candidate_from_context(context)

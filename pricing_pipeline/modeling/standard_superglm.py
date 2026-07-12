@@ -158,6 +158,21 @@ def _json_primitive(value: Any) -> Any:
     return value
 
 
+def _scoring_labels(
+    scoring: str | Callable | Sequence[str | Callable],
+) -> list[str]:
+    values = (scoring,) if isinstance(scoring, str) or callable(scoring) else tuple(scoring)
+    labels = []
+    for value in values:
+        if isinstance(value, str):
+            labels.append(value)
+            continue
+        module = getattr(value, "__module__", None)
+        name = getattr(value, "__qualname__", getattr(value, "__name__", None))
+        labels.append(f"{module}.{name}" if module and name else type(value).__name__)
+    return labels
+
+
 def _finite_score(value: Any, *, label: str) -> float:
     score = float(value)
     if not math.isfinite(score):
@@ -440,6 +455,10 @@ def run_standard_superglm_build(
     cross_validate_fn: Callable[..., Any] = cross_validate,
 ) -> StandardBuildResult:
     _validate_input_lengths(inputs)
+    if offset_export_options and "offset" in offset_export_options:
+        raise StandardSuperGLMError(
+            "offset_export_options must not contain 'offset'; set ModelInputs.offset once"
+        )
     folds = list(split_indices)
     evidence = run_cross_validation(
         model_factory(),
@@ -512,6 +531,9 @@ def run_standard_superglm_build(
     source_sha256 = hash_model_source(model_source_root)
     cv_report = dict(evidence.report)
     cv_report["full_fit_telemetry"] = telemetry
+    cv_report["model_name"] = model_name
+    cv_report["fit_mode"] = fit_mode
+    cv_report["scoring"] = _scoring_labels(scoring)
     bundle = CandidateBundle(
         fitted_model=fitted,
         X=inputs.X.copy(),
@@ -580,7 +602,6 @@ def run_standard_superglm_build(
         metric_scopes={name: "cv" for name in evidence.metrics},
         fold_metrics=fold_metric_records,
     )
-    cv_report["model_name"] = model_name
     return StandardBuildResult(
         completed_build=completed_build,
         fold_indices=evidence.fold_indices,

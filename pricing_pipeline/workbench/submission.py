@@ -122,6 +122,9 @@ class EditorSubmission:
             raise RuntimeError("This submission has no live Airflow run handle")
         run = self._airflow_client.get_dag_run(self.dag_id, self.dag_run_id)
         airflow_url = self._airflow_client.dag_run_ui_url(self.dag_id, self.dag_run_id)
+        triggering_user_name = (run.payload or {}).get("triggering_user_name")
+        if triggering_user_name and str(triggering_user_name).strip():
+            self.claimed_identity = str(triggering_user_name).strip()
         state = str(run.state).lower()
         message = None
         if state in {"queued", "scheduled", "deferred", "up_for_retry"}:
@@ -188,7 +191,6 @@ class EditorSubmission:
                 "package_version": self.published_package_version,
                 "deployment_slot": slot,
                 "deployment_reason": cleaned_reason,
-                "deployed_by": self.claimed_identity,
             },
         )
 
@@ -269,6 +271,93 @@ def _submission_id(
     return f"submission-{hashlib.sha256(identity).hexdigest()[:24]}"
 
 
+def _trigger_editor_dag(
+    submission: EditorSubmission,
+    airflow_client: AirflowClient | Any,
+) -> EditorSubmission:
+    run = airflow_client.trigger_dag(
+        EDITOR_DAG_ID,
+        run_id=f"manual__{submission.submission_id}",
+        conf={
+            "submission_path": submission.path,
+            "submission_sha256": submission.sha256,
+        },
+    )
+    submission.dag_id = run.dag_id
+    submission.dag_run_id = run.dag_run_id
+    submission.state = run.state
+    return submission
+
+
+def _reuse_existing_submission(
+    path: Path,
+    *,
+    root: Path,
+    candidate: Candidate,
+    reason: str,
+    claimed_identity: str,
+    deployment_slot: str,
+    editor_session_sha256: str,
+    editor_session_size_bytes: int,
+    edited_model_sha256: str,
+    edited_model_size_bytes: int,
+    edited_model_python_version: str,
+    edited_model_superglm_version: str,
+    airflow_client: AirflowClient | Any,
+) -> EditorSubmission:
+    if not path.is_file():
+        raise EditorSubmissionError(
+            f"submission directory already exists without a submission record: {path.parent}"
+        )
+    existing = load_verified_submission(
+        path,
+        sha256_file(path),
+        allowed_root=root,
+    )
+    technical = candidate.technical
+    expected = {
+        "submission_id": path.parent.name,
+        "model_name": candidate.model_name,
+        "deployment_slot": deployment_slot,
+        "source_package_version": candidate.package_version,
+        "parent_rate_package_id": candidate.rate_package_id,
+        "parent_model_run_id": candidate.model_run_id,
+        "manifest_id": candidate.bundle.manifest_id,
+        "split_set_id": candidate.bundle.split_set_id,
+        "reason": reason,
+        "claimed_identity": claimed_identity,
+        "editor_session_sha256": editor_session_sha256,
+        "editor_session_size_bytes": editor_session_size_bytes,
+        "edited_model_sha256": edited_model_sha256,
+        "edited_model_size_bytes": edited_model_size_bytes,
+        "edited_model_format": EDITED_MODEL_FORMAT,
+        "edited_model_python_version": edited_model_python_version,
+        "edited_model_superglm_version": edited_model_superglm_version,
+        "baseline_candidate_path": str(technical.get("candidate_artifact_path") or ""),
+        "baseline_candidate_sha256": str(
+            technical.get("candidate_artifact_sha256") or ""
+        ),
+        "baseline_candidate_format": technical.get("candidate_artifact_format"),
+        "baseline_candidate_size_bytes": technical.get("candidate_artifact_size_bytes"),
+        "baseline_candidate_python_version": technical.get("candidate_python_version"),
+        "baseline_candidate_superglm_version": technical.get(
+            "candidate_superglm_version"
+        ),
+        "model_source_sha256": candidate.bundle.model_source_sha256,
+    }
+    conflicts = [
+        name for name, value in expected.items() if getattr(existing, name) != value
+    ]
+    if conflicts:
+        raise EditorSubmissionError(
+            f"submission {existing.submission_id} already exists with incompatible "
+            "metadata: " + ", ".join(conflicts)
+        )
+    existing._airflow_client = airflow_client
+    existing._workbench = candidate.workbench
+    return _trigger_editor_dag(existing, airflow_client)
+
+
 def create_editor_submission(
     candidate: Candidate,
     *,
@@ -286,6 +375,7 @@ def create_editor_submission(
     submissions_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".submission-", dir=submissions_root))
     final_directory: Path | None = None
+    created_final_directory = False
 
     try:
         staged_session_path = staging / "editor_session.json"
@@ -310,11 +400,27 @@ def create_editor_submission(
             edited_model_sha256=model_sha256,
         )
         final_directory = submissions_root / submission_id
+        deployment_slot = candidate.workbench.model_config(
+            candidate.model_name
+        ).deployment_slot
         if final_directory.exists():
-            raise EditorSubmissionError(
-                f"submission {submission_id} already exists; use its existing handle"
+            return _reuse_existing_submission(
+                final_directory / "submission.json",
+                root=root,
+                candidate=candidate,
+                reason=cleaned_reason,
+                claimed_identity=claimed_identity,
+                deployment_slot=deployment_slot,
+                editor_session_sha256=session_sha256,
+                editor_session_size_bytes=session_size,
+                edited_model_sha256=model_sha256,
+                edited_model_size_bytes=model_size,
+                edited_model_python_version=python_version,
+                edited_model_superglm_version=superglm_version,
+                airflow_client=airflow_client,
             )
         final_directory.mkdir()
+        created_final_directory = True
 
         final_session_path = final_directory / "editor_session.json"
         editor_session.save(final_session_path)
@@ -330,9 +436,7 @@ def create_editor_submission(
         submission = EditorSubmission(
             submission_id=submission_id,
             model_name=candidate.model_name,
-            deployment_slot=candidate.workbench.model_config(
-                candidate.model_name
-            ).deployment_slot,
+            deployment_slot=deployment_slot,
             source_package_version=candidate.package_version,
             parent_rate_package_id=candidate.rate_package_id,
             parent_model_run_id=candidate.model_run_id,
@@ -369,24 +473,13 @@ def create_editor_submission(
         _write_json_atomic(submission.to_payload(), submission_path)
         submission.sha256 = sha256_file(submission_path)
     except BaseException:
-        if final_directory is not None:
+        if created_final_directory and final_directory is not None:
             shutil.rmtree(final_directory, ignore_errors=True)
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    run = airflow_client.trigger_dag(
-        EDITOR_DAG_ID,
-        run_id=f"manual__{submission.submission_id}",
-        conf={
-            "submission_path": submission.path,
-            "submission_sha256": submission.sha256,
-        },
-    )
-    submission.dag_id = run.dag_id
-    submission.dag_run_id = run.dag_run_id
-    submission.state = run.state
-    return submission
+    return _trigger_editor_dag(submission, airflow_client)
 
 
 def load_verified_submission(

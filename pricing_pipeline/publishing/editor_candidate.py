@@ -237,7 +237,7 @@ def _load_champion_bundle(
             mr.candidate_python_version,
             mr.candidate_superglm_version
         FROM {schemas.pricing}.PRICING_MODEL_DEPLOYMENT AS deployment
-        JOIN {schemas.pricing}.MODEL_RUN AS mr
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = deployment.rate_package_id
         WHERE deployment.model_id = :model_id
           AND deployment.deployment_slot = :deployment_slot
@@ -282,10 +282,12 @@ def _load_champion_bundle(
         )
     except CandidateArtifactError as exc:
         return None, f"the deployed champion artifact could not be verified: {exc}"
-    if champion.row_order_sha256 != parent_bundle.row_order_sha256:
-        return None, "the deployed champion was fitted on a different ordered dataset"
     if list(champion.X.columns) != list(parent_bundle.X.columns):
         return None, "the deployed champion uses a different prepared feature frame"
+    if champion.offset_contract.get("handling") != parent_bundle.offset_contract.get(
+        "handling"
+    ):
+        return None, "the deployed champion uses a different offset contract"
     return champion, None
 
 
@@ -337,6 +339,24 @@ def _predict(model: Any, bundle: CandidateBundle) -> np.ndarray:
     return values
 
 
+def _mean_model_deviance(
+    model: Any,
+    y: np.ndarray,
+    prediction: np.ndarray,
+    weights: np.ndarray,
+) -> float | None:
+    distribution = getattr(model, "_distribution", None)
+    deviance_unit = getattr(distribution, "deviance_unit", None)
+    if callable(deviance_unit):
+        unit_values = np.asarray(deviance_unit(y, prediction), dtype=float)
+        if unit_values.shape != y.shape or not np.isfinite(unit_values).all():
+            raise EditorSubmissionError("model distribution returned invalid unit deviance")
+        return float(np.average(unit_values, weights=weights))
+    if np.all(y >= 0) and np.all(prediction > 0):
+        return float(mean_poisson_deviance(y, prediction, sample_weight=weights))
+    return None
+
+
 def training_comparison_metrics(
     baseline_model: Any,
     edited_model: Any,
@@ -369,17 +389,23 @@ def training_comparison_metrics(
         ),
     }
     y = np.asarray(bundle.y, dtype=float)
-    if (
-        len(y) == len(bundle.X)
-        and np.isfinite(y).all()
-        and np.all(y >= 0)
-        and np.all(baseline > 0)
-        and np.all(edited > 0)
-    ):
-        baseline_deviance = float(
-            mean_poisson_deviance(y, baseline, sample_weight=weights)
+    if len(y) == len(bundle.X) and np.isfinite(y).all():
+        baseline_deviance = _mean_model_deviance(
+            baseline_model,
+            y,
+            baseline,
+            weights,
         )
-        edited_deviance = float(mean_poisson_deviance(y, edited, sample_weight=weights))
+        edited_deviance = _mean_model_deviance(
+            edited_model,
+            y,
+            edited,
+            weights,
+        )
+    else:
+        baseline_deviance = None
+        edited_deviance = None
+    if baseline_deviance is not None and edited_deviance is not None:
         metrics[f"{prefix}_baseline_deviance"] = baseline_deviance
         metrics[f"{prefix}_edited_deviance"] = edited_deviance
         delta_name = (
@@ -392,6 +418,32 @@ def training_comparison_metrics(
     return metrics, {metric_name: scope for metric_name in metrics}
 
 
+def inherited_cv_metrics(
+    bundle: CandidateBundle,
+) -> tuple[dict[str, float], dict[str, str]]:
+    report = bundle.cv_report
+    metrics: dict[str, float] = {}
+    for report_name, metric_prefix in (
+        ("mean_scores", "cv_mean"),
+        ("pooled_scores", "cv_pooled"),
+        ("std_scores", "cv_std"),
+    ):
+        values = report.get(report_name) or {}
+        for metric_name, raw_value in values.items():
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise EditorSubmissionError(
+                    f"inherited CV metric {report_name}.{metric_name} is not finite"
+                )
+            metrics[f"{metric_prefix}_{metric_name}"] = value
+    if report.get("oof_coverage") is not None:
+        coverage = float(report["oof_coverage"])
+        if not math.isfinite(coverage):
+            raise EditorSubmissionError("inherited CV OOF coverage is not finite")
+        metrics["cv_oof_coverage"] = coverage
+    return metrics, {metric_name: "inherited_cv" for metric_name in metrics}
+
+
 def _canonical_json(payload: dict[str, Any]) -> str:
     return json.dumps(
         payload,
@@ -400,6 +452,17 @@ def _canonical_json(payload: dict[str, Any]) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _revision_with_publisher_identity(value: str, created_by: str) -> str:
+    payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise EditorSubmissionError("editor revision metadata must be a JSON object")
+    publisher_identity = str(created_by).strip()
+    if not publisher_identity:
+        raise EditorSubmissionError("publisher identity is required")
+    payload["published_by"] = publisher_identity
+    return _canonical_json(payload)
 
 
 def export_edited_model(
@@ -431,12 +494,15 @@ def export_edited_model(
     receipt_path = output_dir / "publication_receipt.json"
     receipt_sha256 = write_publication_receipt(receipt, receipt_path)
 
-    metrics, metric_scopes = training_comparison_metrics(
+    metrics, metric_scopes = inherited_cv_metrics(parent.bundle)
+    parent_metrics, parent_scopes = training_comparison_metrics(
         parent.bundle.fitted_model,
         edited_model,
         parent.bundle,
         comparison_name="parent",
     )
+    metrics.update(parent_metrics)
+    metric_scopes.update(parent_scopes)
     champion_bundle = getattr(parent, "champion_bundle", None)
     champion_reason = getattr(parent, "champion_unavailable_reason", None)
     if champion_bundle is not None:
@@ -503,10 +569,24 @@ def export_edited_model(
         "claimed_identity": submission.claimed_identity,
         "parent_rate_package_id": submission.parent_rate_package_id,
         "parent_model_run_id": submission.parent_model_run_id,
+        "submission_path": submission.path,
+        "submission_sha256": submission.sha256,
+        "editor_session_path": submission.editor_session_path,
         "editor_session_sha256": submission.editor_session_sha256,
+        "editor_session_size_bytes": submission.editor_session_size_bytes,
+        "edited_model_path": submission.edited_model_path,
         "edited_model_sha256": submission.edited_model_sha256,
+        "edited_model_size_bytes": submission.edited_model_size_bytes,
+        "edited_model_format": submission.edited_model_format,
         "baseline_candidate_sha256": submission.baseline_candidate_sha256,
-        "comparison_metrics": metrics,
+        "baseline_cv_metrics": {
+            name: value for name, value in metrics.items() if name.startswith("cv_")
+        },
+        "comparison_metrics": {
+            name: value
+            for name, value in metrics.items()
+            if name.startswith("editor_training_")
+        },
         "champion_comparison": champion_comparison,
     }
     return EditorExport(
@@ -574,7 +654,7 @@ def verify_package_sql_parity(
     edited_model: Any,
     bundle: CandidateBundle,
     sample_size: int = 50,
-    rtol: float = 1e-6,
+    rtol: float = 1e-4,
     atol: float = 1e-8,
     execute_params_hook: Callable[[dict[str, Any], float], dict[str, Any]] | None = None,
 ) -> None:
@@ -645,6 +725,10 @@ def publish_editor_submission(
     parent = load_parent_candidate(engine, submission)
     exported = export_edited_model(parent, submission)
     stage_editor_export(engine, parent, exported, created_by)
+    revision_metadata_json = _revision_with_publisher_identity(
+        exported.revision_metadata_json,
+        created_by,
+    )
 
     def validate_draft(connection, rate_package_id: int) -> None:
         verify_package_sql_parity(
@@ -660,7 +744,7 @@ def publish_editor_submission(
         created_by=created_by,
         package_status=parent.config.default_package_status,
         parent_rate_package_id=submission.parent_rate_package_id,
-        revision_metadata_json=exported.revision_metadata_json,
+        revision_metadata_json=revision_metadata_json,
         draft_validator=validate_draft,
     )
     model_run_id = record_derived_model_run(

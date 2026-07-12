@@ -297,12 +297,28 @@ def test_settings_load_workbench_and_airflow_api_values(tmp_path):
             "WORKBENCH_ARTIFACT_ROOT": str(tmp_path / "candidates"),
             "AIRFLOW_API_URL": "http://127.0.0.1:8080/api/v2",
             "AIRFLOW_API_TOKEN": "unit-token",
+            "AIRFLOW_API_USERNAME": "analyst",
+            "AIRFLOW_API_PASSWORD": "local-secret",
         }
     )
 
     assert settings.workbench_artifact_root == tmp_path / "candidates"
     assert settings.airflow_api_url == "http://127.0.0.1:8080/api/v2"
     assert settings.airflow_api_token == "unit-token"
+    assert settings.airflow_api_username == "analyst"
+    assert settings.airflow_api_password == "local-secret"
+
+
+def test_settings_reuses_local_airflow_password_for_internal_api_login():
+    settings = Settings.from_env(
+        {
+            "AIRFLOW_API_USERNAME": "admin",
+            "AIRFLOW_LOCAL_PASSWORD": "changed-local-password",
+        }
+    )
+
+    assert settings.airflow_api_username == "admin"
+    assert settings.airflow_api_password == "changed-local-password"
 
 
 def test_generated_runtime_files_use_portable_exception_tuple_syntax():

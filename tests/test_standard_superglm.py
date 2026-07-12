@@ -349,3 +349,6 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         "sha256": api.hash_file_sha256(tmp_path / "run" / "rating_tables_review.xlsx"),
         "size_bytes": len(b"presentation only"),
     }
+    assert bundle.cv_report["model_name"] == "HOME_FREQ"
+    assert bundle.cv_report["fit_mode"] == "fit_reml"
+    assert bundle.cv_report["scoring"] == ["deviance"]

@@ -80,6 +80,23 @@ def test_pricing_deploy_rate_package_dag_exposes_manual_params(monkeypatch):
     }
 
 
+def test_deployment_context_uses_authenticated_airflow_trigger_identity(monkeypatch):
+    module = _import_deploy_dag_module(monkeypatch)
+    context = {
+        "params": {
+            "model_name": "HOME_FREQ",
+            "package_version": 8,
+            "deployment_reason": "Approved",
+            "deployed_by": "spoofed-notebook-value",
+        },
+        "dag_run": types.SimpleNamespace(triggering_user_name="approver@example.test"),
+    }
+
+    params = module.deployment_params_from_context(context)
+
+    assert params["deployed_by"] == "approver@example.test"
+
+
 def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_strings(
     monkeypatch,
 ):

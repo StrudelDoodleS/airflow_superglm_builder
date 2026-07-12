@@ -81,6 +81,7 @@ def _history_rows():
             "current_rate_package_id": 113,
             "baseline_cv_deviance": 0.491,
             "baseline_is_parent": True,
+            "baseline_metric_scope": "inherited_cv",
             "editor_training_delta": 0.009,
             "model_run_id": 912,
             "run_status": "SUCCESS",

@@ -34,6 +34,7 @@ def publish_editor_candidate_from_context(context: Mapping[str, Any]) -> dict[st
     dag_id = str(getattr(dag_obj, "dag_id", None) or getattr(dag_run, "dag_id"))
     triggering_identity = str(
         context.get("triggering_user_name")
+        or getattr(dag_run, "triggering_user_name", None)
         or "prototype-airflow-trigger-identity-unavailable"
     )
     result = publish_editor_submission(

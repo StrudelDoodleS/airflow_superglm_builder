@@ -150,6 +150,12 @@ def _settings_from_mapping(settings: Settings, values: Mapping[str, Any]) -> Set
     if "airflow_api_token" in values:
         token = str(values["airflow_api_token"]).strip()
         replacements["airflow_api_token"] = token or None
+    if "airflow_api_username" in values:
+        username = str(values["airflow_api_username"]).strip()
+        replacements["airflow_api_username"] = username or None
+    if "airflow_api_password" in values:
+        password = str(values["airflow_api_password"])
+        replacements["airflow_api_password"] = password or None
     if "skip_database_create" in values:
         replacements["skip_database_create"] = _bool_value(values["skip_database_create"])
 

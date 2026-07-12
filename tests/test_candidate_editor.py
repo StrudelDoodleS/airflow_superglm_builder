@@ -10,6 +10,7 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.workbench.artifacts import CandidateBundle
+from pricing_pipeline.workbench.submission import EditorSubmissionError
 
 
 class FakeWidget:
@@ -42,6 +43,7 @@ class FakeAirflowClient:
     def __init__(self) -> None:
         self.triggered = []
         self.run_state = "queued"
+        self.triggering_user_name = None
 
     def trigger_dag(self, dag_id, *, run_id, conf):
         self.triggered.append(SimpleNamespace(dag_id=dag_id, run_id=run_id, conf=conf))
@@ -52,7 +54,7 @@ class FakeAirflowClient:
             dag_id=dag_id,
             dag_run_id=run_id,
             state=self.run_state,
-            payload={},
+            payload={"triggering_user_name": self.triggering_user_name},
         )
 
     def dag_run_ui_url(self, dag_id, run_id):
@@ -216,6 +218,7 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
         "package_status": "PUBLISHED",
     }
     airflow_client.run_state = "success"
+    airflow_client.triggering_user_name = "analyst@example.test"
 
     status = submission.status()
     deployment_run = submission.request_deployment(
@@ -238,7 +241,6 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
         "package_version": 8,
         "deployment_slot": "HOME_FREQ_UAT",
         "deployment_reason": "Approved market calibration",
-        "deployed_by": "prototype-local-not-authenticated",
     }
 
 
@@ -255,3 +257,41 @@ def test_deployment_request_requires_published_submission_and_reason(tmp_path):
         submission.request_deployment(reason="Approved")
     with pytest.raises(ValueError, match="reason"):
         submission.request_deployment(reason=" ")
+
+
+def test_identical_submission_retry_reuses_immutable_artifacts(tmp_path):
+    airflow_client = FakeAirflowClient()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+
+    first = candidate.submit_edits(reason="Market calibration")
+    retried = candidate.submit_edits(reason="Market calibration")
+
+    assert retried.submission_id == first.submission_id
+    assert retried.path == first.path
+    assert retried.sha256 == first.sha256
+    assert Path(first.path).is_file()
+    assert Path(first.editor_session_path).is_file()
+    assert Path(first.edited_model_path).is_file()
+    assert len(airflow_client.triggered) == 2
+
+
+def test_incompatible_submission_retry_preserves_existing_artifacts(tmp_path):
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    first = candidate.submit_edits(reason="First rationale")
+
+    with pytest.raises(EditorSubmissionError, match="already exists"):
+        candidate.submit_edits(reason="Different rationale")
+
+    assert Path(first.path).is_file()
+    assert Path(first.editor_session_path).is_file()
+    assert Path(first.edited_model_path).is_file()

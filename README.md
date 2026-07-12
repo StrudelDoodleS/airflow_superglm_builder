@@ -15,6 +15,7 @@ demo/reference implementation.
 - [Docker Quickstart](#docker-quickstart)
 - [No-Docker Work Quickstart](#no-docker-work-quickstart)
 - [Adding Models](#adding-models)
+- [Candidate Workbench](#candidate-workbench)
 - [Optional Local Tools](#optional-local-tools)
 - [Demo Data](#demo-data)
 - [Work SQL Server Targeting](#work-sql-server-targeting)
@@ -179,10 +180,21 @@ Prerequisites:
    MLFLOW_ARTIFACT_ROOT=state/no_docker/mlflow/artifacts
    RATING_EXPORT_ROOT=state/no_docker/rating_exports
    VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits
+   WORKBENCH_ARTIFACT_ROOT=state/no_docker/workbench_artifacts
+   AIRFLOW_API_URL=http://127.0.0.1:8080/api/v2
+   AIRFLOW_LOCAL_PASSWORD=admin
+   AIRFLOW_API_USERNAME=admin
    ```
 
-   Do not put SQL server names, tokens, table names, or source-data rules in
-   `.env`; keep those in the Python modules your DAG imports.
+   Do not put SQL server names, database tokens, table names, or source-data
+   rules in `.env`; keep those in the Python modules your DAG imports. The local
+   Airflow simple-auth values above apply only to the single-user local service.
+
+   The local username/password are used internally to obtain Airflow's short-lived
+   API token when an editor submission is sent. For a work-managed Airflow
+   instance, return the API URL and token from the governed runtime module (or
+   inject `AIRFLOW_API_TOKEN` through your normal secret mechanism). Credentials
+   never belong in the analyst notebook.
 
 3. Seed the target database with the required DDL using the plain Python script
    shown in [Seed Database Schema](#seed-database-schema).
@@ -414,7 +426,9 @@ by the candidate workbench workflow.
 Scheduled training, human editing, and deployment are three separate runs:
 
 1. The model's scaffolded scheduled DAG trains on new data and publishes an
-   immutable candidate. Analysts do not edit models on a weekly schedule.
+   immutable candidate. Set `MODEL_BUILD_SCHEDULE` in the generated DAG when
+   the model is ready for recurring builds. Analysts do not edit models on a
+   weekly schedule.
 2. When a pricing change is needed, an analyst opens
    `tutorials/scaffolded_candidate_workbench.ipynb`, selects a friendly package
    number, and uses the live SuperGLM editor.
@@ -433,7 +447,9 @@ comparisons, artifact hashes, and Airflow lineage.
 SQL stores audit and lookup metadata. Verified joblib bundles beneath
 `WORKBENCH_ARTIFACT_ROOT` store the fitted Python model and the exact editor
 inputs needed on the single-host Cloud PC. That shared artifact directory must
-be visible to the notebook and Airflow processes.
+be visible to the notebook and Airflow processes. Those bundles can contain
+row-level model data, so restrict directory permissions and retention; this is
+the trusted single-host prototype boundary, not a general artifact service.
 
 A model-local `write_review_workbook(...)` hook may translate prepared axes for
 presentation, such as showing `exp(LogDensity)` as raw density. The resulting

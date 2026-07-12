@@ -112,6 +112,8 @@ class Workbench:
             self._airflow_client = AirflowClient(
                 self.settings.airflow_api_url,
                 token=self.settings.airflow_api_token,
+                username=self.settings.airflow_api_username,
+                password=self.settings.airflow_api_password,
             )
         return self._airflow_client
 
@@ -278,8 +280,15 @@ class Workbench:
                 manifest.data_as_of_date,
                 deployment.rate_package_id AS current_rate_package_id,
                 COALESCE(cv.metric_value, parent_cv.metric_value) AS baseline_cv_deviance,
-                CASE WHEN cv.metric_value IS NULL AND parent_cv.metric_value IS NOT NULL
-                    THEN 1 ELSE 0 END AS baseline_is_parent,
+                cv.metric_scope AS baseline_metric_scope,
+                CASE
+                    WHEN rp.parent_rate_package_id IS NOT NULL
+                     AND (
+                         cv.metric_scope = 'inherited_cv'
+                         OR (cv.metric_value IS NULL AND parent_cv.metric_value IS NOT NULL)
+                     )
+                    THEN 1 ELSE 0
+                END AS baseline_is_parent,
                 editor_delta.metric_value AS editor_training_delta
             FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
             JOIN {schemas.pricing}.PRICING_MODEL AS pm
