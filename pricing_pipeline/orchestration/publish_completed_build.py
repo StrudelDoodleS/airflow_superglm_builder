@@ -443,6 +443,21 @@ def load_candidate_sql_lineage(
                 .mappings()
                 .one_or_none()
             )
+        else:
+            split_row = (
+                con.execute(
+                    text(
+                        f"""
+                        SELECT split_set_id
+                        FROM {schemas.pricing}.CV_SPLIT_SET
+                        WHERE manifest_id = :manifest_id
+                        """
+                    ),
+                    {"manifest_id": manifest_id},
+                )
+                .mappings()
+                .first()
+            )
 
     try:
         raw_pk_columns = json.loads(str(manifest_row["pk_columns_json"]))
@@ -470,6 +485,11 @@ def load_candidate_sql_lineage(
                 f"split_set_id {split_set_id!r} row count does not match manifest_id "
                 f"{manifest_id!r}"
             )
+    elif split_row is not None:
+        raise CompletedModelBuildError(
+            "candidate artifact omits split_set_id but SQL manifest owns split_set_id "
+            f"{split_row['split_set_id']!r}"
+        )
 
     return CandidateSQLLineage(
         manifest_id=manifest_id,

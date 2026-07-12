@@ -127,6 +127,9 @@ class _FakeMappingResult:
     def one_or_none(self):
         return self.row
 
+    def first(self):
+        return self.row
+
 
 class _FakeCandidateLineageEngine:
     def __init__(self, *, manifest_row, split_row):
@@ -732,6 +735,103 @@ def test_candidate_publication_rejects_untrusted_sql_lineage_before_publish(
         )
 
     assert publish_calls == []
+
+
+@pytest.mark.parametrize(
+    ("split_row", "should_reject"),
+    [
+        (
+            {
+                "split_set_id": "split-owned",
+                "manifest_id": "manifest-existing",
+                "row_count": 1,
+                "row_order_sha256": "d" * 64,
+            },
+            True,
+        ),
+        (None, False),
+    ],
+    ids=("owned-split-omitted", "legitimate-no-split"),
+)
+def test_candidate_publication_resolves_omitted_split_against_sql_manifest(
+    tmp_path,
+    monkeypatch,
+    split_row,
+    should_reject,
+):
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_text("fake workbook", encoding="utf-8")
+    settings = _settings(tmp_path)
+    candidate_metadata = _candidate_metadata(
+        settings.workbench_artifact_root,
+        split_set_id=None,
+    )
+    engine = _FakeCandidateLineageEngine(
+        manifest_row={
+            "manifest_id": "manifest-existing",
+            "row_count": 1,
+            "pk_columns_json": json.dumps(["policy_id"]),
+        },
+        split_row=split_row,
+    )
+    publish_calls = []
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.configure_engine",
+        lambda engine_arg, schemas: engine_arg,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.schema_names_from_connectable",
+        lambda engine_arg: settings.schema_names,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine_arg, config_arg: 17,
+    )
+
+    def fake_publish(engine_arg, export, *, model_config):
+        publish_calls.append(export)
+        return {
+            "mlflow_run_id": "",
+            "export_id": export.export_id,
+            "rate_package_id": "42",
+            "package_version": "7",
+            "rating_workbook_path": export.rating_workbook_path,
+        }
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        fake_publish,
+    )
+    completed_build = {
+        "rating_workbook_path": str(workbook),
+        "model_version": "20260603",
+        "effective_from": "2026-06-03",
+        "export_id": "export-1",
+        "manifest_id": "manifest-existing",
+        "created_by": "airflow",
+        **candidate_metadata,
+    }
+
+    if should_reject:
+        with pytest.raises(CompletedModelBuildError, match="omits split_set_id.*owns"):
+            publish_completed_model_build(
+                engine,
+                settings=settings,
+                model_config=_config(),
+                dataset=None,
+                completed_build=completed_build,
+            )
+        assert publish_calls == []
+    else:
+        result = publish_completed_model_build(
+            engine,
+            settings=settings,
+            model_config=_config(),
+            dataset=None,
+            completed_build=completed_build,
+        )
+        assert result.split_set_id is None
+        assert len(publish_calls) == 1
 
 
 def test_publish_completed_model_build_carries_publication_receipt_fields(
