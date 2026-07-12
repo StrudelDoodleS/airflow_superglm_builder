@@ -92,17 +92,12 @@ class EditorPublicationResult:
     was_existing: bool
 
 
-def _artifact_root_from_submission(submission: EditorSubmission) -> Path:
-    path = Path(submission.path).expanduser().resolve()
-    try:
-        return path.parents[3]
-    except IndexError as exc:
-        raise EditorSubmissionError(
-            f"submission path does not follow the workbench layout: {path}"
-        ) from exc
-
-
-def load_parent_candidate(engine, submission: EditorSubmission) -> ParentCandidate:
+def load_parent_candidate(
+    engine,
+    submission: EditorSubmission,
+    *,
+    allowed_root: str | Path,
+) -> ParentCandidate:
     schemas = schema_names_from_connectable(engine)
     query = text(
         f"""
@@ -132,6 +127,8 @@ def load_parent_candidate(engine, submission: EditorSubmission) -> ParentCandida
           ON mr.rate_package_id = rp.rate_package_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
           ON split_link.model_run_id = mr.model_run_id
+         AND split_link.manifest_id = mr.manifest_id
+         AND split_link.dataset_role = 'training'
          AND split_link.split_role = 'validation'
         WHERE rp.rate_package_id = :rate_package_id
           AND mr.model_run_id = :model_run_id
@@ -185,7 +182,7 @@ def load_parent_candidate(engine, submission: EditorSubmission) -> ParentCandida
         expected_format=row["candidate_artifact_format"],
         expected_python_version=row["candidate_python_version"],
         expected_superglm_version=row["candidate_superglm_version"],
-        allowed_root=_artifact_root_from_submission(submission),
+        allowed_root=allowed_root,
     )
     if bundle.manifest_id != submission.manifest_id:
         raise EditorSubmissionError("parent bundle manifest does not match the submission")
@@ -196,7 +193,7 @@ def load_parent_candidate(engine, submission: EditorSubmission) -> ParentCandida
         engine,
         model_id=int(row["model_id"]),
         deployment_slot=config.deployment_slot,
-        allowed_root=_artifact_root_from_submission(submission),
+        allowed_root=allowed_root,
         parent_bundle=bundle,
     )
     return ParentCandidate(
@@ -291,9 +288,13 @@ def _load_champion_bundle(
     return champion, None
 
 
-def _load_edited_model(submission: EditorSubmission) -> Any:
+def _load_edited_model(
+    submission: EditorSubmission,
+    *,
+    allowed_root: str | Path,
+) -> Any:
     path = Path(submission.edited_model_path).expanduser().resolve()
-    root = _artifact_root_from_submission(submission)
+    root = Path(allowed_root).expanduser().resolve()
     if not path.is_relative_to(root):
         raise EditorSubmissionError(f"edited model is outside artifact root {root}: {path}")
     if submission.edited_model_format != EDITED_MODEL_FORMAT:
@@ -468,8 +469,10 @@ def _revision_with_publisher_identity(value: str, created_by: str) -> str:
 def export_edited_model(
     parent: ParentCandidate,
     submission: EditorSubmission,
+    *,
+    allowed_root: str | Path,
 ) -> EditorExport:
-    edited_model = _load_edited_model(submission)
+    edited_model = _load_edited_model(submission, allowed_root=allowed_root)
     output_dir = Path(submission.path).resolve().parent / "published"
     output_dir.mkdir(parents=True, exist_ok=True)
     workbook_path = output_dir / "rating_tables.xlsx"
@@ -783,8 +786,16 @@ def publish_editor_submission(
         submission_sha256,
         allowed_root=settings.workbench_artifact_root,
     )
-    parent = load_parent_candidate(engine, submission)
-    exported = export_edited_model(parent, submission)
+    parent = load_parent_candidate(
+        engine,
+        submission,
+        allowed_root=settings.workbench_artifact_root,
+    )
+    exported = export_edited_model(
+        parent,
+        submission,
+        allowed_root=settings.workbench_artifact_root,
+    )
     stage_editor_export(engine, parent, exported, created_by)
     revision_metadata_json = _revision_with_publisher_identity(
         exported.revision_metadata_json,

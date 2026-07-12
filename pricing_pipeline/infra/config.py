@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -14,6 +14,14 @@ def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def resolve_project_path(value: str | Path, env: Mapping[str, str]) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    project_root = Path(env.get("PRICING_PROJECT_ROOT") or Path.cwd()).expanduser().resolve()
+    return (project_root / path).resolve()
+
+
 @dataclass(frozen=True)
 class Settings:
     mssql_server: str = "mssql,1433"
@@ -23,7 +31,7 @@ class Settings:
     mssql_auth_mode: str = "sql_password"
     mssql_token_scope: str = "https://database.windows.net/.default"
     mssql_user: str = "sa"
-    mssql_password: str = "YourStrong(!)Password123"
+    mssql_password: str = field(default="YourStrong(!)Password123", repr=False)
     mssql_driver: str = "ODBC Driver 18 for SQL Server"
     mssql_encrypt: str = "no"
     mssql_trust_server_cert: str = "yes"
@@ -33,9 +41,9 @@ class Settings:
     validation_split_artifact_root: Path = Path("/opt/pricing/state/validation_splits")
     workbench_artifact_root: Path = Path("state/workbench_artifacts")
     airflow_api_url: str = "http://127.0.0.1:8080/api/v2"
-    airflow_api_token: str | None = None
+    airflow_api_token: str | None = field(default=None, repr=False)
     airflow_api_username: str | None = None
-    airflow_api_password: str | None = None
+    airflow_api_password: str | None = field(default=None, repr=False)
     skip_database_create: bool = False
     pricing_schema: str = "pricing"
     pricing_staging_schema: str = "pricing_stg"
@@ -70,20 +78,23 @@ class Settings:
             ),
             mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI", cls.mlflow_tracking_uri),
             mlflow_enabled=_env_bool(env, "PRICING_ENABLE_MLFLOW", cls.mlflow_enabled),
-            rating_export_root=Path(
-                env.get("RATING_EXPORT_ROOT", str(cls.rating_export_root))
+            rating_export_root=resolve_project_path(
+                env.get("RATING_EXPORT_ROOT", str(cls.rating_export_root)),
+                env,
             ),
-            validation_split_artifact_root=Path(
+            validation_split_artifact_root=resolve_project_path(
                 env.get(
                     "VALIDATION_SPLIT_ARTIFACT_ROOT",
                     str(cls.validation_split_artifact_root),
-                )
+                ),
+                env,
             ),
-            workbench_artifact_root=Path(
+            workbench_artifact_root=resolve_project_path(
                 env.get(
                     "WORKBENCH_ARTIFACT_ROOT",
                     str(cls.workbench_artifact_root),
-                )
+                ),
+                env,
             ),
             airflow_api_url=env.get("AIRFLOW_API_URL", cls.airflow_api_url).rstrip("/"),
             airflow_api_token=(env.get("AIRFLOW_API_TOKEN") or None),

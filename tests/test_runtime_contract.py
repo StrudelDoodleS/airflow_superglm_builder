@@ -309,6 +309,87 @@ def test_settings_load_workbench_and_airflow_api_values(tmp_path):
     assert settings.airflow_api_password == "local-secret"
 
 
+def test_settings_resolves_relative_artifact_roots_from_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    project_root = tmp_path / "project"
+    launch_root = tmp_path / "launch"
+    project_root.mkdir()
+    launch_root.mkdir()
+    monkeypatch.chdir(launch_root)
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": str(project_root),
+            "RATING_EXPORT_ROOT": "state/rating_exports",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "state/validation_splits",
+            "WORKBENCH_ARTIFACT_ROOT": "state/workbench",
+        }
+    )
+
+    assert settings.rating_export_root == project_root / "state/rating_exports"
+    assert settings.validation_split_artifact_root == (
+        project_root / "state/validation_splits"
+    )
+    assert settings.workbench_artifact_root == project_root / "state/workbench"
+
+
+def test_settings_resolves_relative_artifact_roots_from_cwd_without_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    launch_root = tmp_path / "launch"
+    launch_root.mkdir()
+    monkeypatch.chdir(launch_root)
+
+    settings = Settings.from_env(
+        {
+            "RATING_EXPORT_ROOT": "rating",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "splits",
+            "WORKBENCH_ARTIFACT_ROOT": "workbench",
+        }
+    )
+
+    assert settings.rating_export_root == launch_root / "rating"
+    assert settings.validation_split_artifact_root == launch_root / "splits"
+    assert settings.workbench_artifact_root == launch_root / "workbench"
+
+
+def test_settings_keeps_absolute_artifact_roots_absolute(tmp_path):
+    project_root = tmp_path / "project"
+    absolute_roots = {
+        "RATING_EXPORT_ROOT": tmp_path / "external-rating",
+        "VALIDATION_SPLIT_ARTIFACT_ROOT": tmp_path / "external-splits",
+        "WORKBENCH_ARTIFACT_ROOT": tmp_path / "external-workbench",
+    }
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": str(project_root),
+            **{name: str(path) for name, path in absolute_roots.items()},
+        }
+    )
+
+    assert settings.rating_export_root == absolute_roots["RATING_EXPORT_ROOT"]
+    assert settings.validation_split_artifact_root == absolute_roots[
+        "VALIDATION_SPLIT_ARTIFACT_ROOT"
+    ]
+    assert settings.workbench_artifact_root == absolute_roots["WORKBENCH_ARTIFACT_ROOT"]
+
+
+def test_settings_repr_hides_database_and_airflow_secrets():
+    secrets = {
+        "MSSQL_PASSWORD": "sentinel-mssql-secret",
+        "AIRFLOW_API_TOKEN": "sentinel-airflow-token",
+        "AIRFLOW_API_PASSWORD": "sentinel-airflow-password",
+    }
+
+    rendered = repr(Settings.from_env(secrets))
+
+    assert all(secret not in rendered for secret in secrets.values())
+
+
 def test_settings_reuses_local_airflow_password_for_internal_api_login():
     settings = Settings.from_env(
         {

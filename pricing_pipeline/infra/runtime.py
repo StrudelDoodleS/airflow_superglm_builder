@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra import db as shared_db
-from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.config import Settings, resolve_project_path
 from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
 
 
@@ -113,7 +113,11 @@ def _settings_from_module(module: ModuleType, *, env: Mapping[str, str]) -> Sett
         # database creation should be opt-in rather than inherited from Docker defaults.
         settings = replace(Settings.from_env(env), skip_database_create=True)
         if raw_settings is not None:
-            settings = _settings_from_mapping(settings, _as_mapping(raw_settings))
+            settings = _settings_from_mapping(
+                settings,
+                _as_mapping(raw_settings),
+                env=env,
+            )
 
     if schema_names is not None:
         settings = replace(
@@ -125,7 +129,12 @@ def _settings_from_module(module: ModuleType, *, env: Mapping[str, str]) -> Sett
     return settings
 
 
-def _settings_from_mapping(settings: Settings, values: Mapping[str, Any]) -> Settings:
+def _settings_from_mapping(
+    settings: Settings,
+    values: Mapping[str, Any],
+    *,
+    env: Mapping[str, str],
+) -> Settings:
     replacements: dict[str, Any] = {}
     if "pricing_database" in values:
         replacements["pricing_database"] = str(values["pricing_database"])
@@ -136,14 +145,19 @@ def _settings_from_mapping(settings: Settings, values: Mapping[str, Any]) -> Set
     if "mlflow_enabled" in values:
         replacements["mlflow_enabled"] = _bool_value(values["mlflow_enabled"])
     if "rating_export_root" in values:
-        replacements["rating_export_root"] = Path(str(values["rating_export_root"]))
+        replacements["rating_export_root"] = resolve_project_path(
+            str(values["rating_export_root"]),
+            env,
+        )
     if "validation_split_artifact_root" in values:
-        replacements["validation_split_artifact_root"] = Path(
-            str(values["validation_split_artifact_root"])
+        replacements["validation_split_artifact_root"] = resolve_project_path(
+            str(values["validation_split_artifact_root"]),
+            env,
         )
     if "workbench_artifact_root" in values:
-        replacements["workbench_artifact_root"] = Path(
-            str(values["workbench_artifact_root"])
+        replacements["workbench_artifact_root"] = resolve_project_path(
+            str(values["workbench_artifact_root"]),
+            env,
         )
     if "airflow_api_url" in values:
         replacements["airflow_api_url"] = str(values["airflow_api_url"]).rstrip("/")

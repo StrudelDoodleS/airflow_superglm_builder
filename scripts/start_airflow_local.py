@@ -26,6 +26,17 @@ def _repo_path(value: str | Path) -> Path:
     return ROOT / path
 
 
+def _project_path(value: str | Path, *, project_root: Path) -> Path:
+    path = Path(value)
+    try:
+        return ROOT / path.relative_to(DOCKER_PROJECT_ROOT)
+    except ValueError:
+        pass
+    if path.is_absolute():
+        return path
+    return (project_root / path).resolve()
+
+
 def _prepend_pythonpath(path: Path) -> None:
     existing = os.environ.get("PYTHONPATH")
     parts = [str(path)]
@@ -88,18 +99,37 @@ def main() -> None:
     _repo_path("logs").mkdir(parents=True, exist_ok=True)
 
     dags_folder = _repo_path(os.environ.get("AIRFLOW__CORE__DAGS_FOLDER", "dags"))
-    rating_export_root = _repo_path(
-        os.environ.get("RATING_EXPORT_ROOT", "state/no_docker/rating_exports")
+    project_root = _repo_path(os.environ.get("PRICING_PROJECT_ROOT", str(ROOT)))
+    rating_export_root = _project_path(
+        os.environ.get("RATING_EXPORT_ROOT", "state/no_docker/rating_exports"),
+        project_root=project_root,
     )
-    rating_export_root.mkdir(parents=True, exist_ok=True)
+    validation_split_artifact_root = _project_path(
+        os.environ.get(
+            "VALIDATION_SPLIT_ARTIFACT_ROOT",
+            "state/no_docker/validation_splits",
+        ),
+        project_root=project_root,
+    )
+    workbench_artifact_root = _project_path(
+        os.environ.get(
+            "WORKBENCH_ARTIFACT_ROOT",
+            "state/no_docker/workbench_artifacts",
+        ),
+        project_root=project_root,
+    )
+    for artifact_root in (
+        rating_export_root,
+        validation_split_artifact_root,
+        workbench_artifact_root,
+    ):
+        artifact_root.mkdir(parents=True, exist_ok=True)
     schema_dir = _repo_path(
         os.environ.get(
             "PRICING_SCHEMA_DIR",
             os.environ.get("PRICING_MIGRATIONS_DIR", "db/migrations"),
         )
     )
-    project_root = _repo_path(os.environ.get("PRICING_PROJECT_ROOT", str(ROOT)))
-
     os.environ["AIRFLOW_HOME"] = str(airflow_home)
     os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(dags_folder)
     os.environ.setdefault("AIRFLOW__CORE__LOAD_EXAMPLES", "false")
@@ -108,6 +138,10 @@ def main() -> None:
     os.environ["PRICING_PROJECT_ROOT"] = str(project_root)
     os.environ["PRICING_SCHEMA_DIR"] = str(schema_dir)
     os.environ["RATING_EXPORT_ROOT"] = str(rating_export_root)
+    os.environ["VALIDATION_SPLIT_ARTIFACT_ROOT"] = str(
+        validation_split_artifact_root
+    )
+    os.environ["WORKBENCH_ARTIFACT_ROOT"] = str(workbench_artifact_root)
     airflow_username, airflow_password = _configure_simple_auth(airflow_home)
     _prepend_pythonpath(ROOT)
 

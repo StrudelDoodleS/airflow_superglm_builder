@@ -22,6 +22,8 @@ LOCAL_AIRFLOW_ENV_KEYS = [
     "PRICING_SCHEMA_DIR",
     "PRICING_PROJECT_ROOT",
     "RATING_EXPORT_ROOT",
+    "VALIDATION_SPLIT_ARTIFACT_ROOT",
+    "WORKBENCH_ARTIFACT_ROOT",
 ]
 
 
@@ -797,6 +799,14 @@ def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_pa
 
     def fake_load_env():
         monkeypatch.setenv("RATING_EXPORT_ROOT", "/opt/pricing/state/rating_exports")
+        monkeypatch.setenv(
+            "VALIDATION_SPLIT_ARTIFACT_ROOT",
+            "/opt/pricing/state/validation_splits",
+        )
+        monkeypatch.setenv(
+            "WORKBENCH_ARTIFACT_ROOT",
+            "/opt/pricing/state/workbench_artifacts",
+        )
         monkeypatch.setenv("PRICING_SCHEMA_DIR", "/opt/pricing/db/migrations")
         monkeypatch.setenv("PRICING_PROJECT_ROOT", "/opt/pricing")
 
@@ -823,10 +833,66 @@ def test_local_airflow_maps_docker_mount_paths_to_repo_paths(monkeypatch, tmp_pa
 
     assert exit_info.value.code == 0
     assert Path(os.environ["RATING_EXPORT_ROOT"]) == tmp_path / "state/rating_exports"
+    assert Path(os.environ["VALIDATION_SPLIT_ARTIFACT_ROOT"]) == (
+        tmp_path / "state/validation_splits"
+    )
+    assert Path(os.environ["WORKBENCH_ARTIFACT_ROOT"]) == (
+        tmp_path / "state/workbench_artifacts"
+    )
     assert Path(os.environ["PRICING_SCHEMA_DIR"]) == tmp_path / "db/migrations"
     assert Path(os.environ["PRICING_PROJECT_ROOT"]) == tmp_path
     assert (tmp_path / "state/rating_exports").is_dir()
+    assert (tmp_path / "state/validation_splits").is_dir()
+    assert (tmp_path / "state/workbench_artifacts").is_dir()
     assert captured_exec["command"] == ["/usr/bin/airflow", "version"]
+
+
+def test_local_airflow_resolves_relative_artifact_roots_from_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    from scripts import start_airflow_local
+
+    clear_local_airflow_env(monkeypatch)
+    repo_root = tmp_path / "launcher-repo"
+    project_root = tmp_path / "pricing-project"
+    launch_root = tmp_path / "different-cwd"
+    for path in (repo_root, project_root, launch_root):
+        path.mkdir()
+    monkeypatch.chdir(launch_root)
+
+    def fake_load_env():
+        monkeypatch.setenv("PRICING_PROJECT_ROOT", str(project_root))
+        monkeypatch.setenv("RATING_EXPORT_ROOT", "state/rating")
+        monkeypatch.setenv("VALIDATION_SPLIT_ARTIFACT_ROOT", "state/splits")
+        monkeypatch.setenv("WORKBENCH_ARTIFACT_ROOT", "state/workbench")
+
+    def fake_execv(_executable: str, _command: list[str]) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr(start_airflow_local, "ROOT", repo_root)
+    monkeypatch.setattr(start_airflow_local, "load_env", fake_load_env)
+    monkeypatch.setattr(start_airflow_local.os, "chdir", lambda path: None)
+    monkeypatch.setattr(
+        start_airflow_local,
+        "parse_args",
+        lambda: types.SimpleNamespace(airflow_args=["version"]),
+    )
+    monkeypatch.setattr(start_airflow_local.shutil, "which", lambda name: "/usr/bin/airflow")
+    monkeypatch.setattr(start_airflow_local.os, "execv", fake_execv)
+
+    with pytest.raises(SystemExit) as exit_info:
+        start_airflow_local.main()
+
+    assert exit_info.value.code == 0
+    assert Path(os.environ["PRICING_PROJECT_ROOT"]) == project_root
+    assert Path(os.environ["RATING_EXPORT_ROOT"]) == project_root / "state/rating"
+    assert Path(os.environ["VALIDATION_SPLIT_ARTIFACT_ROOT"]) == (
+        project_root / "state/splits"
+    )
+    assert Path(os.environ["WORKBENCH_ARTIFACT_ROOT"]) == (
+        project_root / "state/workbench"
+    )
 
 
 def test_local_airflow_configures_predictable_simple_auth(monkeypatch, tmp_path):

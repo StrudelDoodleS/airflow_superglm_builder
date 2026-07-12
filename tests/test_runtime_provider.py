@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
 from sqlalchemy import create_engine
 
@@ -12,7 +11,9 @@ from pricing_pipeline.infra.schema import SchemaNames, schema_names_from_connect
 
 
 def test_runtime_provider_imports_connection_module_from_src(monkeypatch, tmp_path):
-    project_root = tmp_path
+    project_root = tmp_path / "project"
+    launch_root = tmp_path / "launch"
+    launch_root.mkdir()
     runtime_dir = project_root / "src" / "work_runtime"
     runtime_dir.mkdir(parents=True)
     (runtime_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -55,6 +56,7 @@ def get_runtime_settings():
     )
 
     monkeypatch.setenv("PRICING_PROJECT_ROOT", str(project_root))
+    monkeypatch.chdir(launch_root)
     sys.modules.pop("work_runtime", None)
     sys.modules.pop("work_runtime.database", None)
 
@@ -65,7 +67,11 @@ def get_runtime_settings():
     assert runtime.settings.skip_database_create is True
     assert runtime.settings.mlflow_tracking_uri == "http://mlflow.work:5000"
     assert runtime.settings.mlflow_enabled is False
-    assert runtime.settings.workbench_artifact_root == Path("state/work/candidates")
+    assert runtime.settings.rating_export_root == project_root / "state/work/rating_exports"
+    assert runtime.settings.validation_split_artifact_root == (
+        project_root / "state/work/validation_splits"
+    )
+    assert runtime.settings.workbench_artifact_root == project_root / "state/work/candidates"
     assert runtime.settings.airflow_api_url == "https://airflow.work.example/api/v2"
     assert runtime.settings.airflow_api_token == "runtime-token"
     assert runtime.settings.schema_names == SchemaNames(

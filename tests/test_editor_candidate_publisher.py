@@ -53,6 +53,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         metric_scopes={"editor_training_deviance_delta": "editor_training_parent"},
     )
     calls = []
+    allowed_roots = []
     publish_connection = object()
     publication_is_active = False
     monkeypatch.setattr(
@@ -60,16 +61,16 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         "load_verified_submission",
         lambda path, digest, **kwargs: submission,
     )
-    monkeypatch.setattr(
-        editor_candidate,
-        "load_parent_candidate",
-        lambda engine, loaded_submission: parent,
-    )
-    monkeypatch.setattr(
-        editor_candidate,
-        "export_edited_model",
-        lambda loaded_parent, loaded_submission: exported,
-    )
+    def fake_load_parent_candidate(engine, loaded_submission, *, allowed_root):
+        allowed_roots.append(("parent", allowed_root))
+        return parent
+
+    def fake_export_edited_model(loaded_parent, loaded_submission, *, allowed_root):
+        allowed_roots.append(("edited", allowed_root))
+        return exported
+
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", fake_load_parent_candidate)
+    monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export_edited_model)
     monkeypatch.setattr(
         editor_candidate,
         "stage_editor_export",
@@ -139,6 +140,200 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert lineage_kwargs["manifest_id"] == submission.manifest_id
     assert lineage_kwargs["split_set_id"] == submission.split_set_id
     assert lineage_kwargs["candidate_artifact_sha256"] == "d" * 64
+    assert allowed_roots == [("parent", tmp_path), ("edited", tmp_path)]
+
+
+@pytest.mark.parametrize(
+    "submission_relative_path",
+    [
+        "submission.json",
+        "models/HOME_FREQ/editor/submissions/deep/submission.json",
+    ],
+)
+def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
+    monkeypatch,
+    tmp_path,
+    submission_relative_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    configured_root = tmp_path / "configured-workbench"
+    candidate_path = configured_root / "models/HOME_FREQ/runs/deep/candidate.joblib"
+    submission = SimpleNamespace(
+        path=str(configured_root / submission_relative_path),
+        model_name="HOME_FREQ",
+        source_package_version=7,
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        baseline_candidate_path=str(candidate_path),
+        baseline_candidate_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+    )
+    row = {
+        "model_id": 17,
+        "model_name": submission.model_name,
+        "model_version": "v4",
+        "package_version": submission.source_package_version,
+        "rate_package_id": submission.parent_rate_package_id,
+        "effective_from_date": "2026-01-01",
+        "effective_to_date": None,
+        "model_run_id": submission.parent_model_run_id,
+        "run_status": "SUCCESS",
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        "candidate_artifact_path": submission.baseline_candidate_path,
+        "candidate_artifact_sha256": submission.baseline_candidate_sha256,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+        "model_source_sha256": submission.model_source_sha256,
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement, params):
+            self.statements.append((str(statement), params))
+            return Rows()
+
+    class Begin:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self.connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def __init__(self):
+            self.connection = Connection()
+
+        def begin(self):
+            return Begin(self.connection)
+
+    bundle = SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1")
+    load_calls = []
+    champion_calls = []
+
+    def fake_load_candidate_bundle(path, **kwargs):
+        load_calls.append((path, kwargs))
+        return bundle
+
+    def fake_load_champion_bundle(engine, **kwargs):
+        champion_calls.append(kwargs)
+        return None, "no champion"
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(editor_candidate, "load_candidate_bundle", fake_load_candidate_bundle)
+    monkeypatch.setattr(editor_candidate, "_load_champion_bundle", fake_load_champion_bundle)
+    monkeypatch.setattr(
+        editor_candidate,
+        "get_model_config",
+        lambda model_name: SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+    )
+    engine = Engine()
+
+    parent = editor_candidate.load_parent_candidate(
+        engine,
+        submission,
+        allowed_root=configured_root,
+    )
+
+    assert parent.bundle is bundle
+    assert load_calls[0][0] == str(candidate_path)
+    assert load_calls[0][1]["allowed_root"] == configured_root
+    assert champion_calls[0]["allowed_root"] == configured_root
+    statement = engine.connection.statements[0][0]
+    assert "split_link.manifest_id = mr.manifest_id" in statement
+    assert "split_link.dataset_role = 'training'" in statement
+    assert "split_link.split_role = 'validation'" in statement
+
+
+@pytest.mark.parametrize(
+    "submission_relative_path",
+    ["submission.json", "crafted/deep/layout/submission.json"],
+)
+def test_edited_model_root_cannot_be_widened_by_submission_path(
+    tmp_path,
+    submission_relative_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.submission import EditorSubmissionError
+
+    configured_root = tmp_path / "configured-workbench"
+    outside_model = tmp_path / "outside" / "edited.joblib"
+    submission = SimpleNamespace(
+        path=str(tmp_path / submission_relative_path),
+        edited_model_path=str(outside_model),
+    )
+
+    with pytest.raises(EditorSubmissionError, match="outside artifact root"):
+        editor_candidate._load_edited_model(
+            submission,
+            allowed_root=configured_root,
+        )
+
+
+def test_edited_model_loader_supports_nested_path_within_configured_root(
+    monkeypatch,
+    tmp_path,
+):
+    import platform
+
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.submission import EDITED_MODEL_FORMAT, sha256_file
+
+    configured_root = tmp_path / "configured-workbench"
+    model_path = configured_root / "models/HOME_FREQ/editor/deep/edited.joblib"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"nested-model")
+    python_version = platform.python_version()
+    superglm_version = "test-superglm"
+    edited_model = object()
+    submission = SimpleNamespace(
+        path=str(configured_root / "submission.json"),
+        edited_model_path=str(model_path),
+        edited_model_format=EDITED_MODEL_FORMAT,
+        edited_model_size_bytes=model_path.stat().st_size,
+        edited_model_sha256=sha256_file(model_path),
+        edited_model_python_version=python_version,
+        edited_model_superglm_version=superglm_version,
+    )
+    monkeypatch.setattr(editor_candidate, "version", lambda name: superglm_version)
+    monkeypatch.setattr(
+        editor_candidate.joblib,
+        "load",
+        lambda path: {
+            "format": EDITED_MODEL_FORMAT,
+            "python_version": python_version,
+            "superglm_version": superglm_version,
+            "model": edited_model,
+        },
+    )
+
+    loaded = editor_candidate._load_edited_model(
+        submission,
+        allowed_root=configured_root,
+    )
+
+    assert loaded is edited_model
 
 
 def test_training_comparison_metrics_are_stable_and_scoped():
