@@ -1381,7 +1381,7 @@ def test_record_model_run_cleans_superseded_primary_lineage_before_upserts():
         "dataset_role": "training",
         "split_role": "validation",
     }
-    assert fold_cleanup[2] == split_params
+    assert fold_cleanup[2] == {"model_run_id": 501}
     assert split_cleanup[2] == split_params
     assert dataset_cleanup[2] == {
         "model_run_id": 501,
@@ -1393,12 +1393,107 @@ def test_record_model_run_cleans_superseded_primary_lineage_before_upserts():
     assert "split_reference.manifest_id = dataset_link.manifest_id" in dataset_cleanup[1]
     assert "split_reference.dataset_role = dataset_link.dataset_role" in dataset_cleanup[1]
     assert (
-        executed.index(fold_cleanup)
-        < executed.index(split_cleanup)
+        executed.index(split_cleanup)
+        < executed.index(fold_cleanup)
         < executed.index(dataset_cleanup)
         < executed.index(dataset_upsert)
         < executed.index(split_upsert)
     )
+
+
+def test_record_model_run_preserves_fold_metrics_shared_by_another_split_role():
+    events = []
+
+    class SharedSplitConnection(FakeLineageConnection):
+        def __init__(self, captured_events):
+            super().__init__(captured_events)
+            self.split_links = [
+                {
+                    "manifest_id": "manifest-1",
+                    "split_set_id": "split-shared",
+                    "dataset_role": "training",
+                    "split_role": "validation",
+                },
+                {
+                    "manifest_id": "manifest-1",
+                    "split_set_id": "split-shared",
+                    "dataset_role": "training",
+                    "split_role": "benchmark",
+                },
+            ]
+            self.fold_split_sets = {"split-shared"}
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            self.events.append(("execute", sql, params))
+            if "SELECT model_run_id" in sql:
+                return FakeScalarResult(501)
+            if "DELETE split_link" in sql:
+                self.split_links = [
+                    link
+                    for link in self.split_links
+                    if not (
+                        link["dataset_role"] == params["dataset_role"]
+                        and link["split_role"] == params["split_role"]
+                        and (
+                            params["split_set_id"] is None
+                            or link["manifest_id"] != params["manifest_id"]
+                            or link["split_set_id"] != params["split_set_id"]
+                        )
+                    )
+                ]
+            if "DELETE fold_metric" in sql:
+                if "AND EXISTS" in sql:
+                    stale_sets = {
+                        link["split_set_id"]
+                        for link in self.split_links
+                        if link["dataset_role"] == params["dataset_role"]
+                        and link["split_role"] == params["split_role"]
+                        and (
+                            params["split_set_id"] is None
+                            or link["manifest_id"] != params["manifest_id"]
+                            or link["split_set_id"] != params["split_set_id"]
+                        )
+                    }
+                    self.fold_split_sets.difference_update(stale_sets)
+                else:
+                    referenced_sets = {link["split_set_id"] for link in self.split_links}
+                    self.fold_split_sets.intersection_update(referenced_sets)
+            return FakeScalarResult(None)
+
+    engine = FakeLineageEngine(events)
+    connection = SharedSplitConnection(events)
+    engine.connection = connection
+
+    lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-07-12",
+        mlflow_run_id="mlflow-2",
+        manifest_id="manifest-2",
+        split_set_id="split-2",
+        export_id="export-2",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v2",
+        rate_package_id=43,
+        rating_workbook_path="/tmp/attempt-2/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+    )
+
+    assert [link["split_role"] for link in connection.split_links] == ["benchmark"]
+    assert connection.fold_split_sets == {"split-shared"}
+    fold_cleanup = next(
+        event for event in events if event[0] == "execute" and "DELETE fold_metric" in event[1]
+    )
+    split_cleanup = next(
+        event for event in events if event[0] == "execute" and "DELETE split_link" in event[1]
+    )
+    assert events.index(split_cleanup) < events.index(fold_cleanup)
+    assert "NOT EXISTS" in fold_cleanup[1]
+    assert "split_reference.model_run_id = fold_metric.model_run_id" in fold_cleanup[1]
+    assert "split_reference.split_set_id = fold_metric.split_set_id" in fold_cleanup[1]
 
 
 def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
@@ -1447,7 +1542,7 @@ def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
         "dataset_role": "training",
         "split_role": "validation",
     }
-    assert fold_cleanup[2] == expected_params
+    assert fold_cleanup[2] == {"model_run_id": 501}
     assert split_cleanup[2] == expected_params
     assert dataset_cleanup[2] == {
         "model_run_id": 501,
@@ -1455,8 +1550,8 @@ def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
         "dataset_role": "training",
     }
     assert (
-        executed.index(fold_cleanup)
-        < executed.index(split_cleanup)
+        executed.index(split_cleanup)
+        < executed.index(fold_cleanup)
         < executed.index(dataset_cleanup)
         < executed.index(dataset_upsert)
     )

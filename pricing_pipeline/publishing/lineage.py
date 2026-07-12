@@ -179,29 +179,6 @@ def record_model_run(
         con.execute(
             text(
                 """
-                DELETE fold_metric
-                FROM pricing.CV_FOLD_METRIC AS fold_metric
-                WHERE fold_metric.model_run_id = :model_run_id
-                  AND EXISTS (
-                      SELECT 1
-                      FROM mlops.MODEL_RUN_SPLIT_SET AS split_link
-                      WHERE split_link.model_run_id = fold_metric.model_run_id
-                        AND split_link.split_set_id = fold_metric.split_set_id
-                        AND split_link.dataset_role = :dataset_role
-                        AND split_link.split_role = :split_role
-                        AND (
-                            :split_set_id IS NULL
-                            OR split_link.manifest_id <> :manifest_id
-                            OR split_link.split_set_id <> :split_set_id
-                        )
-                  );
-                """
-            ),
-            split_lineage_params,
-        )
-        con.execute(
-            text(
-                """
                 DELETE split_link
                 FROM mlops.MODEL_RUN_SPLIT_SET AS split_link
                 WHERE split_link.model_run_id = :model_run_id
@@ -215,6 +192,22 @@ def record_model_run(
                 """
             ),
             split_lineage_params,
+        )
+        con.execute(
+            text(
+                """
+                DELETE fold_metric
+                FROM pricing.CV_FOLD_METRIC AS fold_metric
+                WHERE fold_metric.model_run_id = :model_run_id
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM mlops.MODEL_RUN_SPLIT_SET AS split_reference
+                      WHERE split_reference.model_run_id = fold_metric.model_run_id
+                        AND split_reference.split_set_id = fold_metric.split_set_id
+                  );
+                """
+            ),
+            {"model_run_id": model_run_id},
         )
         con.execute(
             text(
