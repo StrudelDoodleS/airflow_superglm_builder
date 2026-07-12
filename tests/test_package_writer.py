@@ -76,7 +76,11 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
         return 108
 
     monkeypatch.setattr(package_writer, "load_staging_to_rating_package", fake_load)
+
     def validator(connection, rate_package_id):
+        return None
+
+    def write_lineage(connection, rate_package_id):
         return None
 
     publish_rating_package(
@@ -86,12 +90,14 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
         parent_rate_package_id=107,
         revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
         draft_validator=validator,
+        package_lineage_writer=write_lineage,
     )
 
     args = captured[0]
     assert args.parent_rate_package_id == 107
     assert args.revision_metadata_json == '{"kind":"SUPERGLM_EDITOR"}'
     assert args.draft_validator is validator
+    assert args.package_lineage_writer is write_lineage
 
 
 def test_publish_rating_package_reports_existing_source_export(monkeypatch):
@@ -254,6 +260,144 @@ class _FakeExistingPackageEngine:
 
     def begin(self):
         return _FakeExistingPackageBegin(self.connection)
+
+
+class _FakeScalarResult:
+    def __init__(self, value=None):
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _FakeNewPackageConnection:
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params))
+        if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
+            return _FakeMetaWithModelResult(_staged_meta())
+        if "source_export_id = :export_id" in sql:
+            return _FakeExistingPackageResult(None)
+        if "SELECT ISNULL(MAX(package_version), 0) + 1" in sql:
+            return _FakeScalarResult(3)
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql:
+            return _FakeScalarResult(42)
+        return _FakeScalarResult()
+
+
+class _FakeNewPackageBegin:
+    def __init__(self, connection):
+        self.connection = connection
+        self.exit_exception = None
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exit_exception = exc
+        return False
+
+
+class _FakeNewPackageEngine:
+    def __init__(self):
+        self.connection = _FakeNewPackageConnection()
+        self.transaction = _FakeNewPackageBegin(self.connection)
+
+    def begin(self):
+        return self.transaction
+
+
+def _new_package_args(**overrides):
+    values = {
+        "export_id": "export-1",
+        "created_by": "airflow",
+        "package_status": "PUBLISHED",
+        "set_pointer": None,
+    }
+    values.update(overrides)
+    args = type("Args", (), {})()
+    for name, value in values.items():
+        setattr(args, name, value)
+    return args
+
+
+def test_package_lineage_writer_runs_inside_transaction_before_final_status():
+    engine = _FakeNewPackageEngine()
+    events = []
+
+    def validate_draft(connection, rate_package_id):
+        assert connection is engine.connection
+        assert rate_package_id == 42
+        events.append("validate")
+
+    def write_lineage(connection, rate_package_id):
+        assert connection is engine.connection
+        assert rate_package_id == 42
+        assert not any(
+            "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
+            for sql, _params in connection.statements
+        )
+        events.append("lineage")
+
+    args = _new_package_args(
+        draft_validator=validate_draft,
+        package_lineage_writer=write_lineage,
+    )
+
+    assert load_staging_to_rating_package(engine, args) == 42
+
+    status_index = next(
+        index
+        for index, (sql, _params) in enumerate(engine.connection.statements)
+        if "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
+    )
+    assert events == ["validate", "lineage"]
+    assert engine.connection.statements[status_index][1] == {
+        "package_status": "PUBLISHED",
+        "rate_package_id": 42,
+    }
+
+
+def test_package_lineage_failure_prevents_final_status_and_rolls_back_transaction():
+    engine = _FakeNewPackageEngine()
+    failure = RuntimeError("lineage write failed")
+
+    def fail_lineage(connection, rate_package_id):
+        assert connection is engine.connection
+        assert rate_package_id == 42
+        raise failure
+
+    args = _new_package_args(package_lineage_writer=fail_lineage)
+
+    with pytest.raises(RuntimeError, match="lineage write failed"):
+        load_staging_to_rating_package(engine, args)
+
+    assert engine.transaction.exit_exception is failure
+    assert not any(
+        "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+def test_existing_compatible_package_invokes_lineage_writer_on_same_connection():
+    engine = _FakeExistingPackageEngine()
+    calls = []
+
+    def write_lineage(connection, rate_package_id):
+        calls.append((connection, rate_package_id))
+
+    args = _new_package_args(package_lineage_writer=write_lineage)
+
+    assert load_staging_to_rating_package(engine, args) == 42
+
+    assert calls == [(engine.connection, 42)]
+    assert args.was_existing is True
 
 
 def test_package_writer_rejects_staged_export_without_registered_model_id(monkeypatch):

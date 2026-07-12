@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
 def record_model_run(
-    engine: Engine,
+    engine: Engine | None,
     *,
     dag_id: str,
     airflow_run_id: str,
@@ -36,6 +37,8 @@ def record_model_run(
     fold_metrics: Sequence[Mapping[str, int | str | float]] = (),
     dataset_role: str = "training",
     split_role: str = "validation",
+    parent_model_run_id: int | None = None,
+    connection=None,
 ) -> int:
     params = {
         "dag_id": dag_id,
@@ -63,7 +66,8 @@ def record_model_run(
         "dataset_role": dataset_role,
         "split_role": split_role,
     }
-    with engine.begin() as con:
+    transaction = engine.begin() if connection is None else nullcontext(connection)
+    with transaction as con:
         con.execute(
             text(
                 """
@@ -238,6 +242,79 @@ def record_model_run(
                     "split_role": split_role,
                 },
             )
+        if parent_model_run_id is not None:
+            con.execute(
+                text(
+                    """
+                    MERGE mlops.MODEL_RUN_DATASET WITH (HOLDLOCK) AS tgt
+                    USING (
+                        SELECT
+                            :model_run_id AS model_run_id,
+                            parent_link.manifest_id,
+                            parent_link.dataset_role
+                        FROM mlops.MODEL_RUN_DATASET AS parent_link
+                        WHERE parent_link.model_run_id = :parent_model_run_id
+                    ) AS src
+                    ON tgt.model_run_id = src.model_run_id
+                       AND tgt.manifest_id = src.manifest_id
+                       AND tgt.dataset_role = src.dataset_role
+                    WHEN NOT MATCHED THEN
+                        INSERT (
+                            model_run_id,
+                            manifest_id,
+                            dataset_role
+                        )
+                        VALUES (
+                            src.model_run_id,
+                            src.manifest_id,
+                            src.dataset_role
+                        );
+                    """
+                ),
+                {
+                    "model_run_id": model_run_id,
+                    "parent_model_run_id": parent_model_run_id,
+                },
+            )
+            con.execute(
+                text(
+                    """
+                    MERGE mlops.MODEL_RUN_SPLIT_SET WITH (HOLDLOCK) AS tgt
+                    USING (
+                        SELECT
+                            :model_run_id AS model_run_id,
+                            parent_link.manifest_id,
+                            parent_link.split_set_id,
+                            parent_link.dataset_role,
+                            parent_link.split_role
+                        FROM mlops.MODEL_RUN_SPLIT_SET AS parent_link
+                        WHERE parent_link.model_run_id = :parent_model_run_id
+                    ) AS src
+                    ON tgt.model_run_id = src.model_run_id
+                       AND tgt.split_set_id = src.split_set_id
+                       AND tgt.split_role = src.split_role
+                    WHEN NOT MATCHED THEN
+                        INSERT (
+                            model_run_id,
+                            manifest_id,
+                            split_set_id,
+                            dataset_role,
+                            split_role
+                        )
+                        VALUES (
+                            src.model_run_id,
+                            src.manifest_id,
+                            src.split_set_id,
+                            src.dataset_role,
+                            src.split_role
+                        );
+                    """
+                ),
+                {
+                    "model_run_id": model_run_id,
+                    "parent_model_run_id": parent_model_run_id,
+                },
+            )
         for metric_name in sorted(metrics or {}):
             con.execute(
                 text(
@@ -317,3 +394,7 @@ def record_model_run(
                 },
             )
     return int(model_run_id)
+
+
+def record_model_run_on_connection(connection, **kwargs) -> int:
+    return record_model_run(None, connection=connection, **kwargs)

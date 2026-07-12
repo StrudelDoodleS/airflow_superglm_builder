@@ -84,6 +84,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             getattr(args, "revision_metadata_json", None)
         )
         draft_validator = getattr(args, "draft_validator", None)
+        package_lineage_writer = getattr(args, "package_lineage_writer", None)
+        if package_lineage_writer is not None and not callable(package_lineage_writer):
+            raise TypeError("package_lineage_writer must be callable")
         meta = (
             con.execute(
                 text("""
@@ -164,7 +167,10 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             args.package_version = int(existing_package["package_version"])
             args.package_status = str(existing_package["package_status"])
             args.was_existing = True
-            return int(existing_package["rate_package_id"])
+            rate_package_id = int(existing_package["rate_package_id"])
+            if package_lineage_writer is not None:
+                package_lineage_writer(con, rate_package_id)
+            return rate_package_id
 
         if parent_rate_package_id is not None:
             parent = (
@@ -674,6 +680,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             if not callable(draft_validator):
                 raise TypeError("draft_validator must be callable")
             draft_validator(con, int(rate_package_id))
+        if package_lineage_writer is not None:
+            package_lineage_writer(con, int(rate_package_id))
 
         con.execute(
             text("""
@@ -701,6 +709,7 @@ def publish_rating_package(
     parent_rate_package_id: int | None = None,
     revision_metadata_json: str | None = None,
     draft_validator=None,
+    package_lineage_writer=None,
 ) -> PublishResult:
     args = argparse.Namespace(
         export_id=export_id,
@@ -709,6 +718,7 @@ def publish_rating_package(
         parent_rate_package_id=parent_rate_package_id,
         revision_metadata_json=revision_metadata_json,
         draft_validator=draft_validator,
+        package_lineage_writer=package_lineage_writer,
         set_pointer=None,
     )
     rate_package_id = load_staging_to_rating_package(engine, args)

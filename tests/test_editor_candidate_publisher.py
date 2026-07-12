@@ -53,6 +53,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         metric_scopes={"editor_training_deviance_delta": "editor_training_parent"},
     )
     calls = []
+    publish_connection = object()
+    publication_is_active = False
     monkeypatch.setattr(
         editor_candidate,
         "load_verified_submission",
@@ -75,22 +77,39 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
             ("stage", created_by)
         ),
     )
-    monkeypatch.setattr(
-        editor_candidate,
-        "publish_rating_package",
-        lambda engine, **kwargs: calls.append(("publish", kwargs))
-        or PublishResult(
+    def fake_publish_rating_package(engine, **kwargs):
+        nonlocal publication_is_active
+        calls.append(("publish", kwargs))
+        publication_is_active = True
+        try:
+            lineage_writer = kwargs.get("package_lineage_writer")
+            if lineage_writer is not None:
+                lineage_writer(publish_connection, 108)
+        finally:
+            publication_is_active = False
+        return PublishResult(
             mlflow_run_id="",
             export_id=exported.export_id,
             rate_package_id=108,
             package_version=8,
             rating_workbook_path=exported.rating_workbook_path,
-        ),
+        )
+
+    def fake_record_derived_model_run(connection, **kwargs):
+        assert publication_is_active, "lineage must execute inside package publication"
+        assert connection is publish_connection
+        calls.append(("lineage", kwargs))
+        return 908
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "publish_rating_package",
+        fake_publish_rating_package,
     )
     monkeypatch.setattr(
         editor_candidate,
         "record_derived_model_run",
-        lambda engine, **kwargs: calls.append(("lineage", kwargs)) or 908,
+        fake_record_derived_model_run,
     )
 
     result = editor_candidate.publish_editor_submission(
@@ -113,8 +132,10 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert publish_kwargs["revision_metadata_json"] == (
         '{"kind":"SUPERGLM_EDITOR","published_by":"analyst@example.test"}'
     )
+    assert callable(publish_kwargs["package_lineage_writer"])
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id
+    assert lineage_kwargs["parent_model_run_id"] == submission.parent_model_run_id
     assert lineage_kwargs["manifest_id"] == submission.manifest_id
     assert lineage_kwargs["split_set_id"] == submission.split_set_id
     assert lineage_kwargs["candidate_artifact_sha256"] == "d" * 64

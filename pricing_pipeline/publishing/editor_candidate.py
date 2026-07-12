@@ -20,7 +20,7 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.modeling.standard_superglm import ModelInputs, call_review_hook
-from pricing_pipeline.publishing.lineage import record_model_run
+from pricing_pipeline.publishing.lineage import record_model_run_on_connection
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.staging import stage_rating_export
@@ -764,8 +764,8 @@ def verify_package_sql_parity(
             )
 
 
-def record_derived_model_run(engine, **kwargs) -> int:
-    return record_model_run(engine, **kwargs)
+def record_derived_model_run(connection, **kwargs) -> int:
+    return record_model_run_on_connection(connection, **kwargs)
 
 
 def publish_editor_submission(
@@ -799,6 +799,39 @@ def publish_editor_submission(
             bundle=exported.bundle,
         )
 
+    model_run_id: int | None = None
+
+    def write_package_lineage(connection, rate_package_id: int) -> None:
+        nonlocal model_run_id
+        model_run_id = record_derived_model_run(
+            connection,
+            dag_id=dag_id,
+            airflow_run_id=airflow_run_id,
+            mlflow_run_id=f"editor::{submission.submission_id}",
+            manifest_id=submission.manifest_id,
+            split_set_id=submission.split_set_id,
+            export_id=exported.export_id,
+            model_id=parent.model_id,
+            model_name=parent.model_name,
+            model_version=parent.model_version,
+            rate_package_id=rate_package_id,
+            rating_workbook_path=exported.rating_workbook_path,
+            run_status="SUCCESS",
+            created_by=created_by,
+            publication_receipt_path=exported.publication_receipt_path,
+            publication_receipt_sha256=exported.publication_receipt_sha256,
+            candidate_artifact_path=exported.candidate_artifact_path,
+            candidate_artifact_sha256=exported.candidate_artifact_sha256,
+            candidate_artifact_format=exported.candidate_artifact_format,
+            candidate_artifact_size_bytes=exported.candidate_artifact_size_bytes,
+            candidate_python_version=exported.candidate_python_version,
+            candidate_superglm_version=exported.candidate_superglm_version,
+            model_source_sha256=submission.model_source_sha256,
+            metrics=exported.metrics,
+            metric_scopes=exported.metric_scopes,
+            parent_model_run_id=submission.parent_model_run_id,
+        )
+
     published = publish_rating_package(
         engine,
         export_id=exported.export_id,
@@ -807,34 +840,10 @@ def publish_editor_submission(
         parent_rate_package_id=submission.parent_rate_package_id,
         revision_metadata_json=revision_metadata_json,
         draft_validator=validate_draft,
+        package_lineage_writer=write_package_lineage,
     )
-    model_run_id = record_derived_model_run(
-        engine,
-        dag_id=dag_id,
-        airflow_run_id=airflow_run_id,
-        mlflow_run_id=f"editor::{submission.submission_id}",
-        manifest_id=submission.manifest_id,
-        split_set_id=submission.split_set_id,
-        export_id=exported.export_id,
-        model_id=parent.model_id,
-        model_name=parent.model_name,
-        model_version=parent.model_version,
-        rate_package_id=published.rate_package_id,
-        rating_workbook_path=exported.rating_workbook_path,
-        run_status="SUCCESS",
-        created_by=created_by,
-        publication_receipt_path=exported.publication_receipt_path,
-        publication_receipt_sha256=exported.publication_receipt_sha256,
-        candidate_artifact_path=exported.candidate_artifact_path,
-        candidate_artifact_sha256=exported.candidate_artifact_sha256,
-        candidate_artifact_format=exported.candidate_artifact_format,
-        candidate_artifact_size_bytes=exported.candidate_artifact_size_bytes,
-        candidate_python_version=exported.candidate_python_version,
-        candidate_superglm_version=exported.candidate_superglm_version,
-        model_source_sha256=submission.model_source_sha256,
-        metrics=exported.metrics,
-        metric_scopes=exported.metric_scopes,
-    )
+    if model_run_id is None:
+        raise RuntimeError("package publication did not record editor lineage")
     return EditorPublicationResult(
         submission_id=submission.submission_id,
         model_name=parent.model_name,

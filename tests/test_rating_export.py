@@ -1321,6 +1321,63 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
     }
 
 
+def test_record_model_run_on_connection_inherits_all_parent_associations_idempotently():
+    events = []
+    connection = FakeLineageConnection(events)
+
+    model_run_id = lineage.record_model_run_on_connection(
+        connection,
+        dag_id="pricing_publish_editor_candidate",
+        airflow_run_id="manual__submission-1",
+        mlflow_run_id="editor::submission-1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        export_id="editor__submission_1",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        rate_package_id=108,
+        rating_workbook_path="/tmp/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="analyst@example.test",
+        parent_model_run_id=409,
+    )
+
+    assert model_run_id == 501
+    executed = [event for event in events if event[0] == "execute"]
+    inherited_dataset = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_DATASET" in event[1]
+        and ":parent_model_run_id" in event[1]
+    )
+    inherited_split = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_SPLIT_SET" in event[1]
+        and ":parent_model_run_id" in event[1]
+    )
+    assert inherited_dataset[2] == {
+        "model_run_id": 501,
+        "parent_model_run_id": 409,
+    }
+    assert inherited_split[2] == {
+        "model_run_id": 501,
+        "parent_model_run_id": 409,
+    }
+    assert "SELECT" in inherited_dataset[1]
+    assert "dataset_role" in inherited_dataset[1]
+    assert "manifest_id" in inherited_dataset[1]
+    assert "WHEN NOT MATCHED THEN" in inherited_dataset[1]
+    assert "SELECT" in inherited_split[1]
+    assert "dataset_role" in inherited_split[1]
+    assert "split_role" in inherited_split[1]
+    assert "split_set_id" in inherited_split[1]
+    assert "manifest_id" in inherited_split[1]
+    assert "WHEN NOT MATCHED THEN" in inherited_split[1]
+    assert executed.index(inherited_dataset) < executed.index(inherited_split)
+
+
 def test_record_model_run_persists_candidate_artifact_and_cv_metrics():
     events = []
     engine = FakeLineageEngine(events)
