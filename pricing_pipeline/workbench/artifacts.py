@@ -37,6 +37,9 @@ class CandidateBundle:
     model_source_sha256: str
     offset_contract: dict[str, Any]
     review_artifact: dict[str, Any] | None = None
+    fit_sample_weight_name: str | None = None
+    export_weight_name: str | None = None
+    offset_export_options: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

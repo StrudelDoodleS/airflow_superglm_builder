@@ -468,6 +468,9 @@ def run_standard_superglm_build(
         ),
         model_source_sha256=source_sha256,
         offset_contract=resolved_offset_contract.model_dump(mode="json"),
+        fit_sample_weight_name=fit_weight_name,
+        export_weight_name=export_weight_name,
+        offset_export_options=dict(offset_export_options or {}),
     )
     artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
     fold_metric_records = tuple(

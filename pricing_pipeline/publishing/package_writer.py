@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from sqlalchemy import text
 
@@ -16,7 +17,13 @@ def _identity_text(value) -> str | None:
     return str(value)
 
 
-def _existing_export_conflicts(existing_package, meta) -> list[str]:
+def _existing_export_conflicts(
+    existing_package,
+    meta,
+    *,
+    parent_rate_package_id: int | None,
+    revision_metadata_json: str | None,
+) -> list[str]:
     conflicts: list[str] = []
     for field_name in (
         "model_version",
@@ -34,7 +41,32 @@ def _existing_export_conflicts(existing_package, meta) -> list[str]:
                 f"{field_name} existing={existing_package[field_name]!r} "
                 f"staged={meta[field_name]!r}"
             )
+    requested_identity = {
+        "parent_rate_package_id": parent_rate_package_id,
+        "revision_metadata_json": revision_metadata_json,
+    }
+    for field_name, requested_value in requested_identity.items():
+        existing_value = existing_package.get(field_name)
+        if _identity_text(existing_value) != _identity_text(requested_value):
+            conflicts.append(
+                f"{field_name} existing={existing_value!r} requested={requested_value!r}"
+            )
     return conflicts
+
+
+def _canonical_revision_metadata(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("revision_metadata_json must be valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("revision_metadata_json must be a JSON object")
+    canonical = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if value != canonical:
+        raise ValueError("revision_metadata_json must use canonical JSON encoding")
+    return canonical
 
 
 def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
@@ -47,6 +79,11 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
     with engine.begin() as con:
         args.was_existing = False
         requested_package_status = args.package_status
+        parent_rate_package_id = getattr(args, "parent_rate_package_id", None)
+        revision_metadata_json = _canonical_revision_metadata(
+            getattr(args, "revision_metadata_json", None)
+        )
+        draft_validator = getattr(args, "draft_validator", None)
         meta = (
             con.execute(
                 text("""
@@ -97,7 +134,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 package_status,
                 source_export_id,
                 source_file,
-                publication_receipt_sha256
+                publication_receipt_sha256,
+                parent_rate_package_id,
+                revision_metadata_json
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
@@ -111,7 +150,12 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             .one_or_none()
         )
         if existing_package is not None:
-            conflicts = _existing_export_conflicts(existing_package, meta)
+            conflicts = _existing_export_conflicts(
+                existing_package,
+                meta,
+                parent_rate_package_id=parent_rate_package_id,
+                revision_metadata_json=revision_metadata_json,
+            )
             if conflicts:
                 raise ValueError(
                     f"export_id {args.export_id!r} is already published with "
@@ -121,6 +165,44 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             args.package_status = str(existing_package["package_status"])
             args.was_existing = True
             return int(existing_package["rate_package_id"])
+
+        if parent_rate_package_id is not None:
+            parent = (
+                con.execute(
+                    text("""
+                    SELECT
+                        rate_package_id,
+                        model_id,
+                        model_version,
+                        effective_from_date,
+                        effective_to_date,
+                        package_status
+                    FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
+                    WHERE rate_package_id = :parent_rate_package_id
+                    """),
+                    {"parent_rate_package_id": parent_rate_package_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if parent is None:
+                raise ValueError(
+                    f"parent rate package {parent_rate_package_id} does not exist"
+                )
+            if int(parent["model_id"]) != int(model_id):
+                raise ValueError("parent rate package belongs to a different model")
+            if str(parent["package_status"]) != "PUBLISHED":
+                raise ValueError("parent rate package must have PUBLISHED status")
+            for field_name in (
+                "model_version",
+                "effective_from_date",
+                "effective_to_date",
+            ):
+                if _identity_text(parent[field_name]) != _identity_text(meta[field_name]):
+                    raise ValueError(
+                        f"parent {field_name}={parent[field_name]!r} does not match "
+                        f"staged {field_name}={meta[field_name]!r}"
+                    )
 
         offset_handling = meta["offset_handling"] or "UNKNOWN"
         offset_factor_name = meta["offset_factor_name"]
@@ -200,7 +282,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             )
             OUTPUT INSERTED.rate_package_id
             VALUES (
-                NULL,
+                :parent_rate_package_id,
                 :model_id,
                 :model_name,
                 :model_version,
@@ -214,7 +296,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :publication_receipt_json,
                 :publication_receipt_sha256,
                 :package_metadata_json,
-                NULL,
+                :revision_metadata_json,
                 :offset_handling,
                 :offset_factor_name,
                 :offset_source_name,
@@ -225,6 +307,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         """),
             {
                 "model_id": model_id,
+                "parent_rate_package_id": parent_rate_package_id,
                 "model_name": meta["model_name"],
                 "model_version": meta["model_version"],
                 "package_version": package_version,
@@ -237,6 +320,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 "publication_receipt_json": meta["publication_receipt_json"],
                 "publication_receipt_sha256": meta["publication_receipt_sha256"],
                 "package_metadata_json": meta["package_metadata_json"],
+                "revision_metadata_json": revision_metadata_json,
                 "offset_handling": offset_handling,
                 "offset_factor_name": offset_factor_name,
                 "offset_source_name": meta["offset_source_name"],
@@ -586,6 +670,11 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             {"rate_package_id": rate_package_id},
         )
 
+        if draft_validator is not None:
+            if not callable(draft_validator):
+                raise TypeError("draft_validator must be callable")
+            draft_validator(con, int(rate_package_id))
+
         con.execute(
             text("""
             UPDATE pricing.PRICING_RATE_PACKAGE
@@ -609,11 +698,17 @@ def publish_rating_package(
     export_id: str,
     created_by: str = "python",
     package_status: str = "PUBLISHED",
+    parent_rate_package_id: int | None = None,
+    revision_metadata_json: str | None = None,
+    draft_validator=None,
 ) -> PublishResult:
     args = argparse.Namespace(
         export_id=export_id,
         created_by=created_by,
         package_status=package_status,
+        parent_rate_package_id=parent_rate_package_id,
+        revision_metadata_json=revision_metadata_json,
+        draft_validator=draft_validator,
         set_pointer=None,
     )
     rate_package_id = load_staging_to_rating_package(engine, args)

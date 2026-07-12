@@ -67,6 +67,33 @@ def test_publish_rating_package_builds_args_without_deployment_pointer(monkeypat
     assert args.set_pointer is None
 
 
+def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
+    captured = []
+
+    def fake_load(engine, args):
+        captured.append(args)
+        args.package_version = 8
+        return 108
+
+    monkeypatch.setattr(package_writer, "load_staging_to_rating_package", fake_load)
+    def validator(connection, rate_package_id):
+        return None
+
+    publish_rating_package(
+        object(),
+        export_id="editor__submission_1",
+        created_by="analyst@example.test",
+        parent_rate_package_id=107,
+        revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
+        draft_validator=validator,
+    )
+
+    args = captured[0]
+    assert args.parent_rate_package_id == 107
+    assert args.revision_metadata_json == '{"kind":"SUPERGLM_EDITOR"}'
+    assert args.draft_validator is validator
+
+
 def test_publish_rating_package_reports_existing_source_export(monkeypatch):
     def fake_load(engine, args):
         args.package_version = 3
@@ -162,6 +189,8 @@ def _existing_package(**overrides):
         "source_export_id": "export-1",
         "source_file": "/tmp/export/rating_tables.xlsx",
         "publication_receipt_sha256": None,
+        "parent_rate_package_id": None,
+        "revision_metadata_json": None,
     }
     row.update(overrides)
     return row

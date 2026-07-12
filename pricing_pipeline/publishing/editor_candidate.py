@@ -1,0 +1,668 @@
+from __future__ import annotations
+
+import json
+import math
+import platform
+from dataclasses import dataclass, replace
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any, Callable
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_poisson_deviance
+from sqlalchemy import text
+
+from pricing_models.registry import get_model_config
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.publishing.lineage import record_model_run
+from pricing_pipeline.publishing.package_writer import publish_rating_package
+from pricing_pipeline.publishing.rating_export import export_rating_tables
+from pricing_pipeline.publishing.staging import stage_rating_export
+from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    OffsetExportContract,
+    write_publication_receipt,
+)
+from pricing_pipeline.workbench.artifacts import (
+    CandidateArtifactError,
+    CandidateArtifactMetadata,
+    CandidateBundle,
+    load_candidate_bundle,
+    save_candidate_bundle,
+)
+from pricing_pipeline.workbench.submission import (
+    EDITED_MODEL_FORMAT,
+    EditorSubmission,
+    EditorSubmissionError,
+    load_verified_submission,
+    sha256_file,
+)
+
+
+@dataclass(frozen=True)
+class ParentCandidate:
+    model_id: int
+    model_name: str
+    model_version: str
+    package_version: int
+    rate_package_id: int
+    model_run_id: int
+    effective_from: str
+    effective_to: str | None
+    config: ModelBuildConfig
+    bundle: CandidateBundle
+    champion_bundle: CandidateBundle | None = None
+    champion_unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class EditorExport:
+    export_id: str
+    rating_workbook_path: str
+    publication_receipt_path: str
+    publication_receipt_sha256: str
+    candidate_artifact_path: str
+    candidate_artifact_sha256: str
+    candidate_artifact_format: str
+    candidate_artifact_size_bytes: int
+    candidate_python_version: str
+    candidate_superglm_version: str
+    revision_metadata_json: str
+    metrics: dict[str, float]
+    metric_scopes: dict[str, str]
+    edited_model: Any
+    bundle: CandidateBundle
+
+
+@dataclass(frozen=True)
+class EditorPublicationResult:
+    submission_id: str
+    model_name: str
+    parent_rate_package_id: int
+    rate_package_id: int
+    package_version: int
+    model_run_id: int
+    package_status: str
+    was_existing: bool
+
+
+def _artifact_root_from_submission(submission: EditorSubmission) -> Path:
+    path = Path(submission.path).expanduser().resolve()
+    try:
+        return path.parents[3]
+    except IndexError as exc:
+        raise EditorSubmissionError(
+            f"submission path does not follow the workbench layout: {path}"
+        ) from exc
+
+
+def load_parent_candidate(engine, submission: EditorSubmission) -> ParentCandidate:
+    schemas = schema_names_from_connectable(engine)
+    query = text(
+        f"""
+        SELECT
+            pm.model_id,
+            pm.model_name,
+            rp.model_version,
+            rp.package_version,
+            rp.rate_package_id,
+            rp.effective_from_date,
+            rp.effective_to_date,
+            mr.model_run_id,
+            mr.run_status,
+            mr.manifest_id,
+            split_link.split_set_id,
+            mr.candidate_artifact_path,
+            mr.candidate_artifact_sha256,
+            mr.candidate_artifact_format,
+            mr.candidate_artifact_size_bytes,
+            mr.candidate_python_version,
+            mr.candidate_superglm_version,
+            mr.model_source_sha256
+        FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+        JOIN {schemas.pricing}.PRICING_MODEL AS pm
+          ON pm.model_id = rp.model_id
+        JOIN {schemas.pricing}.MODEL_RUN AS mr
+          ON mr.rate_package_id = rp.rate_package_id
+        LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
+          ON split_link.model_run_id = mr.model_run_id
+         AND split_link.split_role = 'validation'
+        WHERE rp.rate_package_id = :rate_package_id
+          AND mr.model_run_id = :model_run_id
+        """
+    )
+    with engine.begin() as connection:
+        rows = list(
+            connection.execute(
+                query,
+                {
+                    "rate_package_id": submission.parent_rate_package_id,
+                    "model_run_id": submission.parent_model_run_id,
+                },
+            )
+            .mappings()
+            .all()
+        )
+    if len(rows) != 1:
+        raise EditorSubmissionError(
+            "parent package must resolve exactly one successful model run; "
+            f"found {len(rows)}"
+        )
+    row = dict(rows[0])
+    expected = {
+        "model_name": submission.model_name,
+        "package_version": submission.source_package_version,
+        "rate_package_id": submission.parent_rate_package_id,
+        "model_run_id": submission.parent_model_run_id,
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        "candidate_artifact_path": submission.baseline_candidate_path,
+        "candidate_artifact_sha256": submission.baseline_candidate_sha256,
+        "model_source_sha256": submission.model_source_sha256,
+    }
+    mismatches = [
+        name
+        for name, value in expected.items()
+        if str(row.get(name)) != str(value)
+    ]
+    if str(row.get("run_status") or "").upper() != "SUCCESS":
+        mismatches.append("run_status")
+    if mismatches:
+        raise EditorSubmissionError(
+            "parent SQL lineage no longer matches the submission: " + ", ".join(mismatches)
+        )
+
+    bundle = load_candidate_bundle(
+        row["candidate_artifact_path"],
+        expected_sha256=row["candidate_artifact_sha256"],
+        expected_size_bytes=int(row["candidate_artifact_size_bytes"]),
+        expected_format=row["candidate_artifact_format"],
+        expected_python_version=row["candidate_python_version"],
+        expected_superglm_version=row["candidate_superglm_version"],
+        allowed_root=_artifact_root_from_submission(submission),
+    )
+    if bundle.manifest_id != submission.manifest_id:
+        raise EditorSubmissionError("parent bundle manifest does not match the submission")
+    if bundle.split_set_id != submission.split_set_id:
+        raise EditorSubmissionError("parent bundle split set does not match the submission")
+    config = get_model_config(submission.model_name)
+    champion_bundle, champion_unavailable_reason = _load_champion_bundle(
+        engine,
+        model_id=int(row["model_id"]),
+        deployment_slot=config.deployment_slot,
+        allowed_root=_artifact_root_from_submission(submission),
+        parent_bundle=bundle,
+    )
+    return ParentCandidate(
+        model_id=int(row["model_id"]),
+        model_name=str(row["model_name"]),
+        model_version=str(row["model_version"]),
+        package_version=int(row["package_version"]),
+        rate_package_id=int(row["rate_package_id"]),
+        model_run_id=int(row["model_run_id"]),
+        effective_from=str(row["effective_from_date"]),
+        effective_to=(
+            None if row.get("effective_to_date") is None else str(row["effective_to_date"])
+        ),
+        config=config,
+        bundle=bundle,
+        champion_bundle=champion_bundle,
+        champion_unavailable_reason=champion_unavailable_reason,
+    )
+
+
+def _load_champion_bundle(
+    engine,
+    *,
+    model_id: int,
+    deployment_slot: str,
+    allowed_root: Path,
+    parent_bundle: CandidateBundle,
+) -> tuple[CandidateBundle | None, str | None]:
+    schemas = schema_names_from_connectable(engine)
+    query = text(
+        f"""
+        SELECT
+            mr.run_status,
+            mr.candidate_artifact_path,
+            mr.candidate_artifact_sha256,
+            mr.candidate_artifact_format,
+            mr.candidate_artifact_size_bytes,
+            mr.candidate_python_version,
+            mr.candidate_superglm_version
+        FROM {schemas.pricing}.PRICING_MODEL_DEPLOYMENT AS deployment
+        JOIN {schemas.pricing}.MODEL_RUN AS mr
+          ON mr.rate_package_id = deployment.rate_package_id
+        WHERE deployment.model_id = :model_id
+          AND deployment.deployment_slot = :deployment_slot
+          AND deployment.effective_to_ts IS NULL
+        """
+    )
+    with engine.begin() as connection:
+        rows = list(
+            connection.execute(
+                query,
+                {"model_id": model_id, "deployment_slot": deployment_slot},
+            )
+            .mappings()
+            .all()
+        )
+    if not rows:
+        return None, f"no champion is deployed in {deployment_slot}"
+    if len(rows) != 1:
+        return None, f"{len(rows)} current champion runs resolved in {deployment_slot}"
+    row = dict(rows[0])
+    if str(row.get("run_status") or "").upper() != "SUCCESS":
+        return None, "the deployed champion has no successful candidate run"
+    required = (
+        "candidate_artifact_path",
+        "candidate_artifact_sha256",
+        "candidate_artifact_format",
+        "candidate_artifact_size_bytes",
+        "candidate_python_version",
+        "candidate_superglm_version",
+    )
+    if any(row.get(name) is None for name in required):
+        return None, "the deployed champion has no candidate artifact"
+    try:
+        champion = load_candidate_bundle(
+            row["candidate_artifact_path"],
+            expected_sha256=row["candidate_artifact_sha256"],
+            expected_size_bytes=int(row["candidate_artifact_size_bytes"]),
+            expected_format=row["candidate_artifact_format"],
+            expected_python_version=row["candidate_python_version"],
+            expected_superglm_version=row["candidate_superglm_version"],
+            allowed_root=allowed_root,
+        )
+    except CandidateArtifactError as exc:
+        return None, f"the deployed champion artifact could not be verified: {exc}"
+    if champion.row_order_sha256 != parent_bundle.row_order_sha256:
+        return None, "the deployed champion was fitted on a different ordered dataset"
+    if list(champion.X.columns) != list(parent_bundle.X.columns):
+        return None, "the deployed champion uses a different prepared feature frame"
+    return champion, None
+
+
+def _load_edited_model(submission: EditorSubmission) -> Any:
+    path = Path(submission.edited_model_path).expanduser().resolve()
+    root = _artifact_root_from_submission(submission)
+    if not path.is_relative_to(root):
+        raise EditorSubmissionError(f"edited model is outside artifact root {root}: {path}")
+    if submission.edited_model_format != EDITED_MODEL_FORMAT:
+        raise EditorSubmissionError(
+            f"unsupported edited model format {submission.edited_model_format!r}"
+        )
+    if path.stat().st_size != int(submission.edited_model_size_bytes):
+        raise EditorSubmissionError("edited model byte-size verification failed")
+    if sha256_file(path) != submission.edited_model_sha256:
+        raise EditorSubmissionError("edited model SHA-256 verification failed")
+    if submission.edited_model_python_version.split(".")[:2] != platform.python_version().split(
+        "."
+    )[:2]:
+        raise EditorSubmissionError("edited model Python version is incompatible")
+    try:
+        runtime_superglm_version = version("superglm")
+    except PackageNotFoundError:
+        runtime_superglm_version = "unknown"
+    if submission.edited_model_superglm_version != runtime_superglm_version:
+        raise EditorSubmissionError(
+            "edited model SuperGLM version is incompatible: "
+            f"artifact={submission.edited_model_superglm_version!r}, "
+            f"runtime={runtime_superglm_version!r}"
+        )
+    envelope = joblib.load(path)
+    if not isinstance(envelope, dict) or envelope.get("format") != EDITED_MODEL_FORMAT:
+        raise EditorSubmissionError("edited model envelope has an invalid format")
+    if envelope.get("python_version") != submission.edited_model_python_version:
+        raise EditorSubmissionError("edited model Python metadata is inconsistent")
+    if envelope.get("superglm_version") != submission.edited_model_superglm_version:
+        raise EditorSubmissionError("edited model SuperGLM metadata is inconsistent")
+    return envelope["model"]
+
+
+def _predict(model: Any, bundle: CandidateBundle) -> np.ndarray:
+    if bundle.offset is None:
+        prediction = model.predict(bundle.X)
+    else:
+        prediction = model.predict(bundle.X, offset=bundle.offset)
+    values = np.asarray(prediction, dtype=float).reshape(-1)
+    if len(values) != len(bundle.X) or not np.isfinite(values).all():
+        raise EditorSubmissionError("model returned invalid training predictions")
+    return values
+
+
+def training_comparison_metrics(
+    baseline_model: Any,
+    edited_model: Any,
+    bundle: CandidateBundle,
+    *,
+    comparison_name: str,
+) -> tuple[dict[str, float], dict[str, str]]:
+    name = str(comparison_name).strip().lower()
+    if not name:
+        raise ValueError("comparison_name is required")
+    baseline = _predict(baseline_model, bundle)
+    edited = _predict(edited_model, bundle)
+    weights = (
+        np.ones(len(bundle.X), dtype=float)
+        if bundle.sample_weight is None
+        else np.asarray(bundle.sample_weight, dtype=float)
+    )
+    if len(weights) != len(bundle.X) or not np.isfinite(weights).all() or weights.sum() <= 0:
+        raise EditorSubmissionError("training comparison weights are invalid")
+    absolute_delta = np.abs(edited - baseline)
+    relative_delta = absolute_delta / np.maximum(np.abs(baseline), 1e-12)
+    prefix = f"editor_training_{name}"
+    metrics = {
+        f"{prefix}_mean_absolute_prediction_delta": float(
+            np.average(absolute_delta, weights=weights)
+        ),
+        f"{prefix}_max_absolute_prediction_delta": float(np.max(absolute_delta)),
+        f"{prefix}_mean_absolute_relative_change": float(
+            np.average(relative_delta, weights=weights)
+        ),
+    }
+    y = np.asarray(bundle.y, dtype=float)
+    if (
+        len(y) == len(bundle.X)
+        and np.isfinite(y).all()
+        and np.all(y >= 0)
+        and np.all(baseline > 0)
+        and np.all(edited > 0)
+    ):
+        baseline_deviance = float(
+            mean_poisson_deviance(y, baseline, sample_weight=weights)
+        )
+        edited_deviance = float(mean_poisson_deviance(y, edited, sample_weight=weights))
+        metrics[f"{prefix}_baseline_deviance"] = baseline_deviance
+        metrics[f"{prefix}_edited_deviance"] = edited_deviance
+        delta_name = (
+            "editor_training_deviance_delta"
+            if name == "parent"
+            else f"{prefix}_deviance_delta"
+        )
+        metrics[delta_name] = edited_deviance - baseline_deviance
+    scope = f"editor_training_{name}"
+    return metrics, {metric_name: scope for metric_name in metrics}
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def export_edited_model(
+    parent: ParentCandidate,
+    submission: EditorSubmission,
+) -> EditorExport:
+    edited_model = _load_edited_model(submission)
+    output_dir = Path(submission.path).resolve().parent / "published"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = output_dir / "rating_tables.xlsx"
+    export_options = dict(parent.bundle.offset_export_options or {})
+    if parent.bundle.offset is not None:
+        export_options["offset"] = parent.bundle.offset
+    export_rating_tables(
+        edited_model,
+        parent.bundle.X,
+        parent.bundle.y,
+        parent.bundle.export_weight,
+        output_path=workbook_path,
+        mlflow_client=None,
+        **export_options,
+    )
+    receipt = build_superglm_publication_receipt(
+        edited_model,
+        offset_contract=OffsetExportContract.model_validate(parent.bundle.offset_contract),
+        fit_sample_weight_name=parent.bundle.fit_sample_weight_name,
+        export_weight_name=parent.bundle.export_weight_name,
+    )
+    receipt_path = output_dir / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(receipt, receipt_path)
+
+    metrics, metric_scopes = training_comparison_metrics(
+        parent.bundle.fitted_model,
+        edited_model,
+        parent.bundle,
+        comparison_name="parent",
+    )
+    champion_bundle = getattr(parent, "champion_bundle", None)
+    champion_reason = getattr(parent, "champion_unavailable_reason", None)
+    if champion_bundle is not None:
+        champion_metrics, champion_scopes = training_comparison_metrics(
+            champion_bundle.fitted_model,
+            edited_model,
+            parent.bundle,
+            comparison_name="champion",
+        )
+        metrics.update(champion_metrics)
+        metric_scopes.update(champion_scopes)
+        champion_comparison = {"available": True}
+    else:
+        champion_comparison = {
+            "available": False,
+            "reason": champion_reason or "champion artifact comparison is unavailable",
+        }
+    edited_bundle = replace(
+        parent.bundle,
+        fitted_model=edited_model,
+        review_artifact=None,
+    )
+    artifact: CandidateArtifactMetadata = save_candidate_bundle(
+        edited_bundle,
+        output_dir / "candidate_bundle.joblib",
+    )
+    revision_metadata = {
+        "kind": "SUPERGLM_EDITOR",
+        "schema_version": 1,
+        "submission_id": submission.submission_id,
+        "reason": submission.reason,
+        "claimed_identity": submission.claimed_identity,
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "parent_model_run_id": submission.parent_model_run_id,
+        "editor_session_sha256": submission.editor_session_sha256,
+        "edited_model_sha256": submission.edited_model_sha256,
+        "baseline_candidate_sha256": submission.baseline_candidate_sha256,
+        "comparison_metrics": metrics,
+        "champion_comparison": champion_comparison,
+    }
+    return EditorExport(
+        export_id=f"editor__{submission.submission_id.replace('-', '_')}",
+        rating_workbook_path=str(workbook_path),
+        publication_receipt_path=str(receipt_path),
+        publication_receipt_sha256=receipt_sha256,
+        candidate_artifact_path=artifact.path,
+        candidate_artifact_sha256=artifact.sha256,
+        candidate_artifact_format=artifact.format,
+        candidate_artifact_size_bytes=artifact.size_bytes,
+        candidate_python_version=artifact.python_version,
+        candidate_superglm_version=artifact.superglm_version,
+        revision_metadata_json=_canonical_json(revision_metadata),
+        metrics=metrics,
+        metric_scopes=metric_scopes,
+        edited_model=edited_model,
+        bundle=edited_bundle,
+    )
+
+
+def stage_editor_export(
+    engine,
+    parent: ParentCandidate,
+    export: EditorExport,
+    created_by: str,
+) -> None:
+    stage_rating_export(
+        engine,
+        workbook_path=Path(export.rating_workbook_path),
+        export_id=export.export_id,
+        model_name=parent.model_name,
+        model_version=parent.model_version,
+        target_name=parent.config.target_name,
+        model_type=parent.config.model_type,
+        effective_from=parent.effective_from,
+        effective_to=parent.effective_to,
+        created_by=created_by,
+        replace=True,
+        model_id=parent.model_id,
+        publication_receipt_path=export.publication_receipt_path,
+        publication_receipt_sha256=export.publication_receipt_sha256,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+    )
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+    if isinstance(value, np.generic):
+        return _json_value(value.item())
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    if pd.isna(value):
+        return None
+    return str(value)
+
+
+def verify_package_sql_parity(
+    connection,
+    *,
+    rate_package_id: int,
+    edited_model: Any,
+    bundle: CandidateBundle,
+    sample_size: int = 50,
+    rtol: float = 1e-6,
+    atol: float = 1e-8,
+    execute_params_hook: Callable[[dict[str, Any], float], dict[str, Any]] | None = None,
+) -> None:
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+    count = min(int(sample_size), len(bundle.X))
+    if count == 0:
+        raise EditorSubmissionError("cannot verify SQL parity on an empty candidate")
+    sample = bundle.X.iloc[:count]
+    sample_offset = None if bundle.offset is None else np.asarray(bundle.offset)[:count]
+    if sample_offset is None:
+        expected = np.asarray(edited_model.predict(sample), dtype=float)
+    else:
+        expected = np.asarray(edited_model.predict(sample, offset=sample_offset), dtype=float)
+    contract = OffsetExportContract.model_validate(bundle.offset_contract)
+
+    schemas = schema_names_from_connectable(connection)
+    statement = text(
+        f"""
+        EXEC {schemas.pricing}.PREDICT_RATE_PACKAGE
+            @rate_package_id = :rate_package_id,
+            @features_json = :features_json,
+            @exposure = :exposure,
+            @include_breakdown = 0
+        """
+    )
+    for position, (_, row) in enumerate(sample.iterrows()):
+        features = {str(name): _json_value(value) for name, value in row.items()}
+        exposure = 1.0
+        if sample_offset is not None and contract.handling == "EXPORTED_FACTOR":
+            features[str(contract.published_factor_name)] = float(sample_offset[position])
+        elif sample_offset is not None and contract.handling == "ALREADY_APPLIED_SQL_EXPOSURE":
+            exposure = float(np.exp(sample_offset[position]))
+        params: dict[str, Any] = {
+            "rate_package_id": int(rate_package_id),
+            "features_json": _canonical_json(features),
+            "exposure": exposure,
+        }
+        if execute_params_hook is not None:
+            params = execute_params_hook(params, float(expected[position]))
+        actual = float(connection.execute(statement, params).mappings().one()["prediction"])
+        if not np.isclose(actual, expected[position], rtol=rtol, atol=atol):
+            raise EditorSubmissionError(
+                "edited package failed Python/SQL parity at sample row "
+                f"{position}: python={expected[position]!r}, sql={actual!r}"
+            )
+
+
+def record_derived_model_run(engine, **kwargs) -> int:
+    return record_model_run(engine, **kwargs)
+
+
+def publish_editor_submission(
+    engine,
+    *,
+    settings: Settings,
+    submission_path: str,
+    submission_sha256: str,
+    dag_id: str,
+    airflow_run_id: str,
+    created_by: str,
+) -> EditorPublicationResult:
+    submission = load_verified_submission(
+        submission_path,
+        submission_sha256,
+        allowed_root=settings.workbench_artifact_root,
+    )
+    parent = load_parent_candidate(engine, submission)
+    exported = export_edited_model(parent, submission)
+    stage_editor_export(engine, parent, exported, created_by)
+
+    def validate_draft(connection, rate_package_id: int) -> None:
+        verify_package_sql_parity(
+            connection,
+            rate_package_id=rate_package_id,
+            edited_model=exported.edited_model,
+            bundle=exported.bundle,
+        )
+
+    published = publish_rating_package(
+        engine,
+        export_id=exported.export_id,
+        created_by=created_by,
+        package_status=parent.config.default_package_status,
+        parent_rate_package_id=submission.parent_rate_package_id,
+        revision_metadata_json=exported.revision_metadata_json,
+        draft_validator=validate_draft,
+    )
+    model_run_id = record_derived_model_run(
+        engine,
+        dag_id=dag_id,
+        airflow_run_id=airflow_run_id,
+        mlflow_run_id=f"editor::{submission.submission_id}",
+        manifest_id=submission.manifest_id,
+        split_set_id=submission.split_set_id,
+        export_id=exported.export_id,
+        model_id=parent.model_id,
+        model_name=parent.model_name,
+        model_version=parent.model_version,
+        rate_package_id=published.rate_package_id,
+        rating_workbook_path=exported.rating_workbook_path,
+        run_status="SUCCESS",
+        created_by=created_by,
+        publication_receipt_path=exported.publication_receipt_path,
+        publication_receipt_sha256=exported.publication_receipt_sha256,
+        candidate_artifact_path=exported.candidate_artifact_path,
+        candidate_artifact_sha256=exported.candidate_artifact_sha256,
+        candidate_artifact_format=exported.candidate_artifact_format,
+        candidate_artifact_size_bytes=exported.candidate_artifact_size_bytes,
+        candidate_python_version=exported.candidate_python_version,
+        candidate_superglm_version=exported.candidate_superglm_version,
+        model_source_sha256=submission.model_source_sha256,
+        metrics=exported.metrics,
+        metric_scopes=exported.metric_scopes,
+    )
+    return EditorPublicationResult(
+        submission_id=submission.submission_id,
+        model_name=parent.model_name,
+        parent_rate_package_id=submission.parent_rate_package_id,
+        rate_package_id=published.rate_package_id,
+        package_version=published.package_version,
+        model_run_id=model_run_id,
+        package_status=published.package_status,
+        was_existing=published.was_existing,
+    )

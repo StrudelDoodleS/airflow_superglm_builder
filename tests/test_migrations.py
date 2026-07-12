@@ -178,6 +178,20 @@ def test_candidate_artifact_migration_extends_model_run_and_guards_package_ident
     assert "THROW" in source
 
 
+def test_package_specific_scorer_does_not_resolve_live_pointer():
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE OR ALTER PROCEDURE pricing.PREDICT_RATE_PACKAGE" in sql
+    assert "@rate_package_id BIGINT" in sql
+    assert "pricing.PRICING_COMPILED_RATE_CELL" in sql
+    assert "pricing.PRICING_COMPILED_1D_RATE_BAND" in sql
+    assert "package_status IN ('DRAFT', 'PUBLISHED')" in sql
+    assert "PRICING_PACKAGE_POINTER" not in sql
+    assert "V_CURRENT_RATE_PACKAGE" not in sql
+
+
 def test_offline_model_run_mirrors_candidate_artifact_columns():
     source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
 
