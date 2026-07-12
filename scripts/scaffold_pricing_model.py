@@ -267,6 +267,7 @@ def _custom_modeling_template(*, package_name: str) -> str:
         from pathlib import Path
         from typing import Any, Mapping
 
+        import numpy as np
         import pandas as pd
 
         # Model-local config/constants.
@@ -281,11 +282,13 @@ def _custom_modeling_template(*, package_name: str) -> str:
         # Shared lifecycle helpers. Most model authors do not need to edit these imports.
         from pricing_pipeline.data.manifest import (
             ModelFrameManifestSpec,
-            create_model_frame_manifest_with_split,
             validation_split_indices,
         )
+        from pricing_pipeline.modeling.standard_superglm import (
+            ModelInputs,
+            run_standard_superglm_build,
+        )
         from pricing_pipeline.orchestration.completed_build_helpers import (
-            completed_model_build_payload,
             effective_from_for_run,
             required_payload_text,
         )
@@ -298,6 +301,10 @@ def _custom_modeling_template(*, package_name: str) -> str:
         # ---------------------------------------------------------------------------
         # Edit These Model-Specific Functions
         # ---------------------------------------------------------------------------
+
+        FIT_MODE = "fit_reml"
+        CV_SCORING = ("deviance",)
+        FEATURE_COLUMNS: tuple[str, ...] = ()
 
         def read_prepared_source(prepared: Mapping[str, Any]) -> pd.DataFrame:
             \"\"\"Load the prepared source frame for this run.
@@ -319,30 +326,39 @@ def _custom_modeling_template(*, package_name: str) -> str:
             return raw.copy()
 
 
-        def fit_validate_export_rating_tables(
-            frame: pd.DataFrame,
-            *,
-            split_indices: list[tuple[Any, Any]],
-            output_dir: str | Path,
-            model_version: str,
-            effective_from: str,
-        ) -> tuple[str | Path, str | Path | None, dict[str, float]]:
-            \"\"\"Fit/validate the model and export the rating workbook.
-
-            Return:
-                rating_workbook_path, model_artifact_path, metrics
-            \"\"\"
-            raise NotImplementedError(
-                "Fit/validate the model using split_indices, export the rating "
-                "workbook, optionally persist the model artifact, and return "
-                "(rating_workbook_path, model_artifact_path, metrics)."
+        def build_training_inputs(frame: pd.DataFrame) -> ModelInputs:
+            \"\"\"Select model features, target, weights, and any fit offset.\"\"\"
+            if not FEATURE_COLUMNS:
+                raise ValueError("Set FEATURE_COLUMNS before running this model")
+            required = [*FEATURE_COLUMNS, MODEL_CONFIG.target_name, *PK_COLUMNS]
+            if WEIGHT_COLUMN is not None:
+                required.append(WEIGHT_COLUMN)
+            missing = [column for column in required if column not in frame.columns]
+            if missing:
+                raise ValueError("missing final model frame columns: " + ", ".join(missing))
+            weight = (
+                None
+                if WEIGHT_COLUMN is None
+                else frame[WEIGHT_COLUMN].astype(float).rename(WEIGHT_COLUMN)
+            )
+            return ModelInputs(
+                X=frame.loc[:, list(FEATURE_COLUMNS)].copy(),
+                y=frame[MODEL_CONFIG.target_name].to_numpy(dtype=float),
+                sample_weight=weight,
+                offset=None,
+                export_weight=weight,
             )
 
 
-        def validation_split_indices_for_model(
-            frame: pd.DataFrame,
-        ) -> list[tuple[Any, Any]]:
-            \"\"\"Return the validation folds used by this model.
+        def build_model():
+            \"\"\"Configure and return an unfitted SuperGLM model.\"\"\"
+            raise NotImplementedError(
+                "Configure SuperGLM family, features, penalties, and constraints"
+            )
+
+
+        def validation_splitter(frame: pd.DataFrame):
+            \"\"\"Return the configured folds or a model-owned splitter.
 
             Built-in model.toml methods delegate to pricing_pipeline. If model.toml
             uses method = "custom", replace this function body with model-specific
@@ -355,6 +371,22 @@ def _custom_modeling_template(*, package_name: str) -> str:
                     "[(train_idx, test_idx), ...] using zero-based row positions."
                 )
             return validation_split_indices(frame, MODEL_CONFIG.validation_split)
+
+
+        def write_review_workbook(*, fitted_model, inputs, output_path):
+            \"\"\"Optionally write a presentation-only analyst workbook.\"\"\"
+            del fitted_model, inputs, output_path
+            return None
+
+
+        def _split_indices_for_model(frame: pd.DataFrame) -> list[tuple[Any, Any]]:
+            configured = validation_splitter(frame)
+            if hasattr(configured, "split") and callable(configured.split):
+                configured = configured.split(frame)
+            return [
+                (np.asarray(train_idx), np.asarray(test_idx))
+                for train_idx, test_idx in configured
+            ]
 
 
         # ---------------------------------------------------------------------------
@@ -373,8 +405,8 @@ def _custom_modeling_template(*, package_name: str) -> str:
             Start by customizing the functions above. Edit this recipe only when your
             model needs a different build flow. The recipe resolves stable publish
             metadata, calls the model-owned functions, creates the frame-backed
-            manifest, and returns the CompletedModelBuild payload consumed by the
-            publish task.
+            manifest, candidate artifact, and CompletedModelBuild payload consumed
+            by the publish task.
             \"\"\"
             run_key = str(prepared.get("run_key") or "manual")
             export_id = build_export_id(MODEL_CONFIG.model_name, run_key)
@@ -394,22 +426,28 @@ def _custom_modeling_template(*, package_name: str) -> str:
             # deterministic and aligned with PK_COLUMNS unless the model deliberately needs
             # a different order.
             frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
-            split_indices = validation_split_indices_for_model(frame)
+            inputs = build_training_inputs(frame)
+            split_indices = _split_indices_for_model(frame)
             # If validation_split uses a source split column, do not include that
             # column as a rating feature unless this is an intentional model decision.
-            rating_workbook_path, model_artifact_path, metrics = (
-                fit_validate_export_rating_tables(
-                    frame,
-                    split_indices=split_indices,
-                    output_dir=prepared.get("output_dir") or Path("state") / run_key,
-                    model_version=model_version,
-                    effective_from=effective_from,
-                )
-            )
-            manifest = create_model_frame_manifest_with_split(
+            result = run_standard_superglm_build(
                 engine,
                 frame=frame,
-                spec=ModelFrameManifestSpec(
+                inputs=inputs,
+                model_factory=build_model,
+                split_indices=split_indices,
+                fit_mode=FIT_MODE,
+                scoring=CV_SCORING,
+                output_dir=(
+                    Path(settings.workbench_artifact_root)
+                    / MODEL_CONFIG.model_name
+                    / export_id
+                ),
+                model_name=MODEL_CONFIG.model_name,
+                model_version=model_version,
+                export_id=export_id,
+                effective_from=effective_from,
+                manifest_spec=ModelFrameManifestSpec(
                     dataset_name=DATASET_NAME,
                     source_system=SOURCE_SYSTEM,
                     data_as_of_date=data_as_of_date,
@@ -418,22 +456,11 @@ def _custom_modeling_template(*, package_name: str) -> str:
                     weight_column=WEIGHT_COLUMN,
                 ),
                 validation_split=MODEL_CONFIG.validation_split,
-                validation_split_artifact_root=settings.validation_split_artifact_root,
-                split_indices=split_indices,
+                split_artifact_root=settings.validation_split_artifact_root,
+                model_source_root=Path(__file__).resolve().parent,
                 created_by=created_by,
             )
-
-            return completed_model_build_payload(
-                rating_workbook_path=rating_workbook_path,
-                model_version=model_version,
-                effective_from=effective_from,
-                export_id=export_id,
-                created_by=created_by,
-                manifest_id=manifest.manifest_id,
-                split_set_id=manifest.split_set_id,
-                model_artifact_path=model_artifact_path,
-                metrics=metrics,
-            )
+            return result.completed_build
         """
     )
 

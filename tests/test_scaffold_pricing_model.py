@@ -69,26 +69,27 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "Standard Build Recipe - Usually Leave This Alone" in modeling
     assert "data.py decides the handoff shape" in modeling
     assert "Do not pass large DataFrames through Airflow/XCom" in modeling
-    assert "rating_workbook_path, model_artifact_path, metrics" in modeling
     assert "Start by customizing the functions above" in modeling
     assert "The manifest and split artifacts use this frame order" in modeling
     assert "def train_validate_export_model" in modeling
     assert "def read_prepared_source" in modeling
     assert "def build_final_model_frame" in modeling
-    assert "def fit_validate_export_rating_tables" in modeling
-    assert "def validation_split_indices_for_model" in modeling
+    assert "def build_training_inputs" in modeling
+    assert "def build_model" in modeling
+    assert "def validation_splitter" in modeling
+    assert "def write_review_workbook" in modeling
+    assert "ModelInputs" in modeling
+    assert "run_standard_superglm_build" in modeling
+    assert "fit_validate_export_rating_tables" not in modeling
+    assert "validation_split_indices_for_model" not in modeling
     assert 'method = "custom"' in modeling
     assert "SQL lookup, external mapping" in modeling
     assert "source fold/holdout column" not in modeling
     assert "return validation_split_indices(frame, MODEL_CONFIG.validation_split)" in modeling
-    assert "completed_build_helpers import" in modeling
-    assert "completed_model_build_payload(" in modeling
     assert "resolve_model_version_for_export" in modeling
     assert "ModelFrameManifestSpec" in modeling
-    assert "create_model_frame_manifest_with_split" in modeling
-    assert "split_indices=split_indices" in modeling
-    assert "manifest_id=manifest.manifest_id" in modeling
-    assert "split_set_id=manifest.split_set_id" in modeling
+    assert "settings.workbench_artifact_root" in modeling
+    assert "settings.validation_split_artifact_root" in modeling
     assert "If validation_split uses a source split column" in modeling
     assert "column as a rating feature unless this is an intentional model decision" in modeling
     assert "CompletedModelBuild(" not in modeling
