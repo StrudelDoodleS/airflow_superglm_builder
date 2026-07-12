@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -22,6 +24,16 @@ def record_model_run(
     created_by: str,
     publication_receipt_path: str | None = None,
     publication_receipt_sha256: str | None = None,
+    candidate_artifact_path: str | None = None,
+    candidate_artifact_sha256: str | None = None,
+    candidate_artifact_format: str | None = None,
+    candidate_artifact_size_bytes: int | None = None,
+    candidate_python_version: str | None = None,
+    candidate_superglm_version: str | None = None,
+    model_source_sha256: str | None = None,
+    metrics: Mapping[str, float] | None = None,
+    metric_scopes: Mapping[str, str] | None = None,
+    fold_metrics: Sequence[Mapping[str, int | str | float]] = (),
     dataset_role: str = "training",
     split_role: str = "validation",
 ) -> int:
@@ -41,6 +53,13 @@ def record_model_run(
         "created_by": created_by,
         "publication_receipt_path": publication_receipt_path,
         "publication_receipt_sha256": publication_receipt_sha256,
+        "candidate_artifact_path": candidate_artifact_path,
+        "candidate_artifact_sha256": candidate_artifact_sha256,
+        "candidate_artifact_format": candidate_artifact_format,
+        "candidate_artifact_size_bytes": candidate_artifact_size_bytes,
+        "candidate_python_version": candidate_python_version,
+        "candidate_superglm_version": candidate_superglm_version,
+        "model_source_sha256": model_source_sha256,
         "dataset_role": dataset_role,
         "split_role": split_role,
     }
@@ -71,6 +90,13 @@ def record_model_run(
                         rating_workbook_path = :rating_workbook_path,
                         publication_receipt_path = :publication_receipt_path,
                         publication_receipt_sha256 = :publication_receipt_sha256,
+                        candidate_artifact_path = :candidate_artifact_path,
+                        candidate_artifact_sha256 = :candidate_artifact_sha256,
+                        candidate_artifact_format = :candidate_artifact_format,
+                        candidate_artifact_size_bytes = :candidate_artifact_size_bytes,
+                        candidate_python_version = :candidate_python_version,
+                        candidate_superglm_version = :candidate_superglm_version,
+                        model_source_sha256 = :model_source_sha256,
                         run_status = :run_status,
                         completed_ts = SYSUTCDATETIME(),
                         created_by = :created_by
@@ -88,6 +114,13 @@ def record_model_run(
                         rating_workbook_path,
                         publication_receipt_path,
                         publication_receipt_sha256,
+                        candidate_artifact_path,
+                        candidate_artifact_sha256,
+                        candidate_artifact_format,
+                        candidate_artifact_size_bytes,
+                        candidate_python_version,
+                        candidate_superglm_version,
+                        model_source_sha256,
                         run_status,
                         completed_ts,
                         created_by
@@ -105,6 +138,13 @@ def record_model_run(
                         :rating_workbook_path,
                         :publication_receipt_path,
                         :publication_receipt_sha256,
+                        :candidate_artifact_path,
+                        :candidate_artifact_sha256,
+                        :candidate_artifact_format,
+                        :candidate_artifact_size_bytes,
+                        :candidate_python_version,
+                        :candidate_superglm_version,
+                        :model_source_sha256,
                         :run_status,
                         SYSUTCDATETIME(),
                         :created_by
@@ -196,6 +236,84 @@ def record_model_run(
                     "split_set_id": split_set_id,
                     "dataset_role": dataset_role,
                     "split_role": split_role,
+                },
+            )
+        for metric_name in sorted(metrics or {}):
+            con.execute(
+                text(
+                    """
+                    MERGE mlops.MODEL_RUN_METRIC WITH (HOLDLOCK) AS tgt
+                    USING (
+                        SELECT
+                            :model_run_id AS model_run_id,
+                            :metric_name AS metric_name
+                    ) AS src
+                    ON tgt.model_run_id = src.model_run_id
+                       AND tgt.metric_name = src.metric_name
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            metric_value = :metric_value,
+                            metric_scope = :metric_scope
+                    WHEN NOT MATCHED THEN
+                        INSERT (model_run_id, metric_name, metric_value, metric_scope)
+                        VALUES (
+                            :model_run_id,
+                            :metric_name,
+                            :metric_value,
+                            :metric_scope
+                        );
+                    """
+                ),
+                {
+                    "model_run_id": model_run_id,
+                    "metric_name": metric_name,
+                    "metric_value": float((metrics or {})[metric_name]),
+                    "metric_scope": (metric_scopes or {}).get(metric_name),
+                },
+            )
+        if fold_metrics and split_set_id is None:
+            raise ValueError("fold_metrics require split_set_id")
+        for metric in fold_metrics:
+            con.execute(
+                text(
+                    """
+                    MERGE pricing.CV_FOLD_METRIC WITH (HOLDLOCK) AS tgt
+                    USING (
+                        SELECT
+                            :model_run_id AS model_run_id,
+                            :split_set_id AS split_set_id,
+                            :fold_no AS fold_no,
+                            :metric_name AS metric_name
+                    ) AS src
+                    ON tgt.model_run_id = src.model_run_id
+                       AND tgt.split_set_id = src.split_set_id
+                       AND tgt.fold_no = src.fold_no
+                       AND tgt.metric_name = src.metric_name
+                    WHEN MATCHED THEN
+                        UPDATE SET metric_value = :metric_value
+                    WHEN NOT MATCHED THEN
+                        INSERT (
+                            model_run_id,
+                            split_set_id,
+                            fold_no,
+                            metric_name,
+                            metric_value
+                        )
+                        VALUES (
+                            :model_run_id,
+                            :split_set_id,
+                            :fold_no,
+                            :metric_name,
+                            :metric_value
+                        );
+                    """
+                ),
+                {
+                    "model_run_id": model_run_id,
+                    "split_set_id": split_set_id,
+                    "fold_no": int(metric["fold_no"]),
+                    "metric_name": str(metric["metric_name"]),
+                    "metric_value": float(metric["metric_value"]),
                 },
             )
     return int(model_run_id)

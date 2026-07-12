@@ -455,6 +455,16 @@ def publish_completed_model_build(
         package_status=resolved_package_status,
         publication_receipt_path=build.publication_receipt_path,
         publication_receipt_sha256=build.publication_receipt_sha256,
+        candidate_artifact_path=build.candidate_artifact_path,
+        candidate_artifact_sha256=build.candidate_artifact_sha256,
+        candidate_artifact_format=build.candidate_artifact_format,
+        candidate_artifact_size_bytes=build.candidate_artifact_size_bytes,
+        candidate_python_version=build.candidate_python_version,
+        candidate_superglm_version=build.candidate_superglm_version,
+        model_source_sha256=build.model_source_sha256,
+        metrics=dict(build.metrics),
+        metric_scopes=dict(build.metric_scopes),
+        fold_metrics=tuple(dict(item) for item in build.fold_metrics),
     )
     publish_config = replace(
         model_config,

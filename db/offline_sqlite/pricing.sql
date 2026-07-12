@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     publication_receipt_path TEXT,
     publication_receipt_sha256 TEXT,
     model_artifact_path TEXT,
+    candidate_artifact_path TEXT,
+    candidate_artifact_sha256 TEXT,
+    candidate_artifact_format TEXT,
+    candidate_artifact_size_bytes INTEGER,
+    candidate_python_version TEXT,
+    candidate_superglm_version TEXT,
+    model_source_sha256 TEXT,
     effective_from TEXT NOT NULL,
     run_status TEXT NOT NULL DEFAULT 'SUCCEEDED',
     started_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -108,6 +115,10 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS pricing.UX_MODEL_RUN_RATE_PACKAGE
+ON MODEL_RUN(rate_package_id)
+WHERE rate_package_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
     rate_package_id INTEGER PRIMARY KEY AUTOINCREMENT,

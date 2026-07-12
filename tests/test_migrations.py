@@ -155,6 +155,44 @@ def test_publication_receipt_migration_enforces_hash_shape():
     assert "publication_receipt_sha256 COLLATE Latin1_General_BIN2" in source
 
 
+def test_candidate_artifact_migration_extends_model_run_and_guards_package_identity():
+    source = Path("db/migrations/V024__candidate_model_artifacts.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for column in (
+        "candidate_artifact_path",
+        "candidate_artifact_sha256",
+        "candidate_artifact_format",
+        "candidate_artifact_size_bytes",
+        "candidate_python_version",
+        "candidate_superglm_version",
+        "model_source_sha256",
+    ):
+        assert f"COL_LENGTH('pricing.MODEL_RUN', '{column}')" in source
+    assert "CK_MODEL_RUN_CANDIDATE_ARTIFACT_FIELDS" in source
+    assert "CK_MODEL_RUN_CANDIDATE_ARTIFACT_SHA256" in source
+    assert "UX_MODEL_RUN_RATE_PACKAGE" in source
+    assert "WHERE rate_package_id IS NOT NULL" in source
+    assert "HAVING COUNT_BIG(*) > 1" in source
+    assert "THROW" in source
+
+
+def test_offline_model_run_mirrors_candidate_artifact_columns():
+    source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
+
+    for column in (
+        "candidate_artifact_path",
+        "candidate_artifact_sha256",
+        "candidate_artifact_format",
+        "candidate_artifact_size_bytes",
+        "candidate_python_version",
+        "candidate_superglm_version",
+        "model_source_sha256",
+    ):
+        assert column in source
+
+
 def test_migration_recorder_insert_is_idempotent_when_row_appears_after_precheck(
     tmp_path,
     monkeypatch,

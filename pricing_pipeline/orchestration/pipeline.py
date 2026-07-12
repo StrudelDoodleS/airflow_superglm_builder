@@ -124,24 +124,39 @@ def publish_model_export(
     publisher.validate_registered_model()
     publish_result = publisher.publish_training_export(export_result)
 
-    record_model_run(
-        engine,
-        dag_id=export_result.dag_id,
-        airflow_run_id=export_result.airflow_run_id,
-        mlflow_run_id=export_result.mlflow_run_id,
-        manifest_id=export_result.manifest_id,
-        split_set_id=export_result.split_set_id,
-        export_id=export_result.export_id,
-        model_id=export_result.model_id,
-        model_name=export_result.model_name,
-        model_version=export_result.model_version,
-        rate_package_id=publish_result.rate_package_id,
-        rating_workbook_path=str(publish_result.rating_workbook_path),
-        run_status="SUCCESS",
-        created_by=export_result.created_by,
-        publication_receipt_path=export_result.publication_receipt_path,
-        publication_receipt_sha256=export_result.publication_receipt_sha256,
-    )
+    lineage_kwargs = {
+        "dag_id": export_result.dag_id,
+        "airflow_run_id": export_result.airflow_run_id,
+        "mlflow_run_id": export_result.mlflow_run_id,
+        "manifest_id": export_result.manifest_id,
+        "split_set_id": export_result.split_set_id,
+        "export_id": export_result.export_id,
+        "model_id": export_result.model_id,
+        "model_name": export_result.model_name,
+        "model_version": export_result.model_version,
+        "rate_package_id": publish_result.rate_package_id,
+        "rating_workbook_path": str(publish_result.rating_workbook_path),
+        "run_status": "SUCCESS",
+        "created_by": export_result.created_by,
+        "publication_receipt_path": export_result.publication_receipt_path,
+        "publication_receipt_sha256": export_result.publication_receipt_sha256,
+    }
+    if export_result.candidate_artifact_path is not None:
+        lineage_kwargs.update(
+            {
+                "candidate_artifact_path": export_result.candidate_artifact_path,
+                "candidate_artifact_sha256": export_result.candidate_artifact_sha256,
+                "candidate_artifact_format": export_result.candidate_artifact_format,
+                "candidate_artifact_size_bytes": export_result.candidate_artifact_size_bytes,
+                "candidate_python_version": export_result.candidate_python_version,
+                "candidate_superglm_version": export_result.candidate_superglm_version,
+                "model_source_sha256": export_result.model_source_sha256,
+                "metrics": export_result.metrics,
+                "metric_scopes": export_result.metric_scopes,
+                "fold_metrics": export_result.fold_metrics,
+            }
+        )
+    record_model_run(engine, **lineage_kwargs)
 
     result: dict[str, str | bool] = {
         "mlflow_run_id": str(publish_result.mlflow_run_id),

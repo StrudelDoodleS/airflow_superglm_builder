@@ -1256,6 +1256,13 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         "created_by": "airflow",
         "publication_receipt_path": "/tmp/superglm_publication_receipt.json",
         "publication_receipt_sha256": "c" * 64,
+        "candidate_artifact_path": None,
+        "candidate_artifact_sha256": None,
+        "candidate_artifact_format": None,
+        "candidate_artifact_size_bytes": None,
+        "candidate_python_version": None,
+        "candidate_superglm_version": None,
+        "model_source_sha256": None,
     }
 
 
@@ -1311,6 +1318,71 @@ def test_record_model_run_links_run_to_dataset_and_split_set():
         "split_set_id": "manifest-1__kfold_5_seed_42",
         "dataset_role": "training",
         "split_role": "validation",
+    }
+
+
+def test_record_model_run_persists_candidate_artifact_and_cv_metrics():
+    events = []
+    engine = FakeLineageEngine(events)
+
+    lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-07-12",
+        mlflow_run_id="",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        export_id="export-1",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v1",
+        rate_package_id=42,
+        rating_workbook_path="/tmp/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+        candidate_artifact_path="/tmp/candidate.joblib",
+        candidate_artifact_sha256="a" * 64,
+        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_size_bytes=123,
+        candidate_python_version="3.14.4",
+        candidate_superglm_version="0.11.0",
+        model_source_sha256="b" * 64,
+        metrics={"cv_pooled_deviance": 0.42},
+        metric_scopes={"cv_pooled_deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
+
+    model_run_event = next(
+        event
+        for event in events
+        if event[0] == "execute" and "MERGE pricing.MODEL_RUN" in event[1]
+    )
+    assert model_run_event[2]["candidate_artifact_path"] == "/tmp/candidate.joblib"
+    assert model_run_event[2]["model_source_sha256"] == "b" * 64
+    run_metric_event = next(
+        event
+        for event in events
+        if event[0] == "execute" and "MERGE mlops.MODEL_RUN_METRIC" in event[1]
+    )
+    assert run_metric_event[2] == {
+        "model_run_id": 501,
+        "metric_name": "cv_pooled_deviance",
+        "metric_value": 0.42,
+        "metric_scope": "cv",
+    }
+    fold_metric_event = next(
+        event
+        for event in events
+        if event[0] == "execute" and "MERGE pricing.CV_FOLD_METRIC" in event[1]
+    )
+    assert fold_metric_event[2] == {
+        "model_run_id": 501,
+        "split_set_id": "split-1",
+        "fold_no": 1,
+        "metric_name": "deviance",
+        "metric_value": 0.4,
     }
 
 

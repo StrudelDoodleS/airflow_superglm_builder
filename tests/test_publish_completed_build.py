@@ -115,6 +115,43 @@ def test_completed_model_build_accepts_complete_candidate_metadata():
     assert build.fold_metrics[0]["metric_name"] == "deviance"
 
 
+def test_model_export_result_round_trips_candidate_metadata():
+    export = ModelExportResult(
+        model_id=17,
+        model_name="CLAIM_FREQ",
+        model_version="v1",
+        model_type="superglm_poisson",
+        target_name="claim_count",
+        deployment_slot="CLAIM_FREQ_CURRENT",
+        manifest_id="manifest-1",
+        dag_id="pricing_claim_freq",
+        airflow_run_id="scheduled__20260712",
+        mlflow_run_id="",
+        split_set_id="split-1",
+        export_id="export-1",
+        rating_workbook_path="rating.xlsx",
+        effective_from="2026-07-12",
+        created_by="airflow",
+        candidate_artifact_path="candidate.joblib",
+        candidate_artifact_sha256="a" * 64,
+        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_size_bytes=123,
+        candidate_python_version="3.14.4",
+        candidate_superglm_version="0.11.0",
+        model_source_sha256="b" * 64,
+        metrics={"cv_pooled_deviance": 0.42},
+        metric_scopes={"cv_pooled_deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
+
+    restored = ModelExportResult.from_mapping(export.to_dict())
+
+    assert restored == export
+    assert restored.candidate_artifact_size_bytes == 123
+
+
 def test_completed_model_build_rejects_partial_candidate_metadata():
     with pytest.raises(CompletedModelBuildError, match="candidate artifact fields"):
         CompletedModelBuild(
@@ -495,11 +532,26 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
             "created_by": "airflow",
             "publication_receipt_path": str(receipt_path),
             "publication_receipt_sha256": receipt_sha256,
+            "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
+            "candidate_artifact_sha256": "a" * 64,
+            "candidate_artifact_format": "superglm-candidate-joblib-v1",
+            "candidate_artifact_size_bytes": 123,
+            "candidate_python_version": "3.14.4",
+            "candidate_superglm_version": "0.11.0",
+            "model_source_sha256": "c" * 64,
+            "metrics": {"cv_pooled_deviance": 0.42},
+            "metric_scopes": {"cv_pooled_deviance": "cv"},
+            "fold_metrics": (
+                {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            ),
         },
     )
 
     assert published_exports[0].publication_receipt_path == str(receipt_path)
     assert published_exports[0].publication_receipt_sha256 == receipt_sha256
+    assert published_exports[0].candidate_artifact_path == str(tmp_path / "candidate.joblib")
+    assert published_exports[0].metrics == {"cv_pooled_deviance": 0.42}
+    assert published_exports[0].fold_metrics[0]["metric_name"] == "deviance"
     assert result.publication_receipt_path == str(receipt_path)
     assert result.publication_receipt_sha256 == receipt_sha256
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -66,6 +66,16 @@ class ModelExportResult:
     package_status: str = "DRAFT"
     publication_receipt_path: str | None = None
     publication_receipt_sha256: str | None = None
+    candidate_artifact_path: str | None = None
+    candidate_artifact_sha256: str | None = None
+    candidate_artifact_format: str | None = None
+    candidate_artifact_size_bytes: int | None = None
+    candidate_python_version: str | None = None
+    candidate_superglm_version: str | None = None
+    model_source_sha256: str | None = None
+    metrics: dict[str, float] = field(default_factory=dict)
+    metric_scopes: dict[str, str] = field(default_factory=dict)
+    fold_metrics: tuple[dict[str, int | str | float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -73,6 +83,23 @@ class ModelExportResult:
             payload.pop("publication_receipt_path")
         if self.publication_receipt_sha256 is None:
             payload.pop("publication_receipt_sha256")
+        if self.candidate_artifact_path is None:
+            for field_name in (
+                "candidate_artifact_path",
+                "candidate_artifact_sha256",
+                "candidate_artifact_format",
+                "candidate_artifact_size_bytes",
+                "candidate_python_version",
+                "candidate_superglm_version",
+                "model_source_sha256",
+            ):
+                payload.pop(field_name)
+        if not self.metrics:
+            payload.pop("metrics")
+        if not self.metric_scopes:
+            payload.pop("metric_scopes")
+        if not self.fold_metrics:
+            payload.pop("fold_metrics")
         return payload
 
     @classmethod
@@ -81,6 +108,8 @@ class ModelExportResult:
             return value
         data = dict(value)
         data["model_id"] = int(data["model_id"])
+        if "fold_metrics" in data:
+            data["fold_metrics"] = tuple(dict(item) for item in data["fold_metrics"])
         return cls(**data)
 
 
