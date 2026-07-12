@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from pricing_pipeline.infra.config import Settings
+
 
 MSSQL_PASSWORD_DEFAULT = "${MSSQL_PASSWORD:-YourStrong(!)Password123}"
 STATE_PATHS = [
@@ -271,13 +273,36 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     expected = (
-        "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@"
+        "superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@"
         "1072f7792cf255899fa6ba93579efd49a25ccdb4"
     )
 
     assert expected in requirements
     assert f'"{expected}"' in pyproject
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
+
+
+def test_workbench_runtime_dependencies_are_direct():
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    for dependency in ("httpx", "joblib"):
+        assert dependency in requirements.splitlines()
+        assert f'"{dependency}"' in pyproject
+
+
+def test_settings_load_workbench_and_airflow_api_values(tmp_path):
+    settings = Settings.from_env(
+        {
+            "WORKBENCH_ARTIFACT_ROOT": str(tmp_path / "candidates"),
+            "AIRFLOW_API_URL": "http://127.0.0.1:8080/api/v2",
+            "AIRFLOW_API_TOKEN": "unit-token",
+        }
+    )
+
+    assert settings.workbench_artifact_root == tmp_path / "candidates"
+    assert settings.airflow_api_url == "http://127.0.0.1:8080/api/v2"
+    assert settings.airflow_api_token == "unit-token"
 
 
 def test_generated_runtime_files_use_portable_exception_tuple_syntax():

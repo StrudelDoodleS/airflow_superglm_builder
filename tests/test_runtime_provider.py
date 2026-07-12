@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 from sqlalchemy import create_engine
 
@@ -43,6 +44,9 @@ def get_runtime_settings():
         "skip_database_create": True,
         "rating_export_root": "state/work/rating_exports",
         "validation_split_artifact_root": "state/work/validation_splits",
+        "workbench_artifact_root": "state/work/candidates",
+        "airflow_api_url": "https://airflow.work.example/api/v2",
+        "airflow_api_token": "runtime-token",
         "mlflow_tracking_uri": "http://mlflow.work:5000",
         "mlflow_enabled": False,
     }
@@ -61,6 +65,9 @@ def get_runtime_settings():
     assert runtime.settings.skip_database_create is True
     assert runtime.settings.mlflow_tracking_uri == "http://mlflow.work:5000"
     assert runtime.settings.mlflow_enabled is False
+    assert runtime.settings.workbench_artifact_root == Path("state/work/candidates")
+    assert runtime.settings.airflow_api_url == "https://airflow.work.example/api/v2"
+    assert runtime.settings.airflow_api_token == "runtime-token"
     assert runtime.settings.schema_names == SchemaNames(
         pricing="python_pricing",
         pricing_staging="python_pricing_stg",

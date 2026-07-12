@@ -141,6 +141,15 @@ def _settings_from_mapping(settings: Settings, values: Mapping[str, Any]) -> Set
         replacements["validation_split_artifact_root"] = Path(
             str(values["validation_split_artifact_root"])
         )
+    if "workbench_artifact_root" in values:
+        replacements["workbench_artifact_root"] = Path(
+            str(values["workbench_artifact_root"])
+        )
+    if "airflow_api_url" in values:
+        replacements["airflow_api_url"] = str(values["airflow_api_url"]).rstrip("/")
+    if "airflow_api_token" in values:
+        token = str(values["airflow_api_token"]).strip()
+        replacements["airflow_api_token"] = token or None
     if "skip_database_create" in values:
         replacements["skip_database_create"] = _bool_value(values["skip_database_create"])
 

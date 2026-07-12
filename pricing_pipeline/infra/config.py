@@ -31,6 +31,9 @@ class Settings:
     mlflow_enabled: bool = True
     rating_export_root: Path = Path("/opt/pricing/state/rating_exports")
     validation_split_artifact_root: Path = Path("/opt/pricing/state/validation_splits")
+    workbench_artifact_root: Path = Path("state/workbench_artifacts")
+    airflow_api_url: str = "http://127.0.0.1:8080/api/v2"
+    airflow_api_token: str | None = None
     skip_database_create: bool = False
     pricing_schema: str = "pricing"
     pricing_staging_schema: str = "pricing_stg"
@@ -74,6 +77,14 @@ class Settings:
                     str(cls.validation_split_artifact_root),
                 )
             ),
+            workbench_artifact_root=Path(
+                env.get(
+                    "WORKBENCH_ARTIFACT_ROOT",
+                    str(cls.workbench_artifact_root),
+                )
+            ),
+            airflow_api_url=env.get("AIRFLOW_API_URL", cls.airflow_api_url).rstrip("/"),
+            airflow_api_token=(env.get("AIRFLOW_API_TOKEN") or None),
             skip_database_create=_env_bool(
                 env,
                 "PRICING_SKIP_DATABASE_CREATE",
