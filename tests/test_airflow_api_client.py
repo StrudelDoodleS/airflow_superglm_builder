@@ -4,7 +4,9 @@ import httpx
 import pytest
 
 
-def test_airflow_client_triggers_editor_dag_with_submission_path():
+def test_airflow_client_trigger_body_matches_airflow_3_schema():
+    from airflow.api_fastapi.core_api.datamodels.dag_run import TriggerDAGRunPostBody
+
     from pricing_pipeline.workbench.airflow import AirflowClient
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -13,8 +15,10 @@ def test_airflow_client_triggers_editor_dag_with_submission_path():
             "/api/v2/dags/pricing_publish_editor_candidate/dagRuns"
         )
         assert request.headers["authorization"] == "Bearer token"
-        assert request.read() == (
-            b'{"dag_run_id":"manual__submission-1","conf":'
+        body = request.read()
+        TriggerDAGRunPostBody.model_validate_json(body)
+        assert body == (
+            b'{"dag_run_id":"manual__submission-1","logical_date":null,"conf":'
             b'{"submission_path":"state/submission.json",'
             b'"submission_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
         )
@@ -84,18 +88,138 @@ def test_airflow_client_raises_for_http_errors():
         client.trigger_dag("example", run_id="manual__1", conf={})
 
 
-def test_airflow_client_treats_existing_deterministic_run_as_retry():
+def test_airflow_client_reuses_queued_run_with_equivalent_conf():
     from pricing_pipeline.workbench.airflow import AirflowClient
 
-    methods = []
+    requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        methods.append(request.method)
+        requests.append((request.method, request.url.path, request.read()))
         if request.method == "POST":
             return httpx.Response(409, json={"detail": "run already exists"})
         return httpx.Response(
             200,
-            json={"dag_run_id": "manual__submission-1", "state": "queued"},
+            json={
+                "dag_run_id": "manual__submission-1",
+                "state": "queued",
+                "conf": {
+                    "options": {"alpha": 1, "beta": 2},
+                    "submission_path": "state/submission.json",
+                },
+            },
+        )
+
+    client = AirflowClient(
+        "http://127.0.0.1:8080/api/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.trigger_dag(
+        "pricing_publish_editor_candidate",
+        run_id="manual__submission-1",
+        conf={
+            "submission_path": "state/submission.json",
+            "options": {"beta": 2, "alpha": 1},
+        },
+    )
+
+    assert requests == [
+        (
+            "POST",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns",
+            b'{"dag_run_id":"manual__submission-1","logical_date":null,"conf":'
+            b'{"submission_path":"state/submission.json","options":{"beta":2,"alpha":1}}}',
+        ),
+        (
+            "GET",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns/manual__submission-1",
+            b"",
+        ),
+    ]
+    assert result.dag_run_id == "manual__submission-1"
+    assert result.state == "queued"
+
+
+def test_airflow_client_rejects_existing_run_with_different_conf():
+    from pricing_pipeline.workbench import AirflowDagRunConflictError
+    from pricing_pipeline.workbench.airflow import AirflowClient
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, request.read()))
+        if request.method == "POST":
+            return httpx.Response(409, json={"detail": "run already exists"})
+        return httpx.Response(
+            200,
+            json={
+                "dag_run_id": "manual__submission-1",
+                "state": "queued",
+                "conf": {"submission_path": "state/different-submission.json"},
+            },
+        )
+
+    client = AirflowClient(
+        "http://127.0.0.1:8080/api/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(
+        AirflowDagRunConflictError,
+        match="already exists with different conf",
+    ):
+        client.trigger_dag(
+            "pricing_publish_editor_candidate",
+            run_id="manual__submission-1",
+            conf={"submission_path": "state/submission.json"},
+        )
+
+    assert requests == [
+        (
+            "POST",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns",
+            b'{"dag_run_id":"manual__submission-1","logical_date":null,"conf":'
+            b'{"submission_path":"state/submission.json"}}',
+        ),
+        (
+            "GET",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns/manual__submission-1",
+            b"",
+        ),
+    ]
+
+
+def test_airflow_client_clears_failed_run_with_same_conf():
+    from airflow.api_fastapi.core_api.datamodels.dag_run import DAGRunClearBody
+
+    from pricing_pipeline.workbench.airflow import AirflowClient
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read()
+        path = request.url.path
+        requests.append((request.method, path, body))
+        if path.endswith("/clear"):
+            DAGRunClearBody.model_validate_json(body)
+            return httpx.Response(
+                200,
+                json={
+                    "dag_run_id": "manual__submission-1",
+                    "state": "queued",
+                    "conf": {"submission_path": "state/submission.json"},
+                    "clear_marker": True,
+                },
+            )
+        if request.method == "POST":
+            return httpx.Response(409, json={"detail": "run already exists"})
+        return httpx.Response(
+            200,
+            json={
+                "dag_run_id": "manual__submission-1",
+                "state": "failed",
+                "conf": {"submission_path": "state/submission.json"},
+            },
         )
 
     client = AirflowClient(
@@ -109,9 +233,27 @@ def test_airflow_client_treats_existing_deterministic_run_as_retry():
         conf={"submission_path": "state/submission.json"},
     )
 
-    assert methods == ["POST", "GET"]
-    assert result.dag_run_id == "manual__submission-1"
+    assert requests == [
+        (
+            "POST",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns",
+            b'{"dag_run_id":"manual__submission-1","logical_date":null,"conf":'
+            b'{"submission_path":"state/submission.json"}}',
+        ),
+        (
+            "GET",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns/manual__submission-1",
+            b"",
+        ),
+        (
+            "POST",
+            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns/"
+            "manual__submission-1/clear",
+            b'{"dry_run":false}',
+        ),
+    ]
     assert result.state == "queued"
+    assert result.payload["clear_marker"] is True
 
 
 def test_airflow_client_obtains_simple_auth_token_when_static_token_is_absent():

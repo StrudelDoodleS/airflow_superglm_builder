@@ -7,7 +7,11 @@ from pricing_pipeline.workbench.artifacts import (
     save_candidate_bundle,
 )
 from pricing_pipeline.workbench.core import Candidate, CandidateLineageError, Workbench
-from pricing_pipeline.workbench.airflow import AirflowClient, AirflowDagRun
+from pricing_pipeline.workbench.airflow import (
+    AirflowClient,
+    AirflowDagRun,
+    AirflowDagRunConflictError,
+)
 from pricing_pipeline.workbench.submission import (
     EDITED_MODEL_FORMAT,
     SUBMISSION_FORMAT,
@@ -23,6 +27,7 @@ __all__ = [
     "SUBMISSION_FORMAT",
     "AirflowClient",
     "AirflowDagRun",
+    "AirflowDagRunConflictError",
     "CandidateArtifactError",
     "CandidateArtifactMetadata",
     "CandidateBundle",

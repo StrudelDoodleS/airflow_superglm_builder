@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -13,6 +14,26 @@ class AirflowDagRun:
     dag_run_id: str
     state: str
     payload: dict[str, Any]
+
+
+class AirflowDagRunConflictError(RuntimeError):
+    """Raised when a deterministic DAG run ID belongs to different conf."""
+
+    def __init__(
+        self,
+        dag_id: str,
+        run_id: str,
+        *,
+        requested_conf: dict[str, Any],
+        existing_conf: object,
+    ) -> None:
+        self.dag_id = dag_id
+        self.run_id = run_id
+        self.requested_conf = requested_conf
+        self.existing_conf = existing_conf
+        super().__init__(
+            f"Airflow DAG run {dag_id!r}/{run_id!r} already exists with different conf"
+        )
 
 
 class AirflowClient:
@@ -59,10 +80,21 @@ class AirflowClient:
         self._ensure_authenticated()
         response = self._client.post(
             self._dag_runs_url(dag_id),
-            json={"dag_run_id": run_id, "conf": conf},
+            json={"dag_run_id": run_id, "logical_date": None, "conf": conf},
         )
         if response.status_code == httpx.codes.CONFLICT:
-            return self.get_dag_run(dag_id, run_id)
+            existing = self.get_dag_run(dag_id, run_id)
+            existing_conf = existing.payload.get("conf")
+            if self._canonical_conf(existing_conf) != self._canonical_conf(conf):
+                raise AirflowDagRunConflictError(
+                    dag_id,
+                    run_id,
+                    requested_conf=conf,
+                    existing_conf=existing_conf,
+                )
+            if existing.state == "failed":
+                return self._clear_dag_run(dag_id, run_id)
+            return existing
         response.raise_for_status()
         return self._dag_run(dag_id, response.json(), fallback_run_id=run_id)
 
@@ -70,6 +102,15 @@ class AirflowClient:
         self._ensure_authenticated()
         encoded_run_id = quote(self._required(run_id, "run_id"), safe="")
         response = self._client.get(f"{self._dag_runs_url(dag_id)}/{encoded_run_id}")
+        response.raise_for_status()
+        return self._dag_run(dag_id, response.json(), fallback_run_id=run_id)
+
+    def _clear_dag_run(self, dag_id: str, run_id: str) -> AirflowDagRun:
+        encoded_run_id = quote(self._required(run_id, "run_id"), safe="")
+        response = self._client.post(
+            f"{self._dag_runs_url(dag_id)}/{encoded_run_id}/clear",
+            json={"dry_run": False},
+        )
         response.raise_for_status()
         return self._dag_run(dag_id, response.json(), fallback_run_id=run_id)
 
@@ -111,6 +152,10 @@ class AirflowClient:
         if not cleaned:
             raise ValueError(f"{name} is required")
         return cleaned
+
+    @staticmethod
+    def _canonical_conf(conf: object) -> str:
+        return json.dumps(conf, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     @staticmethod
     def _dag_run(
