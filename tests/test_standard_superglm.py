@@ -254,6 +254,73 @@ def test_manifest_attempt_directory_rejects_unsafe_path_components(
         api._manifest_attempt_directory(tmp_path / "run", manifest_id)
 
 
+def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    split_evidence = tmp_path / "splits" / "manifest-failure-split.npz"
+
+    def fake_manifest(engine, **kwargs):
+        del engine, kwargs
+        split_evidence.parent.mkdir(parents=True)
+        split_evidence.write_bytes(b"durable split evidence")
+        return SimpleNamespace(
+            manifest_id="manifest-failure",
+            split_set_id="manifest-failure-split",
+            split_artifact_uri=str(split_evidence),
+        )
+
+    def failing_export(model, X, y, exposure, output_path, **kwargs):
+        del model, X, y, exposure, kwargs
+        Path(output_path).write_bytes(b"partial workbook")
+        raise RuntimeError("artifact export failed")
+
+    monkeypatch.setattr(api, "create_model_frame_manifest_with_split", fake_manifest)
+    monkeypatch.setattr(api, "export_rating_tables", failing_export)
+
+    with pytest.raises(RuntimeError, match="artifact export failed"):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=api.ModelInputs(
+                X=frame[["age"]],
+                y=frame["target"].to_numpy(),
+            ),
+            model_factory=_FakeModel,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            cross_validate_fn=lambda *args, **kwargs: _cv_result(),
+            output_dir=tmp_path / "run",
+            model_name="HOME_FREQ",
+            model_version="v1",
+            export_id="export-1",
+            effective_from="2026-07-12",
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            validation_split=ValidationSplitConfig.custom(materialize=True),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+        )
+
+    assert not (tmp_path / "run" / "manifest-failure").exists()
+    assert split_evidence.read_bytes() == b"durable split evidence"
+
+
 def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metadata(
     tmp_path,
     monkeypatch,

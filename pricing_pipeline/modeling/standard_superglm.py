@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import hashlib
 import re
+import shutil
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -523,112 +524,118 @@ def run_standard_superglm_build(
         created_by=created_by,
     )
     run_dir = _manifest_attempt_directory(output_dir, manifest.manifest_id)
-    workbook_path = run_dir / "rating_tables.xlsx"
-    export_options = dict(offset_export_options or {})
-    if inputs.offset is not None:
-        export_options["offset"] = inputs.offset
-    export_rating_tables(
-        fitted,
-        inputs.X,
-        inputs.y,
-        export_weight,
-        output_path=workbook_path,
-        mlflow_client=None,
-        **export_options,
-    )
-    receipt = build_superglm_publication_receipt(
-        fitted,
-        offset_contract=resolved_offset_contract,
-        fit_sample_weight_name=fit_weight_name,
-        export_weight_name=export_weight_name,
-    )
-    receipt_path = run_dir / "publication_receipt.json"
-    receipt_sha256 = write_publication_receipt(receipt, receipt_path)
-    review_artifact = call_review_hook(
-        review_workbook_hook,
-        fitted_model=fitted,
-        inputs=inputs,
-        output_path=run_dir / "rating_tables_review.xlsx",
-        allowed_root=run_dir,
-    )
+    try:
+        workbook_path = run_dir / "rating_tables.xlsx"
+        export_options = dict(offset_export_options or {})
+        if inputs.offset is not None:
+            export_options["offset"] = inputs.offset
+        export_rating_tables(
+            fitted,
+            inputs.X,
+            inputs.y,
+            export_weight,
+            output_path=workbook_path,
+            mlflow_client=None,
+            **export_options,
+        )
+        receipt = build_superglm_publication_receipt(
+            fitted,
+            offset_contract=resolved_offset_contract,
+            fit_sample_weight_name=fit_weight_name,
+            export_weight_name=export_weight_name,
+        )
+        receipt_path = run_dir / "publication_receipt.json"
+        receipt_sha256 = write_publication_receipt(receipt, receipt_path)
+        review_artifact = call_review_hook(
+            review_workbook_hook,
+            fitted_model=fitted,
+            inputs=inputs,
+            output_path=run_dir / "rating_tables_review.xlsx",
+            allowed_root=run_dir,
+        )
 
-    source_sha256 = hash_model_source(model_source_root)
-    cv_report = dict(evidence.report)
-    cv_report["full_fit_telemetry"] = telemetry
-    cv_report["model_name"] = model_name
-    cv_report["fit_mode"] = fit_mode
-    cv_report["scoring"] = _scoring_labels(scoring)
-    bundle = CandidateBundle(
-        fitted_model=fitted,
-        X=inputs.X.copy(),
-        y=np.asarray(inputs.y).copy(),
-        sample_weight=(
-            None if inputs.sample_weight is None else np.asarray(inputs.sample_weight).copy()
-        ),
-        offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
-        export_weight=None if export_weight is None else np.asarray(export_weight).copy(),
-        cv_report=cv_report,
-        manifest_id=manifest.manifest_id,
-        split_set_id=manifest.split_set_id,
-        pk_columns=manifest_spec.pk_columns,
-        row_order_sha256=compute_row_order_sha256(
-            frame,
+        source_sha256 = hash_model_source(model_source_root)
+        cv_report = dict(evidence.report)
+        cv_report["full_fit_telemetry"] = telemetry
+        cv_report["model_name"] = model_name
+        cv_report["fit_mode"] = fit_mode
+        cv_report["scoring"] = _scoring_labels(scoring)
+        bundle = CandidateBundle(
+            fitted_model=fitted,
+            X=inputs.X.copy(),
+            y=np.asarray(inputs.y).copy(),
+            sample_weight=(
+                None if inputs.sample_weight is None else np.asarray(inputs.sample_weight).copy()
+            ),
+            offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
+            export_weight=None if export_weight is None else np.asarray(export_weight).copy(),
+            cv_report=cv_report,
+            manifest_id=manifest.manifest_id,
+            split_set_id=manifest.split_set_id,
             pk_columns=manifest_spec.pk_columns,
-        ),
-        model_source_sha256=source_sha256,
-        offset_contract=resolved_offset_contract.model_dump(mode="json"),
-        review_artifact=(
-            None
-            if review_artifact is None
-            else {
-                "path": review_artifact.path,
-                "sha256": review_artifact.sha256,
-                "size_bytes": review_artifact.size_bytes,
+            row_order_sha256=compute_row_order_sha256(
+                frame,
+                pk_columns=manifest_spec.pk_columns,
+            ),
+            model_source_sha256=source_sha256,
+            offset_contract=resolved_offset_contract.model_dump(mode="json"),
+            review_artifact=(
+                None
+                if review_artifact is None
+                else {
+                    "path": review_artifact.path,
+                    "sha256": review_artifact.sha256,
+                    "size_bytes": review_artifact.size_bytes,
+                }
+            ),
+            fit_sample_weight_name=fit_weight_name,
+            export_weight_name=export_weight_name,
+            offset_export_options=dict(offset_export_options or {}),
+            review_hook_module=(
+                None if review_workbook_hook is None else review_workbook_hook.__module__
+            ),
+            review_hook_name=(
+                None if review_workbook_hook is None else review_workbook_hook.__name__
+            ),
+        )
+        artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
+        fold_metric_records = tuple(
+            {
+                "fold_no": metric.fold_no,
+                "metric_name": metric.metric_name,
+                "metric_value": metric.metric_value,
             }
-        ),
-        fit_sample_weight_name=fit_weight_name,
-        export_weight_name=export_weight_name,
-        offset_export_options=dict(offset_export_options or {}),
-        review_hook_module=(
-            None if review_workbook_hook is None else review_workbook_hook.__module__
-        ),
-        review_hook_name=(
-            None if review_workbook_hook is None else review_workbook_hook.__name__
-        ),
-    )
-    artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
-    fold_metric_records = tuple(
-        {
-            "fold_no": metric.fold_no,
-            "metric_name": metric.metric_name,
-            "metric_value": metric.metric_value,
-        }
-        for metric in evidence.fold_metrics
-    )
-    completed_build = completed_model_build_payload(
-        rating_workbook_path=workbook_path,
-        model_version=model_version,
-        effective_from=effective_from,
-        export_id=export_id,
-        created_by=created_by,
-        manifest_id=manifest.manifest_id,
-        split_set_id=manifest.split_set_id,
-        candidate_artifact_path=artifact.path,
-        candidate_artifact_sha256=artifact.sha256,
-        candidate_artifact_format=artifact.format,
-        candidate_artifact_size_bytes=artifact.size_bytes,
-        candidate_python_version=artifact.python_version,
-        candidate_superglm_version=artifact.superglm_version,
-        model_source_sha256=source_sha256,
-        publication_receipt_path=receipt_path,
-        publication_receipt_sha256=receipt_sha256,
-        metrics=evidence.metrics,
-        metric_scopes={name: "cv" for name in evidence.metrics},
-        fold_metrics=fold_metric_records,
-    )
-    return StandardBuildResult(
-        completed_build=completed_build,
-        fold_indices=evidence.fold_indices,
-        cv_report=cv_report,
-        metrics=evidence.metrics,
-    )
+            for metric in evidence.fold_metrics
+        )
+        completed_build = completed_model_build_payload(
+            rating_workbook_path=workbook_path,
+            model_version=model_version,
+            effective_from=effective_from,
+            export_id=export_id,
+            created_by=created_by,
+            manifest_id=manifest.manifest_id,
+            split_set_id=manifest.split_set_id,
+            candidate_artifact_path=artifact.path,
+            candidate_artifact_sha256=artifact.sha256,
+            candidate_artifact_format=artifact.format,
+            candidate_artifact_size_bytes=artifact.size_bytes,
+            candidate_python_version=artifact.python_version,
+            candidate_superglm_version=artifact.superglm_version,
+            model_source_sha256=source_sha256,
+            publication_receipt_path=receipt_path,
+            publication_receipt_sha256=receipt_sha256,
+            metrics=evidence.metrics,
+            metric_scopes={name: "cv" for name in evidence.metrics},
+            fold_metrics=fold_metric_records,
+        )
+        return StandardBuildResult(
+            completed_build=completed_build,
+            fold_indices=evidence.fold_indices,
+            cv_report=cv_report,
+            metrics=evidence.metrics,
+        )
+    except BaseException:
+        # The manifest/split was committed first and remains durable frame evidence.
+        # Only the incomplete, retry-local artifact directory is disposable here.
+        shutil.rmtree(run_dir)
+        raise

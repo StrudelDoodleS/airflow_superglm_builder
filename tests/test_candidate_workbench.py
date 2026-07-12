@@ -176,6 +176,7 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
 
     assert workbench._candidate_rows("HOME_FREQ", "HOME_FREQ_UAT") == []
     assert "split_link.manifest_id = mr.manifest_id" in statements[0][0]
+    assert "split_link.dataset_role = 'training'" in statements[0][0]
 
 
 def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypatch):

@@ -223,7 +223,14 @@ def record_model_run(
                 FROM mlops.MODEL_RUN_DATASET AS dataset_link
                 WHERE dataset_link.model_run_id = :model_run_id
                   AND dataset_link.dataset_role = :dataset_role
-                  AND dataset_link.manifest_id <> :manifest_id;
+                  AND dataset_link.manifest_id <> :manifest_id
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM mlops.MODEL_RUN_SPLIT_SET AS split_reference
+                      WHERE split_reference.model_run_id = dataset_link.model_run_id
+                        AND split_reference.manifest_id = dataset_link.manifest_id
+                        AND split_reference.dataset_role = dataset_link.dataset_role
+                  );
                 """
             ),
             {

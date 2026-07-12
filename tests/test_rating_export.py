@@ -1388,6 +1388,10 @@ def test_record_model_run_cleans_superseded_primary_lineage_before_upserts():
         "manifest_id": "manifest-2",
         "dataset_role": "training",
     }
+    assert "NOT EXISTS" in dataset_cleanup[1]
+    assert "split_reference.model_run_id = dataset_link.model_run_id" in dataset_cleanup[1]
+    assert "split_reference.manifest_id = dataset_link.manifest_id" in dataset_cleanup[1]
+    assert "split_reference.dataset_role = dataset_link.dataset_role" in dataset_cleanup[1]
     assert (
         executed.index(fold_cleanup)
         < executed.index(split_cleanup)
