@@ -11,9 +11,7 @@ def test_airflow_client_trigger_body_matches_airflow_3_schema():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path.endswith(
-            "/api/v2/dags/pricing_publish_editor_candidate/dagRuns"
-        )
+        assert request.url.path == "/api/v2/dags/pricing_publish_editor_candidate/dagRuns"
         assert request.headers["authorization"] == "Bearer token"
         body = request.read()
         TriggerDAGRunPostBody.model_validate_json(body)
