@@ -1425,6 +1425,17 @@ def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
         for event in executed
         if "DELETE split_link" in event[1] and "MODEL_RUN_SPLIT_SET" in event[1]
     )
+    dataset_cleanup = next(
+        event
+        for event in executed
+        if "DELETE dataset_link" in event[1] and "MODEL_RUN_DATASET" in event[1]
+    )
+    dataset_upsert = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_DATASET" in event[1]
+        and ":parent_model_run_id" not in event[1]
+    )
     expected_params = {
         "model_run_id": 501,
         "manifest_id": "manifest-2",
@@ -1434,6 +1445,17 @@ def test_record_model_run_without_split_cleans_stale_split_and_fold_lineage():
     }
     assert fold_cleanup[2] == expected_params
     assert split_cleanup[2] == expected_params
+    assert dataset_cleanup[2] == {
+        "model_run_id": 501,
+        "manifest_id": "manifest-2",
+        "dataset_role": "training",
+    }
+    assert (
+        executed.index(fold_cleanup)
+        < executed.index(split_cleanup)
+        < executed.index(dataset_cleanup)
+        < executed.index(dataset_upsert)
+    )
     assert not any(
         "MERGE mlops.MODEL_RUN_SPLIT_SET" in event[1]
         and ":parent_model_run_id" not in event[1]
