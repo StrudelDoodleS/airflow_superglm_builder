@@ -493,6 +493,38 @@ def test_package_sql_parity_rejects_invalid_exported_offset_source_before_sql(
         )
 
 
+@pytest.mark.parametrize(
+    ("dtype", "infinity"),
+    [("object", float("inf")), ("category", float("-inf"))],
+)
+def test_package_sql_parity_rejects_nonfinite_numeric_levels_in_mixed_series(
+    dtype,
+    infinity,
+):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+    from pricing_pipeline.workbench.submission import EditorSubmissionError
+
+    offset_source = pd.Series(["basic", np.float64(infinity)], dtype=dtype)
+    bundle, _raw_exposure = _offset_parity_bundle(
+        handling="EXPORTED_FACTOR",
+        offset_source=offset_source,
+    )
+
+    with pytest.raises(
+        EditorSubmissionError,
+        match="offset_source contains non-finite numeric values",
+    ):
+        verify_package_sql_parity(
+            _ParityConnection(allow_execute=False),
+            rate_package_id=108,
+            edited_model=bundle.fitted_model,
+            bundle=bundle,
+        )
+
+
 def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
 

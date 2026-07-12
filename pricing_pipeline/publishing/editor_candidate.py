@@ -687,12 +687,17 @@ def _published_offset_source(bundle: CandidateBundle) -> pd.Series:
         )
     if values.isna().any():
         raise EditorSubmissionError("EXPORTED_FACTOR offset_source contains missing values")
-    if pd.api.types.is_float_dtype(values.dtype) and not np.isfinite(
-        values.to_numpy(dtype=float)
-    ).all():
-        raise EditorSubmissionError(
-            "EXPORTED_FACTOR offset_source contains non-finite numeric values"
-        )
+    for value in values:
+        if isinstance(value, (bool, np.bool_)) or not pd.api.types.is_number(value):
+            continue
+        try:
+            is_finite = bool(np.isfinite(value))
+        except TypeError:
+            is_finite = math.isfinite(value)
+        if not is_finite:
+            raise EditorSubmissionError(
+                "EXPORTED_FACTOR offset_source contains non-finite numeric values"
+            )
     return values
 
 
