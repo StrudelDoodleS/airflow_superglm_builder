@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import platform
 import shutil
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
 
 import joblib
@@ -391,6 +393,17 @@ def _quarantine_incomplete_submission(
     return True
 
 
+@contextmanager
+def _submission_root_lock(submissions_root: Path) -> Iterator[None]:
+    descriptor = os.open(submissions_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _promote_or_reuse_submission(
     staging: Path,
     final_directory: Path,
@@ -408,35 +421,36 @@ def _promote_or_reuse_submission(
     edited_model_superglm_version: str,
     airflow_client: AirflowClient | Any,
 ) -> EditorSubmission | None:
-    while True:
-        try:
-            os.rename(staging, final_directory)
-            return None
-        except OSError as exc:
-            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
-                raise
+    with _submission_root_lock(final_directory.parent):
+        while True:
+            try:
+                os.rename(staging, final_directory)
+                return None
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
 
-        if _submission_tree_is_complete(final_directory):
-            return _reuse_existing_submission(
-                final_directory / "submission.json",
-                root=root,
-                candidate=candidate,
-                reason=reason,
-                claimed_identity=claimed_identity,
-                deployment_slot=deployment_slot,
-                editor_session_sha256=editor_session_sha256,
-                editor_session_size_bytes=editor_session_size_bytes,
-                edited_model_sha256=edited_model_sha256,
-                edited_model_size_bytes=edited_model_size_bytes,
-                edited_model_python_version=edited_model_python_version,
-                edited_model_superglm_version=edited_model_superglm_version,
-                airflow_client=airflow_client,
+            if _submission_tree_is_complete(final_directory):
+                return _reuse_existing_submission(
+                    final_directory / "submission.json",
+                    root=root,
+                    candidate=candidate,
+                    reason=reason,
+                    claimed_identity=claimed_identity,
+                    deployment_slot=deployment_slot,
+                    editor_session_sha256=editor_session_sha256,
+                    editor_session_size_bytes=editor_session_size_bytes,
+                    edited_model_sha256=edited_model_sha256,
+                    edited_model_size_bytes=edited_model_size_bytes,
+                    edited_model_python_version=edited_model_python_version,
+                    edited_model_superglm_version=edited_model_superglm_version,
+                    airflow_client=airflow_client,
+                )
+            _quarantine_incomplete_submission(
+                final_directory,
+                submissions_root=final_directory.parent,
+                submission_id=final_directory.name,
             )
-        _quarantine_incomplete_submission(
-            final_directory,
-            submissions_root=final_directory.parent,
-            submission_id=final_directory.name,
-        )
 
 
 def _submissions_root(root: Path, model_name: str) -> Path:

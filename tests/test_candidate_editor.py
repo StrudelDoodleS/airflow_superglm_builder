@@ -4,6 +4,8 @@ import errno
 import json
 import os
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,6 +334,130 @@ def test_incomplete_deterministic_directory_is_recovered_without_touching_siblin
     }
     assert (sibling / "sentinel").read_text(encoding="utf-8") == "preserve"
     assert len(session.saved_json_paths) == save_attempts_before_retry + 1
+
+
+def test_concurrent_recovery_never_quarantines_a_newly_promoted_winner(
+    tmp_path,
+    monkeypatch,
+):
+    from pricing_pipeline.workbench import submission as submission_module
+
+    seed_candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    seed_candidate.editor()
+    seed = seed_candidate.submit_edits(reason="Recover interrupted submission")
+    final_directory = Path(seed.path).parent
+    shutil.rmtree(final_directory)
+    final_directory.mkdir()
+    (final_directory / "legacy.partial").write_text("interrupted", encoding="utf-8")
+
+    airflow_client = FakeAirflowClient()
+    candidates = []
+    for _ in range(2):
+        candidate, _ = _candidate(
+            tmp_path,
+            session=FakeEditorSession(),
+            airflow_client=airflow_client,
+        )
+        candidate.editor()
+        candidates.append(candidate)
+
+    real_datetime = submission_module.datetime
+    clock_lock = threading.Lock()
+    clock_tick = 0
+
+    class DistinctClock:
+        @classmethod
+        def now(cls, tz):
+            nonlocal clock_tick
+            with clock_lock:
+                clock_tick += 1
+                tick = clock_tick
+            return real_datetime(2026, 7, 13, 10, 0, 0, tick, tzinfo=tz)
+
+    monkeypatch.setattr(submission_module, "datetime", DistinctClock)
+
+    real_is_complete = submission_module._submission_tree_is_complete
+    both_observed_incomplete = threading.Barrier(2)
+
+    def synchronize_incomplete_observations(directory):
+        complete = real_is_complete(directory)
+        if not complete:
+            try:
+                both_observed_incomplete.wait(timeout=0.5)
+            except threading.BrokenBarrierError:
+                pass
+        return complete
+
+    monkeypatch.setattr(
+        submission_module,
+        "_submission_tree_is_complete",
+        synchronize_incomplete_observations,
+    )
+
+    winner_promoted = threading.Event()
+    real_quarantine = submission_module._quarantine_incomplete_submission
+    recovery_lock = threading.Lock()
+    recovery_calls = 0
+
+    def order_recovery_attempts(*args, **kwargs):
+        nonlocal recovery_calls
+        with recovery_lock:
+            recovery_calls += 1
+            recovery_call = recovery_calls
+        if recovery_call == 2:
+            assert winner_promoted.wait(timeout=5)
+        return real_quarantine(*args, **kwargs)
+
+    monkeypatch.setattr(
+        submission_module,
+        "_quarantine_incomplete_submission",
+        order_recovery_attempts,
+    )
+
+    real_rename = os.rename
+    promotion_lock = threading.Lock()
+    promotion_count = 0
+
+    def observe_promotions(source, target):
+        nonlocal promotion_count
+        result = real_rename(source, target)
+        if Path(source).name.startswith(".submission-") and Path(target) == final_directory:
+            with promotion_lock:
+                promotion_count += 1
+            winner_promoted.set()
+        return result
+
+    monkeypatch.setattr(submission_module.os, "rename", observe_promotions)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                candidate.submit_edits,
+                reason="Recover interrupted submission",
+            )
+            for candidate in candidates
+        ]
+        submissions = [future.result(timeout=10) for future in futures]
+
+    final_submission = final_directory / "submission.json"
+    final_sha256 = submission_module.sha256_file(final_submission)
+    assert promotion_count == 1
+    assert len({submission.submission_id for submission in submissions}) == 1
+    assert {submission.sha256 for submission in submissions} == {final_sha256}
+    assert {
+        trigger.conf["submission_sha256"] for trigger in airflow_client.triggered
+    } == {final_sha256}
+    for submission in submissions:
+        loaded = load_verified_submission(
+            submission.path,
+            submission.sha256,
+            allowed_root=tmp_path,
+        )
+        assert loaded.submission_id == submission.submission_id
 
 
 def test_trigger_failure_leaves_complete_submission_for_deterministic_retry(tmp_path):
