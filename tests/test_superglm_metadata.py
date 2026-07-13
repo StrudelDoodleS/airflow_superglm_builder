@@ -17,6 +17,7 @@ from superglm import (
     Tweedie,
 )
 from superglm.features.spline import PSpline
+from superglm.features.interaction import NumericInteraction
 
 from pricing_pipeline.publishing.superglm_metadata import (
     _grouping_metadata,
@@ -26,7 +27,7 @@ from pricing_pipeline.publishing.superglm_metadata import (
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
-def _fit_model(features, *, family="poisson", offset=None):
+def _fit_model(features, *, family="poisson", offset=None, interactions=None):
     n = 90
     rng = np.random.default_rng(20260619)
     x = pd.DataFrame(
@@ -44,6 +45,7 @@ def _fit_model(features, *, family="poisson", offset=None):
     model = SuperGLM(
         family=family,
         features=features,
+        interactions=interactions,
         selection_penalty=0.0,
         discrete=True,
         n_bins=32,
@@ -126,6 +128,46 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert numeric["feature_kind"] == "numeric"
     assert numeric["declared"] == {}
     assert numeric["effective"]["encoding"] == "identity"
+
+
+def test_extracts_ordered_categorical_interaction_metadata_from_fitted_model():
+    model = _fit_model(
+        {
+            "cat": Categorical(base="most_exposed"),
+            "ord": Categorical(base="most_exposed"),
+        },
+        interactions=[("cat", "ord")],
+    )
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    interaction = receipt.term_metadata["cat_ord"]
+    assert interaction["feature_kind"] == "categorical_interaction"
+    assert interaction["source_term_name"] == "cat:ord"
+    assert interaction["published_term_name"] == "cat_ord"
+    assert list(interaction["parent_names"]) == ["cat", "ord"]
+    assert list(interaction["input_column_names"]) == ["cat", "ord"]
+    assert interaction["interaction_order"] == 2
+    assert interaction["effective"]["encoding"] == "categorical_cross_product"
+
+
+def test_rejects_unsupported_interaction_metadata_before_publication():
+    class Model:
+        family = "poisson"
+        _fit_used_offset = False
+        _specs = {"a": Numeric(), "b": Numeric()}
+        _feature_order = ["a", "b"]
+        _interaction_specs = {"a:b": NumericInteraction("a", "b")}
+        _interaction_order = ["a:b"]
+
+    with pytest.raises(ValueError, match="a:b.*categorical"):
+        build_superglm_publication_receipt(
+            Model(),
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
 
 
 def test_receipt_records_actual_fit_and_export_weight_usage():

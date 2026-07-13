@@ -112,6 +112,222 @@ def split_interaction_level(level_code: str, features: list[str]) -> list[tuple[
     return out
 
 
+def _normalise_interaction_specs(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise ValueError("interaction feature metadata must be a JSON object")
+    specs: dict[str, dict[str, Any]] = {}
+    for term_name, metadata in value.items():
+        if isinstance(metadata, list):
+            continue
+        if not isinstance(metadata, dict):
+            raise ValueError(f"interaction metadata for {term_name!r} must be an object")
+        source_term_name = str(metadata.get("source_term_name") or "").strip()
+        parent_names = metadata.get("parent_names")
+        input_column_names = metadata.get("input_column_names")
+        if (
+            not source_term_name
+            or not isinstance(parent_names, list)
+            or not isinstance(input_column_names, list)
+            or len(parent_names) != 2
+            or len(input_column_names) != 2
+        ):
+            raise ValueError(
+                f"interaction metadata for {term_name!r} must declare two ordered parents"
+            )
+        cleaned_parents = [str(name).strip() for name in parent_names]
+        cleaned_inputs = [clean_identifier(str(name)) for name in input_column_names]
+        if any(not name for name in cleaned_parents + cleaned_inputs):
+            raise ValueError(
+                f"interaction metadata for {term_name!r} contains an empty parent name"
+            )
+        specs[clean_identifier(str(term_name))] = {
+            "source_term_name": source_term_name,
+            "parent_names": cleaned_parents,
+            "input_column_names": cleaned_inputs,
+        }
+    return specs
+
+
+def _interaction_title_positions(
+    raw: pd.DataFrame,
+    interaction_specs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[int, int]]:
+    positions: dict[str, tuple[int, int]] = {}
+    for term_name, spec in interaction_specs.items():
+        expected_titles = {str(spec["source_term_name"]), term_name}
+        matches: list[tuple[int, int]] = []
+        for row_index in range(raw.shape[0]):
+            for column_index in range(raw.shape[1]):
+                value = clean_text(raw.iat[row_index, column_index])
+                if value in expected_titles:
+                    matches.append((row_index, column_index))
+        if len(matches) != 1:
+            raise ValueError(
+                f"interaction {term_name!r} must have exactly one workbook title; "
+                f"found {len(matches)}"
+            )
+        positions[term_name] = matches[0]
+    return positions
+
+
+def _positive_multiplier(value: Any, *, term_name: str, location: str) -> float:
+    try:
+        multiplier = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"term {term_name!r} has a non-numeric relativity at {location}: {value!r}"
+        ) from exc
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise ValueError(
+            f"term {term_name!r} has a non-positive or non-finite relativity "
+            f"at {location}: {value!r}"
+        )
+    return multiplier
+
+
+def _append_interaction_matrix_rows(
+    *,
+    raw: pd.DataFrame,
+    export_id: str,
+    interaction_specs: Mapping[str, Mapping[str, Any]],
+    title_positions: Mapping[str, tuple[int, int]],
+    rate_rows: list[dict[str, Any]],
+    level_rows: list[dict[str, Any]],
+    row_id: int,
+    sequence_no: int,
+) -> tuple[int, int]:
+    ordered_terms = sorted(interaction_specs, key=lambda name: title_positions[name][0])
+    level_order = {
+        (str(row["feature_name"]), str(row["level_code"])): int(row["order_index"])
+        for row in level_rows
+    }
+    for term_position, term_name in enumerate(ordered_terms):
+        sequence_no += 1
+        spec = interaction_specs[term_name]
+        parent_names = list(spec["parent_names"])
+        input_columns = list(spec["input_column_names"])
+        title_row, _title_column = title_positions[term_name]
+        boundary_row = (
+            title_positions[ordered_terms[term_position + 1]][0]
+            if term_position + 1 < len(ordered_terms)
+            else raw.shape[0]
+        )
+
+        header: tuple[int, int, list[str]] | None = None
+        expected_left_headers = {parent_names[0], input_columns[0]}
+        for header_row in range(title_row + 1, boundary_row):
+            for left_column in range(raw.shape[1]):
+                if clean_text(raw.iat[header_row, left_column]) not in expected_left_headers:
+                    continue
+                top_levels: list[str] = []
+                for column_index in range(left_column + 1, raw.shape[1]):
+                    top_level = clean_text(raw.iat[header_row, column_index])
+                    if top_level is None:
+                        break
+                    top_levels.append(top_level)
+                if top_levels:
+                    header = (header_row, left_column, top_levels)
+                    break
+            if header is not None:
+                break
+        if header is None:
+            raise ValueError(
+                f"interaction {term_name!r} has no matrix header for {parent_names[0]!r}"
+            )
+        header_row, left_column, top_levels = header
+        if len(set(top_levels)) != len(top_levels):
+            raise ValueError(f"interaction {term_name!r} has duplicate column levels")
+
+        left_levels_seen: set[str] = set()
+        matrix_cell_count = 0
+        for matrix_row in range(header_row + 1, boundary_row):
+            left_level = clean_text(raw.iat[matrix_row, left_column])
+            if left_level is None:
+                break
+            if left_level in left_levels_seen:
+                raise ValueError(
+                    f"interaction {term_name!r} has duplicate row level {left_level!r}"
+                )
+            left_levels_seen.add(left_level)
+            left_order = level_order.get(
+                (input_columns[0], left_level),
+                len(left_levels_seen),
+            )
+            level_order[(input_columns[0], left_level)] = left_order
+
+            for top_index, top_level in enumerate(top_levels, start=1):
+                value_column = left_column + top_index
+                if value_column >= raw.shape[1] or pd.isna(raw.iat[matrix_row, value_column]):
+                    raise ValueError(
+                        f"interaction {term_name!r} has a ragged matrix at "
+                        f"row {matrix_row + 1}, column {value_column + 1}"
+                    )
+                multiplier = _positive_multiplier(
+                    raw.iat[matrix_row, value_column],
+                    term_name=term_name,
+                    location=f"row {matrix_row + 1}, column {value_column + 1}",
+                )
+                top_order = level_order.get(
+                    (input_columns[1], top_level),
+                    top_index,
+                )
+                level_order[(input_columns[1], top_level)] = top_order
+                row_id += 1
+                matrix_cell_count += 1
+                cell_key = (
+                    f"{term_name}="
+                    f"{input_columns[0]}={left_level}|{input_columns[1]}={top_level}"
+                )
+                rate_rows.append(
+                    {
+                        "export_id": export_id,
+                        "row_id": row_id,
+                        "term_name": term_name,
+                        "term_type": "CATEGORICAL_INTERACTION",
+                        "sequence_no": sequence_no,
+                        "cell_key_text": cell_key,
+                        "multiplier": multiplier,
+                        "log_coefficient": float(np.log(multiplier)),
+                        "exposure_weight": None,
+                        "record_count": None,
+                        "is_reference": 1 if np.isclose(multiplier, 1.0) else 0,
+                        "is_default": 0,
+                    }
+                )
+                for position_no, (feature_name, level_code, order_index) in enumerate(
+                    (
+                        (input_columns[0], left_level, left_order),
+                        (input_columns[1], top_level, top_order),
+                    ),
+                    start=1,
+                ):
+                    lower_value = level_code.lower()
+                    level_rows.append(
+                        {
+                            "export_id": export_id,
+                            "row_id": row_id,
+                            "position_no": position_no,
+                            "feature_name": feature_name,
+                            "feature_value_type": "CATEGORICAL",
+                            "level_set_name": f"{feature_name}__{export_id}",
+                            "level_set_type": "CATEGORICAL",
+                            "level_code": level_code,
+                            "level_label": level_code,
+                            "order_index": order_index,
+                            "lower_bound": None,
+                            "upper_bound": None,
+                            "representative_value": None,
+                            "is_missing": 1
+                            if lower_value in {"missing", "na", "nan", "null"}
+                            else 0,
+                            "is_other": 1 if lower_value in {"other", "else"} else 0,
+                        }
+                    )
+        if not left_levels_seen or matrix_cell_count == 0:
+            raise ValueError(f"interaction {term_name!r} has an empty matrix")
+    return row_id, sequence_no
+
+
 def build_staging_frames(
     args: argparse.Namespace,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -125,6 +341,13 @@ def build_staging_frames(
 
     term_type_map = json.loads(args.term_type_map_json)
     interaction_features = json.loads(args.interaction_features_json)
+    interaction_specs = _normalise_interaction_specs(interaction_features)
+    interaction_titles = _interaction_title_positions(raw, interaction_specs)
+    main_effect_stop = (
+        min(row for row, _column in interaction_titles.values())
+        if interaction_titles
+        else raw.shape[0]
+    )
 
     blocks = find_blocks(raw, args.term_row, args.header_row)
     if not blocks:
@@ -158,7 +381,7 @@ def build_staging_frames(
         mult_col = block["mult_col"]
         weight_col = block["weight_col"]
 
-        block_df = raw.iloc[start:, [level_col, mult_col, weight_col]].copy()
+        block_df = raw.iloc[start:main_effect_stop, [level_col, mult_col, weight_col]].copy()
         block_df.columns = ["level_code", "multiplier", "exposure_weight"]
         block_df = block_df.dropna(subset=["level_code", "multiplier"], how="any")
         if block_df.empty:
@@ -178,7 +401,11 @@ def build_staging_frames(
         for order_index, rec in enumerate(block_df.to_dict("records"), start=1):
             row_id += 1
             level_code = str(rec["level_code"]).strip()
-            multiplier = float(rec["multiplier"])
+            multiplier = _positive_multiplier(
+                rec["multiplier"],
+                term_name=term_name,
+                location=f"main-effect row {start + order_index + 1}",
+            )
             exposure_weight = (
                 None if pd.isna(rec.get("exposure_weight")) else float(rec["exposure_weight"])
             )
@@ -236,6 +463,16 @@ def build_staging_frames(
                     }
                 )
 
+    row_id, sequence_no = _append_interaction_matrix_rows(
+        raw=raw,
+        export_id=args.export_id,
+        interaction_specs=interaction_specs,
+        title_positions=interaction_titles,
+        rate_rows=rate_rows,
+        level_rows=level_rows,
+        row_id=row_id,
+        sequence_no=sequence_no,
+    )
     rate_df = pd.DataFrame(rate_rows)
     level_df = pd.DataFrame(level_rows)
     return export_df, rate_df, level_df
@@ -306,6 +543,37 @@ def _metadata_feature_kind(metadata: Mapping[str, Any]) -> str | None:
     return str(feature_kind)
 
 
+def _receipt_interaction_features(
+    receipt: SuperGLMPublicationReceipt | None,
+) -> dict[str, dict[str, Any]]:
+    if receipt is None:
+        return {}
+    interaction_features: dict[str, dict[str, Any]] = {}
+    for term_name, metadata in receipt.model_dump(mode="json")["term_metadata"].items():
+        if _metadata_feature_kind(metadata) != "categorical_interaction":
+            continue
+        source_term_name = metadata.get("source_term_name")
+        parent_names = metadata.get("parent_names")
+        input_column_names = metadata.get("input_column_names")
+        if (
+            not isinstance(source_term_name, str)
+            or not source_term_name.strip()
+            or not isinstance(parent_names, list)
+            or not isinstance(input_column_names, list)
+            or len(parent_names) != 2
+            or len(input_column_names) != 2
+        ):
+            raise ValueError(
+                f"publication receipt interaction {term_name!r} has invalid parent metadata"
+            )
+        interaction_features[term_name] = {
+            "source_term_name": source_term_name,
+            "parent_names": parent_names,
+            "input_column_names": input_column_names,
+        }
+    return interaction_features
+
+
 def _receipt_term_type(
     *,
     term_name: str,
@@ -320,6 +588,8 @@ def _receipt_term_type(
         return "NUMERIC_MAIN"
     if feature_kind == "categorical":
         return "CATEGORICAL_MAIN"
+    if feature_kind == "categorical_interaction":
+        return "CATEGORICAL_INTERACTION"
     if feature_kind == "ordered_categorical":
         return "ORDERED_CATEGORICAL_MAIN"
     if feature_kind == "spline":
@@ -336,11 +606,51 @@ def _receipt_term_type(
     )
 
 
+def _validate_numeric_main_staging(
+    rate_df: pd.DataFrame,
+    level_df: pd.DataFrame,
+) -> None:
+    numeric_terms = sorted(
+        rate_df.loc[rate_df["term_type"] == "NUMERIC_MAIN", "term_name"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+    for term_name in numeric_terms:
+        term_rows = rate_df[
+            (rate_df["term_name"] == term_name)
+            & (rate_df["term_type"] == "NUMERIC_MAIN")
+        ]
+        if len(term_rows) != 1:
+            raise ValueError(
+                f"numeric main term {term_name!r} must contain exactly one per_unit cell"
+            )
+        term_row = term_rows.iloc[0]
+        log_coefficient = float(term_row["log_coefficient"])
+        if not math.isfinite(log_coefficient):
+            raise ValueError(
+                f"numeric main term {term_name!r} has a non-finite log coefficient"
+            )
+        matching_levels = level_df[level_df["row_id"] == term_row["row_id"]]
+        if len(matching_levels) != 1:
+            raise ValueError(
+                f"numeric main term {term_name!r} must map exactly one feature level"
+            )
+        level_index = matching_levels.index[0]
+        level = matching_levels.iloc[0]
+        if int(level["position_no"]) != 1 or str(level["level_code"]).lower() != "per_unit":
+            raise ValueError(
+                f"numeric main term {term_name!r} must use a position-1 per_unit level"
+            )
+        level_df.loc[level_index, "feature_value_type"] = "NUMERIC"
+
+
 def _apply_publication_receipt_metadata(
     *,
     args: argparse.Namespace,
     export_df: pd.DataFrame,
     rate_df: pd.DataFrame,
+    level_df: pd.DataFrame,
     receipt: SuperGLMPublicationReceipt | None,
     receipt_sha256: str | None,
 ) -> pd.DataFrame:
@@ -373,6 +683,8 @@ def _apply_publication_receipt_metadata(
             levels=levels,
             metadata=term_metadata[term_name],
         )
+
+    _validate_numeric_main_staging(rate_df, level_df)
 
     offset_contract = receipt.offset_contract
     if offset_contract.handling == "EXPORTED_FACTOR":
@@ -535,7 +847,9 @@ def stage_rating_export(
         header_row=7,
         data_start_row=8,
         term_type_map_json="{}",
-        interaction_features_json="{}",
+        interaction_features_json=_deterministic_json(
+            _receipt_interaction_features(receipt)
+        ),
         created_by=created_by,
         replace=replace,
         model_id=model_id,
@@ -545,6 +859,7 @@ def stage_rating_export(
         args=args,
         export_df=export_df,
         rate_df=rate_df,
+        level_df=level_df,
         receipt=receipt,
         receipt_sha256=publication_receipt_sha256,
     )

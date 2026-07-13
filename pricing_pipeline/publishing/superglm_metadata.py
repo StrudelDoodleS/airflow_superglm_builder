@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from superglm.features.categorical import Categorical
+from superglm.features.interaction import CategoricalInteraction
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
@@ -28,7 +29,7 @@ from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
 )
 
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"
 
 _SPLINE_KIND_BY_CLASS = {
     PSpline: "ps",
@@ -399,6 +400,65 @@ def _iter_model_specs(model: Any) -> list[tuple[str, Any]]:
     return []
 
 
+def _iter_interaction_specs(model: Any) -> list[tuple[str, Any]]:
+    for specs_attr, order_attr in (
+        ("_interaction_specs", "_interaction_order"),
+        ("interaction_specs", "interaction_order"),
+    ):
+        specs = _safe_getattr(model, specs_attr)
+        if not isinstance(specs, Mapping):
+            continue
+        order = _safe_getattr(model, order_attr)
+        if order is None:
+            return [(str(name), spec) for name, spec in specs.items()]
+        ordered: list[tuple[str, Any]] = []
+        seen: set[str] = set()
+        for name in order:
+            if name in specs:
+                ordered.append((str(name), specs[name]))
+                seen.add(str(name))
+        ordered.extend((str(name), spec) for name, spec in specs.items() if str(name) not in seen)
+        return ordered
+    return []
+
+
+def _categorical_interaction_metadata(
+    name: str,
+    spec: Any,
+    *,
+    published_name: str,
+    published_by_source: Mapping[str, str],
+) -> dict[str, Any]:
+    if not isinstance(spec, CategoricalInteraction):
+        raise ValueError(
+            f"interaction {name!r} uses unsupported {type(spec).__name__}; "
+            "only two-way categorical interactions can be published"
+        )
+    parent_names = tuple(str(parent).strip() for parent in spec.parent_names)
+    if len(parent_names) != 2 or any(not parent for parent in parent_names):
+        raise ValueError(
+            f"interaction {name!r} must have exactly two categorical parent features"
+        )
+    missing_parents = [parent for parent in parent_names if parent not in published_by_source]
+    if missing_parents:
+        raise ValueError(
+            f"interaction {name!r} references unpublished parent feature(s): "
+            + ", ".join(missing_parents)
+        )
+    return {
+        "feature_kind": "categorical_interaction",
+        "superglm_class": type(spec).__name__,
+        "source_term_name": name,
+        "published_term_name": published_name,
+        "parent_names": list(parent_names),
+        "input_column_names": [published_by_source[parent] for parent in parent_names],
+        "interaction_order": 2,
+        "declared": {},
+        "effective": {"encoding": "categorical_cross_product"},
+        "fitted": {},
+    }
+
+
 def _feature_metadata(name: str, spec: Any) -> dict[str, Any]:
     if isinstance(spec, OrderedCategorical):
         return _ordered_categorical_metadata(name, spec)
@@ -467,6 +527,7 @@ def build_superglm_publication_receipt(
     overrides = source_to_published_names or {}
     term_metadata: dict[str, dict[str, Any]] = {}
     published_sources: dict[str, str] = {}
+    published_by_source: dict[str, str] = {}
     fit_used_offset = bool(_safe_getattr(model, "_fit_used_offset", False))
     _validate_offset_contract(fit_used_offset, offset_contract)
 
@@ -486,6 +547,25 @@ def build_superglm_publication_receipt(
                 f"{published_name!r} from {first_source!r} and {source_name!r}"
             )
         published_sources[published_name] = source_name
+        published_by_source[source_name] = published_name
+        term_metadata[published_name] = _json_value(metadata)
+
+    for source_name, spec in _iter_interaction_specs(model):
+        published_name = overrides.get(source_name, clean_identifier(source_name))
+        if published_name in published_sources:
+            first_source = published_sources[published_name]
+            raise ValueError(
+                "canonical term name collision: "
+                f"{published_name!r} from {first_source!r} and {source_name!r}"
+            )
+        metadata = _categorical_interaction_metadata(
+            source_name,
+            spec,
+            published_name=published_name,
+            published_by_source=published_by_source,
+        )
+        published_sources[published_name] = source_name
+        published_by_source[source_name] = published_name
         term_metadata[published_name] = _json_value(metadata)
 
     if offset_contract.handling == "EXPORTED_FACTOR":

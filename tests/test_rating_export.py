@@ -400,12 +400,17 @@ def _offline_staging_engine(tmp_path: Path):
     return engine
 
 
-def _minimal_rating_workbook(path: Path, term_name: str = "TermMonths") -> Path:
+def _minimal_rating_workbook(
+    path: Path,
+    term_name: str = "TermMonths",
+    *,
+    level_code: str = "12",
+) -> Path:
     raw = pd.DataFrame([[None] * 3 for _ in range(8)])
     raw.iat[1, 2] = 0.123
     raw.iat[4, 0] = term_name
     raw.iloc[6, 0:3] = [term_name, "Relativity", "Weight"]
-    raw.iloc[7, 0:3] = ["12", 1.0, 10.0]
+    raw.iloc[7, 0:3] = [level_code, 1.0, 10.0]
     path.parent.mkdir(parents=True, exist_ok=True)
     raw.to_excel(path, sheet_name="Rating Tables", header=False, index=False)
     return path
@@ -609,7 +614,9 @@ def test_stage_rating_export_requires_receipt_metadata_for_staged_terms(
 ):
     engine = _offline_staging_engine(tmp_path)
     workbook_path = _minimal_rating_workbook(
-        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+        tmp_path / "rating_tables.xlsx",
+        term_name="LogDensity",
+        level_code="per_unit",
     )
     receipt_path = tmp_path / "superglm_publication_receipt.json"
     digest = write_publication_receipt(
@@ -673,7 +680,9 @@ def test_stage_rating_export_uses_receipt_metadata_for_term_type(
 ):
     engine = _offline_staging_engine(tmp_path)
     workbook_path = _minimal_rating_workbook(
-        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+        tmp_path / "rating_tables.xlsx",
+        term_name="LogDensity",
+        level_code="per_unit",
     )
     receipt_path = tmp_path / "superglm_publication_receipt.json"
     digest = write_publication_receipt(
@@ -1009,6 +1018,221 @@ def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_p
     assert rate_df["term_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
     assert rate_df["multiplier"].tolist() == [1.2, 0.9, 1.1]
     assert level_df["feature_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
+
+
+def test_stage_rating_export_parses_real_categorical_interaction_matrix(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from superglm import Categorical, SuperGLM
+
+    from pricing_pipeline.publishing.superglm_metadata import (
+        build_superglm_publication_receipt,
+    )
+
+    n_rows = 60
+    X = pd.DataFrame(
+        {
+            "territory": np.resize(["urban", "rural"], n_rows),
+            "age_band": np.resize(["young", "old", "mid"], n_rows),
+        }
+    )
+    y = np.random.default_rng(20260713).poisson(0.4, size=n_rows)
+    weights = np.ones(n_rows)
+    model = SuperGLM(
+        features={
+            "territory": Categorical(base="first"),
+            "age_band": Categorical(base="first"),
+        },
+        interactions=[("territory", "age_band")],
+        selection_penalty=0.0,
+    ).fit(X, y, sample_weight=weights)
+    workbook_path = tmp_path / "rating_tables.xlsx"
+    rating_export.export_rating_tables(
+        model,
+        X,
+        y,
+        weights,
+        output_path=workbook_path,
+        mlflow_client=None,
+    )
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+    receipt_path = tmp_path / "publication_receipt.json"
+    digest = write_publication_receipt(receipt, receipt_path)
+    captured = {}
+
+    def capture_frames(
+        engine,
+        args,
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+    ):
+        captured.update(
+            rate_df=rate_df.copy(),
+            level_df=level_df.copy(),
+            term_metadata_df=term_metadata_df.copy(),
+        )
+
+    monkeypatch.setattr(staging, "insert_staging_frames", capture_frames)
+
+    staging.stage_rating_export(
+        object(),
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="HOME_FREQ",
+        model_version="20260713",
+        effective_from="2026-07-13",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=17,
+    )
+
+    rate_df = captured["rate_df"]
+    level_df = captured["level_df"]
+    assert len(rate_df[rate_df["term_name"] == "territory"]) == 2
+    assert len(rate_df[rate_df["term_name"] == "age_band"]) == 3
+    interaction_rows = rate_df[
+        rate_df["term_name"] == "territory_age_band"
+    ]
+    assert len(interaction_rows) == 6
+    assert set(interaction_rows["term_type"]) == {"CATEGORICAL_INTERACTION"}
+    interaction_levels = level_df[
+        level_df["row_id"].isin(interaction_rows["row_id"])
+    ]
+    assert len(interaction_levels) == 12
+    assert set(interaction_levels["position_no"]) == {1, 2}
+    assert set(interaction_levels["feature_name"]) == {"territory", "age_band"}
+    assert set(captured["term_metadata_df"]["term_name"]) == {
+        "territory",
+        "age_band",
+        "territory_age_band",
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "message"),
+    [
+        ("missing_header", "no matrix header"),
+        ("ragged", "ragged matrix"),
+        ("non_positive", "non-positive or non-finite relativity"),
+    ],
+)
+def test_interaction_matrix_validation_names_the_broken_term(
+    failure_mode: str,
+    message: str,
+):
+    raw = pd.DataFrame([[None] * 3 for _ in range(4)])
+    raw.iat[0, 0] = "territory:age_band"
+    if failure_mode != "missing_header":
+        raw.iloc[1, 0:3] = ["territory", "young", "old"]
+        raw.iloc[2, 0:3] = ["urban", 1.1, 0.9]
+    if failure_mode == "ragged":
+        raw.iat[2, 2] = None
+    elif failure_mode == "non_positive":
+        raw.iat[2, 1] = 0.0
+
+    specs = {
+        "territory_age_band": {
+            "source_term_name": "territory:age_band",
+            "parent_names": ["territory", "age_band"],
+            "input_column_names": ["territory", "age_band"],
+        }
+    }
+    positions = staging._interaction_title_positions(raw, specs)
+
+    with pytest.raises(ValueError, match=rf"territory_age_band.*{message}"):
+        staging._append_interaction_matrix_rows(
+            raw=raw,
+            export_id="export-1",
+            interaction_specs=specs,
+            title_positions=positions,
+            rate_rows=[],
+            level_rows=[],
+            row_id=0,
+            sequence_no=0,
+        )
+
+
+def test_stage_rating_export_marks_real_numeric_main_as_one_per_unit_coefficient(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from superglm import Numeric, SuperGLM
+
+    from pricing_pipeline.publishing.superglm_metadata import (
+        build_superglm_publication_receipt,
+    )
+
+    X = pd.DataFrame({"age": np.linspace(18.0, 80.0, 60)})
+    y = np.random.default_rng(20260713).poisson(
+        np.exp(-2.0 + 0.02 * X["age"].to_numpy())
+    )
+    weights = np.ones(len(X))
+    model = SuperGLM(
+        features={"age": Numeric()},
+        selection_penalty=0.0,
+    ).fit(X, y, sample_weight=weights)
+    workbook_path = tmp_path / "numeric_rating_tables.xlsx"
+    rating_export.export_rating_tables(
+        model,
+        X,
+        y,
+        weights,
+        output_path=workbook_path,
+        mlflow_client=None,
+    )
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+    receipt_path = tmp_path / "numeric_publication_receipt.json"
+    digest = write_publication_receipt(receipt, receipt_path)
+    captured = {}
+
+    def capture_frames(
+        engine,
+        args,
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+    ):
+        captured.update(rate_df=rate_df.copy(), level_df=level_df.copy())
+
+    monkeypatch.setattr(staging, "insert_staging_frames", capture_frames)
+
+    staging.stage_rating_export(
+        object(),
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="HOME_FREQ",
+        model_version="20260713",
+        effective_from="2026-07-13",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=digest,
+        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        replace=True,
+        model_id=17,
+    )
+
+    numeric_rows = captured["rate_df"][
+        captured["rate_df"]["term_type"] == "NUMERIC_MAIN"
+    ]
+    assert len(numeric_rows) == 1
+    numeric_level = captured["level_df"][
+        captured["level_df"]["row_id"] == numeric_rows.iloc[0]["row_id"]
+    ].iloc[0]
+    assert numeric_level["feature_name"] == "age"
+    assert numeric_level["feature_value_type"] == "NUMERIC"
+    assert numeric_level["level_code"] == "per_unit"
+    assert np.isfinite(float(numeric_rows.iloc[0]["log_coefficient"]))
 
 
 def test_publish_rating_package_wrapper_returns_publish_result_without_pointer(monkeypatch):
