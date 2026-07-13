@@ -10,7 +10,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
@@ -29,9 +28,9 @@ from pricing_models.mtpl_frequency.modeling import (  # noqa: E402
 )
 from pricing_models.mtpl_frequency.spec import MODEL_CONFIG  # noqa: E402
 from pricing_pipeline.data.fremtpl import (  # noqa: E402
-    FREMTPL_COLUMNS,
     fetch_fremtpl,
     prepare_fremtpl_raw_frame,
+    synthetic_fremtpl_raw_frame as fre_mtpl_like_raw_frame,
 )
 from pricing_pipeline.data.manifest import create_model_frame_manifest_with_split  # noqa: E402
 from pricing_pipeline.infra.config import Settings  # noqa: E402
@@ -125,51 +124,6 @@ def parse_args() -> argparse.Namespace:
         help="Delete the existing offline SQLite files and artifacts before running.",
     )
     return parser.parse_args()
-
-
-def fre_mtpl_like_raw_frame(row_count: int) -> pd.DataFrame:
-    if row_count < 5:
-        raise ValueError("row_count must be at least 5 for the configured 5-fold split")
-
-    rng = np.random.default_rng(20260616)
-    index = np.arange(row_count)
-    exposure = rng.uniform(0.1, 1.0, size=row_count).round(6)
-    veh_age = rng.integers(0, 25, size=row_count)
-    driv_age = rng.integers(18, 85, size=row_count)
-    bonus_malus = rng.integers(50, 180, size=row_count)
-    density = rng.lognormal(mean=5.5, sigma=1.0, size=row_count).round(6)
-    area = np.array(["A", "B", "C", "D", "E", "F"])[index % 6]
-    veh_power = rng.integers(4, 12, size=row_count)
-    veh_brand = np.array(["B1", "B2", "B3", "B4", "B5"])[index % 5]
-    veh_gas = np.where(index % 3 == 0, "Diesel", "Regular")
-    region = np.array(["R11", "R21", "R22", "R23", "R24"])[index % 5]
-    log_rate = (
-        -3.3
-        + 0.006 * (bonus_malus - 100)
-        + 0.012 * np.maximum(driv_age - 65, 0)
-        + 0.015 * np.maximum(veh_age - 10, 0)
-        + 0.08 * (area == "F")
-        + 0.04 * (veh_gas == "Diesel")
-    )
-    claim_nb = rng.poisson(exposure * np.exp(log_rate))
-
-    return pd.DataFrame(
-        {
-            "IDpol": (100000 + index).astype("int64"),
-            "ClaimNb": claim_nb.astype("int64"),
-            "Exposure": exposure.astype(float),
-            "Area": area,
-            "VehPower": veh_power.astype("int64"),
-            "VehAge": veh_age.astype("int64"),
-            "DrivAge": driv_age.astype("int64"),
-            "BonusMalus": bonus_malus.astype("int64"),
-            "VehBrand": veh_brand,
-            "VehGas": veh_gas,
-            "Density": density.astype(float),
-            "Region": region,
-        },
-        columns=FREMTPL_COLUMNS,
-    )
 
 
 def offline_source_frame(

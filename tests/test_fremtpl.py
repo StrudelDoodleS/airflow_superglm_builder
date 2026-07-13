@@ -76,6 +76,33 @@ def test_validate_fremtpl_raw_rejects_missing_columns():
     assert "Region" in message
 
 
+def test_ensure_local_fremtpl_demo_seeds_an_empty_sqlite_store_once(tmp_path):
+    from sqlalchemy import text
+
+    from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, _paths = open_offline_sqlite(tmp_path)
+
+    assert ensure_local_fremtpl_demo(engine, row_count=12) == 12
+    assert ensure_local_fremtpl_demo(engine, row_count=99) == 12
+    with engine.connect() as connection:
+        count = connection.execute(
+            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
+        ).scalar_one()
+
+    assert count == 12
+
+
+def test_ensure_local_fremtpl_demo_refuses_non_sqlite_engines():
+    from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
+
+    engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
+
+    with pytest.raises(ValueError, match="local SQLite"):
+        ensure_local_fremtpl_demo(engine)
+
+
 def test_fremtpl_insert_rows_preserves_order_and_converts_missing_to_none():
     frame = fremtpl_frame(
         Area=[None],

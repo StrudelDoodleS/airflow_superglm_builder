@@ -25,6 +25,7 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "connect(" in source
     assert "register_model(" in source
     assert "pd.read_sql_query(" in source
+    assert "ensure_local_fremtpl_demo" in source
     assert 'frame["LogDensity"]' in source
     assert "def make_model()" in source
     assert "ValidationSplitConfig.kfold(" in source
@@ -44,6 +45,11 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in source
     assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in source
     assert "pricing.destination" in source
+
+    source_cell = next(cell for cell in notebook["cells"] if "SOURCE_SQL" in "".join(cell.get("source", [])))
+    source_code = "".join(source_cell["source"])
+    assert 'if pricing.mode == "local":' in source_code
+    assert "ensure_local_fremtpl_demo(pricing.engine" in source_code
 
     assert "model.toml" not in lowered
     assert "model_config" not in lowered
