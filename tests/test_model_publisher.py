@@ -327,10 +327,19 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
         fake_publish_rating_package,
     )
 
-    result = ModelPublisher(engine, config()).publish_training_export(export)
+    def lineage_writer(connection, rate_package_id):
+        return None
+
+    result = ModelPublisher(engine, config()).publish_training_export(
+        export,
+        package_lineage_writer=lineage_writer,
+    )
 
     assert result.rate_package_id == 42
     assert calls[0] == ("validate", engine, config())
     stage_call = calls[1]
     assert stage_call[0] == "stage"
     assert stage_call[2]["model_id"] == 17
+    publish_call = calls[2]
+    assert publish_call[0] == "publish"
+    assert publish_call[2]["package_lineage_writer"] is lineage_writer

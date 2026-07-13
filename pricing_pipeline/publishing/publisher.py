@@ -127,7 +127,12 @@ class ModelPublisher:
             model_id=model_id,
         )
 
-    def publish_training_export(self, export: ModelExportResult | dict) -> PublishResult:
+    def publish_training_export(
+        self,
+        export: ModelExportResult | dict,
+        *,
+        package_lineage_writer=None,
+    ) -> PublishResult:
         export_result = ModelExportResult.from_mapping(export)
         model_id = self.validate_registered_model()
         _validate_export_matches_config(
@@ -162,6 +167,7 @@ class ModelPublisher:
             export_id=export_result.export_id,
             created_by=export_result.created_by,
             package_status=self.config.default_package_status,
+            package_lineage_writer=package_lineage_writer,
         )
         return PublishResult(
             mlflow_run_id=export_result.mlflow_run_id,

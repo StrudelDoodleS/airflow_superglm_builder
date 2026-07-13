@@ -1193,11 +1193,12 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
         (
             "publish",
             engine,
-            {
-                "export_id": "export-1",
-                "created_by": "airflow",
-                "package_status": "PUBLISHED",
-            },
+                {
+                    "export_id": "export-1",
+                    "created_by": "airflow",
+                    "package_status": "PUBLISHED",
+                    "package_lineage_writer": None,
+                },
         ),
     ]
 
@@ -1981,8 +1982,9 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             calls.append(("validate_registered_model",))
             return 17
 
-        def publish_training_export(self, export):
+        def publish_training_export(self, export, *, package_lineage_writer):
             calls.append(("publish_training_export", export))
+            package_lineage_writer(publish_connection, 123)
             return PublishResult(
                 mlflow_run_id=export.mlflow_run_id,
                 export_id=export.export_id,
@@ -1991,8 +1993,11 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
                 rating_workbook_path=export.rating_workbook_path,
             )
 
-    def fake_record_model_run(engine, **kwargs):
-        calls.append(("record_model_run", engine, kwargs))
+    publish_connection = object()
+
+    def fake_record_model_run(connection, **kwargs):
+        calls.append(("record_model_run", connection, kwargs))
+        return 901
 
     monkeypatch.setattr(
         pipeline,
@@ -2008,7 +2013,12 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     monkeypatch.setattr(pipeline, "mlflow", fake_mlflow, raising=False)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
-    monkeypatch.setattr(pipeline, "record_model_run", fake_record_model_run)
+    monkeypatch.setattr(pipeline, "record_model_run_on_connection", fake_record_model_run)
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_existing_published_run",
+        lambda *args, **kwargs: None,
+    )
 
     dumped = []
     real_dump = pickle.dump
@@ -2063,6 +2073,9 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
         "package_version": "4",
         "package_status": "PUBLISHED",
         "rating_workbook_path": str(workbook_path),
+        "model_run_id": "901",
+        "manifest_id": "manifest-1",
+        "split_set_id": "manifest-1__train_test_split_test_0_2_seed_99",
         "was_existing": False,
     }
     assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
@@ -2120,7 +2133,7 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
     record_call = next(event for event in calls if event[0] == "record_model_run")
     assert record_call == (
         "record_model_run",
-        engine,
+        publish_connection,
         {
             "dag_id": "pricing_dag",
             "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
@@ -2206,8 +2219,9 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
             calls.append(("validate_registered_model",))
             return 17
 
-        def publish_training_export(self, export):
+        def publish_training_export(self, export, *, package_lineage_writer):
             calls.append(("publish_training_export", export))
+            package_lineage_writer(publish_connection, 123)
             return PublishResult(
                 mlflow_run_id=export.mlflow_run_id,
                 export_id=export.export_id,
@@ -2230,10 +2244,18 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
     )
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    publish_connection = object()
     monkeypatch.setattr(
         pipeline,
-        "record_model_run",
-        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
+        "record_model_run_on_connection",
+        lambda connection, **kwargs: (
+            calls.append(("record_model_run", connection, kwargs)) or 901
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_existing_published_run",
+        lambda *args, **kwargs: None,
     )
 
     engine = object()
@@ -2290,24 +2312,31 @@ def test_publish_model_export_returns_candidate_without_deploying(
             calls.append(("validate_registered_model",))
             return 17
 
-        def publish_training_export(self, export):
-            calls.append(("publish_training_export", export))
-            return SimpleNamespace(
-                mlflow_run_id="mlflow-run-1",
-                export_id=export.export_id if hasattr(export, "export_id") else export["export_id"],
-                rate_package_id=123,
-                package_version=4,
-                package_status="DRAFT",
-                was_existing=True,
-                rating_workbook_path=(
-                    export.rating_workbook_path
-                    if hasattr(export, "rating_workbook_path")
-                    else export["rating_workbook_path"]
-                ),
-            )
+        def publish_training_export(self, export, *, package_lineage_writer):
+            pytest.fail("a complete existing publication must return before staging")
 
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
-    monkeypatch.setattr(pipeline, "record_model_run", lambda *args, **kwargs: None)
+    existing = pipeline.ExistingPublishedRun(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        export_id="export-1",
+        rate_package_id=123,
+        package_version=4,
+        package_status="DRAFT",
+        model_run_id=901,
+        manifest_id="original-manifest",
+        split_set_id="original-split",
+        rating_workbook_path=str(tmp_path / "original" / "rating_tables.xlsx"),
+        mlflow_run_id="mlflow-run-1",
+        publication_receipt_path=None,
+        publication_receipt_sha256=None,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_existing_published_run",
+        lambda *args, **kwargs: existing,
+    )
     engine = object()
     export = {
         "model_id": 17,
@@ -2334,9 +2363,99 @@ def test_publish_model_export_returns_candidate_without_deploying(
     assert result["package_version"] == "4"
     assert result["package_status"] == "DRAFT"
     assert result["was_existing"] is True
+    assert result["model_run_id"] == "901"
+    assert result["manifest_id"] == "original-manifest"
+    assert result["split_set_id"] == "original-split"
+    assert result["rating_workbook_path"].endswith("original/rating_tables.xlsx")
     assert "publication_receipt_path" not in result
     assert "publication_receipt_sha256" not in result
     assert ("validate_registered_model",) in calls
+
+
+def test_existing_published_run_resolver_returns_complete_lineage_and_rejects_partial(
+    monkeypatch,
+    tmp_path: Path,
+):
+    row = {
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "20260527",
+        "source_export_id": "export-1",
+        "rate_package_id": 123,
+        "package_version": 4,
+        "package_status": "DRAFT",
+        "model_run_id": 901,
+        "run_status": "SUCCESS",
+        "manifest_id": "manifest-original",
+        "split_set_id": "split-original",
+        "rating_workbook_path": str(tmp_path / "original" / "rating_tables.xlsx"),
+        "mlflow_run_id": "mlflow-1",
+        "publication_receipt_path": None,
+        "publication_receipt_sha256": None,
+        "candidate_artifact_path": None,
+        "candidate_artifact_sha256": None,
+        "candidate_artifact_format": None,
+        "candidate_artifact_size_bytes": None,
+        "candidate_python_version": None,
+        "candidate_superglm_version": None,
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [dict(row)]
+
+    class Connection:
+        def execute(self, statement, params):
+            assert params == {"model_id": 17, "export_id": "export-1"}
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    monkeypatch.setattr(
+        pipeline,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    export = ModelExportResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-retry",
+        dag_id="pricing_dag",
+        airflow_run_id="manual__1",
+        mlflow_run_id="mlflow-retry",
+        split_set_id="split-retry",
+        export_id="export-1",
+        rating_workbook_path=str(tmp_path / "retry" / "rating_tables.xlsx"),
+        effective_from="2026-05-27",
+        created_by="airflow",
+    )
+
+    existing = pipeline._resolve_existing_published_run(Engine(), export)
+
+    assert existing is not None
+    assert existing.manifest_id == "manifest-original"
+    assert existing.rating_workbook_path.endswith("original/rating_tables.xlsx")
+
+    row["model_run_id"] = None
+    row["run_status"] = None
+    with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
+        pipeline._resolve_existing_published_run(Engine(), export)
 
 
 def test_publish_model_export_includes_publication_receipt_fields_when_set(
@@ -2345,6 +2464,8 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
 ):
     calls = []
 
+    transaction_connection = object()
+
     class FakePublisher:
         def __init__(self, engine, config):
             pass
@@ -2352,8 +2473,9 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
         def validate_registered_model(self):
             return 17
 
-        def publish_training_export(self, export):
+        def publish_training_export(self, export, *, package_lineage_writer):
             calls.append(("publish_training_export", export))
+            package_lineage_writer(transaction_connection, 123)
             return SimpleNamespace(
                 mlflow_run_id="mlflow-run-1",
                 export_id=export.export_id,
@@ -2367,8 +2489,16 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
     monkeypatch.setattr(
         pipeline,
-        "record_model_run",
-        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
+        "_resolve_existing_published_run",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "record_model_run_on_connection",
+        lambda connection, **kwargs: (
+            calls.append(("record_model_run", connection, kwargs)) or 901
+        ),
+        raising=False,
     )
     engine = object()
     export = ModelExportResult(
@@ -2397,5 +2527,6 @@ def test_publish_model_export_includes_publication_receipt_fields_when_set(
     assert result["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
     assert result["publication_receipt_sha256"] == "d" * 64
     record_call = next(call for call in calls if call[0] == "record_model_run")
+    assert record_call[1] is transaction_connection
     assert record_call[2]["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
     assert record_call[2]["publication_receipt_sha256"] == "d" * 64

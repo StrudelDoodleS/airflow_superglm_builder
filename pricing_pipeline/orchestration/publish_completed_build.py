@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import json
+import shutil
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from numbers import Real
@@ -561,6 +562,49 @@ def _verify_candidate_artifact(
         )
 
 
+def _discard_redundant_completed_build_attempt(
+    build: CompletedModelBuild,
+    *,
+    publish_result: Mapping[str, Any],
+    artifact_root: str | Path,
+) -> None:
+    if not bool(publish_result.get("was_existing", False)):
+        return
+    root = Path(artifact_root).expanduser().resolve()
+    incoming_values = [
+        build.rating_workbook_path,
+        build.publication_receipt_path,
+        build.candidate_artifact_path,
+    ]
+    incoming_paths = [
+        Path(value).expanduser().resolve() for value in incoming_values if value is not None
+    ]
+    if not incoming_paths:
+        return
+    attempt_dir = incoming_paths[0].parent
+    if any(path.parent != attempt_dir for path in incoming_paths):
+        return
+    if not attempt_dir.is_relative_to(root):
+        return
+    relative_attempt = attempt_dir.relative_to(root)
+    if len(relative_attempt.parts) < 3:
+        return
+    canonical_values = [
+        publish_result.get("rating_workbook_path"),
+        publish_result.get("publication_receipt_path"),
+    ]
+    canonical_paths = [
+        Path(str(value)).expanduser().resolve()
+        for value in canonical_values
+        if value is not None and str(value).strip()
+    ]
+    if any(path == attempt_dir or path.is_relative_to(attempt_dir) for path in canonical_paths):
+        return
+    if attempt_dir.is_symlink() or not attempt_dir.is_dir():
+        return
+    shutil.rmtree(attempt_dir)
+
+
 def publish_completed_model_build(
     engine,
     *,
@@ -669,14 +713,29 @@ def publish_completed_model_build(
         engine,
         export,
         model_config=publish_config,
+        allowed_artifact_root=settings.workbench_artifact_root,
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=publish_result,
+        artifact_root=settings.workbench_artifact_root,
+    )
+    result_manifest_id = str(publish_result.get("manifest_id") or manifest_id)
+    result_split_set_id = (
+        publish_result["split_set_id"]
+        if "split_set_id" in publish_result
+        else split_set_id
     )
 
     return CompletedModelPublishResult(
         model_id=int(model_id),
         model_name=model_config.model_name,
         model_version=model_version,
-        manifest_id=manifest_id,
-        split_set_id=split_set_id,
+        manifest_id=result_manifest_id,
+        split_set_id=(
+            None if result_split_set_id is None else str(result_split_set_id)
+        ),
         export_id=str(publish_result["export_id"]),
         rate_package_id=int(publish_result["rate_package_id"]),
         package_version=int(publish_result["package_version"]),

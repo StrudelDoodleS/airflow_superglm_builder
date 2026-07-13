@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import pickle
+from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import text
 
 from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.publishing.lineage import record_model_run
+from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.publishing.lineage import record_model_run_on_connection
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
@@ -18,8 +22,205 @@ from pricing_pipeline.publishing.rating_export import (
     build_rating_export_path,
     export_rating_tables,
 )
-from pricing_pipeline.publishing.publisher import ModelPublisher, validate_model_on_engine
+from pricing_pipeline.publishing.publisher import (
+    ModelPublisher,
+    _validate_export_matches_config,
+    validate_model_on_engine,
+)
 from pricing_pipeline.models.superglm_diagnostics import fit_reml_with_diagnostics
+
+
+class PublishedRunIntegrityError(RuntimeError):
+    """Raised when an export ID resolves incomplete or ambiguous durable lineage."""
+
+
+@dataclass(frozen=True)
+class ExistingPublishedRun:
+    model_id: int
+    model_name: str
+    model_version: str
+    export_id: str
+    rate_package_id: int
+    package_version: int
+    package_status: str
+    model_run_id: int
+    manifest_id: str
+    split_set_id: str | None
+    rating_workbook_path: str
+    mlflow_run_id: str
+    publication_receipt_path: str | None
+    publication_receipt_sha256: str | None
+
+    def to_publish_result(self) -> dict[str, str | bool | None]:
+        result: dict[str, str | bool | None] = {
+            "mlflow_run_id": self.mlflow_run_id,
+            "export_id": self.export_id,
+            "rate_package_id": str(self.rate_package_id),
+            "package_version": str(self.package_version),
+            "package_status": self.package_status,
+            "rating_workbook_path": self.rating_workbook_path,
+            "model_run_id": str(self.model_run_id),
+            "manifest_id": self.manifest_id,
+            "split_set_id": self.split_set_id,
+            "was_existing": True,
+        }
+        if self.publication_receipt_path is not None:
+            result["publication_receipt_path"] = self.publication_receipt_path
+        if self.publication_receipt_sha256 is not None:
+            result["publication_receipt_sha256"] = self.publication_receipt_sha256
+        return result
+
+
+def _resolve_existing_published_run(
+    engine,
+    export: ModelExportResult,
+    *,
+    allowed_artifact_root: str | Path | None = None,
+) -> ExistingPublishedRun | None:
+    schemas = schema_names_from_connectable(engine)
+    query = text(
+        f"""
+        SELECT
+            rp.model_id,
+            pm.model_name,
+            rp.model_version,
+            rp.source_export_id,
+            rp.rate_package_id,
+            rp.package_version,
+            rp.package_status,
+            mr.model_run_id,
+            mr.run_status,
+            mr.manifest_id,
+            split_link.split_set_id,
+            mr.rating_workbook_path,
+            mr.mlflow_run_id,
+            mr.publication_receipt_path,
+            mr.publication_receipt_sha256,
+            mr.candidate_artifact_path,
+            mr.candidate_artifact_sha256,
+            mr.candidate_artifact_format,
+            mr.candidate_artifact_size_bytes,
+            mr.candidate_python_version,
+            mr.candidate_superglm_version
+        FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+        JOIN {schemas.pricing}.PRICING_MODEL AS pm
+          ON pm.model_id = rp.model_id
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
+          ON mr.rate_package_id = rp.rate_package_id
+        LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
+          ON split_link.model_run_id = mr.model_run_id
+         AND split_link.manifest_id = mr.manifest_id
+         AND split_link.dataset_role = 'training'
+         AND split_link.split_role = 'validation'
+        WHERE rp.model_id = :model_id
+          AND rp.source_export_id = :export_id
+        """
+    )
+    with engine.begin() as connection:
+        rows = list(
+            connection.execute(
+                query,
+                {"model_id": export.model_id, "export_id": export.export_id},
+            )
+            .mappings()
+            .all()
+        )
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise PublishedRunIntegrityError(
+            f"export_id {export.export_id!r} resolves {len(rows)} package/run rows"
+        )
+    row = dict(rows[0])
+    if row.get("model_run_id") is None:
+        raise PublishedRunIntegrityError(
+            f"export_id {export.export_id!r} has a package without model-run lineage; "
+            "manual repair is required"
+        )
+    if str(row.get("run_status") or "").upper() != "SUCCESS":
+        raise PublishedRunIntegrityError(
+            f"export_id {export.export_id!r} has no successful model run"
+        )
+    if str(row.get("package_status") or "").upper() not in {"DRAFT", "PUBLISHED"}:
+        raise PublishedRunIntegrityError(
+            f"export_id {export.export_id!r} has unusable package status"
+        )
+    if str(row.get("model_name")) != export.model_name:
+        raise PublishedRunIntegrityError("existing export belongs to a different model")
+    if str(row.get("model_version")) != export.model_version:
+        raise PublishedRunIntegrityError("existing export has a different model version")
+
+    artifact_fields = (
+        "candidate_artifact_path",
+        "candidate_artifact_sha256",
+        "candidate_artifact_format",
+        "candidate_artifact_size_bytes",
+        "candidate_python_version",
+        "candidate_superglm_version",
+    )
+    artifact_values = [row.get(field) for field in artifact_fields]
+    if any(value is not None for value in artifact_values):
+        if any(value is None for value in artifact_values):
+            raise PublishedRunIntegrityError(
+                "existing successful run has incomplete candidate artifact metadata"
+            )
+        if allowed_artifact_root is None:
+            raise PublishedRunIntegrityError(
+                "existing candidate artifact requires a configured verification root"
+            )
+        from pricing_pipeline.workbench.artifacts import (
+            CandidateArtifactError,
+            load_candidate_bundle,
+        )
+
+        try:
+            bundle = load_candidate_bundle(
+                row["candidate_artifact_path"],
+                expected_sha256=row["candidate_artifact_sha256"],
+                expected_size_bytes=int(row["candidate_artifact_size_bytes"]),
+                expected_format=row["candidate_artifact_format"],
+                expected_python_version=row["candidate_python_version"],
+                expected_superglm_version=row["candidate_superglm_version"],
+                allowed_root=allowed_artifact_root,
+            )
+        except CandidateArtifactError as exc:
+            raise PublishedRunIntegrityError(
+                f"existing candidate artifact failed verification: {exc}"
+            ) from exc
+        if bundle.manifest_id != str(row["manifest_id"]):
+            raise PublishedRunIntegrityError(
+                "existing candidate artifact manifest does not match model-run lineage"
+            )
+        row_split_set_id = row.get("split_set_id")
+        if bundle.split_set_id != row_split_set_id:
+            raise PublishedRunIntegrityError(
+                "existing candidate artifact split set does not match model-run lineage"
+            )
+
+    return ExistingPublishedRun(
+        model_id=int(row["model_id"]),
+        model_name=str(row["model_name"]),
+        model_version=str(row["model_version"]),
+        export_id=str(row["source_export_id"]),
+        rate_package_id=int(row["rate_package_id"]),
+        package_version=int(row["package_version"]),
+        package_status=str(row["package_status"]),
+        model_run_id=int(row["model_run_id"]),
+        manifest_id=str(row["manifest_id"]),
+        split_set_id=(None if row.get("split_set_id") is None else str(row["split_set_id"])),
+        rating_workbook_path=str(row["rating_workbook_path"]),
+        mlflow_run_id=str(row.get("mlflow_run_id") or ""),
+        publication_receipt_path=(
+            None
+            if row.get("publication_receipt_path") is None
+            else str(row["publication_receipt_path"])
+        ),
+        publication_receipt_sha256=(
+            None
+            if row.get("publication_receipt_sha256") is None
+            else str(row["publication_receipt_sha256"])
+        ),
+    )
 
 
 def train_and_export_model(
@@ -118,11 +319,19 @@ def publish_model_export(
     export: ModelExportResult | dict,
     *,
     model_config: ModelBuildConfig,
-) -> dict[str, str | bool]:
+    allowed_artifact_root: str | Path | None = None,
+) -> dict[str, str | bool | None]:
     export_result = ModelExportResult.from_mapping(export)
     publisher = ModelPublisher(engine, model_config)
-    publisher.validate_registered_model()
-    publish_result = publisher.publish_training_export(export_result)
+    model_id = publisher.validate_registered_model()
+    _validate_export_matches_config(export_result, model_config, model_id=model_id)
+    existing = _resolve_existing_published_run(
+        engine,
+        export_result,
+        allowed_artifact_root=allowed_artifact_root,
+    )
+    if existing is not None:
+        return existing.to_publish_result()
 
     lineage_kwargs = {
         "dag_id": export_result.dag_id,
@@ -134,8 +343,7 @@ def publish_model_export(
         "model_id": export_result.model_id,
         "model_name": export_result.model_name,
         "model_version": export_result.model_version,
-        "rate_package_id": publish_result.rate_package_id,
-        "rating_workbook_path": str(publish_result.rating_workbook_path),
+        "rating_workbook_path": export_result.rating_workbook_path,
         "run_status": "SUCCESS",
         "created_by": export_result.created_by,
         "publication_receipt_path": export_result.publication_receipt_path,
@@ -156,15 +364,33 @@ def publish_model_export(
                 "fold_metrics": export_result.fold_metrics,
             }
         )
-    record_model_run(engine, **lineage_kwargs)
+    model_run_id: int | None = None
 
-    result: dict[str, str | bool] = {
+    def write_package_lineage(connection, rate_package_id: int) -> None:
+        nonlocal model_run_id
+        model_run_id = record_model_run_on_connection(
+            connection,
+            **lineage_kwargs,
+            rate_package_id=rate_package_id,
+        )
+
+    publish_result = publisher.publish_training_export(
+        export_result,
+        package_lineage_writer=write_package_lineage,
+    )
+    if model_run_id is None:
+        raise RuntimeError("package publication did not record scheduled model lineage")
+
+    result: dict[str, str | bool | None] = {
         "mlflow_run_id": str(publish_result.mlflow_run_id),
         "export_id": str(publish_result.export_id),
         "rate_package_id": str(publish_result.rate_package_id),
         "package_version": str(publish_result.package_version),
         "package_status": str(publish_result.package_status),
         "rating_workbook_path": str(publish_result.rating_workbook_path),
+        "model_run_id": str(model_run_id),
+        "manifest_id": export_result.manifest_id,
+        "split_set_id": export_result.split_set_id,
         "was_existing": bool(getattr(publish_result, "was_existing", False)),
     }
     if export_result.publication_receipt_path is not None:
@@ -186,7 +412,7 @@ def run_training_export_publish(
     spec: ModelSpec,
     model_config: ModelBuildConfig,
     created_by: str = "airflow",
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | None]:
     export = train_and_export_model(
         engine,
         settings=settings,

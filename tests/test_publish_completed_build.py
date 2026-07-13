@@ -555,7 +555,7 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
         ),
     )
 
-    def fake_publish(engine_arg, export, *, model_config):
+    def fake_publish(engine_arg, export, *, model_config, allowed_artifact_root=None):
         calls.append(("publish", engine_arg, export, model_config))
         assert isinstance(export, ModelExportResult)
         return {
@@ -593,6 +593,79 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
     assert calls[0] == ("validate", engine, _config())
     assert calls[1][0] == "manifest"
     assert calls[2][0] == "publish"
+
+
+def test_publish_completed_model_build_returns_canonical_retry_lineage_and_discards_attempt(
+    tmp_path,
+    monkeypatch,
+):
+    settings = _settings(tmp_path)
+    retry_dir = settings.workbench_artifact_root / "HOME_FREQ" / "export-1" / "manifest-retry"
+    retry_dir.mkdir(parents=True)
+    retry_workbook = retry_dir / "rating_tables.xlsx"
+    retry_workbook.write_bytes(b"retry workbook")
+    original_dir = settings.workbench_artifact_root / "HOME_FREQ" / "export-1" / "manifest-original"
+    original_dir.mkdir(parents=True)
+    original_workbook = original_dir / "rating_tables.xlsx"
+    original_workbook.write_bytes(b"original workbook")
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.validate_model_on_engine",
+        lambda engine, config: 17,
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.new_manifest_id",
+        lambda dataset_name: "manifest-retry",
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.create_dataset_manifest_with_split",
+        lambda *args, **kwargs: DatasetManifestResult(
+            manifest_id="manifest-retry",
+            split_set_id="split-retry",
+            split_artifact_uri=None,
+        ),
+    )
+
+    def fake_publish(engine, export, *, model_config, allowed_artifact_root=None):
+        assert allowed_artifact_root == settings.workbench_artifact_root
+        return {
+            "mlflow_run_id": "mlflow-original",
+            "export_id": "export-1",
+            "rate_package_id": "42",
+            "package_version": "7",
+            "package_status": "PUBLISHED",
+            "rating_workbook_path": str(original_workbook),
+            "model_run_id": "901",
+            "manifest_id": "manifest-original",
+            "split_set_id": "split-original",
+            "was_existing": True,
+        }
+
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
+        fake_publish,
+    )
+
+    result = publish_completed_model_build(
+        object(),
+        settings=settings,
+        model_config=_config(),
+        dataset=_dataset(),
+        completed_build={
+            "rating_workbook_path": str(retry_workbook),
+            "model_version": "20260603",
+            "effective_from": "2026-06-03",
+            "export_id": "export-1",
+            "created_by": "airflow",
+        },
+    )
+
+    assert result.manifest_id == "manifest-original"
+    assert result.split_set_id == "split-original"
+    assert result.rating_workbook_path == str(original_workbook)
+    assert result.was_existing is True
+    assert not retry_dir.exists()
+    assert original_workbook.read_bytes() == b"original workbook"
 
 
 def test_candidate_build_requires_existing_manifest_before_database_work(
@@ -788,7 +861,7 @@ def test_candidate_publication_resolves_omitted_split_against_sql_manifest(
         lambda engine_arg, config_arg: 17,
     )
 
-    def fake_publish(engine_arg, export, *, model_config):
+    def fake_publish(engine_arg, export, *, model_config, allowed_artifact_root=None):
         publish_calls.append(export)
         return {
             "mlflow_run_id": "",
@@ -858,7 +931,7 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
         lambda engine_arg, manifest_id: None,
     )
 
-    def fake_publish(engine_arg, export, *, model_config):
+    def fake_publish(engine_arg, export, *, model_config, allowed_artifact_root=None):
         published_exports.append(export)
         return {
             "mlflow_run_id": "",
@@ -1054,7 +1127,7 @@ def test_publish_completed_model_build_configures_engine_with_settings_schema_na
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
-        lambda engine_arg, export, *, model_config: (
+        lambda engine_arg, export, *, model_config, allowed_artifact_root=None: (
             calls.append(("publish", engine_arg, export, model_config))
             or {
                 "mlflow_run_id": "",
@@ -1115,7 +1188,7 @@ def test_publish_completed_model_build_reuses_and_validates_supplied_manifest(
     )
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
-        lambda engine_arg, export, *, model_config: {
+        lambda engine_arg, export, *, model_config, allowed_artifact_root=None: {
             "mlflow_run_id": "",
             "export_id": export.export_id,
             "rate_package_id": "42",
