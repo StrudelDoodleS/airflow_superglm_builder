@@ -1,7 +1,11 @@
+SET NOCOUNT ON;
+
 DECLARE @old_error_keyword NVARCHAR(16) = N'TH' + N'ROW';
 DECLARE @old_raiserror_keyword NVARCHAR(16) = N'RAIS' + N'ERROR';
 DECLARE @object_name SYSNAME;
 DECLARE @sql NVARCHAR(MAX);
+DECLARE @create_position INT;
+DECLARE @alter_position INT;
 
 DECLARE @guard_modules TABLE (
     object_name SYSNAME NOT NULL PRIMARY KEY,
@@ -36,73 +40,101 @@ BEGIN
 
     IF @sql IS NOT NULL
     BEGIN
+        SET @create_position = CHARINDEX(N'CREATE', UPPER(@sql));
+        IF @create_position > 0
+        BEGIN
+            IF SUBSTRING(
+                UPPER(@sql),
+                @create_position,
+                LEN(N'CREATE OR ALTER')
+            ) <> N'CREATE OR ALTER'
+                SET @sql = STUFF(
+                    @sql,
+                    @create_position + LEN(N'CREATE'),
+                    0,
+                    N' OR ALTER'
+                );
+        END;
+        ELSE
+        BEGIN
+            SET @alter_position = CHARINDEX(N'ALTER', UPPER(@sql));
+            IF @alter_position = 0
+                THROW 51003, 'Guard module definition has no CREATE or ALTER header.', 1;
+            SET @sql = STUFF(
+                @sql,
+                @alter_position,
+                LEN(N'ALTER'),
+                N'CREATE OR ALTER'
+            );
+        END;
+
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''features_json must be valid JSON'', 16, 1);
         RETURN;',
-            N';THROW 50000, ''features_json must be valid JSON'', 1;'
+            N'BEGIN; THROW 50000, ''features_json must be valid JSON'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''exposure must be positive'', 16, 1);
         RETURN;',
-            N';THROW 50001, ''exposure must be positive'', 1;'
+            N'BEGIN; THROW 50001, ''exposure must be positive'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''No current deployed rate package found'', 16, 1);
         RETURN;',
-            N';THROW 50002, ''No current deployed rate package found'', 1;'
+            N'BEGIN; THROW 50002, ''No current deployed rate package found'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''Input features did not match every required term'', 16, 1);
         RETURN;',
-            N';THROW 50003, ''Input features did not match every required term'', 1;'
+            N'BEGIN; THROW 50003, ''Input features did not match every required term'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''Immutable rate packages cannot be changed directly. Create a new package revision.'', 16, 1);
         ROLLBACK TRANSACTION;
         RETURN;',
-            N';THROW 51000, ''Immutable rate packages cannot be changed directly. Create a new package revision.'', 1;'
+            N'BEGIN; THROW 51000, ''Immutable rate packages cannot be changed directly. Create a new package revision.'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_raiserror_keyword + N'(''rate package deployments must reference PUBLISHED packages for the same model_id.'', 16, 1);
         ROLLBACK TRANSACTION;
         RETURN;',
-            N';THROW 51001, ''rate package deployments must reference PUBLISHED packages for the same model_id.'', 1;'
+            N'BEGIN; THROW 51001, ''rate package deployments must reference PUBLISHED packages for the same model_id.'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 50000, ''features_json must be valid JSON'', 1;',
-            N';THROW 50000, ''features_json must be valid JSON'', 1;'
+            N'BEGIN; THROW 50000, ''features_json must be valid JSON'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 50001, ''exposure must be positive'', 1;',
-            N';THROW 50001, ''exposure must be positive'', 1;'
+            N'BEGIN; THROW 50001, ''exposure must be positive'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 50002, ''No current deployed rate package found'', 1;',
-            N';THROW 50002, ''No current deployed rate package found'', 1;'
+            N'BEGIN; THROW 50002, ''No current deployed rate package found'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 50003, ''Input features did not match every required term'', 1;',
-            N';THROW 50003, ''Input features did not match every required term'', 1;'
+            N'BEGIN; THROW 50003, ''Input features did not match every required term'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 51000, ''Immutable rate packages cannot be changed directly. Create a new package revision.'', 1;',
-            N';THROW 51000, ''Immutable rate packages cannot be changed directly. Create a new package revision.'', 1;'
+            N'BEGIN; THROW 51000, ''Immutable rate packages cannot be changed directly. Create a new package revision.'', 1; END;'
         );
         SET @sql = REPLACE(
             @sql,
             @old_error_keyword + N' 51001, ''rate package deployments must reference PUBLISHED packages for the same model_id.'', 1;',
-            N';THROW 51001, ''rate package deployments must reference PUBLISHED packages for the same model_id.'', 1;'
+            N'BEGIN; THROW 51001, ''rate package deployments must reference PUBLISHED packages for the same model_id.'', 1; END;'
         );
 
         EXEC sys.sp_executesql @sql;
