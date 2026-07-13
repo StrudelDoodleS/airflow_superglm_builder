@@ -18,3 +18,5 @@ airflow/logs/
 airflow/config/
 airflow/plugins/
 .worktrees/
+docs/superpowers/plans/
+docs/superpowers/specs/
