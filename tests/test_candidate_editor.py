@@ -586,15 +586,17 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
         "package_version": 8,
         "model_run_id": 908,
         "package_status": "PUBLISHED",
+        "reviewed_champion_status": "COMPARED",
+        "reviewed_champion_rate_package_id": 107,
+        "reviewed_deployment_slot": "HOME_FREQ_UAT",
+        "reviewed_champion_reason": None,
     }
     airflow_client.run_state = "success"
     airflow_client.triggering_user_name = "analyst@example.test"
-    champion_calls = []
     candidate.workbench.current_champion_rate_package_id = (
-        lambda model_name, *, deployment_slot: champion_calls.append(
-            (model_name, deployment_slot)
+        lambda *args, **kwargs: pytest.fail(
+            "deployment must not refresh champion evidence"
         )
-        or 107
     )
 
     status = submission.status()
@@ -611,7 +613,6 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
         f"manual__{submission.submission_id}"
     )
     assert deployment_run.state == "queued"
-    assert champion_calls == [("HOME_FREQ", "HOME_FREQ_UAT")]
     trigger = airflow_client.triggered[-1]
     assert trigger.dag_id == "pricing_deploy_rate_package"
     assert trigger.conf == {
@@ -636,6 +637,93 @@ def test_deployment_request_requires_published_submission_and_reason(tmp_path):
         submission.request_deployment(reason="Approved")
     with pytest.raises(ValueError, match="reason"):
         submission.request_deployment(reason=" ")
+
+
+@pytest.mark.parametrize(
+    ("evidence", "deployment_slot", "message"),
+    [
+        (
+            {
+                "reviewed_champion_status": "UNAVAILABLE",
+                "reviewed_champion_rate_package_id": 107,
+                "reviewed_deployment_slot": "HOME_FREQ_UAT",
+                "reviewed_champion_reason": "artifact hash mismatch",
+            },
+            None,
+            "artifact hash mismatch",
+        ),
+        (
+            {
+                "reviewed_champion_status": "COMPARED",
+                "reviewed_champion_rate_package_id": 107,
+                "reviewed_deployment_slot": "HOME_FREQ_UAT",
+                "reviewed_champion_reason": None,
+            },
+            "HOME_FREQ_PROD",
+            "does not match",
+        ),
+    ],
+)
+def test_deployment_rejects_unreviewable_evidence_or_different_slot(
+    tmp_path,
+    evidence,
+    deployment_slot,
+    message,
+):
+    airflow_client = FakeAirflowClient()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Market calibration")
+    candidate.workbench.resolve_editor_publication = lambda loaded_submission: {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "model_run_id": 908,
+        "package_status": "PUBLISHED",
+        **evidence,
+    }
+    airflow_client.run_state = "success"
+    submission.status()
+
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        submission.request_deployment(
+            reason="Approved",
+            deployment_slot=deployment_slot,
+        )
+
+    assert len(airflow_client.triggered) == 1
+
+
+def test_deployment_allows_reviewed_no_champion_only_while_sql_still_has_none(tmp_path):
+    airflow_client = FakeAirflowClient()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=FakeEditorSession(),
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+    submission = candidate.submit_edits(reason="Initial market model")
+    candidate.workbench.resolve_editor_publication = lambda loaded_submission: {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "model_run_id": 908,
+        "package_status": "PUBLISHED",
+        "reviewed_champion_status": "NO_CHAMPION",
+        "reviewed_champion_rate_package_id": None,
+        "reviewed_deployment_slot": "HOME_FREQ_UAT",
+        "reviewed_champion_reason": "no champion is deployed in HOME_FREQ_UAT",
+    }
+    airflow_client.run_state = "success"
+    submission.status()
+
+    submission.request_deployment(reason="Approve initial champion")
+
+    assert airflow_client.triggered[-1].conf["expected_current_rate_package_id"] is None
 
 
 def test_identical_submission_retry_reuses_immutable_artifacts(tmp_path):

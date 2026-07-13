@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -220,6 +221,69 @@ def test_workbench_reads_current_champion_at_decision_time(current_rate_package_
         "model_name": "HOME_FREQ",
         "deployment_slot": "HOME_FREQ_PROD",
     }
+
+
+def test_workbench_resolves_reviewed_champion_from_child_revision_metadata():
+    row = {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "package_status": "PUBLISHED",
+        "parent_rate_package_id": 107,
+        "model_run_id": 908,
+        "run_status": "SUCCESS",
+        "revision_metadata_json": json.dumps(
+            {
+                "champion_comparison": {
+                    "available": True,
+                    "status": "COMPARED",
+                    "deployment_slot": "home_freq_uat",
+                    "rate_package_id": 107,
+                    "reason": None,
+                }
+            }
+        ),
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def execute(self, statement, params):
+            assert "revision_metadata_json" in str(statement)
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    workbench = _api().Workbench(
+        engine=Engine(),
+        settings=_settings(),
+        config_loader=lambda name: SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+    )
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        parent_rate_package_id=107,
+    )
+
+    resolved = workbench.resolve_editor_publication(submission)
+
+    assert resolved["reviewed_champion_status"] == "COMPARED"
+    assert resolved["reviewed_champion_rate_package_id"] == 107
+    assert resolved["reviewed_deployment_slot"] == "HOME_FREQ_UAT"
 
 
 def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypatch):

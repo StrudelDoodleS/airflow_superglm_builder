@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,61 @@ _ARTIFACT_FIELDS = (
 
 class CandidateLineageError(RuntimeError):
     """Raised when a package cannot resolve one trusted candidate run."""
+
+
+def _reviewed_champion_evidence(revision_metadata_json: str | None) -> dict[str, Any]:
+    if revision_metadata_json is None:
+        raise CandidateLineageError("editor child package has no champion comparison metadata")
+    try:
+        revision_metadata = json.loads(revision_metadata_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CandidateLineageError("editor child package has invalid revision metadata") from exc
+    if not isinstance(revision_metadata, dict):
+        raise CandidateLineageError("editor child revision metadata must be a JSON object")
+    comparison = revision_metadata.get("champion_comparison")
+    if not isinstance(comparison, dict):
+        raise CandidateLineageError("editor child package has no champion comparison metadata")
+
+    status = comparison.get("status")
+    if status not in {"COMPARED", "NO_CHAMPION", "UNAVAILABLE"}:
+        raise CandidateLineageError("editor child package has invalid champion comparison status")
+    raw_slot = comparison.get("deployment_slot")
+    slot = str(raw_slot or "").strip().upper()
+    if not slot:
+        raise CandidateLineageError("editor child champion comparison has no deployment slot")
+
+    raw_rate_package_id = comparison.get("rate_package_id")
+    if status == "NO_CHAMPION":
+        if raw_rate_package_id is not None:
+            raise CandidateLineageError(
+                "NO_CHAMPION comparison must not identify a rate package"
+            )
+        rate_package_id = None
+    else:
+        if isinstance(raw_rate_package_id, bool):
+            raise CandidateLineageError("champion comparison rate package ID is invalid")
+        try:
+            rate_package_id = int(raw_rate_package_id)
+        except (TypeError, ValueError) as exc:
+            raise CandidateLineageError(
+                "champion comparison rate package ID is invalid"
+            ) from exc
+        if rate_package_id <= 0:
+            raise CandidateLineageError("champion comparison rate package ID is invalid")
+
+    raw_reason = comparison.get("reason")
+    reason = None if raw_reason is None else str(raw_reason).strip() or None
+    if status == "UNAVAILABLE" and reason is None:
+        raise CandidateLineageError("unavailable champion comparison must include a reason")
+    expected_available = status == "COMPARED"
+    if "available" in comparison and comparison["available"] is not expected_available:
+        raise CandidateLineageError("champion comparison availability is inconsistent")
+    return {
+        "reviewed_champion_status": status,
+        "reviewed_champion_rate_package_id": rate_package_id,
+        "reviewed_deployment_slot": slot,
+        "reviewed_champion_reason": reason,
+    }
 
 
 @dataclass
@@ -187,6 +243,7 @@ class Workbench:
                 rp.package_version,
                 rp.package_status,
                 rp.parent_rate_package_id,
+                rp.revision_metadata_json,
                 mr.model_run_id,
                 mr.run_status
             FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
@@ -220,6 +277,7 @@ class Workbench:
         row = dict(rows[0])
         if row.get("package_status") != "PUBLISHED" or row.get("run_status") != "SUCCESS":
             raise CandidateLineageError("editor child package/run is not successfully published")
+        row.update(_reviewed_champion_evidence(row.get("revision_metadata_json")))
         return row
 
     def candidates(

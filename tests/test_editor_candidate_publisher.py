@@ -431,6 +431,7 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         def all(self):
             return [
                 {
+                    "rate_package_id": 107,
                     "run_status": "SUCCESS",
                     "candidate_artifact_path": artifact.path,
                     "candidate_artifact_sha256": artifact.sha256,
@@ -456,7 +457,7 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         def begin(self):
             return Begin()
 
-    loaded, reason = _load_champion_bundle(
+    snapshot = _load_champion_bundle(
         Engine(),
         model_id=17,
         deployment_slot="HOME_FREQ_UAT",
@@ -464,9 +465,86 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         parent_bundle=parent,
     )
 
-    assert reason is None
-    assert loaded is not None
-    assert loaded.manifest_id == "champion-manifest"
+    assert snapshot.status == "COMPARED"
+    assert snapshot.rate_package_id == 107
+    assert snapshot.unavailable_reason is None
+    assert snapshot.bundle is not None
+    assert snapshot.bundle.manifest_id == "champion-manifest"
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_status", "expected_rate_package_id"),
+    [
+        ([], "NO_CHAMPION", None),
+        (
+            [{"rate_package_id": 107, "run_status": "FAILED"}],
+            "UNAVAILABLE",
+            107,
+        ),
+    ],
+)
+def test_champion_snapshot_distinguishes_absent_and_unavailable_champion(
+    rows,
+    expected_status,
+    expected_rate_package_id,
+    tmp_path,
+):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing.editor_candidate import _load_champion_bundle
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    parent = CandidateBundle(
+        fitted_model=object(),
+        X=pd.DataFrame({"x": [1.0]}),
+        y=np.array([0.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="parent-manifest",
+        split_set_id=None,
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+
+    snapshot = _load_champion_bundle(
+        Engine(),
+        model_id=17,
+        deployment_slot="HOME_FREQ_UAT",
+        allowed_root=tmp_path,
+        parent_bundle=parent,
+    )
+
+    assert snapshot.status == expected_status
+    assert snapshot.rate_package_id == expected_rate_package_id
+    assert snapshot.revision_metadata()["deployment_slot"] == "HOME_FREQ_UAT"
+    assert snapshot.revision_metadata()["available"] is (expected_status == "COMPARED")
 
 
 def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():

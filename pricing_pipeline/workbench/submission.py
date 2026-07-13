@@ -84,6 +84,10 @@ class EditorSubmission:
     published_package_version: int | None = field(default=None, repr=False)
     published_rate_package_id: int | None = field(default=None, repr=False)
     published_model_run_id: int | None = field(default=None, repr=False)
+    reviewed_champion_status: str | None = field(default=None, repr=False)
+    reviewed_champion_rate_package_id: int | None = field(default=None, repr=False)
+    reviewed_deployment_slot: str | None = field(default=None, repr=False)
+    reviewed_champion_reason: str | None = field(default=None, repr=False)
 
     @property
     def parent_package_version(self) -> int:
@@ -142,6 +146,18 @@ class EditorSubmission:
             self.published_package_version = int(resolved["package_version"])
             self.published_rate_package_id = int(resolved["rate_package_id"])
             self.published_model_run_id = int(resolved["model_run_id"])
+            self.reviewed_champion_status = str(resolved["reviewed_champion_status"])
+            reviewed_rate_package_id = resolved["reviewed_champion_rate_package_id"]
+            self.reviewed_champion_rate_package_id = (
+                None
+                if reviewed_rate_package_id is None
+                else int(reviewed_rate_package_id)
+            )
+            self.reviewed_deployment_slot = str(resolved["reviewed_deployment_slot"])
+            reviewed_reason = resolved.get("reviewed_champion_reason")
+            self.reviewed_champion_reason = (
+                None if reviewed_reason is None else str(reviewed_reason)
+            )
             friendly_state = "published"
         elif state in {"failed", "upstream_failed"}:
             friendly_state = "failed"
@@ -173,17 +189,26 @@ class EditorSubmission:
             raise RuntimeError("The edited candidate must be published before deployment")
         if self._airflow_client is None:
             raise RuntimeError("This submission has no live Airflow client")
-        if self._workbench is None:
-            raise RuntimeError("This submission cannot read the current champion")
-        slot = str(deployment_slot or self.deployment_slot).strip()
-        if not slot:
-            raise ValueError("deployment_slot is required")
-        expected_current_rate_package_id = (
-            self._workbench.current_champion_rate_package_id(
-                self.model_name,
-                deployment_slot=slot,
+        status = self.reviewed_champion_status
+        if status not in {"COMPARED", "NO_CHAMPION", "UNAVAILABLE"}:
+            raise RuntimeError("The edited candidate has no valid reviewed champion evidence")
+        if status == "UNAVAILABLE":
+            detail = self.reviewed_champion_reason or "comparison artifact was unavailable"
+            raise RuntimeError(f"Champion comparison was unavailable: {detail}")
+        reviewed_slot = str(self.reviewed_deployment_slot or "").strip().upper()
+        if not reviewed_slot:
+            raise RuntimeError("The edited candidate has no reviewed deployment slot")
+        requested_slot = str(deployment_slot or reviewed_slot).strip().upper()
+        if requested_slot != reviewed_slot:
+            raise ValueError(
+                "deployment_slot does not match the slot used for champion comparison"
             )
-        )
+        expected_current_rate_package_id = self.reviewed_champion_rate_package_id
+        if status == "COMPARED" and expected_current_rate_package_id is None:
+            raise RuntimeError("Compared champion evidence has no rate package ID")
+        if status == "NO_CHAMPION" and expected_current_rate_package_id is not None:
+            raise RuntimeError("NO_CHAMPION evidence unexpectedly identifies a rate package")
+        slot = reviewed_slot
         deployment_identity = json.dumps(
             {
                 "submission_id": self.submission_id,

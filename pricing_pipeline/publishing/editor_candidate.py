@@ -46,6 +46,31 @@ from pricing_pipeline.workbench.submission import (
 
 
 @dataclass(frozen=True)
+class ChampionSnapshot:
+    deployment_slot: str
+    rate_package_id: int | None
+    bundle: CandidateBundle | None
+    unavailable_reason: str | None = None
+
+    @property
+    def status(self) -> str:
+        if self.rate_package_id is None:
+            return "NO_CHAMPION"
+        if self.bundle is None:
+            return "UNAVAILABLE"
+        return "COMPARED"
+
+    def revision_metadata(self) -> dict[str, Any]:
+        return {
+            "available": self.status == "COMPARED",
+            "deployment_slot": self.deployment_slot,
+            "rate_package_id": self.rate_package_id,
+            "reason": self.unavailable_reason,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
 class ParentCandidate:
     model_id: int
     model_name: str
@@ -57,8 +82,7 @@ class ParentCandidate:
     effective_to: str | None
     config: ModelBuildConfig
     bundle: CandidateBundle
-    champion_bundle: CandidateBundle | None = None
-    champion_unavailable_reason: str | None = None
+    champion: ChampionSnapshot
 
 
 @dataclass(frozen=True)
@@ -189,7 +213,7 @@ def load_parent_candidate(
     if bundle.split_set_id != submission.split_set_id:
         raise EditorSubmissionError("parent bundle split set does not match the submission")
     config = get_model_config(submission.model_name)
-    champion_bundle, champion_unavailable_reason = _load_champion_bundle(
+    champion = _load_champion_bundle(
         engine,
         model_id=int(row["model_id"]),
         deployment_slot=config.deployment_slot,
@@ -209,8 +233,7 @@ def load_parent_candidate(
         ),
         config=config,
         bundle=bundle,
-        champion_bundle=champion_bundle,
-        champion_unavailable_reason=champion_unavailable_reason,
+        champion=champion,
     )
 
 
@@ -221,11 +244,12 @@ def _load_champion_bundle(
     deployment_slot: str,
     allowed_root: Path,
     parent_bundle: CandidateBundle,
-) -> tuple[CandidateBundle | None, str | None]:
+) -> ChampionSnapshot:
     schemas = schema_names_from_connectable(engine)
     query = text(
         f"""
         SELECT
+            deployment.rate_package_id,
             mr.run_status,
             mr.candidate_artifact_path,
             mr.candidate_artifact_sha256,
@@ -251,12 +275,26 @@ def _load_champion_bundle(
             .all()
         )
     if not rows:
-        return None, f"no champion is deployed in {deployment_slot}"
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=None,
+            bundle=None,
+            unavailable_reason=f"no champion is deployed in {deployment_slot}",
+        )
     if len(rows) != 1:
-        return None, f"{len(rows)} current champion runs resolved in {deployment_slot}"
+        raise EditorSubmissionError(
+            f"{len(rows)} current champion runs resolved in {deployment_slot}; "
+            "comparison identity is ambiguous"
+        )
     row = dict(rows[0])
+    rate_package_id = int(row["rate_package_id"])
     if str(row.get("run_status") or "").upper() != "SUCCESS":
-        return None, "the deployed champion has no successful candidate run"
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason="the deployed champion has no successful candidate run",
+        )
     required = (
         "candidate_artifact_path",
         "candidate_artifact_sha256",
@@ -266,7 +304,12 @@ def _load_champion_bundle(
         "candidate_superglm_version",
     )
     if any(row.get(name) is None for name in required):
-        return None, "the deployed champion has no candidate artifact"
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason="the deployed champion has no candidate artifact",
+        )
     try:
         champion = load_candidate_bundle(
             row["candidate_artifact_path"],
@@ -278,14 +321,33 @@ def _load_champion_bundle(
             allowed_root=allowed_root,
         )
     except CandidateArtifactError as exc:
-        return None, f"the deployed champion artifact could not be verified: {exc}"
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason=f"the deployed champion artifact could not be verified: {exc}",
+        )
     if list(champion.X.columns) != list(parent_bundle.X.columns):
-        return None, "the deployed champion uses a different prepared feature frame"
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason="the deployed champion uses a different prepared feature frame",
+        )
     if champion.offset_contract.get("handling") != parent_bundle.offset_contract.get(
         "handling"
     ):
-        return None, "the deployed champion uses a different offset contract"
-    return champion, None
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason="the deployed champion uses a different offset contract",
+        )
+    return ChampionSnapshot(
+        deployment_slot=deployment_slot,
+        rate_package_id=rate_package_id,
+        bundle=champion,
+    )
 
 
 def _load_edited_model(
@@ -506,8 +568,7 @@ def export_edited_model(
     )
     metrics.update(parent_metrics)
     metric_scopes.update(parent_scopes)
-    champion_bundle = getattr(parent, "champion_bundle", None)
-    champion_reason = getattr(parent, "champion_unavailable_reason", None)
+    champion_bundle = parent.champion.bundle
     if champion_bundle is not None:
         champion_metrics, champion_scopes = training_comparison_metrics(
             champion_bundle.fitted_model,
@@ -517,12 +578,7 @@ def export_edited_model(
         )
         metrics.update(champion_metrics)
         metric_scopes.update(champion_scopes)
-        champion_comparison = {"available": True}
-    else:
-        champion_comparison = {
-            "available": False,
-            "reason": champion_reason or "champion artifact comparison is unavailable",
-        }
+    champion_comparison = parent.champion.revision_metadata()
     review_hook = None
     if parent.bundle.review_hook_module and parent.bundle.review_hook_name:
         review_module = importlib.import_module(parent.bundle.review_hook_module)
