@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,9 +26,11 @@ class FakeWidget:
 
 
 class FakeEditorSession:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_save: bool = False) -> None:
         self.widget_value = FakeWidget()
         self.saved_json_path: Path | None = None
+        self.saved_json_paths: list[Path] = []
+        self.fail_save = fail_save
         self.to_model_kwargs = None
 
     def widget(self):
@@ -33,6 +38,9 @@ class FakeEditorSession:
 
     def save(self, path) -> None:
         self.saved_json_path = Path(path)
+        self.saved_json_paths.append(self.saved_json_path)
+        if self.fail_save:
+            raise RuntimeError("injected editor session save failure")
         self.saved_json_path.write_text('{"edits":["age"]}\n', encoding="utf-8")
 
     def to_model(self, **kwargs):
@@ -43,11 +51,14 @@ class FakeEditorSession:
 class FakeAirflowClient:
     def __init__(self) -> None:
         self.triggered = []
+        self.trigger_error: Exception | None = None
         self.run_state = "queued"
         self.triggering_user_name = None
 
     def trigger_dag(self, dag_id, *, run_id, conf):
         self.triggered.append(SimpleNamespace(dag_id=dag_id, run_id=run_id, conf=conf))
+        if self.trigger_error is not None:
+            raise self.trigger_error
         return SimpleNamespace(dag_id=dag_id, dag_run_id=run_id, state="queued", payload={})
 
     def get_dag_run(self, dag_id, run_id):
@@ -143,7 +154,7 @@ def test_candidate_retains_live_editor_session_until_submission(tmp_path):
     )
     assert factory_calls[0][2] == candidate.bundle.cv_report
     assert session.saved_json_path is not None
-    assert session.saved_json_path.exists()
+    assert len(session.saved_json_paths) == 1
     assert session.to_model_kwargs == {
         "X": candidate.bundle.X,
         "y": candidate.bundle.y,
@@ -170,6 +181,204 @@ def test_candidate_retains_live_editor_session_until_submission(tmp_path):
     assert payload["split_set_id"] == "split-1"
     assert payload["baseline_candidate_sha256"] == "c" * 64
     assert payload["claimed_identity"] == "prototype-local-not-authenticated"
+
+
+def test_submission_promotes_one_complete_staging_directory_atomically(
+    tmp_path,
+    monkeypatch,
+):
+    from pricing_pipeline.workbench import submission as submission_module
+
+    session = FakeEditorSession()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    observed = {}
+    real_rename = os.rename
+
+    def inspect_then_promote(source, target):
+        staged_directory = Path(source)
+        final_directory = Path(target)
+        assert not final_directory.exists()
+        assert {path.name for path in staged_directory.iterdir()} == {
+            "editor_session.json",
+            "edited_model.joblib",
+            "submission.json",
+        }
+        payload = json.loads(
+            (staged_directory / "submission.json").read_text(encoding="utf-8")
+        )
+        assert Path(payload["editor_session_path"]) == (
+            final_directory / "editor_session.json"
+        )
+        assert Path(payload["edited_model_path"]) == final_directory / "edited_model.joblib"
+        observed["staging"] = staged_directory
+        observed["final"] = final_directory
+        return real_rename(source, target)
+
+    monkeypatch.setattr(submission_module.os, "rename", inspect_then_promote)
+
+    result = candidate.submit_edits(reason="Atomic market calibration")
+
+    assert observed["final"] == Path(result.path).parent
+    assert not observed["staging"].exists()
+    assert len(session.saved_json_paths) == 1
+    assert set(observed["final"].iterdir()) == {
+        Path(result.editor_session_path),
+        Path(result.edited_model_path),
+        Path(result.path),
+    }
+
+
+@pytest.mark.parametrize("failure_point", ["session", "model", "json", "promotion"])
+def test_failure_before_promotion_cleans_staging_without_final_state(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+):
+    from pricing_pipeline.workbench import submission as submission_module
+
+    session = FakeEditorSession(fail_save=failure_point == "session")
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+
+    def injected_failure(*args, **kwargs):
+        raise RuntimeError(f"injected {failure_point} failure")
+
+    if failure_point == "model":
+        monkeypatch.setattr(submission_module, "_save_edited_model", injected_failure)
+    elif failure_point == "json":
+        monkeypatch.setattr(submission_module, "_write_json_atomic", injected_failure)
+    elif failure_point == "promotion":
+        monkeypatch.setattr(submission_module.os, "rename", injected_failure)
+
+    with pytest.raises(RuntimeError, match=f"injected .*{failure_point}.*failure"):
+        candidate.submit_edits(reason="Failure boundary")
+
+    submissions_root = tmp_path / "HOME_FREQ" / "editor_submissions"
+    assert list(submissions_root.iterdir()) == []
+    assert len(session.saved_json_paths) == 1
+
+
+def test_concurrent_identical_submission_loser_reuses_atomic_winner(
+    tmp_path,
+    monkeypatch,
+):
+    from pricing_pipeline.workbench import submission as submission_module
+
+    session = FakeEditorSession()
+    airflow_client = FakeAirflowClient()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+    real_rename = os.rename
+    winner_paths = []
+
+    def simulate_concurrent_winner(source, target):
+        real_rename(source, target)
+        winner_paths.append(Path(target))
+        raise FileExistsError(errno.EEXIST, "simulated concurrent winner", target)
+
+    monkeypatch.setattr(submission_module.os, "rename", simulate_concurrent_winner)
+
+    submission = candidate.submit_edits(reason="Concurrent calibration")
+
+    assert winner_paths == [Path(submission.path).parent]
+    assert len(session.saved_json_paths) == 1
+    assert len(airflow_client.triggered) == 1
+    assert Path(submission.path).is_file()
+    assert Path(submission.editor_session_path).is_file()
+    assert Path(submission.edited_model_path).is_file()
+
+
+def test_incomplete_deterministic_directory_is_recovered_without_touching_siblings(
+    tmp_path,
+):
+    session = FakeEditorSession()
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.editor()
+    first = candidate.submit_edits(reason="Recover interrupted submission")
+    final_directory = Path(first.path).parent
+    submissions_root = final_directory.parent
+    shutil.rmtree(final_directory)
+    final_directory.mkdir()
+    (final_directory / "legacy.partial").write_text("interrupted", encoding="utf-8")
+    sibling = submissions_root / "do-not-touch"
+    sibling.mkdir()
+    (sibling / "sentinel").write_text("preserve", encoding="utf-8")
+    save_attempts_before_retry = len(session.saved_json_paths)
+
+    recovered = candidate.submit_edits(reason="Recover interrupted submission")
+
+    assert recovered.submission_id == first.submission_id
+    assert {path.name for path in final_directory.iterdir()} == {
+        "editor_session.json",
+        "edited_model.joblib",
+        "submission.json",
+    }
+    assert (sibling / "sentinel").read_text(encoding="utf-8") == "preserve"
+    assert len(session.saved_json_paths) == save_attempts_before_retry + 1
+
+
+def test_trigger_failure_leaves_complete_submission_for_deterministic_retry(tmp_path):
+    session = FakeEditorSession()
+    airflow_client = FakeAirflowClient()
+    airflow_client.trigger_error = RuntimeError("injected trigger failure")
+    candidate, _ = _candidate(
+        tmp_path,
+        session=session,
+        airflow_client=airflow_client,
+    )
+    candidate.editor()
+
+    with pytest.raises(RuntimeError, match="injected trigger failure"):
+        candidate.submit_edits(reason="Retry trigger safely")
+
+    submissions_root = tmp_path / "HOME_FREQ" / "editor_submissions"
+    final_directories = list(submissions_root.glob("submission-*"))
+    assert len(final_directories) == 1
+    assert {path.name for path in final_directories[0].iterdir()} == {
+        "editor_session.json",
+        "edited_model.joblib",
+        "submission.json",
+    }
+    airflow_client.trigger_error = None
+
+    retried = candidate.submit_edits(reason="Retry trigger safely")
+
+    assert Path(retried.path).parent == final_directories[0]
+    assert len(session.saved_json_paths) == 2
+    assert len(airflow_client.triggered) == 2
+
+
+def test_submission_root_cannot_escape_configured_artifact_root(tmp_path):
+    configured_root = tmp_path / "configured"
+    candidate, _ = _candidate(
+        configured_root,
+        session=FakeEditorSession(),
+        airflow_client=FakeAirflowClient(),
+    )
+    candidate.model_name = "../outside"
+    candidate.editor()
+
+    with pytest.raises(EditorSubmissionError, match="outside configured artifact root"):
+        candidate.submit_edits(reason="Contain submission artifacts")
+
+    assert not (tmp_path / "outside").exists()
 
 
 def test_public_submission_loader_rejects_omitted_allowed_root(tmp_path):

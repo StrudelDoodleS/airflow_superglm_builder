@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import joblib
 
@@ -328,8 +330,10 @@ def _reuse_existing_submission(
         "claimed_identity": claimed_identity,
         "editor_session_sha256": editor_session_sha256,
         "editor_session_size_bytes": editor_session_size_bytes,
+        "editor_session_path": str(path.parent / "editor_session.json"),
         "edited_model_sha256": edited_model_sha256,
         "edited_model_size_bytes": edited_model_size_bytes,
+        "edited_model_path": str(path.parent / "edited_model.joblib"),
         "edited_model_format": EDITED_MODEL_FORMAT,
         "edited_model_python_version": edited_model_python_version,
         "edited_model_superglm_version": edited_model_superglm_version,
@@ -355,7 +359,94 @@ def _reuse_existing_submission(
         )
     existing._airflow_client = airflow_client
     existing._workbench = candidate.workbench
-    return _trigger_editor_dag(existing, airflow_client)
+    return existing
+
+
+def _submission_tree_is_complete(directory: Path) -> bool:
+    return directory.is_dir() and all(
+        (directory / name).is_file()
+        for name in ("editor_session.json", "edited_model.joblib", "submission.json")
+    )
+
+
+def _quarantine_incomplete_submission(
+    directory: Path,
+    *,
+    submissions_root: Path,
+    submission_id: str,
+) -> bool:
+    if directory.parent != submissions_root or directory.name != submission_id:
+        raise EditorSubmissionError(
+            f"refusing to recover submission path outside reserved directory: {directory}"
+        )
+    quarantine = submissions_root / f".incomplete-{submission_id}-{uuid4().hex}"
+    try:
+        os.rename(directory, quarantine)
+    except FileNotFoundError:
+        return False
+    if quarantine.is_symlink() or not quarantine.is_dir():
+        quarantine.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(quarantine)
+    return True
+
+
+def _promote_or_reuse_submission(
+    staging: Path,
+    final_directory: Path,
+    *,
+    root: Path,
+    candidate: Candidate,
+    reason: str,
+    claimed_identity: str,
+    deployment_slot: str,
+    editor_session_sha256: str,
+    editor_session_size_bytes: int,
+    edited_model_sha256: str,
+    edited_model_size_bytes: int,
+    edited_model_python_version: str,
+    edited_model_superglm_version: str,
+    airflow_client: AirflowClient | Any,
+) -> EditorSubmission | None:
+    while True:
+        try:
+            os.rename(staging, final_directory)
+            return None
+        except OSError as exc:
+            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
+
+        if _submission_tree_is_complete(final_directory):
+            return _reuse_existing_submission(
+                final_directory / "submission.json",
+                root=root,
+                candidate=candidate,
+                reason=reason,
+                claimed_identity=claimed_identity,
+                deployment_slot=deployment_slot,
+                editor_session_sha256=editor_session_sha256,
+                editor_session_size_bytes=editor_session_size_bytes,
+                edited_model_sha256=edited_model_sha256,
+                edited_model_size_bytes=edited_model_size_bytes,
+                edited_model_python_version=edited_model_python_version,
+                edited_model_superglm_version=edited_model_superglm_version,
+                airflow_client=airflow_client,
+            )
+        _quarantine_incomplete_submission(
+            final_directory,
+            submissions_root=final_directory.parent,
+            submission_id=final_directory.name,
+        )
+
+
+def _submissions_root(root: Path, model_name: str) -> Path:
+    submissions_root = (root / model_name / "editor_submissions").resolve()
+    if not submissions_root.is_relative_to(root):
+        raise EditorSubmissionError(
+            f"submission directory is outside configured artifact root {root}: "
+            f"{submissions_root}"
+        )
+    return submissions_root
 
 
 def create_editor_submission(
@@ -371,11 +462,9 @@ def create_editor_submission(
         raise ValueError("A non-empty reason is required to submit editor changes")
 
     root = Path(candidate.workbench.settings.workbench_artifact_root).expanduser().resolve()
-    submissions_root = root / candidate.model_name / "editor_submissions"
+    submissions_root = _submissions_root(root, candidate.model_name)
     submissions_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".submission-", dir=submissions_root))
-    final_directory: Path | None = None
-    created_final_directory = False
 
     try:
         staged_session_path = staging / "editor_session.json"
@@ -403,34 +492,8 @@ def create_editor_submission(
         deployment_slot = candidate.workbench.model_config(
             candidate.model_name
         ).deployment_slot
-        if final_directory.exists():
-            return _reuse_existing_submission(
-                final_directory / "submission.json",
-                root=root,
-                candidate=candidate,
-                reason=cleaned_reason,
-                claimed_identity=claimed_identity,
-                deployment_slot=deployment_slot,
-                editor_session_sha256=session_sha256,
-                editor_session_size_bytes=session_size,
-                edited_model_sha256=model_sha256,
-                edited_model_size_bytes=model_size,
-                edited_model_python_version=python_version,
-                edited_model_superglm_version=superglm_version,
-                airflow_client=airflow_client,
-            )
-        final_directory.mkdir()
-        created_final_directory = True
-
         final_session_path = final_directory / "editor_session.json"
-        editor_session.save(final_session_path)
-        if sha256_file(final_session_path) != session_sha256:
-            raise EditorSubmissionError("editor session changed while the submission was saved")
-        if final_session_path.stat().st_size != session_size:
-            raise EditorSubmissionError("editor session byte size changed while saving")
-
         final_model_path = final_directory / "edited_model.joblib"
-        os.replace(staged_model_path, final_model_path)
         submission_path = final_directory / "submission.json"
         technical = candidate.technical
         submission = EditorSubmission(
@@ -470,12 +533,27 @@ def create_editor_submission(
             _airflow_client=airflow_client,
             _workbench=candidate.workbench,
         )
-        _write_json_atomic(submission.to_payload(), submission_path)
-        submission.sha256 = sha256_file(submission_path)
-    except BaseException:
-        if created_final_directory and final_directory is not None:
-            shutil.rmtree(final_directory, ignore_errors=True)
-        raise
+        staged_submission_path = staging / "submission.json"
+        _write_json_atomic(submission.to_payload(), staged_submission_path)
+        submission.sha256 = sha256_file(staged_submission_path)
+        existing = _promote_or_reuse_submission(
+            staging,
+            final_directory,
+            root=root,
+            candidate=candidate,
+            reason=cleaned_reason,
+            claimed_identity=claimed_identity,
+            deployment_slot=deployment_slot,
+            editor_session_sha256=session_sha256,
+            editor_session_size_bytes=session_size,
+            edited_model_sha256=model_sha256,
+            edited_model_size_bytes=model_size,
+            edited_model_python_version=python_version,
+            edited_model_superglm_version=superglm_version,
+            airflow_client=airflow_client,
+        )
+        if existing is not None:
+            submission = existing
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

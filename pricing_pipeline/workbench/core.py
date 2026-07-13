@@ -11,7 +11,7 @@ from sqlalchemy import text
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.infra.schema import schema_names_from_connectable
-from pricing_models.registry import get_model_config
+from pricing_models.registry import get_model_config, model_names
 from pricing_pipeline.workbench.artifacts import CandidateBundle, load_candidate_bundle
 from pricing_pipeline.workbench.airflow import AirflowClient
 
@@ -92,12 +92,14 @@ class Workbench:
         engine,
         settings: Settings,
         config_loader: Callable[[str], Any] = get_model_config,
+        model_names_loader: Callable[[], tuple[str, ...]] = model_names,
         editor_session_factory: Callable[..., Any] | None = None,
         airflow_client: AirflowClient | Any | None = None,
     ) -> None:
         self.engine = engine
         self.settings = settings
         self._config_loader = config_loader
+        self._model_names_loader = model_names_loader
         self._editor_session_factory = editor_session_factory
         self._airflow_client = airflow_client
 
@@ -131,6 +133,10 @@ class Workbench:
 
     def model_config(self, model_name: str):
         return self._config_loader(self._required_model_name(model_name))
+
+    def models(self) -> list[str]:
+        """Return the logical model names discovered by the model registry."""
+        return list(self._model_names_loader())
 
     def resolve_editor_publication(self, submission) -> dict[str, Any]:
         schemas = schema_names_from_connectable(self.engine)

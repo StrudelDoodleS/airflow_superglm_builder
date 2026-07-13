@@ -251,3 +251,21 @@ def test_from_runtime_hides_engine_construction(monkeypatch):
 
     assert workbench.engine == "configured-engine"
     assert workbench.settings is runtime.settings
+
+
+def test_models_returns_injected_discovered_logical_names_without_sql_identifiers():
+    loader_calls = []
+
+    def load_model_names():
+        loader_calls.append(True)
+        return ("HOME_FREQ", "MOTOR_SEVERITY")
+
+    workbench = _api().Workbench(
+        engine=object(),
+        settings=_settings(),
+        config_loader=lambda name: SimpleNamespace(deployment_slot="unused"),
+        model_names_loader=load_model_names,
+    )
+
+    assert workbench.models() == ["HOME_FREQ", "MOTOR_SEVERITY"]
+    assert loader_calls == [True]
