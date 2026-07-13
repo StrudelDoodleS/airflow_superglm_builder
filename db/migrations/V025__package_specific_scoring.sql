@@ -117,6 +117,120 @@ BEGIN
         cell.term_id,
         cell.term_name,
         cell.term_type,
+        'NUMERIC',
+        term_feature.input_column_name,
+        raw_input.input_value,
+        feature_level.level_code,
+        EXP(numeric_input.numeric_value * CAST(cell.log_coefficient AS FLOAT)),
+        numeric_input.numeric_value * CAST(cell.log_coefficient AS FLOAT)
+    FROM pricing.PRICING_COMPILED_RATE_CELL AS cell
+    JOIN pricing.PRICING_RATE_CELL AS source_cell
+      ON source_cell.term_id = cell.term_id
+     AND source_cell.cell_key_digest = cell.cell_key_digest
+    JOIN pricing.PRICING_TERM_FEATURE AS term_feature
+      ON term_feature.term_id = cell.term_id
+     AND term_feature.position_no = 1
+    JOIN pricing.PRICING_RATE_CELL_LEVEL AS cell_level
+      ON cell_level.cell_id = source_cell.cell_id
+     AND cell_level.position_no = term_feature.position_no
+    JOIN pricing.PRICING_FEATURE_LEVEL AS feature_level
+      ON feature_level.feature_level_id = cell_level.feature_level_id
+     AND feature_level.level_set_id = term_feature.level_set_id
+    CROSS APPLY (
+        SELECT JSON_VALUE(
+            @features_json,
+            CONCAT('$.', term_feature.input_column_name)
+        ) AS input_value
+    ) AS raw_input
+    CROSS APPLY (
+        SELECT TRY_CONVERT(FLOAT, raw_input.input_value) AS numeric_value
+    ) AS numeric_input
+    WHERE cell.rate_package_id = @rate_package_id
+      AND cell.term_type = 'NUMERIC_MAIN'
+      AND LOWER(feature_level.level_code) = 'per_unit'
+      AND numeric_input.numeric_value IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM @matched AS matched
+          WHERE matched.term_id = cell.term_id
+      );
+
+    INSERT INTO @matched (
+        term_id,
+        term_name,
+        term_type,
+        match_type,
+        feature_name,
+        input_value,
+        level_code,
+        multiplier,
+        log_coefficient
+    )
+    SELECT
+        cell.term_id,
+        cell.term_name,
+        cell.term_type,
+        'INTERACTION',
+        cell.term_name,
+        cell.cell_key_text,
+        cell.cell_key_text,
+        CAST(cell.multiplier AS FLOAT),
+        CAST(cell.log_coefficient AS FLOAT)
+    FROM pricing.PRICING_COMPILED_RATE_CELL AS cell
+    JOIN pricing.PRICING_RATE_CELL AS source_cell
+      ON source_cell.term_id = cell.term_id
+     AND source_cell.cell_key_digest = cell.cell_key_digest
+    WHERE cell.rate_package_id = @rate_package_id
+      AND cell.term_type = 'CATEGORICAL_INTERACTION'
+      AND 2 = (
+          SELECT COUNT(*)
+          FROM pricing.PRICING_TERM_FEATURE AS term_feature
+          WHERE term_feature.term_id = cell.term_id
+      )
+      AND 2 = (
+          SELECT COUNT(*)
+          FROM pricing.PRICING_RATE_CELL_LEVEL AS cell_level
+          WHERE cell_level.cell_id = source_cell.cell_id
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pricing.PRICING_TERM_FEATURE AS term_feature
+          WHERE term_feature.term_id = cell.term_id
+            AND NOT EXISTS (
+                SELECT 1
+                FROM pricing.PRICING_RATE_CELL_LEVEL AS cell_level
+                JOIN pricing.PRICING_FEATURE_LEVEL AS feature_level
+                  ON feature_level.feature_level_id = cell_level.feature_level_id
+                 AND feature_level.level_set_id = term_feature.level_set_id
+                WHERE cell_level.cell_id = source_cell.cell_id
+                  AND cell_level.position_no = term_feature.position_no
+                  AND feature_level.level_code = JSON_VALUE(
+                      @features_json,
+                      CONCAT('$.', term_feature.input_column_name)
+                  )
+            )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM @matched AS matched
+          WHERE matched.term_id = cell.term_id
+      );
+
+    INSERT INTO @matched (
+        term_id,
+        term_name,
+        term_type,
+        match_type,
+        feature_name,
+        input_value,
+        level_code,
+        multiplier,
+        log_coefficient
+    )
+    SELECT
+        cell.term_id,
+        cell.term_name,
+        cell.term_type,
         'CELL',
         cell.term_name,
         JSON_VALUE(@features_json, CONCAT('$.', cell.term_name)),
@@ -125,6 +239,7 @@ BEGIN
         CAST(cell.log_coefficient AS FLOAT)
     FROM pricing.PRICING_COMPILED_RATE_CELL AS cell
     WHERE cell.rate_package_id = @rate_package_id
+      AND cell.term_type NOT IN ('NUMERIC_MAIN', 'CATEGORICAL_INTERACTION')
       AND NOT EXISTS (
           SELECT 1
           FROM @matched AS matched
@@ -159,6 +274,7 @@ BEGIN
         CAST(cell.log_coefficient AS FLOAT)
     FROM pricing.PRICING_COMPILED_RATE_CELL AS cell
     WHERE cell.rate_package_id = @rate_package_id
+      AND cell.term_type NOT IN ('NUMERIC_MAIN', 'CATEGORICAL_INTERACTION')
       AND cell.is_default = 1
       AND NOT EXISTS (
           SELECT 1

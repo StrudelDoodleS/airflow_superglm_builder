@@ -192,6 +192,32 @@ def test_package_specific_scorer_does_not_resolve_live_pointer():
     assert "V_CURRENT_RATE_PACKAGE" not in sql
 
 
+def test_package_specific_scorer_applies_numeric_coefficients_to_input_values():
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "cell.term_type = 'NUMERIC_MAIN'" in sql
+    assert "pricing.PRICING_TERM_FEATURE AS term_feature" in sql
+    assert "LOWER(feature_level.level_code) = 'per_unit'" in sql
+    assert "TRY_CONVERT(FLOAT, raw_input.input_value)" in sql
+    assert "numeric_input.numeric_value * CAST(cell.log_coefficient AS FLOAT)" in sql
+    assert "EXP(numeric_input.numeric_value * CAST(cell.log_coefficient AS FLOAT))" in sql
+
+
+def test_package_specific_scorer_matches_interactions_by_ordered_components():
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "cell.term_type = 'CATEGORICAL_INTERACTION'" in sql
+    assert "pricing.PRICING_RATE_CELL_LEVEL AS cell_level" in sql
+    assert "cell_level.position_no = term_feature.position_no" in sql
+    assert "feature_level.level_code = JSON_VALUE(" in sql
+    assert "CONCAT('$.', term_feature.input_column_name)" in sql
+    assert "cell.term_type NOT IN ('NUMERIC_MAIN', 'CATEGORICAL_INTERACTION')" in sql
+
+
 def test_offline_model_run_mirrors_candidate_artifact_columns():
     source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
 
