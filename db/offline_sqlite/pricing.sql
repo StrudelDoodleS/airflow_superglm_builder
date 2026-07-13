@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
     source_file TEXT,
     publication_receipt_json TEXT,
     publication_receipt_sha256 TEXT,
+    staging_content_sha256 TEXT,
     package_metadata_json TEXT,
     revision_metadata_json TEXT,
     offset_handling TEXT NOT NULL DEFAULT 'UNKNOWN',

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -517,6 +518,71 @@ def _empty_term_metadata_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=["export_id", "term_name", "term_metadata_json"])
 
 
+def _canonical_staging_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    missing = pd.isna(value)
+    if isinstance(missing, bool | np.bool_) and missing:
+        return None
+    if isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
+
+
+def _canonical_staging_frame(name: str, frame: pd.DataFrame) -> dict[str, Any]:
+    content = frame.drop(columns=["staging_content_sha256"], errors="ignore")
+    columns = sorted(str(column) for column in content.columns)
+    rows = [
+        [_canonical_staging_value(row[column]) for column in columns]
+        for _, row in content.loc[:, columns].iterrows()
+    ]
+    rows.sort(
+        key=lambda row: json.dumps(
+            row,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    )
+    return {"name": name, "columns": columns, "rows": rows}
+
+
+def staging_content_sha256(
+    export_df: pd.DataFrame,
+    rate_df: pd.DataFrame,
+    level_df: pd.DataFrame,
+    term_metadata_df: pd.DataFrame | None = None,
+) -> str:
+    """Return a canonical digest binding every row staged for one export."""
+
+    term_frame = (
+        _empty_term_metadata_frame() if term_metadata_df is None else term_metadata_df
+    )
+    payload = [
+        _canonical_staging_frame("rating_export", export_df),
+        _canonical_staging_frame("rate_cell", rate_df),
+        _canonical_staging_frame("cell_level", level_df),
+        _canonical_staging_frame("term_metadata", term_frame),
+    ]
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _term_metadata_frame(
     export_id: str,
     receipt: SuperGLMPublicationReceipt,
@@ -725,7 +791,12 @@ def insert_staging_frames(
     rate_df: pd.DataFrame,
     level_df: pd.DataFrame,
     term_metadata_df: pd.DataFrame | None = None,
+    staging_content_sha256: str | None = None,
 ) -> None:
+    if staging_content_sha256 is not None and re.fullmatch(
+        r"[0-9a-f]{64}", staging_content_sha256
+    ) is None:
+        raise ValueError("staging_content_sha256 must be a lowercase SHA-256 digest")
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         acquire_staging_export_lock(con, args.export_id)
@@ -759,9 +830,15 @@ def insert_staging_frames(
         con.execute(
             text(
                 "UPDATE pricing_stg.STG_RATING_EXPORT "
-                "SET model_id = :model_id WHERE export_id = :export_id"
+                "SET model_id = :model_id, "
+                "staging_content_sha256 = :staging_content_sha256 "
+                "WHERE export_id = :export_id"
             ),
-            {"export_id": args.export_id, "model_id": model_id},
+            {
+                "export_id": args.export_id,
+                "model_id": model_id,
+                "staging_content_sha256": staging_content_sha256,
+            },
         )
         rate_df.to_sql(
             "STG_RATE_CELL",
@@ -809,7 +886,7 @@ def stage_rating_export(
     metadata_mode: Literal[
         "REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"
     ] = "REQUIRE_SUPERGLM_RECEIPT",
-) -> None:
+) -> str:
     if metadata_mode not in {"REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"}:
         raise ValueError(f"unknown metadata_mode: {metadata_mode}")
 
@@ -865,4 +942,19 @@ def stage_rating_export(
         receipt=receipt,
         receipt_sha256=publication_receipt_sha256,
     )
-    insert_staging_frames(engine, args, export_df, rate_df, level_df, term_metadata_df)
+    content_sha256 = staging_content_sha256(
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+    )
+    insert_staging_frames(
+        engine,
+        args,
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+        staging_content_sha256=content_sha256,
+    )
+    return content_sha256

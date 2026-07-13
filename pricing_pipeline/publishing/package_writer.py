@@ -22,6 +22,7 @@ _STAGED_IDENTITY_FIELDS = (
     "effective_to_date",
     "source_file",
     "publication_receipt_sha256",
+    "staging_content_sha256",
 )
 
 
@@ -45,6 +46,7 @@ def _existing_export_conflicts(
         "effective_to_date",
         "source_file",
         "publication_receipt_sha256",
+        "staging_content_sha256",
     ):
         existing_value = _identity_text(existing_package[field_name])
         staged_value = _identity_text(meta[field_name])
@@ -147,7 +149,8 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 offset_factor_name,
                 offset_source_name,
                 offset_label,
-                metadata_origin
+                metadata_origin,
+                staging_content_sha256
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """),
@@ -189,6 +192,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 source_export_id,
                 source_file,
                 publication_receipt_sha256,
+                staging_content_sha256,
                 parent_rate_package_id,
                 revision_metadata_json
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
@@ -219,8 +223,6 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             args.package_status = str(existing_package["package_status"])
             args.was_existing = True
             rate_package_id = int(existing_package["rate_package_id"])
-            if package_lineage_writer is not None:
-                package_lineage_writer(con, rate_package_id)
             return rate_package_id
 
         if parent_rate_package_id is not None:
@@ -260,6 +262,38 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                         f"parent {field_name}={parent[field_name]!r} does not match "
                         f"staged {field_name}={meta[field_name]!r}"
                     )
+
+        if parent_rate_package_id is None:
+            reservation = (
+                con.execute(
+                    text("""
+                    SELECT
+                        model_id,
+                        export_id,
+                        model_version
+                    FROM pricing.PRICING_MODEL_VERSION_RESERVATION
+                        WITH (UPDLOCK, HOLDLOCK)
+                    WHERE model_id = :model_id
+                      AND export_id = :export_id
+                    """),
+                    {"model_id": model_id, "export_id": args.export_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if reservation is None:
+                raise ValueError(
+                    "root package publication requires a model-version reservation for "
+                    f"model_id={model_id}, export_id={args.export_id!r}"
+                )
+            reserved_version = _identity_text(reservation["model_version"])
+            staged_version = _identity_text(meta["model_version"])
+            if reserved_version != staged_version:
+                raise ValueError(
+                    f"reserved model_version {reserved_version!r} does not match "
+                    f"staged model_version {staged_version!r} for "
+                    f"export_id={args.export_id!r}"
+                )
 
         offset_handling = meta["offset_handling"] or "UNKNOWN"
         offset_factor_name = meta["offset_factor_name"]
@@ -328,6 +362,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 source_file,
                 publication_receipt_json,
                 publication_receipt_sha256,
+                staging_content_sha256,
                 package_metadata_json,
                 revision_metadata_json,
                 offset_handling,
@@ -352,6 +387,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :source_file,
                 :publication_receipt_json,
                 :publication_receipt_sha256,
+                :staging_content_sha256,
                 :package_metadata_json,
                 :revision_metadata_json,
                 :offset_handling,
@@ -376,6 +412,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 "source_file": meta["source_file"],
                 "publication_receipt_json": meta["publication_receipt_json"],
                 "publication_receipt_sha256": meta["publication_receipt_sha256"],
+                "staging_content_sha256": meta["staging_content_sha256"],
                 "package_metadata_json": meta["package_metadata_json"],
                 "revision_metadata_json": revision_metadata_json,
                 "offset_handling": offset_handling,

@@ -86,6 +86,7 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
     expected_staged_metadata = {
         "export_id": "editor__submission_1",
         "model_id": 17,
+        "staging_content_sha256": "a" * 64,
     }
 
     publish_rating_package(
@@ -122,6 +123,7 @@ def test_package_writer_rejects_replaced_staging_before_lineage_write():
             "effective_to_date": None,
             "source_file": "/tmp/export/rating_tables.xlsx",
             "publication_receipt_sha256": None,
+            "staging_content_sha256": "a" * 64,
         },
         package_lineage_writer=lambda *args: lineage_calls.append(args),
     )
@@ -212,6 +214,7 @@ def _staged_meta(**overrides):
         "offset_source_name": None,
         "offset_label": None,
         "metadata_origin": None,
+        "staging_content_sha256": "a" * 64,
     }
     row.update(overrides)
     return row
@@ -232,6 +235,7 @@ def _existing_package(**overrides):
         "publication_receipt_sha256": None,
         "parent_rate_package_id": None,
         "revision_metadata_json": None,
+        "staging_content_sha256": "a" * 64,
     }
     row.update(overrides)
     return row
@@ -309,8 +313,13 @@ class _FakeScalarResult:
 
 
 class _FakeNewPackageConnection:
-    def __init__(self):
+    def __init__(self, reservation=None):
         self.statements = []
+        self.reservation = reservation or {
+            "model_id": 17,
+            "export_id": "export-1",
+            "model_version": "20260529",
+        }
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -319,6 +328,8 @@ class _FakeNewPackageConnection:
             return _FakeMetaWithModelResult(_staged_meta())
         if "source_export_id = :export_id" in sql:
             return _FakeExistingPackageResult(None)
+        if "FROM pricing.PRICING_MODEL_VERSION_RESERVATION" in sql:
+            return _FakeExistingPackageResult(self.reservation)
         if "SELECT ISNULL(MAX(package_version), 0) + 1" in sql:
             return _FakeScalarResult(3)
         if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql:
@@ -340,8 +351,8 @@ class _FakeNewPackageBegin:
 
 
 class _FakeNewPackageEngine:
-    def __init__(self):
-        self.connection = _FakeNewPackageConnection()
+    def __init__(self, reservation=None):
+        self.connection = _FakeNewPackageConnection(reservation=reservation)
         self.transaction = _FakeNewPackageBegin(self.connection)
 
     def begin(self):
@@ -387,6 +398,13 @@ def test_package_lineage_writer_runs_inside_transaction_before_final_status():
 
     assert load_staging_to_rating_package(engine, args) == 42
 
+    package_insert = next(
+        (sql, params)
+        for sql, params in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+    )
+    assert "staging_content_sha256" in package_insert[0]
+    assert package_insert[1]["staging_content_sha256"] == "a" * 64
     status_index = next(
         index
         for index, (sql, _params) in enumerate(engine.connection.statements)
@@ -420,7 +438,7 @@ def test_package_lineage_failure_prevents_final_status_and_rolls_back_transactio
     )
 
 
-def test_existing_compatible_package_invokes_lineage_writer_on_same_connection():
+def test_existing_compatible_package_does_not_rewrite_lineage():
     engine = _FakeExistingPackageEngine()
     calls = []
 
@@ -431,8 +449,68 @@ def test_existing_compatible_package_invokes_lineage_writer_on_same_connection()
 
     assert load_staging_to_rating_package(engine, args) == 42
 
-    assert calls == [(engine.connection, 42)]
+    assert calls == []
     assert args.was_existing is True
+
+
+def test_package_writer_rejects_replaced_staging_rate_content():
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(staging_content_sha256="b" * 64),
+    )
+    lineage_calls = []
+    args = _new_package_args(
+        expected_staged_metadata={"staging_content_sha256": "a" * 64},
+        package_lineage_writer=lambda *args: lineage_calls.append(args),
+    )
+
+    with pytest.raises(ValueError, match="staged export changed.*staging_content_sha256"):
+        load_staging_to_rating_package(engine, args)
+
+    assert lineage_calls == []
+
+
+def test_package_writer_rejects_existing_package_built_from_other_rate_content():
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(staging_content_sha256="b" * 64),
+        existing_package=_existing_package(staging_content_sha256="a" * 64),
+    )
+    args = _new_package_args(
+        expected_staged_metadata={"staging_content_sha256": "b" * 64},
+    )
+
+    with pytest.raises(ValueError, match="incompatible metadata.*staging_content_sha256"):
+        load_staging_to_rating_package(engine, args)
+
+
+def test_package_writer_rejects_root_package_without_version_reservation():
+    engine = _FakeNewPackageEngine(reservation={})
+    engine.connection.reservation = None
+
+    with pytest.raises(ValueError, match="model-version reservation"):
+        load_staging_to_rating_package(engine, _new_package_args())
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+def test_package_writer_rejects_root_package_with_different_reserved_version():
+    engine = _FakeNewPackageEngine(
+        reservation={
+            "model_id": 17,
+            "export_id": "export-1",
+            "model_version": "20260530",
+        }
+    )
+
+    with pytest.raises(ValueError, match="reserved model_version.*20260530.*20260529"):
+        load_staging_to_rating_package(engine, _new_package_args())
+
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
 
 
 def test_package_writer_rejects_staged_export_without_registered_model_id(monkeypatch):

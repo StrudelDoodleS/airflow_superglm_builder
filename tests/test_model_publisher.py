@@ -307,6 +307,7 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
 
     def fake_stage_rating_export(engine_arg, **kwargs):
         calls.append(("stage", engine_arg, kwargs))
+        return "a" * 64
 
     def fake_publish_rating_package(engine_arg, **kwargs):
         calls.append(("publish", engine_arg, kwargs))
@@ -352,4 +353,5 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
         "effective_to_date": None,
         "source_file": str((tmp_path / "rating_tables.xlsx").resolve()),
         "publication_receipt_sha256": None,
+        "staging_content_sha256": "a" * 64,
     }

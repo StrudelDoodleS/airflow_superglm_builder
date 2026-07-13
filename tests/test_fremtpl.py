@@ -94,6 +94,41 @@ def test_ensure_local_fremtpl_demo_seeds_an_empty_sqlite_store_once(tmp_path):
     assert count == 12
 
 
+def test_open_offline_sqlite_adds_digest_columns_to_existing_store(tmp_path):
+    import sqlite3
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, paths = open_offline_sqlite(tmp_path)
+    engine.dispose()
+    with sqlite3.connect(paths["pricing"]) as connection:
+        connection.execute(
+            "ALTER TABLE PRICING_RATE_PACKAGE DROP COLUMN staging_content_sha256"
+        )
+    with sqlite3.connect(paths["pricing_stg"]) as connection:
+        connection.execute(
+            "ALTER TABLE STG_RATING_EXPORT DROP COLUMN staging_content_sha256"
+        )
+
+    upgraded, _paths = open_offline_sqlite(tmp_path)
+    with upgraded.connect() as connection:
+        package_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing.table_info('PRICING_RATE_PACKAGE')"
+            )
+        }
+        staging_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing_stg.table_info('STG_RATING_EXPORT')"
+            )
+        }
+
+    assert "staging_content_sha256" in package_columns
+    assert "staging_content_sha256" in staging_columns
+
+
 def test_ensure_local_fremtpl_demo_refuses_non_sqlite_engines():
     from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
 

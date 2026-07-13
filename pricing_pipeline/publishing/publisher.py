@@ -161,7 +161,7 @@ class ModelPublisher:
                     "metadata_mode": "REQUIRE_SUPERGLM_RECEIPT",
                 }
             )
-        stage_rating_export(self.engine, **staging_kwargs)
+        content_sha256 = stage_rating_export(self.engine, **staging_kwargs)
         result = publish_rating_package(
             self.engine,
             export_id=export_result.export_id,
@@ -177,6 +177,7 @@ class ModelPublisher:
                 "effective_to_date": None,
                 "source_file": str(Path(export_result.rating_workbook_path).resolve()),
                 "publication_receipt_sha256": export_result.publication_receipt_sha256,
+                "staging_content_sha256": content_sha256,
             },
         )
         return PublishResult(

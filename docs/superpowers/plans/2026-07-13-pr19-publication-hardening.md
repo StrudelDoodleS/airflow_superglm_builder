@@ -155,3 +155,47 @@ commit as `fix: harden remote notebook publication`, and push
 Reply to each of the four threads with its concrete fix and test evidence, resolve all
 four threads, verify the unresolved-thread count is zero, and post `@codex review` on
 PR 19 for a fresh review of the pushed commit.
+
+### Task 6: Close second-review publication races
+
+**Files:**
+- Create: `db/migrations/V028__staging_content_digest.sql`
+- Modify: `db/offline_sqlite/pricing.sql`
+- Modify: `db/offline_sqlite/pricing_stg.sql`
+- Modify: `pricing_pipeline/infra/offline_sqlite.py`
+- Modify: `pricing_pipeline/publishing/staging.py`
+- Modify: `pricing_pipeline/publishing/package_writer.py`
+- Modify: `pricing_pipeline/publishing/publisher.py`
+- Modify: `pricing_pipeline/orchestration/pipeline.py`
+- Modify: `pricing_pipeline/publishing/editor_candidate.py`
+- Modify: `pricing_pipeline/publishing/sqlite_notebook.py`
+- Test: `tests/test_package_writer.py`
+- Test: `tests/test_model_publisher.py`
+- Test: `tests/test_rating_export.py`
+- Test: `tests/test_editor_candidate_publisher.py`
+- Test: `tests/test_fremtpl.py`
+- Test: `tests/test_migrations.py`
+
+- [x] **Step 1: Reproduce all three reported races**
+
+Require changed staging rows to fail even when their header is unchanged, unreserved or
+mismatched root versions to fail before insert, and a losing publisher never to invoke
+the lineage writer for an existing package.
+
+- [x] **Step 2: Bind staging and package content**
+
+Compute a canonical digest over all four staging frames, persist it on staging and the
+resulting package, and compare caller-to-staging plus staging-to-existing-package
+identity under the export application lock.
+
+- [x] **Step 3: Enforce root reservations and immutable existing lineage**
+
+Validate the root reservation under update/range locks before package insertion. Return
+existing packages without calling the lineage writer, then run the complete scheduled or
+editor existing-publication validator.
+
+- [ ] **Step 4: Verify and close the second review**
+
+Run focused and repository-wide checks, commit and push only intentional files, reply to
+and resolve all three new threads, verify zero unresolved threads, and request another
+Codex review.

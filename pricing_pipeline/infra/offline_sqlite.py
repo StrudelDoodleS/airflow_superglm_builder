@@ -20,6 +20,20 @@ SCHEMA_DB_FILES = {
     "pricing_stg": "pricing_stg.sqlite",
     "mlops": "mlops.sqlite",
 }
+_OFFLINE_COLUMN_UPGRADES = (
+    (
+        "pricing",
+        "PRICING_RATE_PACKAGE",
+        "staging_content_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing_stg",
+        "STG_RATING_EXPORT",
+        "staging_content_sha256",
+        "TEXT",
+    ),
+)
 
 
 @contextmanager
@@ -84,6 +98,17 @@ def apply_offline_ddl(engine: Engine) -> None:
         for schema in SCHEMA_DB_FILES:
             ddl_path = OFFLINE_DDL_DIR / f"{schema}.sql"
             connection.executescript(ddl_path.read_text(encoding="utf-8"))
+        for schema, table, column, column_type in _OFFLINE_COLUMN_UPGRADES:
+            existing_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    f"PRAGMA {schema}.table_info('{table}')"
+                ).fetchall()
+            }
+            if column not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE {schema}.{table} ADD COLUMN {column} {column_type}"
+                )
         connection.commit()
     finally:
         connection.close()

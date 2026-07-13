@@ -468,7 +468,7 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
     receipt_path = tmp_path / "superglm_publication_receipt.json"
     digest = write_publication_receipt(_publication_receipt(), receipt_path)
 
-    load_superglm_excel_to_staging.stage_rating_export(
+    staging_digest = load_superglm_excel_to_staging.stage_rating_export(
         engine,
         workbook_path=workbook_path,
         export_id="export-1",
@@ -486,7 +486,8 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
         export = (
             con.execute(
                 text(
-                    "SELECT publication_receipt_sha256, offset_handling, offset_factor_name "
+                    "SELECT publication_receipt_sha256, offset_handling, offset_factor_name, "
+                    "staging_content_sha256 "
                     "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
                 ),
                 {"export_id": "export-1"},
@@ -518,10 +519,59 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
         )
 
     assert export["publication_receipt_sha256"] == digest
+    assert export["staging_content_sha256"] == staging_digest
+    assert len(staging_digest) == 64
     assert export["offset_handling"] == "EXPORTED_FACTOR"
     assert export["offset_factor_name"] == "TermMonths"
     assert term["term_type"] == "OFFSET_FACTOR"
     assert json.loads(metadata["term_metadata_json"])["feature_kind"] == "offset"
+
+
+def test_staging_content_sha256_binds_rate_level_and_term_rows():
+    export = pd.DataFrame([{"export_id": "export-1", "model_name": "MTPL_FREQ"}])
+    rates = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "row_id": 1,
+                "term_name": "Area",
+                "multiplier": 1.1,
+            }
+        ]
+    )
+    levels = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "row_id": 1,
+                "position_no": 1,
+                "level_code": "A",
+            }
+        ]
+    )
+    terms = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "term_name": "Area",
+                "term_metadata_json": '{"feature_kind":"categorical"}',
+            }
+        ]
+    )
+
+    original = staging.staging_content_sha256(export, rates, levels, terms)
+
+    changed_rates = rates.copy()
+    changed_rates.loc[0, "multiplier"] = 1.2
+    changed_levels = levels.copy()
+    changed_levels.loc[0, "level_code"] = "B"
+    changed_terms = terms.copy()
+    changed_terms.loc[0, "term_metadata_json"] = '{"feature_kind":"ordered_categorical"}'
+
+    assert len(original) == 64
+    assert staging.staging_content_sha256(export, changed_rates, levels, terms) != original
+    assert staging.staging_content_sha256(export, rates, changed_levels, terms) != original
+    assert staging.staging_content_sha256(export, rates, levels, changed_terms) != original
 
 
 def test_stage_rating_export_requires_publication_receipt_in_strict_metadata_mode(
@@ -801,6 +851,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         )
 
     monkeypatch.setattr(staging, "build_staging_frames", fake_build_staging_frames)
+    monkeypatch.setattr(staging, "staging_content_sha256", lambda *frames: "a" * 64)
     engine = FakeModelRegistryEngine(events)
     workbook_path = tmp_path / "rating_tables.xlsx"
 
@@ -838,7 +889,7 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
         "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
-        "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id WHERE export_id = :export_id",
+        "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id, staging_content_sha256 = :staging_content_sha256 WHERE export_id = :export_id",
     ]
     assert [event[2] for event in events if event[0] == "execute"] == [
         {"model_name": "MTPL_FREQ"},
@@ -846,7 +897,11 @@ def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
         {"export_id": "export-1"},
         {"export_id": "export-1"},
         {"export_id": "export-1"},
-        {"export_id": "export-1", "model_id": 17},
+        {
+            "export_id": "export-1",
+            "model_id": 17,
+            "staging_content_sha256": "a" * 64,
+        },
     ]
     assert [event[:4] for event in events if event[0] == "to_sql"] == [
         ("to_sql", "export", "STG_RATING_EXPORT", engine.connection),
@@ -1104,11 +1159,14 @@ def test_stage_rating_export_parses_real_categorical_interaction_matrix(
         rate_df,
         level_df,
         term_metadata_df,
+        *,
+        staging_content_sha256,
     ):
         captured.update(
             rate_df=rate_df.copy(),
             level_df=level_df.copy(),
             term_metadata_df=term_metadata_df.copy(),
+            staging_content_sha256=staging_content_sha256,
         )
 
     monkeypatch.setattr(staging, "insert_staging_frames", capture_frames)
@@ -1236,8 +1294,14 @@ def test_stage_rating_export_marks_real_numeric_main_as_one_per_unit_coefficient
         rate_df,
         level_df,
         term_metadata_df,
+        *,
+        staging_content_sha256,
     ):
-        captured.update(rate_df=rate_df.copy(), level_df=level_df.copy())
+        captured.update(
+            rate_df=rate_df.copy(),
+            level_df=level_df.copy(),
+            staging_content_sha256=staging_content_sha256,
+        )
 
     monkeypatch.setattr(staging, "insert_staging_frames", capture_frames)
 
@@ -1396,6 +1460,7 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
 
     def fake_stage_rating_export(engine_arg, **kwargs):
         calls.append(("stage", engine_arg, kwargs))
+        return "a" * 64
 
     def fake_publish_rating_package(engine_arg, **kwargs):
         calls.append(("publish", engine_arg, kwargs))
@@ -1462,9 +1527,10 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
                     "model_version": "20260527",
                     "effective_from_date": "2026-05-27",
                     "effective_to_date": None,
-                    "source_file": str(workbook_path.resolve()),
-                    "publication_receipt_sha256": None,
-                },
+                        "source_file": str(workbook_path.resolve()),
+                        "publication_receipt_sha256": None,
+                        "staging_content_sha256": "a" * 64,
+                    },
             },
         ),
     ]
@@ -2568,7 +2634,7 @@ def test_run_training_export_publish_continues_when_mlflow_unavailable(
     assert record_call[2]["mlflow_run_id"] == ""
 
 
-def test_publish_model_export_returns_candidate_without_deploying(
+def test_publish_model_export_restages_before_reusing_existing_candidate(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -2583,7 +2649,16 @@ def test_publish_model_export_returns_candidate_without_deploying(
             return 17
 
         def publish_training_export(self, export, *, package_lineage_writer):
-            pytest.fail("a complete existing publication must return before staging")
+            calls.append(("publish_training_export", export.export_id))
+            return PublishResult(
+                mlflow_run_id=export.mlflow_run_id,
+                export_id=export.export_id,
+                rate_package_id=123,
+                package_version=4,
+                rating_workbook_path=export.rating_workbook_path,
+                package_status="DRAFT",
+                was_existing=True,
+            )
 
     monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
     existing = pipeline.ExistingPublishedRun(
@@ -2640,6 +2715,7 @@ def test_publish_model_export_returns_candidate_without_deploying(
     assert "publication_receipt_path" not in result
     assert "publication_receipt_sha256" not in result
     assert ("validate_registered_model",) in calls
+    assert ("publish_training_export", "export-1") in calls
 
 
 def _existing_retry_evidence(tmp_path: Path) -> dict[str, object]:
@@ -2797,6 +2873,63 @@ def test_existing_published_run_resolver_requires_exact_complete_lineage(tmp_pat
     evidence["row"]["run_status"] = None
     with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
         pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
+
+
+def test_losing_publisher_validates_existing_lineage_without_rewriting(
+    monkeypatch,
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    existing = pipeline.ExistingPublishedRun(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="20260527",
+        export_id="export-1",
+        rate_package_id=123,
+        package_version=4,
+        package_status="PUBLISHED",
+        model_run_id=901,
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        rating_workbook_path=export.rating_workbook_path,
+        mlflow_run_id="mlflow-1",
+        publication_receipt_path=None,
+        publication_receipt_sha256=None,
+    )
+    class LosingPublisher:
+        def __init__(self, engine, config):
+            pass
+
+        def validate_registered_model(self):
+            return 17
+
+        def publish_training_export(self, export, *, package_lineage_writer):
+            return PublishResult(
+                mlflow_run_id=export.mlflow_run_id,
+                export_id=export.export_id,
+                rate_package_id=123,
+                package_version=4,
+                rating_workbook_path=export.rating_workbook_path,
+                package_status="PUBLISHED",
+                was_existing=True,
+            )
+
+    monkeypatch.setattr(pipeline, "ModelPublisher", LosingPublisher)
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_existing_published_run",
+        lambda *args, **kwargs: existing,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "record_model_run_on_connection",
+        lambda *args, **kwargs: pytest.fail("losing publisher must not rewrite lineage"),
+    )
+
+    result = pipeline.publish_model_export(object(), export, model_config=MODEL_CONFIG)
+
+    assert result["model_run_id"] == "901"
+    assert result["was_existing"] is True
 
 
 @pytest.mark.parametrize(

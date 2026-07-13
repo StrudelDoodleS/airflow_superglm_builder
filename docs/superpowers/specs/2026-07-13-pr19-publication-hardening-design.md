@@ -76,3 +76,24 @@ distributed-lock abstraction is introduced.
 - Replacing SQL Server with MLflow or another service.
 - Changing the analyst-facing notebook API or exposing reservation/audit fields.
 - Repairing previously inconsistent packages automatically.
+
+## Re-review addendum: immutable publication handoff
+
+The second Codex review identified three remaining races in the gap between staging and
+package publication. The accepted refinement keeps the analyst API unchanged:
+
+- Staging computes one canonical SHA-256 over the export, rate-cell, cell-level, and
+  term-metadata frames. SQL stores it on both the staging header and the package copied
+  from that staging generation. The caller carries the digest internally between the two
+  transactions, so replaced staging and an existing package built from different cells
+  are both rejected. Opening an existing local SQLite store applies the two additive
+  digest-column upgrades in place, preserving its data.
+- Every newly inserted root package must find the `(model_id, export_id)` reservation
+  under update/range locks and its staged `model_version` must equal the reserved value.
+  Child editor packages continue to inherit the parent version and do not allocate a new
+  trained-model version.
+- Finding an existing package is validation-only. The package writer never invokes the
+  lineage writer on that path; scheduled and editor callers resolve and validate the
+  winner's complete durable lineage, then return it or raise an integrity error. A retry
+  always restages first so the rate-cell digest is checked before an existing result can
+  be reused.

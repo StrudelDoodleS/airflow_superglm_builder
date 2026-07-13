@@ -90,8 +90,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     monkeypatch.setattr(
         editor_candidate,
         "stage_editor_export",
-        lambda engine, loaded_parent, export, created_by: calls.append(
-            ("stage", created_by)
+        lambda engine, loaded_parent, export, created_by: (
+            calls.append(("stage", created_by)) or "e" * 64
         ),
     )
 
@@ -160,6 +160,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         "effective_to_date": None,
         "source_file": str(Path(exported.rating_workbook_path).resolve()),
         "publication_receipt_sha256": exported.publication_receipt_sha256,
+        "staging_content_sha256": "e" * 64,
     }
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id

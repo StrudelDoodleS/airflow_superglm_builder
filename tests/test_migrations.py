@@ -39,6 +39,19 @@ def test_remote_model_version_reservation_migration_is_concurrency_safe():
     assert "rp.source_export_id IS NOT NULL" in sql
 
 
+def test_staging_content_digest_migration_binds_staged_rows():
+    path = Path("db/migrations/V028__staging_content_digest.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "ALTER TABLE pricing_stg.STG_RATING_EXPORT" in sql
+    assert "ALTER TABLE pricing.PRICING_RATE_PACKAGE" in sql
+    assert "staging_content_sha256 CHAR(64) NULL" in sql
+    assert "CK_STG_RATING_EXPORT_CONTENT_SHA256" in sql
+    assert "CK_PRICING_RATE_PACKAGE_CONTENT_SHA256" in sql
+    assert "LIKE '%[^0-9a-f]%'" in sql
+
+
 def _create_table_bodies(ddl: str) -> dict[str, str]:
     bodies = {}
     current_table = None

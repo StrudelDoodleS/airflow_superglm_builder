@@ -861,8 +861,8 @@ def stage_editor_export(
     parent: ParentCandidate,
     export: EditorExport,
     created_by: str,
-) -> None:
-    stage_rating_export(
+) -> str:
+    return stage_rating_export(
         engine,
         workbook_path=Path(export.rating_workbook_path),
         export_id=export.export_id,
@@ -1040,7 +1040,7 @@ def _publish_new_editor_submission(
     )
     os.rename(attempt.staging_dir, attempt.final_dir)
     try:
-        stage_editor_export(engine, parent, exported, created_by)
+        content_sha256 = stage_editor_export(engine, parent, exported, created_by)
         revision_metadata_json = _revision_with_publisher_identity(
             exported.revision_metadata_json,
             created_by,
@@ -1105,8 +1105,21 @@ def _publish_new_editor_submission(
                 "effective_to_date": parent.effective_to,
                 "source_file": str(Path(exported.rating_workbook_path).resolve()),
                 "publication_receipt_sha256": exported.publication_receipt_sha256,
+                "staging_content_sha256": content_sha256,
             },
         )
+        if published.was_existing:
+            existing = _resolve_existing_editor_publication(
+                engine,
+                submission,
+                allowed_root=allowed_root,
+            )
+            if existing is None or existing.rate_package_id != published.rate_package_id:
+                raise EditorSubmissionError(
+                    "existing editor package changed before lineage validation"
+                )
+            _remove_path(attempt.final_dir)
+            return existing
     except BaseException:
         _remove_path(attempt.final_dir)
         raise

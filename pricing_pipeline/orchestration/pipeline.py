@@ -546,14 +546,6 @@ def publish_model_export(
     publisher = ModelPublisher(engine, model_config)
     model_id = publisher.validate_registered_model()
     _validate_export_matches_config(export_result, model_config, model_id=model_id)
-    existing = _resolve_existing_published_run(
-        engine,
-        export_result,
-        allowed_artifact_root=allowed_artifact_root,
-    )
-    if existing is not None:
-        return existing.to_publish_result()
-
     lineage_kwargs = {
         "dag_id": export_result.dag_id,
         "airflow_run_id": export_result.airflow_run_id,
@@ -599,6 +591,23 @@ def publish_model_export(
         export_result,
         package_lineage_writer=write_package_lineage,
     )
+    if publish_result.was_existing:
+        existing = _resolve_existing_published_run(
+            engine,
+            export_result,
+            allowed_artifact_root=allowed_artifact_root,
+        )
+        if existing is None:
+            raise PublishedRunIntegrityError(
+                f"existing package for export_id {export_result.export_id!r} "
+                "disappeared before lineage validation"
+            )
+        if existing.rate_package_id != publish_result.rate_package_id:
+            raise PublishedRunIntegrityError(
+                f"existing package identity changed for export_id "
+                f"{export_result.export_id!r}"
+            )
+        return existing.to_publish_result()
     if model_run_id is None:
         raise RuntimeError("package publication did not record scheduled model lineage")
 
