@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS pricing_stg.STG_RATING_EXPORT (
     model_name TEXT NOT NULL,
     model_version TEXT,
     base_rate REAL NOT NULL,
-    effective_from_date TEXT NOT NULL,
+    effective_from_date TEXT,
     effective_to_date TEXT,
     source_file TEXT,
     publication_receipt_json TEXT,

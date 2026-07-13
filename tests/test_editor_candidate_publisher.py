@@ -565,10 +565,12 @@ def test_editor_publication_lock_serializes_the_same_submission(tmp_path):
         "models/HOME_FREQ/editor/submissions/deep/submission.json",
     ],
 )
+@pytest.mark.parametrize("effective_from_date", ["2026-01-01", None])
 def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     monkeypatch,
     tmp_path,
     submission_relative_path,
+    effective_from_date,
 ):
     from pricing_pipeline.publishing import editor_candidate
 
@@ -592,7 +594,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "model_version": "v4",
         "package_version": submission.source_package_version,
         "rate_package_id": submission.parent_rate_package_id,
-        "effective_from_date": "2026-01-01",
+        "effective_from_date": effective_from_date,
         "effective_to_date": None,
         "model_run_id": submission.parent_model_run_id,
         "run_status": "SUCCESS",
@@ -658,10 +660,13 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     )
     monkeypatch.setattr(editor_candidate, "load_candidate_bundle", fake_load_candidate_bundle)
     monkeypatch.setattr(editor_candidate, "_load_champion_bundle", fake_load_champion_bundle)
+    injected_config = SimpleNamespace(deployment_slot="HOME_FREQ_UAT")
     monkeypatch.setattr(
         editor_candidate,
         "get_model_config",
-        lambda model_name: SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+        lambda model_name: (_ for _ in ()).throw(
+            AssertionError("explicit notebook config should bypass TOML registry discovery")
+        ),
     )
     engine = Engine()
 
@@ -669,9 +674,12 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         engine,
         submission,
         allowed_root=configured_root,
+        model_config=injected_config,
     )
 
     assert parent.bundle is bundle
+    assert parent.config is injected_config
+    assert parent.effective_from == effective_from_date
     assert load_calls[0][0] == str(candidate_path)
     assert load_calls[0][1]["allowed_root"] == configured_root
     assert champion_calls[0]["allowed_root"] == configured_root

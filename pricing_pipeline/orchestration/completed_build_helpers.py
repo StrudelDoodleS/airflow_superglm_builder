@@ -38,7 +38,7 @@ def completed_model_build_payload(
     *,
     rating_workbook_path: str | Path,
     model_version: str,
-    effective_from: str,
+    effective_from: str | None = None,
     export_id: str,
     created_by: str,
     manifest_id: str,

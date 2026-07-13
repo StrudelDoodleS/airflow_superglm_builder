@@ -83,7 +83,7 @@ class ParentCandidate:
     package_version: int
     rate_package_id: int
     model_run_id: int
-    effective_from: str
+    effective_from: str | None
     effective_to: str | None
     config: ModelBuildConfig
     bundle: CandidateBundle
@@ -293,6 +293,7 @@ def load_parent_candidate(
     submission: EditorSubmission,
     *,
     allowed_root: str | Path,
+    model_config: ModelBuildConfig | None = None,
 ) -> ParentCandidate:
     schemas = schema_names_from_connectable(engine)
     query = text(
@@ -384,7 +385,12 @@ def load_parent_candidate(
         raise EditorSubmissionError("parent bundle manifest does not match the submission")
     if bundle.split_set_id != submission.split_set_id:
         raise EditorSubmissionError("parent bundle split set does not match the submission")
-    config = get_model_config(submission.model_name)
+    config = model_config or get_model_config(submission.model_name)
+    configured_name = getattr(config, "model_name", submission.model_name)
+    if str(configured_name) != submission.model_name:
+        raise EditorSubmissionError(
+            "explicit model config does not match the editor submission model_name"
+        )
     champion = _load_champion_bundle(
         engine,
         model_id=int(row["model_id"]),
@@ -399,7 +405,11 @@ def load_parent_candidate(
         package_version=int(row["package_version"]),
         rate_package_id=int(row["rate_package_id"]),
         model_run_id=int(row["model_run_id"]),
-        effective_from=str(row["effective_from_date"]),
+        effective_from=(
+            None
+            if row.get("effective_from_date") is None
+            else str(row["effective_from_date"])
+        ),
         effective_to=(
             None if row.get("effective_to_date") is None else str(row["effective_to_date"])
         ),
@@ -1021,12 +1031,12 @@ def _publish_new_editor_submission(
     dag_id: str,
     airflow_run_id: str,
     created_by: str,
+    model_config: ModelBuildConfig | None = None,
 ) -> EditorPublicationResult:
-    parent = load_parent_candidate(
-        engine,
-        submission,
-        allowed_root=allowed_root,
-    )
+    parent_kwargs: dict[str, Any] = {"allowed_root": allowed_root}
+    if model_config is not None:
+        parent_kwargs["model_config"] = model_config
+    parent = load_parent_candidate(engine, submission, **parent_kwargs)
     exported = export_edited_model(
         parent,
         submission,
@@ -1119,6 +1129,7 @@ def publish_editor_submission(
     dag_id: str,
     airflow_run_id: str,
     created_by: str,
+    model_config: ModelBuildConfig | None = None,
 ) -> EditorPublicationResult:
     submission = load_verified_submission(
         submission_path,
@@ -1140,14 +1151,16 @@ def publish_editor_submission(
         _remove_unpublished_editor_attempts(submission_dir)
         attempt = _new_editor_publication_attempt(submission_dir)
         try:
-            return _publish_new_editor_submission(
-                engine,
-                submission=submission,
-                allowed_root=settings.workbench_artifact_root,
-                attempt=attempt,
-                dag_id=dag_id,
-                airflow_run_id=airflow_run_id,
-                created_by=created_by,
-            )
+            publish_kwargs: dict[str, Any] = {
+                "submission": submission,
+                "allowed_root": settings.workbench_artifact_root,
+                "attempt": attempt,
+                "dag_id": dag_id,
+                "airflow_run_id": airflow_run_id,
+                "created_by": created_by,
+            }
+            if model_config is not None:
+                publish_kwargs["model_config"] = model_config
+            return _publish_new_editor_submission(engine, **publish_kwargs)
         finally:
             _remove_path(attempt.staging_dir)

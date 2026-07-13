@@ -359,10 +359,6 @@ def test_completed_model_build_rejects_unknown_mapping_keys():
             "model_version",
             {"rating_workbook_path": "rating.xlsx", "effective_from": "2026-06-03"},
         ),
-        (
-            "effective_from",
-            {"rating_workbook_path": "rating.xlsx", "model_version": "20260603"},
-        ),
     ],
 )
 def test_completed_model_build_missing_required_mapping_fields_raise_domain_error(
@@ -430,6 +426,16 @@ def test_completed_model_build_normalises_effective_from(raw_value, expected):
 
     assert build.effective_from == expected
     assert build.to_dict()["effective_from"] == expected
+
+
+def test_completed_model_build_allows_candidate_without_effective_date():
+    build = CompletedModelBuild(
+        rating_workbook_path="rating.xlsx",
+        model_version="v1",
+    )
+
+    assert build.effective_from is None
+    assert build.to_dict()["effective_from"] is None
 
 
 def test_completed_model_build_rejects_numeric_effective_from():

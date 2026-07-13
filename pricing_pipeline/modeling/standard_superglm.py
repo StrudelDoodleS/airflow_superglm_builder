@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import math
 import hashlib
+import json
+import math
 import re
 import shutil
 from collections.abc import Callable, Iterable, Sequence
@@ -411,17 +412,46 @@ def hash_model_source(root: str | Path) -> str:
     paths = sorted(
         path
         for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".py", ".sql", ".toml"}
+        if path.is_file() and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
     )
     if not paths:
         raise StandardSuperGLMError(
-            f"model source root contains no .py, .sql, or .toml files: {source_root}"
+            "model source root contains no .ipynb, .py, .sql, or .toml files: "
+            f"{source_root}"
         )
     digest = hashlib.sha256()
     for path in paths:
         digest.update(path.relative_to(source_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        if path.suffix.lower() == ".ipynb":
+            try:
+                notebook = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StandardSuperGLMError(f"invalid model notebook source: {path}") from exc
+            cells = notebook.get("cells")
+            if not isinstance(cells, list):
+                raise StandardSuperGLMError(f"invalid model notebook cells: {path}")
+            source_cells = []
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    raise StandardSuperGLMError(f"invalid model notebook cell: {path}")
+                raw_source = cell.get("source", "")
+                source = "".join(raw_source) if isinstance(raw_source, list) else str(raw_source)
+                source_cells.append(
+                    {
+                        "cell_type": str(cell.get("cell_type") or ""),
+                        "source": source,
+                    }
+                )
+            source_bytes = json.dumps(
+                source_cells,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        else:
+            source_bytes = path.read_bytes()
+        digest.update(source_bytes)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -565,7 +595,7 @@ def run_standard_superglm_build(
     model_name: str,
     model_version: str,
     export_id: str,
-    effective_from: str,
+    effective_from: str | None,
     manifest_spec: ModelFrameManifestSpec,
     validation_split: ValidationSplitConfig,
     split_artifact_root: str | Path,

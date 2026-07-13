@@ -734,3 +734,37 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]
+
+
+def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(tmp_path):
+    from pricing_pipeline.modeling.standard_superglm import hash_model_source
+
+    notebook_path = tmp_path / "pricing_model.ipynb"
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": ["MODEL_NAME = 'HOME_FREQ'\n"],
+            }
+        ],
+        "metadata": {"kernelspec": {"name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    original = hash_model_source(tmp_path)
+
+    notebook["cells"][0]["execution_count"] = 7
+    notebook["cells"][0]["outputs"] = [{"output_type": "stream", "text": ["trained\n"]}]
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    output_only_change = hash_model_source(tmp_path)
+
+    notebook["cells"][0]["source"] = ["MODEL_NAME = 'HOME_SEVERITY'\n"]
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    source_change = hash_model_source(tmp_path)
+
+    assert output_only_change == original
+    assert source_change != original

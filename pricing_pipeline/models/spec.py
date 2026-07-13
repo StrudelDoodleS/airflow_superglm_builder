@@ -61,7 +61,7 @@ class ModelExportResult:
     split_set_id: str | None
     export_id: str
     rating_workbook_path: str
-    effective_from: str
+    effective_from: str | None
     created_by: str
     package_status: str = "DRAFT"
     publication_receipt_path: str | None = None

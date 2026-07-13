@@ -13,6 +13,16 @@ from pricing_pipeline.infra.migrations import (
 from pricing_pipeline.infra.schema import SchemaNames
 
 
+def test_candidate_effective_date_becomes_nullable():
+    path = Path("db/migrations/V026__nullable_candidate_effective_date.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "ALTER TABLE pricing.PRICING_RATE_PACKAGE" in sql
+    assert "ALTER TABLE pricing_stg.STG_RATING_EXPORT" in sql
+    assert sql.count("ALTER COLUMN effective_from_date DATE NULL") == 2
+
+
 def _create_table_bodies(ddl: str) -> dict[str, str]:
     bodies = {}
     current_table = None
@@ -635,8 +645,14 @@ def test_guard_error_compatibility_migration_keeps_throw_with_statement_terminat
     )
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_RATE_CELL_LEVEL_IMMUTABLE_WRITE" in migration
     assert "CREATE OR ALTER TRIGGER pricing.TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD" in migration
-    assert ";THROW 51000" in migration
-    assert ";THROW 51001" in migration
+    assert migration.lstrip().startswith("SET NOCOUNT ON;")
+    assert "N'BEGIN; THROW 50000" in migration
+    assert "N'BEGIN; THROW 51000" in migration
+    assert "N'BEGIN; THROW 51001" in migration
+    assert "N';THROW" not in migration
+    assert "@create_position = CHARINDEX(N'CREATE', UPPER(@sql))" in migration
+    assert "@create_position + LEN(N'CREATE')" in migration
+    assert "N' OR ALTER'" in migration
     assert "RAISERROR" not in migration
 
 

@@ -73,7 +73,7 @@ class CompletedModelBuild(BaseModel):
 
     rating_workbook_path: str
     model_version: str
-    effective_from: str
+    effective_from: str | None = None
     created_by: str | None = None
     export_id: str | None = None
     dag_id: str | None = None
@@ -151,8 +151,8 @@ class CompletedModelBuild(BaseModel):
 
     @field_validator("effective_from", mode="before")
     @classmethod
-    def _effective_from_date_text(cls, value: Any) -> str:
-        return _normalise_effective_from(value)
+    def _effective_from_date_text(cls, value: Any) -> str | None:
+        return None if value is None else _normalise_effective_from(value)
 
     @field_validator(
         "created_by",
@@ -338,6 +338,7 @@ class CompletedModelPublishResult:
     package_version: int
     package_status: str
     rating_workbook_path: str
+    model_run_id: int | None = None
     mlflow_run_id: str | None = None
     publication_receipt_path: str | None = None
     publication_receipt_sha256: str | None = None
@@ -619,7 +620,7 @@ def publish_completed_model_build(
     build = CompletedModelBuild.from_mapping(completed_build)
     rating_workbook_path = _existing_workbook(build.rating_workbook_path)
     model_version = _required_text(build.model_version, "model_version")
-    effective_from = _required_text(build.effective_from, "effective_from")
+    effective_from = build.effective_from
     resolved_created_by = _required_text(
         build.created_by or created_by,
         "created_by",
@@ -742,6 +743,11 @@ def publish_completed_model_build(
         package_status=str(publish_result.get("package_status") or resolved_package_status),
         rating_workbook_path=str(
             publish_result.get("rating_workbook_path") or rating_workbook_path
+        ),
+        model_run_id=(
+            None
+            if publish_result.get("model_run_id") is None
+            else int(publish_result["model_run_id"])
         ),
         mlflow_run_id=str(publish_result.get("mlflow_run_id") or build.mlflow_run_id or "") or None,
         publication_receipt_path=str(

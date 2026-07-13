@@ -795,7 +795,7 @@ def stage_rating_export(
     export_id: str,
     model_name: str,
     model_version: str | None,
-    effective_from: str,
+    effective_from: str | None,
     target_name: str = "ClaimNb",
     model_type: str = "superglm_poisson",
     effective_to: str | None = None,
