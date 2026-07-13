@@ -168,6 +168,16 @@ class ModelPublisher:
             created_by=export_result.created_by,
             package_status=self.config.default_package_status,
             package_lineage_writer=package_lineage_writer,
+            expected_staged_metadata={
+                "export_id": export_result.export_id,
+                "model_id": model_id,
+                "model_name": self.config.model_name,
+                "model_version": export_result.model_version,
+                "effective_from_date": export_result.effective_from,
+                "effective_to_date": None,
+                "source_file": str(Path(export_result.rating_workbook_path).resolve()),
+                "publication_receipt_sha256": export_result.publication_receipt_sha256,
+            },
         )
         return PublishResult(
             mlflow_run_id=export_result.mlflow_run_id,

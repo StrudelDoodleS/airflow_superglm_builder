@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +9,8 @@ from typing import BinaryIO, Iterator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+
+from pricing_pipeline.infra.file_lock import exclusive_file_lock
 
 
 OFFLINE_DDL_DIR = Path(__file__).resolve().parents[2] / "db" / "offline_sqlite"
@@ -27,12 +28,8 @@ def local_publish_lock(root: str | Path) -> Iterator[BinaryIO]:
     resolved = Path(root).expanduser().resolve()
     resolved.mkdir(parents=True, exist_ok=True)
     lock_path = resolved / ".publish.lock"
-    with lock_path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield handle
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with exclusive_file_lock(lock_path) as handle:
+        yield handle
 
 
 def offline_database_paths(root: str | Path) -> dict[str, Path]:

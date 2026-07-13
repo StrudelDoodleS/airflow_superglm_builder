@@ -23,6 +23,22 @@ def test_candidate_effective_date_becomes_nullable():
     assert sql.count("ALTER COLUMN effective_from_date DATE NULL") == 2
 
 
+def test_remote_model_version_reservation_migration_is_concurrency_safe():
+    path = Path("db/migrations/V027__model_version_reservations.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "CREATE TABLE pricing.PRICING_MODEL_VERSION_RESERVATION" in sql
+    assert "PRIMARY KEY (model_id, export_id)" in sql
+    assert "UNIQUE (model_id, model_version)" in sql
+    assert "FOREIGN KEY (model_id)" in sql
+    assert "REFERENCES pricing.PRICING_MODEL(model_id)" in sql
+    assert "ROW_NUMBER() OVER" in sql
+    assert "PARTITION BY rp.model_id, rp.model_version" in sql
+    assert "rp.parent_rate_package_id IS NULL" in sql
+    assert "rp.source_export_id IS NOT NULL" in sql
+
+
 def _create_table_bodies(ddl: str) -> dict[str, str]:
     bodies = {}
     current_table = None

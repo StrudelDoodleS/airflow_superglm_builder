@@ -265,7 +265,7 @@ def test_failure_before_promotion_cleans_staging_without_final_state(
         candidate.submit_edits(reason="Failure boundary")
 
     submissions_root = tmp_path / "HOME_FREQ" / "editor_submissions"
-    assert list(submissions_root.iterdir()) == []
+    assert [path for path in submissions_root.iterdir() if path.name != ".submission.lock"] == []
     assert len(session.saved_json_paths) == 1
 
 

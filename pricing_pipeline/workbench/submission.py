@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,7 @@ from uuid import uuid4
 
 import joblib
 
+from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.workbench.airflow import AirflowClient
 
 if TYPE_CHECKING:
@@ -430,13 +430,8 @@ def _quarantine_incomplete_submission(
 
 @contextmanager
 def _submission_root_lock(submissions_root: Path) -> Iterator[None]:
-    descriptor = os.open(submissions_root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    with exclusive_file_lock(submissions_root / ".submission.lock"):
         yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _promote_or_reuse_submission(

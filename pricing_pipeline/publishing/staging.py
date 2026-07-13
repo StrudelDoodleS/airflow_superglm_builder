@@ -14,6 +14,7 @@ from sqlalchemy import text
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.publishing.model_registry import ModelRegistryError, get_pricing_model
 from pricing_pipeline.publishing.naming import clean_identifier
+from pricing_pipeline.publishing.staging_lock import acquire_staging_export_lock
 from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
     canonical_receipt_bytes,
@@ -727,6 +728,7 @@ def insert_staging_frames(
 ) -> None:
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
+        acquire_staging_export_lock(con, args.export_id)
         model_id = _resolve_registered_model_id(con, args)
 
         if args.replace:

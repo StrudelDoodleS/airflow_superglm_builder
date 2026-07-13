@@ -83,6 +83,11 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
     def write_lineage(connection, rate_package_id):
         return None
 
+    expected_staged_metadata = {
+        "export_id": "editor__submission_1",
+        "model_id": 17,
+    }
+
     publish_rating_package(
         object(),
         export_id="editor__submission_1",
@@ -91,6 +96,7 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
         revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
         draft_validator=validator,
         package_lineage_writer=write_lineage,
+        expected_staged_metadata=expected_staged_metadata,
     )
 
     args = captured[0]
@@ -98,6 +104,35 @@ def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
     assert args.revision_metadata_json == '{"kind":"SUPERGLM_EDITOR"}'
     assert args.draft_validator is validator
     assert args.package_lineage_writer is write_lineage
+    assert args.expected_staged_metadata is expected_staged_metadata
+
+
+def test_package_writer_rejects_replaced_staging_before_lineage_write():
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(source_file="/tmp/other/rating_tables.xlsx"),
+    )
+    lineage_calls = []
+    args = _new_package_args(
+        expected_staged_metadata={
+            "export_id": "export-1",
+            "model_id": 17,
+            "model_name": "MTPL_FREQ",
+            "model_version": "20260529",
+            "effective_from_date": "2026-05-29",
+            "effective_to_date": None,
+            "source_file": "/tmp/export/rating_tables.xlsx",
+            "publication_receipt_sha256": None,
+        },
+        package_lineage_writer=lambda *args: lineage_calls.append(args),
+    )
+
+    with pytest.raises(ValueError, match="staged export changed.*source_file"):
+        load_staging_to_rating_package(engine, args)
+
+    assert lineage_calls == []
+    assert not any(
+        "source_export_id = :export_id" in sql for sql, _params in engine.connection.statements
+    )
 
 
 def test_publish_rating_package_reports_existing_source_export(monkeypatch):

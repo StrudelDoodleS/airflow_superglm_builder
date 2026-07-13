@@ -343,3 +343,13 @@ def test_model_publisher_publish_training_export_validates_and_delegates(
     publish_call = calls[2]
     assert publish_call[0] == "publish"
     assert publish_call[2]["package_lineage_writer"] is lineage_writer
+    assert publish_call[2]["expected_staged_metadata"] == {
+        "export_id": "export-1",
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "20260527",
+        "effective_from_date": "2026-05-27",
+        "effective_to_date": None,
+        "source_file": str((tmp_path / "rating_tables.xlsx").resolve()),
+        "publication_receipt_sha256": None,
+    }

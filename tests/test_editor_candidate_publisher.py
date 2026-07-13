@@ -31,6 +31,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         model_id=17,
         model_name="HOME_FREQ",
         model_version="v4",
+        effective_from=None,
+        effective_to=None,
         config=SimpleNamespace(
             model_name="HOME_FREQ",
             target_name="claim_count",
@@ -62,6 +64,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         "load_verified_submission",
         lambda path, digest, **kwargs: submission,
     )
+
     def fake_load_parent_candidate(engine, loaded_submission, *, allowed_root):
         allowed_roots.append(("parent", allowed_root))
         return parent
@@ -91,6 +94,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
             ("stage", created_by)
         ),
     )
+
     def fake_publish_rating_package(engine, **kwargs):
         nonlocal publication_is_active
         calls.append(("publish", kwargs))
@@ -147,6 +151,16 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         '{"kind":"SUPERGLM_EDITOR","published_by":"analyst@example.test"}'
     )
     assert callable(publish_kwargs["package_lineage_writer"])
+    assert publish_kwargs["expected_staged_metadata"] == {
+        "export_id": exported.export_id,
+        "model_id": parent.model_id,
+        "model_name": parent.model_name,
+        "model_version": parent.model_version,
+        "effective_from_date": None,
+        "effective_to_date": None,
+        "source_file": str(Path(exported.rating_workbook_path).resolve()),
+        "publication_receipt_sha256": exported.publication_receipt_sha256,
+    }
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id
     assert lineage_kwargs["parent_model_run_id"] == submission.parent_model_run_id
@@ -329,6 +343,8 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         model_id=17,
         model_name="HOME_FREQ",
         model_version="v4",
+        effective_from=None,
+        effective_to=None,
         config=SimpleNamespace(default_package_status="PUBLISHED"),
     )
     committed_artifact = tmp_path / "committed" / "candidate_bundle.joblib"

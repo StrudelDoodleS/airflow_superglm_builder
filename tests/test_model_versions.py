@@ -16,6 +16,9 @@ class FakeScalarResult:
     def scalar(self):
         return self.value
 
+    def scalar_one_or_none(self):
+        return self.value
+
 
 class FakeScalarsResult:
     def __init__(self, values):
@@ -29,12 +32,23 @@ class FakeConnection:
     def __init__(self, *, existing_version=None, versions=()):
         self.existing_version = existing_version
         self.versions = versions
+        self.reservations: dict[str, str] = {}
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def execute(self, statement, params=None):
         sql = str(statement)
         values = dict(params or {})
         self.calls.append((sql, values))
+        if "WITH (UPDLOCK, HOLDLOCK)" in sql:
+            return FakeScalarResult(17)
+        if sql.lstrip().startswith("INSERT INTO"):
+            self.reservations[str(values["export_id"])] = str(values["model_version"])
+            return FakeScalarResult(None)
+        if "PRICING_MODEL_VERSION_RESERVATION" in sql and "export_id = :export_id" in sql:
+            existing = self.existing_version or self.reservations.get(str(values["export_id"]))
+            return FakeScalarsResult([] if existing is None else [existing])
+        if "PRICING_MODEL_VERSION_RESERVATION" in sql:
+            return FakeScalarsResult([*self.versions, *self.reservations.values()])
         if "rp.source_export_id = :export_id" in sql:
             return FakeScalarResult(self.existing_version)
         return FakeScalarsResult(self.versions)
@@ -124,7 +138,7 @@ def test_resolve_model_version_for_export_reuses_existing_export_version():
         )
         == "v7"
     )
-    assert len(engine.connection.calls) == 1
+    assert len(engine.connection.calls) == 2
 
 
 def test_resolve_model_version_for_export_allocates_next_version_for_new_export():
@@ -138,7 +152,34 @@ def test_resolve_model_version_for_export_allocates_next_version_for_new_export(
         )
         == "v5"
     )
-    assert len(engine.connection.calls) == 2
+    assert engine.connection.reservations == {"my_model__run_2": "v5"}
+    assert len(engine.connection.calls) == 4
+
+
+def test_resolve_model_version_reserves_distinct_versions_before_publication():
+    engine = FakeEngine()
+
+    first = resolve_model_version_for_export(
+        engine,
+        model_name="MY_MODEL",
+        export_id="my_model__run_1",
+    )
+    second = resolve_model_version_for_export(
+        engine,
+        model_name="MY_MODEL",
+        export_id="my_model__run_2",
+    )
+    retry = resolve_model_version_for_export(
+        engine,
+        model_name="MY_MODEL",
+        export_id="my_model__run_1",
+    )
+
+    assert (first, second, retry) == ("v1", "v2", "v1")
+    assert engine.connection.reservations == {
+        "my_model__run_1": "v1",
+        "my_model__run_2": "v2",
+    }
 
 
 @pytest.mark.parametrize(

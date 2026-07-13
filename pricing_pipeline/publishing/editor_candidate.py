@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import importlib
 import json
 import math
@@ -22,6 +21,7 @@ from sqlalchemy import text
 
 from pricing_models.registry import get_model_config
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.modeling.standard_superglm import ModelInputs, call_review_hook
@@ -148,14 +148,8 @@ def _submission_directory(
 @contextmanager
 def _editor_publication_lock(submission_dir: Path) -> Iterator[None]:
     lock_path = submission_dir / "publication.lock"
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(lock_path, flags, 0o600)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    with exclusive_file_lock(lock_path):
         yield
-    finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
 
 
 def _new_editor_publication_attempt(submission_dir: Path) -> EditorPublicationAttempt:
@@ -1102,6 +1096,16 @@ def _publish_new_editor_submission(
             revision_metadata_json=revision_metadata_json,
             draft_validator=validate_draft,
             package_lineage_writer=write_package_lineage,
+            expected_staged_metadata={
+                "export_id": exported.export_id,
+                "model_id": parent.model_id,
+                "model_name": parent.model_name,
+                "model_version": parent.model_version,
+                "effective_from_date": parent.effective_from,
+                "effective_to_date": parent.effective_to,
+                "source_file": str(Path(exported.rating_workbook_path).resolve()),
+                "publication_receipt_sha256": exported.publication_receipt_sha256,
+            },
         )
     except BaseException:
         _remove_path(attempt.final_dir)

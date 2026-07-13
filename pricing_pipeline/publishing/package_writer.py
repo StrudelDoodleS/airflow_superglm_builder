@@ -4,11 +4,25 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 
 from sqlalchemy import text
 
 from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
+from pricing_pipeline.publishing.staging_lock import acquire_staging_export_lock
+
+
+_STAGED_IDENTITY_FIELDS = (
+    "export_id",
+    "model_id",
+    "model_name",
+    "model_version",
+    "effective_from_date",
+    "effective_to_date",
+    "source_file",
+    "publication_receipt_sha256",
+)
 
 
 def _identity_text(value) -> str | None:
@@ -54,6 +68,32 @@ def _existing_export_conflicts(
     return conflicts
 
 
+def _staged_export_conflicts(
+    meta,
+    expected: Mapping[str, object] | None,
+) -> list[str]:
+    if expected is None:
+        return []
+    unknown_fields = set(expected) - set(_STAGED_IDENTITY_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            "expected_staged_metadata contains unsupported fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+
+    conflicts: list[str] = []
+    for field_name in _STAGED_IDENTITY_FIELDS:
+        if field_name not in expected:
+            continue
+        staged_value = meta[field_name]
+        expected_value = expected[field_name]
+        if _identity_text(staged_value) != _identity_text(expected_value):
+            conflicts.append(
+                f"{field_name} expected={expected_value!r} staged={staged_value!r}"
+            )
+    return conflicts
+
+
 def _canonical_revision_metadata(value: str | None) -> str | None:
     if value is None:
         return None
@@ -77,6 +117,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         )
 
     with engine.begin() as con:
+        acquire_staging_export_lock(con, args.export_id)
         args.was_existing = False
         requested_package_status = args.package_status
         parent_rate_package_id = getattr(args, "parent_rate_package_id", None)
@@ -115,6 +156,16 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             .mappings()
             .one()
         )
+
+        staged_conflicts = _staged_export_conflicts(
+            meta,
+            getattr(args, "expected_staged_metadata", None),
+        )
+        if staged_conflicts:
+            raise ValueError(
+                f"staged export changed before package publication for "
+                f"export_id={args.export_id!r}: " + "; ".join(staged_conflicts)
+            )
 
         model_id = meta["model_id"]
         if model_id is None:
@@ -710,6 +761,7 @@ def publish_rating_package(
     revision_metadata_json: str | None = None,
     draft_validator=None,
     package_lineage_writer=None,
+    expected_staged_metadata: Mapping[str, object] | None = None,
 ) -> PublishResult:
     args = argparse.Namespace(
         export_id=export_id,
@@ -719,6 +771,7 @@ def publish_rating_package(
         revision_metadata_json=revision_metadata_json,
         draft_validator=draft_validator,
         package_lineage_writer=package_lineage_writer,
+        expected_staged_metadata=expected_staged_metadata,
         set_pointer=None,
     )
     rate_package_id = load_staging_to_rating_package(engine, args)

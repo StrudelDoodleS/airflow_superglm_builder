@@ -6,6 +6,7 @@ import pickle
 import shutil
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -892,6 +893,38 @@ def test_insert_staging_frames_uses_configured_staging_schema_for_to_sql():
     ]
 
 
+def test_insert_staging_frames_locks_export_before_registry_lookup(monkeypatch):
+    events = []
+    engine = FakeModelRegistryEngine(events)
+    args = SimpleNamespace(
+        model_name="MTPL_FREQ",
+        model_label=None,
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_status="ACTIVE",
+        created_by="unit-test",
+        replace=False,
+        export_id="export-1",
+    )
+    monkeypatch.setattr(
+        staging,
+        "acquire_staging_export_lock",
+        lambda connection, export_id: events.append(("lock", connection, export_id)),
+    )
+
+    staging.insert_staging_frames(
+        engine,
+        args,
+        FakeFrame("export", events),
+        FakeFrame("rate", events),
+        FakeFrame("level", events),
+    )
+
+    assert events[0] == ("begin",)
+    assert events[1] == ("lock", engine.connection, "export-1")
+    assert events[2][0] == "execute"
+
+
 def test_insert_staging_frames_writes_term_metadata_after_cell_levels():
     events = []
     engine = FakeEngine(events)
@@ -1417,12 +1450,22 @@ def test_model_publisher_publish_training_export_uses_config_and_maps_result(
         (
             "publish",
             engine,
-                {
+            {
+                "export_id": "export-1",
+                "created_by": "airflow",
+                "package_status": "PUBLISHED",
+                "package_lineage_writer": None,
+                "expected_staged_metadata": {
                     "export_id": "export-1",
-                    "created_by": "airflow",
-                    "package_status": "PUBLISHED",
-                    "package_lineage_writer": None,
+                    "model_id": 17,
+                    "model_name": "CONFIG_MODEL",
+                    "model_version": "20260527",
+                    "effective_from_date": "2026-05-27",
+                    "effective_to_date": None,
+                    "source_file": str(workbook_path.resolve()),
+                    "publication_receipt_sha256": None,
                 },
+            },
         ),
     ]
 
@@ -2374,6 +2417,9 @@ def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage
             "created_by": "airflow",
             "publication_receipt_path": None,
             "publication_receipt_sha256": None,
+            "metrics": {},
+            "metric_scopes": {},
+            "fold_metrics": (),
         },
     )
 
@@ -2596,90 +2642,226 @@ def test_publish_model_export_returns_candidate_without_deploying(
     assert ("validate_registered_model",) in calls
 
 
-def test_existing_published_run_resolver_returns_complete_lineage_and_rejects_partial(
-    monkeypatch,
-    tmp_path: Path,
-):
-    row = {
-        "model_id": 17,
-        "model_name": "MTPL_FREQ",
-        "model_version": "20260527",
-        "source_export_id": "export-1",
-        "rate_package_id": 123,
-        "package_version": 4,
-        "package_status": "DRAFT",
-        "model_run_id": 901,
-        "run_status": "SUCCESS",
-        "manifest_id": "manifest-original",
-        "split_set_id": "split-original",
-        "rating_workbook_path": str(tmp_path / "original" / "rating_tables.xlsx"),
-        "mlflow_run_id": "mlflow-1",
-        "publication_receipt_path": None,
-        "publication_receipt_sha256": None,
-        "candidate_artifact_path": None,
-        "candidate_artifact_sha256": None,
-        "candidate_artifact_format": None,
-        "candidate_artifact_size_bytes": None,
-        "candidate_python_version": None,
-        "candidate_superglm_version": None,
+def _existing_retry_evidence(tmp_path: Path) -> dict[str, object]:
+    workbook_path = str((tmp_path / "rating_tables.xlsx").resolve())
+    return {
+        "row": {
+            "model_id": 17,
+            "model_name": "MTPL_FREQ",
+            "model_version": "20260527",
+            "source_export_id": "export-1",
+            "rate_package_id": 123,
+            "package_version": 4,
+            "package_status": "DRAFT",
+            "parent_rate_package_id": None,
+            "effective_from_date": "2026-05-27",
+            "effective_to_date": None,
+            "source_file": workbook_path,
+            "package_publication_receipt_sha256": None,
+            "model_run_id": 901,
+            "run_status": "SUCCESS",
+            "run_export_id": "export-1",
+            "run_model_id": 17,
+            "run_model_name": "MTPL_FREQ",
+            "run_model_version": "20260527",
+            "dag_id": "pricing_dag",
+            "airflow_run_id": "manual__1",
+            "manifest_id": "manifest-1",
+            "rating_workbook_path": workbook_path,
+            "mlflow_run_id": "mlflow-1",
+            "publication_receipt_path": None,
+            "publication_receipt_sha256": None,
+            "candidate_artifact_path": None,
+            "candidate_artifact_sha256": None,
+            "candidate_artifact_format": None,
+            "candidate_artifact_size_bytes": None,
+            "candidate_python_version": None,
+            "candidate_superglm_version": None,
+            "model_source_sha256": None,
+        },
+        "datasets": [{"manifest_id": "manifest-1", "dataset_role": "training"}],
+        "splits": [
+            {
+                "manifest_id": "manifest-1",
+                "split_set_id": "split-1",
+                "dataset_role": "training",
+                "split_role": "validation",
+            }
+        ],
+        "metrics": [
+            {
+                "metric_name": "deviance",
+                "metric_value": 1.25,
+                "metric_scope": "cv",
+            }
+        ],
+        "folds": [
+            {
+                "split_set_id": "split-1",
+                "fold_no": 1,
+                "metric_name": "deviance",
+                "metric_value": 1.5,
+            }
+        ],
     }
 
-    class Rows:
-        def mappings(self):
-            return self
 
-        def all(self):
-            return [dict(row)]
-
-    class Connection:
-        def execute(self, statement, params):
-            assert params == {"model_id": 17, "export_id": "export-1"}
-            return Rows()
-
-    class Begin:
-        def __enter__(self):
-            return Connection()
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class Engine:
-        def begin(self):
-            return Begin()
-
-    monkeypatch.setattr(
-        pipeline,
-        "schema_names_from_connectable",
-        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
-    )
-    export = ModelExportResult(
+def _retry_export(tmp_path: Path) -> ModelExportResult:
+    return ModelExportResult(
         model_id=17,
         model_name="MTPL_FREQ",
         model_version="20260527",
         model_type="superglm_poisson",
         target_name="ClaimNb",
         deployment_slot="MTPL_FREQ_UAT",
-        manifest_id="manifest-retry",
+        manifest_id="manifest-1",
         dag_id="pricing_dag",
         airflow_run_id="manual__1",
-        mlflow_run_id="mlflow-retry",
-        split_set_id="split-retry",
+        mlflow_run_id="mlflow-1",
+        split_set_id="split-1",
         export_id="export-1",
-        rating_workbook_path=str(tmp_path / "retry" / "rating_tables.xlsx"),
+        rating_workbook_path=str((tmp_path / "rating_tables.xlsx").resolve()),
         effective_from="2026-05-27",
         created_by="airflow",
+        metrics={"deviance": 1.25},
+        metric_scopes={"deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 1.5},
+        ),
     )
 
-    existing = pipeline._resolve_existing_published_run(Engine(), export)
+
+class _EvidenceRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return [dict(row) for row in self.rows]
+
+
+class _EvidenceConnection:
+    def __init__(self, evidence):
+        self.evidence = evidence
+
+    def execute(self, statement, params):
+        sql = str(statement)
+        if "FROM pricing.PRICING_RATE_PACKAGE AS rp" in sql:
+            assert params == {"model_id": 17, "export_id": "export-1"}
+            return _EvidenceRows([self.evidence["row"]])
+        assert params == {"model_run_id": 901}
+        if "FROM mlops.MODEL_RUN_DATASET" in sql:
+            return _EvidenceRows(self.evidence["datasets"])
+        if "FROM mlops.MODEL_RUN_SPLIT_SET" in sql:
+            return _EvidenceRows(self.evidence["splits"])
+        if "FROM mlops.MODEL_RUN_METRIC" in sql:
+            return _EvidenceRows(self.evidence["metrics"])
+        if "FROM pricing.CV_FOLD_METRIC" in sql:
+            return _EvidenceRows(self.evidence["folds"])
+        raise AssertionError(f"unexpected evidence query: {sql}")
+
+
+class _EvidenceBegin:
+    def __init__(self, evidence):
+        self.connection = _EvidenceConnection(evidence)
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _EvidenceEngine:
+    def __init__(self, evidence):
+        self.evidence = evidence
+
+    def begin(self):
+        return _EvidenceBegin(self.evidence)
+
+
+def test_existing_published_run_resolver_requires_exact_complete_lineage(tmp_path: Path):
+    evidence = _existing_retry_evidence(tmp_path)
+    export = _retry_export(tmp_path)
+
+    existing = pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
 
     assert existing is not None
-    assert existing.manifest_id == "manifest-original"
-    assert existing.rating_workbook_path.endswith("original/rating_tables.xlsx")
+    assert existing.manifest_id == "manifest-1"
+    assert existing.split_set_id == "split-1"
+    assert existing.rating_workbook_path == export.rating_workbook_path
 
-    row["model_run_id"] = None
-    row["run_status"] = None
+    evidence["row"]["model_run_id"] = None
+    evidence["row"]["run_status"] = None
     with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
-        pipeline._resolve_existing_published_run(Engine(), export)
+        pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
+
+
+@pytest.mark.parametrize(
+    ("conflict", "field_name"),
+    [
+        ("dag", "dag_id"),
+        ("manifest", "manifest_id"),
+        ("split", "split links"),
+        ("workbook", "rating_workbook_path"),
+        ("package_source", "source_file"),
+        ("receipt", "publication_receipt_path"),
+        ("candidate", "candidate_artifact_path"),
+        ("model_source", "model_source_sha256"),
+        ("dataset", "dataset links"),
+        ("metric", "metrics"),
+        ("fold", "fold metrics"),
+    ],
+)
+def test_existing_published_run_resolver_rejects_conflicting_retry_evidence(
+    tmp_path: Path,
+    conflict: str,
+    field_name: str,
+):
+    evidence = deepcopy(_existing_retry_evidence(tmp_path))
+    export = _retry_export(tmp_path)
+    row = evidence["row"]
+    if conflict == "dag":
+        row["dag_id"] = "different_dag"
+    elif conflict == "manifest":
+        row["manifest_id"] = "different-manifest"
+    elif conflict == "split":
+        evidence["splits"][0]["split_set_id"] = "different-split"
+    elif conflict == "workbook":
+        row["rating_workbook_path"] = str(tmp_path / "different.xlsx")
+    elif conflict == "package_source":
+        row["source_file"] = str(tmp_path / "different.xlsx")
+    elif conflict == "receipt":
+        row["publication_receipt_path"] = str(tmp_path / "different-receipt.json")
+    elif conflict == "candidate":
+        row.update(
+            candidate_artifact_path=str(tmp_path / "unexpected.joblib"),
+            candidate_artifact_sha256="a" * 64,
+            candidate_artifact_format="superglm-candidate-joblib-v1",
+            candidate_artifact_size_bytes=12,
+            candidate_python_version="3.14.0",
+            candidate_superglm_version="0.11.0",
+        )
+    elif conflict == "model_source":
+        row["model_source_sha256"] = "b" * 64
+    elif conflict == "dataset":
+        evidence["datasets"].append(
+            {"manifest_id": "extra-manifest", "dataset_role": "training"}
+        )
+    elif conflict == "metric":
+        evidence["metrics"][0]["metric_value"] = 9.0
+    elif conflict == "fold":
+        evidence["folds"][0]["metric_value"] = 9.0
+    else:
+        raise AssertionError(f"unknown conflict fixture: {conflict}")
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match=rf"incompatible evidence.*{field_name}",
+    ):
+        pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
 
 
 def test_publish_model_export_includes_publication_receipt_fields_when_set(
