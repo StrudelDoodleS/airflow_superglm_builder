@@ -206,6 +206,9 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
             "parent_rate_package_id": None,
         }
         state.packages[rate_package_id] = package
+        package_lineage_writer = kwargs.get("package_lineage_writer")
+        if package_lineage_writer is not None:
+            package_lineage_writer(object(), rate_package_id)
         return PublishResult(
             mlflow_run_id="",
             export_id=kwargs["export_id"],
@@ -301,10 +304,16 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
     monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
     monkeypatch.setattr(pipeline, "fit_reml_with_diagnostics", fake_fit_reml_with_diagnostics)
     monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
+    monkeypatch.setattr(pipeline, "_resolve_existing_published_run", lambda *args, **kwargs: None)
+
+    def fake_record_model_run_on_connection(connection, **kwargs):
+        state.recorded_runs.append(kwargs)
+        return len(state.recorded_runs)
+
     monkeypatch.setattr(
         pipeline,
-        "record_model_run",
-        lambda engine_arg, **kwargs: state.recorded_runs.append(kwargs),
+        "record_model_run_on_connection",
+        fake_record_model_run_on_connection,
     )
     monkeypatch.setattr(
         "pricing_pipeline.publishing.publisher.validate_model_on_engine",
