@@ -551,6 +551,24 @@ two real models demonstrate the same need.
   snapshot for its primary split inside the same transaction; metrics omitted by the new
   evidence cannot survive as stale audit rows.
 
+## Operational Compatibility Hardening
+
+- Opening an existing local SQLite workbench performs additive upgrades for every
+  candidate-artifact column written by the notebook publisher, not only content digests.
+- Exposure-based offset metadata is inferred only when `build_candidate()` also derives
+  `offset = log(exposure)`. A caller-supplied offset must provide its model-owned
+  `OffsetExportContract` and export options; the helper never relabels custom semantics.
+- Editor review artifacts retain their path relative to the attempt directory when the
+  staging directory is promoted, including model hooks that write nested report folders.
+- A forward-only SQL migration keeps `PREDICT_CURRENT_RATE` behavior aligned with
+  `PREDICT_RATE_PACKAGE` for numeric-main and categorical-interaction terms. Previously
+  applied migrations are never rewritten.
+- Published editor revision metadata records the Airflow triggering identity as both the
+  claimed and publishing identity, while the immutable submitted file remains hash-bound.
+- A direct root publication creates its missing model-version reservation transactionally
+  before inserting the package. Existing mismatched reservations and unique-version
+  conflicts still fail; child editor packages continue to inherit the parent version.
+
 ## Error Handling
 
 - Scaffolded default builds fail with model-focused messages for missing final-frame
