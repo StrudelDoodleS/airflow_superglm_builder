@@ -42,6 +42,39 @@ def _registered_model(api, tmp_path: Path):
     )
 
 
+def _registered_spec_model(api, tmp_path: Path, **spec_overrides):
+    source_root = tmp_path / "pricing_models" / "claim_frequency_spec"
+    source_root.mkdir(parents=True)
+    values = {
+        "name": "CLAIM_FREQUENCY",
+        "label": "Claim frequency",
+        "target": "claim_count",
+        "model_type": "superglm_poisson",
+        "deployment_slot": "PRODUCTION",
+        "features": ("age", "region"),
+        "dataset_name": "claim_frequency_frame",
+        "source_system": "pricing_sql",
+        "pk_columns": ("policy_id",),
+        "exposure_column": "exposure",
+        "validation": ValidationSplitConfig.kfold(n_splits=2, random_state=7),
+    }
+    values.update(spec_overrides)
+    spec = api.PricingModelSpec(**values)
+    return api.RegisteredModel(
+        model_id=17,
+        config=ModelBuildConfig(
+            model_name=spec.name,
+            model_label=spec.label,
+            target_name=spec.target,
+            model_type=spec.model_type,
+            deployment_slot=spec.deployment_slot,
+            validation_split=spec.validation,
+        ),
+        source_root=source_root.resolve(),
+        spec=spec,
+    )
+
+
 def test_pricing_model_spec_holds_analyst_decisions():
     from pricing_pipeline import notebook as api
 
@@ -376,6 +409,80 @@ def test_build_candidate_derives_audit_plumbing(monkeypatch, tmp_path):
     assert captured["created_by"] == "analyst@example.test"
     assert captured["offset_contract"] is offset_contract
     assert captured["offset_export_options"] is offset_options
+
+
+def test_build_candidate_derives_simple_spec_inputs(monkeypatch, tmp_path):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_spec_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "exposure": [1.0, 0.5, 1.5, 0.75],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    folds = [(np.array([0, 1]), np.array([2, 3]))]
+    captured = {}
+
+    monkeypatch.setattr(api, "validation_split_indices", lambda frame, split: folds)
+    monkeypatch.setattr(
+        api,
+        "build_export_id",
+        lambda model_name, run_key: f"{model_name}__{run_key}",
+    )
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda engine, *, model_name, export_id: "v7",
+    )
+
+    standard_result = SimpleNamespace(
+        completed_build={"manifest_id": "manifest-1", "split_set_id": "split-1"},
+        metrics={"cv_mean_deviance": 1.25},
+    )
+
+    def run_build(engine, **kwargs):
+        captured["engine"] = engine
+        captured.update(kwargs)
+        return standard_result
+
+    monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
+
+    candidate = api.build_candidate(
+        context,
+        model=model,
+        frame=frame,
+        model_factory=lambda: object(),
+        data_as_of="2026-06-30",
+        run_key="notebook-run-1",
+        created_by="analyst@example.test",
+    )
+
+    assert candidate.standard_build is standard_result
+    inputs = captured["inputs"]
+    assert list(inputs.X.columns) == ["age", "region"]
+    assert inputs.y.name == "claim_count"
+    assert np.allclose(inputs.offset.to_numpy(), np.log(frame["exposure"]))
+    assert inputs.export_weight.name == "exposure"
+    assert np.allclose(inputs.export_weight.to_numpy(), frame["exposure"])
+    manifest_spec = captured["manifest_spec"]
+    assert manifest_spec.dataset_name == "claim_frequency_frame"
+    assert manifest_spec.source_system == "pricing_sql"
+    assert manifest_spec.data_as_of_date.isoformat() == "2026-06-30"
+    assert manifest_spec.pk_columns == ("policy_id",)
+    assert manifest_spec.target_column == "claim_count"
+    assert manifest_spec.weight_column == "exposure"
+    assert captured["scoring"] == ("deviance",)
+    assert captured["fit_mode"] == "fit_reml"
+    assert captured["offset_contract"].handling == "EXPORTED_FACTOR"
+    export_options = captured["offset_export_options"]
+    assert export_options["offset_name"] == "exposure"
+    assert export_options["offset_kind"] == "auto"
+    assert export_options["offset_source"].equals(inputs.export_weight)
 
 
 def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):

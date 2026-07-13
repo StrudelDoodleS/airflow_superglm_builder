@@ -215,6 +215,68 @@ def _new_notebook_run_key() -> str:
     return f"notebook_{timestamp}_{uuid4().hex[:8]}"
 
 
+def _normalise_notebook_date(value: Any, field_name: str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a date, datetime, or ISO date string")
+    cleaned = value.strip()
+    try:
+        return datetime.fromisoformat(cleaned).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(cleaned)
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be a date, datetime, or ISO date string"
+            ) from exc
+
+
+def _resolve_data_as_of(
+    frame: pd.DataFrame,
+    *,
+    explicit: date | datetime | str | None,
+    column: str | None,
+) -> date:
+    column_value: date | None = None
+    if column is not None:
+        if column not in frame.columns:
+            raise ValueError(f"data-as-of column is missing from model frame: {column}")
+        if frame[column].isna().any():
+            raise ValueError(f"data-as-of column {column!r} contains null values")
+        values = {
+            _normalise_notebook_date(value, "data_as_of")
+            for value in frame[column]
+        }
+        if len(values) != 1:
+            raise ValueError(
+                f"data-as-of column {column!r} must contain exactly one date"
+            )
+        column_value = values.pop()
+
+    explicit_value = (
+        None
+        if explicit is None
+        else _normalise_notebook_date(explicit, "data_as_of")
+    )
+    if (
+        explicit_value is not None
+        and column_value is not None
+        and explicit_value != column_value
+    ):
+        raise ValueError(
+            "explicit data_as_of does not match the configured data-as-of column"
+        )
+    resolved = explicit_value or column_value
+    if resolved is None:
+        raise ValueError(
+            "provide data_as_of or configure PricingModelSpec.data_as_of_column"
+        )
+    return resolved
+
+
 def _identity_aligned(
     value: pd.Series | pd.DataFrame | np.ndarray | None,
     *,
@@ -333,15 +395,15 @@ def build_candidate(
     *,
     model: RegisteredModel,
     frame: pd.DataFrame,
-    X: pd.DataFrame,
-    y: pd.Series | pd.DataFrame | np.ndarray,
     model_factory: Callable[[], Any],
-    scoring: str | Callable | Sequence[str | Callable],
-    dataset_name: str,
-    source_system: str,
-    data_as_of: date | datetime | str,
-    pk_columns: Iterable[str],
-    effective_from: date | datetime | str,
+    data_as_of: date | datetime | str | None = None,
+    X: pd.DataFrame | None = None,
+    y: pd.Series | pd.DataFrame | np.ndarray | None = None,
+    scoring: str | Callable | Sequence[str | Callable] | None = None,
+    dataset_name: str | None = None,
+    source_system: str | None = None,
+    pk_columns: Iterable[str] | None = None,
+    effective_from: date | datetime | str | None = None,
     sample_weight: pd.Series | np.ndarray | None = None,
     weight_column: str | None = None,
     offset: pd.Series | np.ndarray | None = None,
@@ -349,7 +411,7 @@ def build_candidate(
     sample_weight_name: str | None = None,
     export_weight_name: str | None = None,
     split_indices: Iterable[tuple[Any, Any]] | None = None,
-    fit_mode: str = "fit_reml",
+    fit_mode: str | None = None,
     offset_contract: OffsetExportContract | None = None,
     offset_export_options: dict[str, Any] | None = None,
     review_workbook_hook: Callable[..., str | Path | None] | None = None,
@@ -357,12 +419,85 @@ def build_candidate(
     created_by: str | None = None,
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
-    resolved_pk_columns = tuple(_required_text(column, "pk_columns") for column in pk_columns)
+    spec = model.spec
+    if X is None:
+        if spec is None:
+            raise ValueError("X is required when the registered model has no PricingModelSpec")
+        missing_features = [column for column in spec.features if column not in frame.columns]
+        if missing_features:
+            raise ValueError(
+                "model frame is missing feature columns: " + ", ".join(missing_features)
+            )
+        X = frame.loc[:, list(spec.features)].copy()
+    if y is None:
+        if spec is None:
+            raise ValueError("y is required when the registered model has no PricingModelSpec")
+        if spec.target not in frame.columns:
+            raise ValueError(f"model frame is missing target column: {spec.target}")
+        y = frame[spec.target].astype(float).copy()
+
+    resolved_dataset_name = dataset_name or (spec.dataset_name if spec else None)
+    resolved_source_system = source_system or (spec.source_system if spec else None)
+    raw_pk_columns = pk_columns or (spec.pk_columns if spec else ())
+    resolved_pk_columns = tuple(
+        _required_text(column, "pk_columns") for column in raw_pk_columns
+    )
     if not resolved_pk_columns:
         raise ValueError("pk_columns must contain at least one column")
     missing_pk = [column for column in resolved_pk_columns if column not in frame.columns]
     if missing_pk:
         raise ValueError(f"model frame is missing primary key columns: {', '.join(missing_pk)}")
+
+    data_as_of_column = spec.data_as_of_column if spec is not None else None
+    resolved_data_as_of = _resolve_data_as_of(
+        frame,
+        explicit=data_as_of,
+        column=data_as_of_column,
+    )
+    resolved_scoring = scoring if scoring is not None else (spec.scoring if spec else None)
+    if resolved_scoring is None:
+        raise ValueError("scoring is required when the registered model has no PricingModelSpec")
+    resolved_fit_mode = fit_mode or (spec.fit_mode if spec else "fit_reml")
+
+    derived_exposure_options = False
+    if spec is not None and spec.sample_weight_column is not None and sample_weight is None:
+        column = spec.sample_weight_column
+        if column not in frame.columns:
+            raise ValueError(f"model frame is missing sample-weight column: {column}")
+        sample_weight = frame[column].astype(float).copy()
+        sample_weight_name = sample_weight_name or column
+        weight_column = weight_column or column
+    if spec is not None and spec.exposure_column is not None:
+        column = spec.exposure_column
+        if column not in frame.columns:
+            raise ValueError(f"model frame is missing exposure column: {column}")
+        exposure = frame[column].astype(float).copy()
+        values = exposure.to_numpy()
+        if not np.isfinite(values).all() or (values <= 0).any():
+            raise ValueError(
+                f"exposure column {column!r} must contain finite positive values"
+            )
+        if offset is None:
+            offset = np.log(exposure)
+        if export_weight is None:
+            export_weight = exposure
+        export_weight_name = export_weight_name or column
+        weight_column = weight_column or column
+        if offset_contract is None:
+            offset_contract = OffsetExportContract(
+                handling="EXPORTED_FACTOR",
+                source_factor_name=column,
+                published_factor_name=column,
+                source_name=column,
+                label=f"log({column})",
+            )
+        if offset_export_options is None:
+            offset_export_options = {
+                "offset_source": exposure,
+                "offset_name": column,
+                "offset_kind": "auto",
+            }
+            derived_exposure_options = True
 
     resolved_run_key = _required_text(run_key or _new_notebook_run_key(), "run_key")
     export_id = build_export_id(model.name, resolved_run_key)
@@ -420,14 +555,19 @@ def build_candidate(
         export_weight_name=export_weight_name,
         row_ids=row_ids,
     )
+    if derived_exposure_options:
+        offset_export_options = {
+            **dict(offset_export_options or {}),
+            "offset_source": inputs.export_weight,
+        }
     standard_build = run_standard_superglm_build(
         pricing.engine,
         frame=frame,
         inputs=inputs,
         model_factory=model_factory,
         split_indices=resolved_split_indices,
-        fit_mode=fit_mode,
-        scoring=scoring,
+        fit_mode=resolved_fit_mode,
+        scoring=resolved_scoring,
         output_dir=(
             Path(pricing.settings.workbench_artifact_root)
             / model.name
@@ -436,11 +576,13 @@ def build_candidate(
         model_name=model.name,
         model_version=model_version,
         export_id=export_id,
-        effective_from=effective_from_for_run(effective_from),
+        effective_from=(
+            None if effective_from is None else effective_from_for_run(effective_from)
+        ),
         manifest_spec=ModelFrameManifestSpec(
-            dataset_name=dataset_name,
-            source_system=source_system,
-            data_as_of_date=data_as_of,
+            dataset_name=_required_text(resolved_dataset_name, "dataset_name"),
+            source_system=_required_text(resolved_source_system, "source_system"),
+            data_as_of_date=resolved_data_as_of,
             pk_columns=resolved_pk_columns,
             target_column=model.config.target_name,
             weight_column=weight_column,
