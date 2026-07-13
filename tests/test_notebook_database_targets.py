@@ -425,9 +425,13 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             {"sha": "a" * 64},
         )
 
+    staging_digest = {"value": "d" * 64}
+    staged_digests = []
+
     def stage(engine, **kwargs):
         assert kwargs["model_id"] == model.model_id
         assert kwargs["replace"] is True
+        staged_digests.append(staging_digest["value"])
         with engine.begin() as connection:
             connection.execute(
                 text(
@@ -437,12 +441,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                         base_rate, effective_from_date, source_file,
                         publication_receipt_json, publication_receipt_sha256,
                         package_metadata_json, offset_handling,
-                        metadata_origin, created_by
+                        metadata_origin, staging_content_sha256, created_by
                     ) VALUES (
                         :export_id, :model_id, :model_name, :model_version,
                         0.25, NULL, :source_file,
                         '{}', :receipt_sha, '{}', 'NONE',
-                        'SUPERGLM_EXPORTER', 'test'
+                        'SUPERGLM_EXPORTER', :staging_digest, 'test'
                     )
                     """
                 ),
@@ -457,6 +461,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                     "model_version": kwargs["model_version"],
                     "source_file": str(kwargs["workbook_path"]),
                     "receipt_sha": kwargs["publication_receipt_sha256"],
+                    "staging_digest": staging_digest["value"],
                 },
             )
 
@@ -516,6 +521,16 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     assert second.model_run_id == first.model_run_id
     assert second.mlflow_run_id == "mlflow-old"
     assert second.was_existing is True
+    assert staged_digests == ["d" * 64, "d" * 64]
+
+    staging_digest["value"] = "e" * 64
+    with pytest.raises(ValueError, match="staging_content_sha256"):
+        api.publish_candidate(
+            context,
+            candidate,
+            created_by="analyst@example.test",
+        )
+    staging_digest["value"] = "d" * 64
 
     changed_run_evidence = {
         **completed_build,
@@ -554,6 +569,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             conflicting_candidate,
             created_by="analyst@example.test",
         )
+    recovered = api.publish_candidate(
+        context,
+        candidate,
+        created_by="analyst@example.test",
+    )
+    assert recovered.was_existing is True
 
     with context.engine.connect() as connection:
         counts = {

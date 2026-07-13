@@ -535,6 +535,22 @@ matching SQL transform. The prototype does not guess this boundary from a column
 Generalization is considered only after the actual input contract is known and at least
 two real models demonstrate the same need.
 
+## Publication Retry Integrity
+
+- `export_id` is the idempotency key. A local retry always restages the workbook so
+  the current normalized rating content is checked before an existing package is reused.
+- Packages created after V028 require the staged-content digest to match. A legacy package
+  with a null digest remains reusable only through the immutable metadata and complete
+  model-run lineage checks that existed when it was created.
+- Manifest and split IDs generated internally by `publish_completed_model_build()` are
+  attempt-local. If another attempt already won the same export, the retry adopts that
+  package's canonical manifest and split IDs while every other workbook, receipt, run,
+  metric, fold, and artifact field remains exact. Caller-supplied manifest IDs never use
+  this exception.
+- Re-recording one model run replaces its aggregate-metric snapshot and the fold-metric
+  snapshot for its primary split inside the same transaction; metrics omitted by the new
+  evidence cannot survive as stale audit rows.
+
 ## Error Handling
 
 - Scaffolded default builds fail with model-focused messages for missing final-frame

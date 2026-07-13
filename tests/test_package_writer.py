@@ -482,6 +482,18 @@ def test_package_writer_rejects_existing_package_built_from_other_rate_content()
         load_staging_to_rating_package(engine, args)
 
 
+def test_package_writer_reuses_legacy_package_without_staging_digest():
+    engine = _FakeExistingPackageEngine(
+        existing_package=_existing_package(staging_content_sha256=None),
+    )
+    args = _new_package_args(
+        expected_staged_metadata={"staging_content_sha256": "a" * 64},
+    )
+
+    assert load_staging_to_rating_package(engine, args) == 42
+    assert args.was_existing is True
+
+
 def test_package_writer_rejects_root_package_without_version_reservation():
     engine = _FakeNewPackageEngine(reservation={})
     engine.connection.reservation = None

@@ -52,6 +52,11 @@ def _existing_export_conflicts(
         staged_value = _identity_text(meta[field_name])
         if field_name == "source_file" and (existing_value is None or staged_value is None):
             continue
+        if field_name == "staging_content_sha256" and existing_value is None:
+            # V028 intentionally left pre-migration packages without a digest.
+            # Their remaining immutable metadata and model-run lineage still
+            # provide the compatibility check available when they were written.
+            continue
         if existing_value != staged_value:
             conflicts.append(
                 f"{field_name} existing={existing_package[field_name]!r} "

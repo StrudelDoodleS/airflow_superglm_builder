@@ -561,9 +561,17 @@ def test_publish_completed_model_build_creates_manifest_and_delegates(
         ),
     )
 
-    def fake_publish(engine_arg, export, *, model_config, allowed_artifact_root=None):
+    def fake_publish(
+        engine_arg,
+        export,
+        *,
+        model_config,
+        allowed_artifact_root=None,
+        allow_generated_lineage_reuse=False,
+    ):
         calls.append(("publish", engine_arg, export, model_config))
         assert isinstance(export, ModelExportResult)
+        assert allow_generated_lineage_reuse is True
         return {
             "mlflow_run_id": "mlflow-1",
             "export_id": "export-1",
@@ -632,8 +640,16 @@ def test_publish_completed_model_build_returns_canonical_retry_lineage_and_disca
         ),
     )
 
-    def fake_publish(engine, export, *, model_config, allowed_artifact_root=None):
+    def fake_publish(
+        engine,
+        export,
+        *,
+        model_config,
+        allowed_artifact_root=None,
+        allow_generated_lineage_reuse=False,
+    ):
         assert allowed_artifact_root == settings.workbench_artifact_root
+        assert allow_generated_lineage_reuse is True
         return {
             "mlflow_run_id": "mlflow-original",
             "export_id": "export-1",

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1559,7 +1560,7 @@ def test_record_model_run_uses_parameterized_sql_with_expected_params():
         publication_receipt_sha256="c" * 64,
     )
 
-    assert len(events) == 8
+    assert len(events) == 10
     sql = events[1][1]
     params = events[1][2]
     assert "MERGE pricing.MODEL_RUN" in sql
@@ -2016,6 +2017,61 @@ def test_record_model_run_persists_candidate_artifact_and_cv_metrics():
         "metric_name": "deviance",
         "metric_value": 0.4,
     }
+
+
+def test_record_model_run_replaces_metric_snapshots_before_upserting_values():
+    events = []
+    engine = FakeLineageEngine(events)
+
+    lineage.record_model_run(
+        engine,
+        dag_id="dag",
+        airflow_run_id="scheduled__2026-07-13",
+        mlflow_run_id="",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        export_id="export-1",
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v1",
+        rate_package_id=42,
+        rating_workbook_path="/tmp/rating.xlsx",
+        run_status="SUCCESS",
+        created_by="airflow",
+        metrics={"deviance": 0.42},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
+
+    executed = [event for event in events if event[0] == "execute"]
+    run_metric_delete = next(
+        event
+        for event in executed
+        if "DELETE FROM mlops.MODEL_RUN_METRIC" in event[1]
+    )
+    fold_metric_delete = next(
+        event
+        for event in executed
+        if "DELETE FROM pricing.CV_FOLD_METRIC" in event[1]
+    )
+    run_metric_merge = next(
+        event
+        for event in executed
+        if "MERGE mlops.MODEL_RUN_METRIC" in event[1]
+    )
+    fold_metric_merge = next(
+        event
+        for event in executed
+        if "MERGE pricing.CV_FOLD_METRIC" in event[1]
+    )
+    assert run_metric_delete[2] == {"model_run_id": 501}
+    assert fold_metric_delete[2] == {
+        "model_run_id": 501,
+        "split_set_id": "split-1",
+    }
+    assert executed.index(run_metric_delete) < executed.index(run_metric_merge)
+    assert executed.index(fold_metric_delete) < executed.index(fold_metric_merge)
 
 
 def test_pipeline_imports_with_split_airflow_package_without_script_import_side_effects(
@@ -2875,11 +2931,53 @@ def test_existing_published_run_resolver_requires_exact_complete_lineage(tmp_pat
         pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
 
 
+def test_existing_published_run_resolver_adopts_winner_for_generated_lineage_retry(
+    tmp_path: Path,
+):
+    evidence = _existing_retry_evidence(tmp_path)
+    export = replace(
+        _retry_export(tmp_path),
+        manifest_id="manifest-retry",
+        split_set_id="split-retry",
+    )
+
+    existing = pipeline._resolve_existing_published_run(
+        _EvidenceEngine(evidence),
+        export,
+        allow_generated_lineage_reuse=True,
+    )
+
+    assert existing is not None
+    assert existing.manifest_id == "manifest-1"
+    assert existing.split_set_id == "split-1"
+
+
+def test_generated_lineage_retry_still_rejects_changed_model_evidence(tmp_path: Path):
+    evidence = _existing_retry_evidence(tmp_path)
+    evidence["metrics"][0]["metric_value"] = 9.0
+    export = replace(
+        _retry_export(tmp_path),
+        manifest_id="manifest-retry",
+        split_set_id="split-retry",
+    )
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="incompatible evidence.*metrics",
+    ):
+        pipeline._resolve_existing_published_run(
+            _EvidenceEngine(evidence),
+            export,
+            allow_generated_lineage_reuse=True,
+        )
+
+
 def test_losing_publisher_validates_existing_lineage_without_rewriting(
     monkeypatch,
     tmp_path: Path,
 ):
     export = _retry_export(tmp_path)
+    resolver_options = []
     existing = pipeline.ExistingPublishedRun(
         model_id=17,
         model_name="MTPL_FREQ",
@@ -2915,10 +3013,15 @@ def test_losing_publisher_validates_existing_lineage_without_rewriting(
             )
 
     monkeypatch.setattr(pipeline, "ModelPublisher", LosingPublisher)
+
+    def resolve_existing(*args, **kwargs):
+        resolver_options.append(kwargs)
+        return existing
+
     monkeypatch.setattr(
         pipeline,
         "_resolve_existing_published_run",
-        lambda *args, **kwargs: existing,
+        resolve_existing,
     )
     monkeypatch.setattr(
         pipeline,
@@ -2926,10 +3029,21 @@ def test_losing_publisher_validates_existing_lineage_without_rewriting(
         lambda *args, **kwargs: pytest.fail("losing publisher must not rewrite lineage"),
     )
 
-    result = pipeline.publish_model_export(object(), export, model_config=MODEL_CONFIG)
+    result = pipeline.publish_model_export(
+        object(),
+        export,
+        model_config=MODEL_CONFIG,
+        allow_generated_lineage_reuse=True,
+    )
 
     assert result["model_run_id"] == "901"
     assert result["was_existing"] is True
+    assert resolver_options == [
+        {
+            "allowed_artifact_root": None,
+            "allow_generated_lineage_reuse": True,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

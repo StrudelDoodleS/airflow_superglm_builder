@@ -100,6 +100,32 @@ def _evidence_rows(connection, query, *, model_run_id: int) -> list[dict]:
     ]
 
 
+def _retry_lineage_identity(
+    *,
+    row: dict,
+    export: ModelExportResult,
+    split_rows: list[dict],
+    allow_generated_lineage_reuse: bool,
+) -> tuple[str | None, str | None]:
+    if not allow_generated_lineage_reuse:
+        return export.manifest_id, export.split_set_id
+
+    manifest_id = _text_evidence(row.get("manifest_id"))
+    if export.split_set_id is None:
+        return manifest_id, None
+
+    canonical_split_ids = {
+        _text_evidence(item.get("split_set_id"))
+        for item in split_rows
+        if _text_evidence(item.get("manifest_id")) == manifest_id
+        and _text_evidence(item.get("dataset_role")) == "training"
+        and _text_evidence(item.get("split_role")) == "validation"
+    }
+    if len(canonical_split_ids) == 1:
+        return manifest_id, canonical_split_ids.pop()
+    return manifest_id, export.split_set_id
+
+
 def _retry_evidence_conflicts(
     *,
     row: dict,
@@ -108,7 +134,14 @@ def _retry_evidence_conflicts(
     split_rows: list[dict],
     metric_rows: list[dict],
     fold_rows: list[dict],
+    allow_generated_lineage_reuse: bool = False,
 ) -> list[str]:
+    expected_manifest_id, expected_split_set_id = _retry_lineage_identity(
+        row=row,
+        export=export,
+        split_rows=split_rows,
+        allow_generated_lineage_reuse=allow_generated_lineage_reuse,
+    )
     path_fields = {
         "source_file",
         "rating_workbook_path",
@@ -138,7 +171,7 @@ def _retry_evidence_conflicts(
         "dag_id": export.dag_id,
         "airflow_run_id": export.airflow_run_id,
         "mlflow_run_id": export.mlflow_run_id,
-        "manifest_id": export.manifest_id,
+        "manifest_id": expected_manifest_id,
         "rating_workbook_path": export.rating_workbook_path,
         "publication_receipt_path": export.publication_receipt_path,
         "publication_receipt_sha256": export.publication_receipt_sha256,
@@ -170,7 +203,7 @@ def _retry_evidence_conflicts(
                 f"{field_name} expected={expected_identity!r} stored={actual_identity!r}"
             )
 
-    expected_datasets = {(export.manifest_id, "training")}
+    expected_datasets = {(expected_manifest_id, "training")}
     actual_datasets = {
         (str(item["manifest_id"]), str(item["dataset_role"])) for item in dataset_rows
     }
@@ -182,8 +215,15 @@ def _retry_evidence_conflicts(
 
     expected_splits = (
         set()
-        if export.split_set_id is None
-        else {(export.manifest_id, export.split_set_id, "training", "validation")}
+        if expected_split_set_id is None
+        else {
+            (
+                expected_manifest_id,
+                expected_split_set_id,
+                "training",
+                "validation",
+            )
+        }
     )
     actual_splits = {
         (
@@ -215,7 +255,7 @@ def _retry_evidence_conflicts(
 
     expected_folds = {
         (
-            _text_evidence(export.split_set_id),
+            _text_evidence(expected_split_set_id),
             int(item["fold_no"]),
             str(item["metric_name"]),
             float(item["metric_value"]),
@@ -243,6 +283,7 @@ def _resolve_existing_published_run(
     export: ModelExportResult,
     *,
     allowed_artifact_root: str | Path | None = None,
+    allow_generated_lineage_reuse: bool = False,
 ) -> ExistingPublishedRun | None:
     schemas = schema_names_from_connectable(engine)
     query = text(
@@ -364,10 +405,22 @@ def _resolve_existing_published_run(
         split_rows=split_rows,
         metric_rows=metric_rows,
         fold_rows=fold_rows,
+        allow_generated_lineage_reuse=allow_generated_lineage_reuse,
     )
     if conflicts:
         raise PublishedRunIntegrityError(
             "existing export has incompatible evidence: " + "; ".join(conflicts)
+        )
+
+    resolved_manifest_id, resolved_split_set_id = _retry_lineage_identity(
+        row=row,
+        export=export,
+        split_rows=split_rows,
+        allow_generated_lineage_reuse=allow_generated_lineage_reuse,
+    )
+    if resolved_manifest_id is None:
+        raise PublishedRunIntegrityError(
+            "existing successful run has no dataset manifest identity"
         )
 
     artifact_fields = (
@@ -412,8 +465,7 @@ def _resolve_existing_published_run(
             raise PublishedRunIntegrityError(
                 "existing candidate artifact manifest does not match model-run lineage"
             )
-        row_split_set_id = export.split_set_id
-        if bundle.split_set_id != row_split_set_id:
+        if bundle.split_set_id != resolved_split_set_id:
             raise PublishedRunIntegrityError(
                 "existing candidate artifact split set does not match model-run lineage"
             )
@@ -427,8 +479,8 @@ def _resolve_existing_published_run(
         package_version=int(row["package_version"]),
         package_status=str(row["package_status"]),
         model_run_id=int(row["model_run_id"]),
-        manifest_id=str(row["manifest_id"]),
-        split_set_id=export.split_set_id,
+        manifest_id=resolved_manifest_id,
+        split_set_id=resolved_split_set_id,
         rating_workbook_path=str(row["rating_workbook_path"]),
         mlflow_run_id=str(row.get("mlflow_run_id") or ""),
         publication_receipt_path=(
@@ -541,6 +593,7 @@ def publish_model_export(
     *,
     model_config: ModelBuildConfig,
     allowed_artifact_root: str | Path | None = None,
+    allow_generated_lineage_reuse: bool = False,
 ) -> dict[str, str | bool | None]:
     export_result = ModelExportResult.from_mapping(export)
     publisher = ModelPublisher(engine, model_config)
@@ -596,6 +649,7 @@ def publish_model_export(
             engine,
             export_result,
             allowed_artifact_root=allowed_artifact_root,
+            allow_generated_lineage_reuse=allow_generated_lineage_reuse,
         )
         if existing is None:
             raise PublishedRunIntegrityError(

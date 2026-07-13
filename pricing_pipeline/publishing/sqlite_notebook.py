@@ -182,6 +182,7 @@ def _existing_local_publication(
                     rp.split_set_id,
                     rp.rating_workbook_path,
                     rp.publication_receipt_sha256,
+                    rp.staging_content_sha256,
                     rp.source_export_id,
                     mr.model_run_id,
                     mr.run_status,
@@ -265,6 +266,7 @@ def _local_publication_conflicts(
     build: CompletedModelBuild,
     manifest_id: str,
     split_set_id: str | None,
+    staging_content_sha256: str | None,
 ) -> list[str]:
     expected = {
         "model_version": build.model_version,
@@ -282,6 +284,17 @@ def _local_publication_conflicts(
             conflicts.append(
                 f"{field_name} existing={existing_value!r} requested={expected_value!r}"
             )
+    existing_staging_digest = _identity(existing["staging_content_sha256"])
+    requested_staging_digest = _identity(staging_content_sha256)
+    if (
+        existing_staging_digest is not None
+        and existing_staging_digest != requested_staging_digest
+    ):
+        conflicts.append(
+            "staging_content_sha256 "
+            f"existing={existing_staging_digest!r} "
+            f"requested={requested_staging_digest!r}"
+        )
     return conflicts
 
 
@@ -525,44 +538,6 @@ def _publish_sqlite_candidate_locked(
             allowed_root=artifact_root,
         )
 
-    with engine.connect() as connection:
-        existing = _existing_local_publication(
-            connection,
-            model_id=model_id,
-            export_id=export_id,
-        )
-        if existing is not None:
-            conflicts = _local_publication_conflicts(
-                existing,
-                build=build,
-                manifest_id=manifest_id,
-                split_set_id=split_set_id,
-            )
-            if conflicts:
-                raise ValueError(
-                    f"export_id {export_id!r} has incompatible publication evidence: "
-                    + "; ".join(conflicts)
-                )
-            run_conflicts = _model_run_evidence_conflicts(
-                connection,
-                existing,
-                build=build,
-                export_id=export_id,
-                manifest_id=manifest_id,
-                split_set_id=split_set_id,
-            )
-            if run_conflicts:
-                raise ValueError(
-                    f"export_id {export_id!r} has incompatible model-run evidence: "
-                    + "; ".join(run_conflicts)
-                )
-            return _local_publish_result(
-                model_id=model_id,
-                model_config=model_config,
-                package_row=existing,
-                was_existing=True,
-            )
-
     stage_rating_export(
         engine,
         workbook_path=Path(build.rating_workbook_path),
@@ -600,12 +575,25 @@ def _publish_sqlite_candidate_locked(
             model_id=model_id,
             export_id=export_id,
         )
+        staged_conflicts = _staged_export_conflicts(
+            staged,
+            model_id=model_id,
+            model_config=model_config,
+            build=build,
+            export_id=export_id,
+        )
+        if staged_conflicts:
+            raise ValueError(
+                f"export_id {export_id!r} has incompatible staged evidence: "
+                + "; ".join(staged_conflicts)
+            )
         if existing is not None:
             conflicts = _local_publication_conflicts(
                 existing,
                 build=build,
                 manifest_id=manifest_id,
                 split_set_id=split_set_id,
+                staging_content_sha256=staged["staging_content_sha256"],
             )
             if conflicts:
                 raise ValueError(
@@ -630,19 +618,6 @@ def _publish_sqlite_candidate_locked(
                 model_config=model_config,
                 package_row=existing,
                 was_existing=True,
-            )
-
-        staged_conflicts = _staged_export_conflicts(
-            staged,
-            model_id=model_id,
-            model_config=model_config,
-            build=build,
-            export_id=export_id,
-        )
-        if staged_conflicts:
-            raise ValueError(
-                f"export_id {export_id!r} has incompatible staged evidence: "
-                + "; ".join(staged_conflicts)
             )
 
         reserved_version = connection.execute(

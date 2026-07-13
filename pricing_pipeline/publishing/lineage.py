@@ -40,6 +40,8 @@ def record_model_run(
     parent_model_run_id: int | None = None,
     connection=None,
 ) -> int:
+    if fold_metrics and split_set_id is None:
+        raise ValueError("fold_metrics require split_set_id")
     params = {
         "dag_id": dag_id,
         "airflow_run_id": airflow_run_id,
@@ -378,6 +380,29 @@ def record_model_run(
                     "parent_model_run_id": parent_model_run_id,
                 },
             )
+        con.execute(
+            text(
+                """
+                DELETE FROM mlops.MODEL_RUN_METRIC
+                WHERE model_run_id = :model_run_id;
+                """
+            ),
+            {"model_run_id": model_run_id},
+        )
+        if split_set_id is not None:
+            con.execute(
+                text(
+                    """
+                    DELETE FROM pricing.CV_FOLD_METRIC
+                    WHERE model_run_id = :model_run_id
+                      AND split_set_id = :split_set_id;
+                    """
+                ),
+                {
+                    "model_run_id": model_run_id,
+                    "split_set_id": split_set_id,
+                },
+            )
         for metric_name in sorted(metrics or {}):
             con.execute(
                 text(
@@ -411,8 +436,6 @@ def record_model_run(
                     "metric_scope": (metric_scopes or {}).get(metric_name),
                 },
             )
-        if fold_metrics and split_set_id is None:
-            raise ValueError("fold_metrics require split_set_id")
         for metric in fold_metrics:
             con.execute(
                 text(

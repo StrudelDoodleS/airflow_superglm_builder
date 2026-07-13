@@ -638,12 +638,13 @@ def publish_completed_model_build(
         package_status or model_config.default_package_status,
         "package_status",
     )
+    generated_lineage = build.manifest_id is None
 
-    if build.manifest_id is None and dataset is None:
+    if generated_lineage and dataset is None:
         raise CompletedModelBuildError("dataset is required when manifest_id is not supplied")
 
     model_id = validate_model_on_engine(engine, model_config)
-    if build.manifest_id is None:
+    if generated_lineage:
         manifest_result = create_dataset_manifest_with_split(
             engine,
             dataset=dataset,
@@ -710,11 +711,15 @@ def publish_completed_model_build(
         model_config,
         default_package_status=resolved_package_status,
     )
+    generated_lineage_options = (
+        {"allow_generated_lineage_reuse": True} if generated_lineage else {}
+    )
     publish_result = publish_model_export(
         engine,
         export,
         model_config=publish_config,
         allowed_artifact_root=settings.workbench_artifact_root,
+        **generated_lineage_options,
     )
 
     _discard_redundant_completed_build_attempt(
