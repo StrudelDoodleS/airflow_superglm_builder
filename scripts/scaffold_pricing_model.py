@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import keyword
 import re
 import sys
@@ -684,6 +685,256 @@ def _factory_dag_template(*, package_name: str, dag_id: str) -> str:
     )
 
 
+def _notebook_code_cell(source: str) -> dict[str, object]:
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": [dedent(source).strip() + "\n"],
+    }
+
+
+def _notebook_markdown_cell(source: str) -> dict[str, object]:
+    return {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": [dedent(source).strip() + "\n"],
+    }
+
+
+def _pricing_notebook_template(
+    *,
+    package_name: str,
+    model_name: str,
+    model_label: str,
+    target_name: str,
+    model_type: str,
+    deployment_slot: str,
+) -> str:
+    feature_name = "feature_1" if target_name != "feature_1" else "feature_2"
+    pk_name = "row_id" if target_name != "row_id" else "record_id"
+    exposure_name = "exposure" if target_name != "exposure" else "earned_exposure"
+    cells = [
+        _notebook_markdown_cell(
+            f"""
+            # {model_label}
+
+            This notebook owns the model and data decisions. The helper functions
+            derive and persist model IDs, versions, dataset fingerprints, validation
+            evidence, artifact hashes, and publication audit rows.
+            """
+        ),
+        _notebook_markdown_cell(
+            """
+            ## Analyst controls
+
+            Local mode creates and reuses `.local/*.sqlite`. At work, set
+            `PRICING_RUNTIME_MODULE` outside this notebook, choose remote mode, enter
+            the expected database name, and enable writes only after checking the
+            displayed destination.
+            """
+        ),
+        _notebook_code_cell(
+            """
+            # Remote mode loads your private module from PRICING_RUNTIME_MODULE.
+            DATABASE_MODE = "local"  # "local" or "remote"
+            EXPECTED_REMOTE_DATABASE = ""
+            ALLOW_REMOTE_WRITES = False
+
+            DATA_AS_OF = None  # Or derive it from MODEL.data_as_of_column below.
+            RUN_EDITOR = False
+            EDIT_REASON = ""
+            DEPLOY = False
+            DEPLOYMENT_REASON = ""
+            """
+        ),
+        _notebook_code_cell(
+            f"""
+            from datetime import date
+            from pathlib import Path
+
+            import numpy as np
+            import pandas as pd
+            from superglm import Numeric, SuperGLM
+
+            from pricing_pipeline.models.config import ValidationSplitConfig
+            from pricing_pipeline.notebook import (
+                PricingModelSpec,
+                build_candidate,
+                connect,
+                deploy_package,
+                open_candidate,
+                publish_candidate,
+                publish_edits,
+                register_model,
+            )
+
+            MODEL_DIR = Path("pricing_models/{package_name}")
+            if not MODEL_DIR.is_dir():
+                MODEL_DIR = Path.cwd()
+            MODEL_DIR = MODEL_DIR.resolve()
+            """
+        ),
+        _notebook_markdown_cell("## Connect and verify the destination"),
+        _notebook_code_cell(
+            """
+            pricing = connect(
+                mode=DATABASE_MODE,
+                local_root=MODEL_DIR / ".local",
+                expected_remote_database=EXPECTED_REMOTE_DATABASE,
+                allow_remote_writes=ALLOW_REMOTE_WRITES,
+            )
+            display(pricing.destination)
+            """
+        ),
+        _notebook_markdown_cell(
+            """
+            ## Load the model frame
+
+            Replace this cell with the normal work SQL helper or another source.
+            Keep the primary key, target, features, exposure/weights, optional split
+            column, and data-as-of column in the final frame.
+            """
+        ),
+        _notebook_code_cell(
+            f"""
+            rng = np.random.default_rng(42)
+            frame = pd.DataFrame({{
+                {pk_name!r}: np.arange(1, 101),
+                {feature_name!r}: rng.normal(size=100),
+                {exposure_name!r}: rng.uniform(0.25, 1.0, size=100),
+                "data_as_of": [date.today()] * 100,
+            }})
+            frame[{target_name!r}] = rng.poisson(
+                frame[{exposure_name!r}]
+                * np.exp(-2.5 + 0.25 * frame[{feature_name!r}])
+            )
+            display({{"Rows loaded": len(frame), "Columns loaded": len(frame.columns)}})
+            """
+        ),
+        _notebook_markdown_cell("## Define and register the model"),
+        _notebook_code_cell(
+            f"""
+            MODEL = PricingModelSpec(
+                name={model_name!r},
+                label={model_label!r},
+                target={target_name!r},
+                model_type={model_type!r},
+                deployment_slot={deployment_slot!r},
+                features=({feature_name!r},),
+                dataset_name={f"{package_name}_model_frame"!r},
+                source_system="scaffold_demo",
+                pk_columns=({pk_name!r},),
+                exposure_column={exposure_name!r},
+                data_as_of_column="data_as_of",
+                validation=ValidationSplitConfig.kfold(
+                    n_splits=5,
+                    random_state=42,
+                    shuffle=True,
+                    materialize=True,
+                ),
+            )
+            model = register_model(pricing, MODEL, source_root=MODEL_DIR)
+            display({{"Model": model.name, "SQL model ID": model.model_id}})
+            """
+        ),
+        _notebook_markdown_cell("## Define and fit the model"),
+        _notebook_code_cell(
+            f"""
+            def make_model():
+                return SuperGLM(
+                    family="poisson",
+                    selection_penalty=0.0,
+                    discrete=True,
+                    n_bins=64,
+                    features={{{feature_name!r}: Numeric()}},
+                )
+
+            candidate = build_candidate(
+                pricing,
+                model=model,
+                frame=frame,
+                model_factory=make_model,
+                data_as_of=DATA_AS_OF,
+            )
+            candidate.metrics
+            """
+        ),
+        _notebook_markdown_cell(
+            """
+            ## Publish the immutable candidate
+
+            This records the audit trail and rating package. It does not deploy it.
+            """
+        ),
+        _notebook_code_cell(
+            """
+            published = publish_candidate(pricing, candidate)
+            display({
+                "Model run": published.model_run_id,
+                "Dataset manifest": published.manifest_id,
+                "Validation split": published.split_set_id,
+                "Rate package": published.rate_package_id,
+                "Package version": published.package_version,
+                "State": published.package_status,
+            })
+            """
+        ),
+        _notebook_markdown_cell("## Optional market edit (remote mode only)"),
+        _notebook_code_cell(
+            """
+            edited = None
+            if RUN_EDITOR:
+                editable = open_candidate(
+                    pricing,
+                    model=model,
+                    package_version=published.package_version,
+                )
+                display(editable.editor())
+                if not EDIT_REASON.strip():
+                    raise ValueError("Describe the market or underwriting edit.")
+                edited = publish_edits(
+                    pricing,
+                    model=model,
+                    candidate=editable,
+                    reason=EDIT_REASON,
+                )
+                display(edited)
+            """
+        ),
+        _notebook_markdown_cell("## Optional deployment (remote mode only)"),
+        _notebook_code_cell(
+            """
+            if DEPLOY:
+                if not DEPLOYMENT_REASON.strip():
+                    raise ValueError("Describe the approval for changing the live package.")
+                deployment = deploy_package(
+                    pricing,
+                    model=model,
+                    package=edited if edited is not None else published,
+                    reason=DEPLOYMENT_REASON,
+                )
+                display(deployment)
+            """
+        ),
+    ]
+    notebook = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {"name": "python", "version": "3"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    return json.dumps(notebook, indent=1, ensure_ascii=False) + "\n"
+
+
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     model_name = _validate_model_name(options.model_name)
     template = _required_text(options.template, "template")
@@ -719,6 +970,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         files = (
             package_dir / "__init__.py",
             package_dir / "model.toml",
+            package_dir / "pricing_model.ipynb",
             package_dir / "training.py",
             package_dir / "spec.py",
             dag_path,
@@ -727,6 +979,7 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         files = (
             package_dir / "__init__.py",
             package_dir / "model.toml",
+            package_dir / "pricing_model.ipynb",
             package_dir / "sql" / "source_data.sql",
             package_dir / "spec.py",
             package_dir / "data.py",
@@ -741,6 +994,14 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     content_by_path = {
         package_dir / "__init__.py": _package_init_template(package_name=package_name),
         package_dir / "model.toml": _model_toml_template(
+            model_name=model_name,
+            model_label=model_label,
+            target_name=target_name,
+            model_type=model_type,
+            deployment_slot=deployment_slot,
+        ),
+        package_dir / "pricing_model.ipynb": _pricing_notebook_template(
+            package_name=package_name,
             model_name=model_name,
             model_label=model_label,
             target_name=target_name,

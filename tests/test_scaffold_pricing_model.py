@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +24,7 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert result.created_files == (
         package_dir / "__init__.py",
         package_dir / "model.toml",
+        package_dir / "pricing_model.ipynb",
         package_dir / "sql" / "source_data.sql",
         package_dir / "spec.py",
         package_dir / "data.py",
@@ -120,6 +122,44 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "build_pricing_model_dag" not in dag
     assert "MODEL_SPEC" not in dag
 
+    notebook_path = package_dir / "pricing_model.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    code_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    ]
+    source = "\n".join(code_cells)
+    assert 'DATABASE_MODE = "local"' in code_cells[0]
+    assert 'EXPECTED_REMOTE_DATABASE = ""' in code_cells[0]
+    assert "ALLOW_REMOTE_WRITES = False" in code_cells[0]
+    for index, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        compile(
+            "".join(cell.get("source", [])),
+            f"{notebook_path}:cell-{index}",
+            "exec",
+        )
+        assert cell.get("execution_count") is None
+        assert cell.get("outputs") == []
+
+    globals_cell = next(cell for cell in code_cells if "DATABASE_MODE" in cell)
+    assert 'DATABASE_MODE = "local"' in globals_cell
+    assert 'EXPECTED_REMOTE_DATABASE = ""' in globals_cell
+    assert "ALLOW_REMOTE_WRITES = False" in globals_cell
+    connection_cell = next(cell for cell in code_cells if "pricing = connect(" in cell)
+    assert "mode=DATABASE_MODE" in connection_cell
+    assert 'local_root=MODEL_DIR / ".local"' in connection_cell
+    assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in connection_cell
+    assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in connection_cell
+    assert "pricing.destination" in connection_cell
+    assert "PRICING_RUNTIME_MODULE" in source
+    assert "private-server" not in source
+    assert "mssql_server" not in source
+    assert ".head(" not in source
+    assert "display(frame" not in source
+
 
 def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
     result = scaffold_pricing_model(
@@ -138,6 +178,7 @@ def test_scaffold_pricing_model_can_write_factory_template(tmp_path):
     assert result.created_files == (
         package_dir / "__init__.py",
         package_dir / "model.toml",
+        package_dir / "pricing_model.ipynb",
         package_dir / "training.py",
         package_dir / "spec.py",
         dag_path,

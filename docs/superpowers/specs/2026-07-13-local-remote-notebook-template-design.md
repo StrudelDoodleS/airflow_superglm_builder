@@ -39,6 +39,8 @@ The remaining visible cells are ordinary notebook work: load a frame, define fea
 - Never reset or delete a local store as a side effect of running the pricing notebook.
 - Point generated artifacts at local writable directories rather than Docker `/opt` paths.
 - Do not commit empty or populated SQLite database files.
+- Treat local mode as candidate-build and audit publication only. Editor revision
+  publication and deployment require the governed remote database.
 
 This gives a newly scaffolded notebook a working audit store without Docker, Airflow, credentials, or database setup.
 
@@ -70,14 +72,14 @@ Existing callers that do not choose a mode retain their current runtime-provider
 
 The notebook is intentionally small:
 
-1. imports and model directory;
-2. global analyst controls;
+1. global analyst controls in the first code cell;
+2. imports and model directory;
 3. connection and visible destination;
 4. analyst-owned data-loading cell;
 5. feature, transform, and model definition;
 6. one candidate build call;
 7. metrics and audit summary;
-8. explicit publish, edit, and deploy cells.
+8. explicit publish, edit, and deploy cells, with edit/deploy labelled remote-only.
 
 The framework derives dataset fingerprints, primary-key tracking, split metadata, model revisions, transform metadata, offsets, weights, metrics, and audit rows wherever the available inputs make that possible. Analysts supply genuine modelling decisions; they do not manually assemble audit records.
 
@@ -92,5 +94,5 @@ Tests will demonstrate that:
 - an allowed remote context uses the private runtime provider without running DDL;
 - all notebook mutation entry points use the write guard;
 - scaffolding produces a valid, output-free `.ipynb` whose code cells compile;
+- every committed pricing notebook is output-free and avoids row-level previews;
 - no connection details or SQLite database files are added to version control.
-

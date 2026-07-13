@@ -6,6 +6,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .ipynb_checkpoints/
+pricing_models/*/.local/
+*.sqlite
 .codex
 .dags_root_owned_backup_*/
 logs/

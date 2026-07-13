@@ -412,7 +412,9 @@ def hash_model_source(root: str | Path) -> str:
     paths = sorted(
         path
         for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
+        if path.is_file()
+        and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
+        and ".ipynb_checkpoints" not in path.relative_to(source_root).parts
     )
     if not paths:
         raise StandardSuperGLMError(

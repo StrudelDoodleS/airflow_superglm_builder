@@ -7,8 +7,8 @@ identifiers, audit records, artifact locations, and publication plumbing.
 from __future__ import annotations
 
 import getpass
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,12 +16,14 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+from sqlalchemy import text
 
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
     validation_split_indices,
 )
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
@@ -43,6 +45,11 @@ from pricing_pipeline.publishing.model_versions import resolve_model_version_for
 from pricing_pipeline.publishing.deployment import deploy_rate_package
 from pricing_pipeline.publishing.editor_candidate import publish_editor_submission
 from pricing_pipeline.publishing.rating_export import build_export_id
+from pricing_pipeline.publishing.sqlite_notebook import (
+    publish_sqlite_candidate,
+    register_sqlite_model,
+    resolve_sqlite_model_version,
+)
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 from pricing_pipeline.workbench.core import Workbench
 from pricing_pipeline.workbench.submission import create_editor_submission
@@ -52,6 +59,18 @@ from pricing_pipeline.workbench.submission import create_editor_submission
 class NotebookContext:
     engine: Any
     settings: Settings
+    mode: str = "runtime"
+    write_allowed: bool = True
+    destination: str = "configured runtime"
+    database_paths: Mapping[str, Path] = field(default_factory=dict)
+
+    def require_write(self, operation: str) -> None:
+        """Stop remote mutations until the notebook explicitly enables them."""
+        if not self.write_allowed:
+            raise PermissionError(
+                f"Remote writes are disabled for {operation}. Confirm "
+                "EXPECTED_REMOTE_DATABASE and set ALLOW_REMOTE_WRITES = True."
+            )
 
 
 @dataclass(frozen=True)
@@ -315,8 +334,87 @@ def _identity_aligned(
     return aligned
 
 
-def connect(runtime_module: str | None = None) -> NotebookContext:
-    """Connect through the governed runtime module without starting Airflow."""
+def _local_notebook_settings(root: Path) -> Settings:
+    return replace(
+        Settings(),
+        pricing_database="local_sqlite",
+        mlflow_enabled=False,
+        skip_database_create=True,
+        rating_export_root=root / "rating_exports",
+        validation_split_artifact_root=root / "validation_splits",
+        workbench_artifact_root=root / "workbench_artifacts",
+    )
+
+
+def _connect_local(local_root: str | Path | None) -> NotebookContext:
+    if local_root is None or not str(local_root).strip():
+        raise ValueError("local_root is required when mode='local'")
+    root = Path(local_root).expanduser().resolve()
+    engine, database_paths = open_offline_sqlite(root)
+    return NotebookContext(
+        engine=engine,
+        settings=_local_notebook_settings(root),
+        mode="local",
+        write_allowed=True,
+        destination=f"local SQLite: {root}",
+        database_paths=database_paths,
+    )
+
+
+def _connect_remote(
+    runtime_module: str | None,
+    *,
+    expected_database: str | None,
+    allow_writes: bool,
+) -> NotebookContext:
+    expected = str(expected_database or "").strip()
+    if not expected:
+        raise ValueError(
+            "expected_remote_database is required when mode='remote'"
+        )
+
+    runtime = runtime_from_env_or_module(runtime_module)
+    engine = runtime.get_engine()
+    with engine.connect() as connection:
+        actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}. Writes remain disabled."
+        )
+    return NotebookContext(
+        engine=engine,
+        settings=runtime.settings,
+        mode="remote",
+        write_allowed=bool(allow_writes),
+        destination=f"remote SQL database: {actual}",
+    )
+
+
+def connect(
+    runtime_module: str | None = None,
+    *,
+    mode: str | None = None,
+    local_root: str | Path | None = None,
+    expected_remote_database: str | None = None,
+    allow_remote_writes: bool = False,
+) -> NotebookContext:
+    """Connect locally or through a governed private runtime without Airflow."""
+    selected_mode = None if mode is None else str(mode).strip().lower()
+    if selected_mode == "local":
+        return _connect_local(local_root)
+    if selected_mode == "remote":
+        return _connect_remote(
+            runtime_module,
+            expected_database=expected_remote_database,
+            allow_writes=allow_remote_writes,
+        )
+    if selected_mode is not None:
+        raise ValueError("mode must be 'local' or 'remote'")
+
     runtime = runtime_from_env_or_module(runtime_module)
     return NotebookContext(engine=runtime.get_engine(), settings=runtime.settings)
 
@@ -336,6 +434,7 @@ def register_model(
     created_by: str | None = None,
 ) -> RegisteredModel:
     """Create a model once, then strictly validate its stable SQL identity."""
+    pricing.require_write("register_model")
     root = Path(source_root).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"source_root does not exist: {root}")
@@ -373,6 +472,25 @@ def register_model(
         validation_split=validation_split or ValidationSplitConfig.kfold(),
     )
     identity = _created_by(created_by)
+    if pricing.mode == "local":
+        inserted_model_id = register_sqlite_model(
+            pricing.engine,
+            config,
+            created_by=identity,
+        )
+        with pricing.engine.begin() as connection:
+            record = validate_registered_model(connection, config)
+        if int(inserted_model_id) != int(record.model_id):
+            raise RuntimeError(
+                "registered model_id changed while resolving model identity"
+            )
+        return RegisteredModel(
+            model_id=int(record.model_id),
+            config=config,
+            source_root=root,
+            spec=spec,
+        )
+
     with pricing.engine.begin() as connection:
         inserted_model_id = register_pricing_model(
             connection,
@@ -419,6 +537,7 @@ def build_candidate(
     created_by: str | None = None,
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
+    pricing.require_write("build_candidate")
     spec = model.spec
     if X is None:
         if spec is None:
@@ -501,11 +620,18 @@ def build_candidate(
 
     resolved_run_key = _required_text(run_key or _new_notebook_run_key(), "run_key")
     export_id = build_export_id(model.name, resolved_run_key)
-    model_version = resolve_model_version_for_export(
-        pricing.engine,
-        model_name=model.name,
-        export_id=export_id,
-    )
+    if pricing.mode == "local":
+        model_version = resolve_sqlite_model_version(
+            pricing.engine,
+            model_name=model.name,
+            export_id=export_id,
+        )
+    else:
+        model_version = resolve_model_version_for_export(
+            pricing.engine,
+            model_name=model.name,
+            export_id=export_id,
+        )
     validation_split = model.config.validation_split
     resolved_split_indices = (
         validation_split_indices(frame, validation_split)
@@ -604,14 +730,25 @@ def publish_candidate(
     *,
     created_by: str | None = None,
 ) -> CompletedModelPublishResult:
-    """Publish a built candidate and its audit lineage directly to SQL Server."""
+    """Publish a built candidate and its audit lineage to the selected store."""
+    pricing.require_write("publish_candidate")
+    identity = _created_by(created_by)
+    if pricing.mode == "local":
+        return publish_sqlite_candidate(
+            pricing.engine,
+            settings=pricing.settings,
+            model_id=candidate.model.model_id,
+            model_config=candidate.model.config,
+            completed_build=candidate.completed_build,
+            created_by=identity,
+        )
     return publish_completed_model_build(
         pricing.engine,
         settings=pricing.settings,
         model_config=candidate.model.config,
         dataset=None,
         completed_build=candidate.completed_build,
-        created_by=_created_by(created_by),
+        created_by=identity,
     )
 
 
@@ -640,6 +777,11 @@ def open_candidate(
     package_version: int,
 ):
     """Open one published package for an optional live editor review."""
+    if pricing.mode == "local":
+        raise RuntimeError(
+            "Remote mode is required for the editor; local SQLite records "
+            "candidate audit evidence but does not create editable rating tables."
+        )
     return _workbench(pricing, model).open(
         model.name,
         package_version=int(package_version),
@@ -655,6 +797,12 @@ def publish_edits(
     created_by: str | None = None,
 ):
     """Persist and synchronously publish one retained editor session."""
+    pricing.require_write("publish_edits")
+    if pricing.mode == "local":
+        raise RuntimeError(
+            "Remote mode is required for the editor; local SQLite records "
+            "candidate audit evidence but does not publish editor revisions."
+        )
     if candidate.model_name != model.name:
         raise ValueError("candidate model_name does not match the registered notebook model")
     if candidate.editor_session is None or candidate.editor_widget is None:
@@ -688,6 +836,12 @@ def deploy_package(
     deployed_by: str | None = None,
 ):
     """Deploy a published package with an immediately refreshed stale guard."""
+    pricing.require_write("deploy_package")
+    if pricing.mode == "local":
+        raise RuntimeError(
+            "Remote mode is required for deployment; local SQLite is an audit "
+            "workbench and cannot change a live package."
+        )
     slot = model.config.deployment_slot.upper()
     current_rate_package_id = _workbench(
         pricing,

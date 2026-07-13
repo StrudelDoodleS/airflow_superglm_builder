@@ -34,6 +34,14 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "published.model_run_id" in source
     assert "published.rate_package_id" in source
     assert "published.package_version" in source
+    assert 'DATABASE_MODE = "local"' in source
+    assert 'EXPECTED_REMOTE_DATABASE = ""' in source
+    assert "ALLOW_REMOTE_WRITES = False" in source
+    assert "mode=DATABASE_MODE" in source
+    assert 'local_root=MODEL_DIR / ".local"' in source
+    assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in source
+    assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in source
+    assert "pricing.destination" in source
 
     assert "model.toml" not in lowered
     assert "model_config" not in lowered
@@ -59,16 +67,19 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert assigned_names.isdisjoint(generated_ids)
 
 
-def test_mtpl_pricing_model_notebook_code_cells_compile_and_have_no_saved_output():
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+def test_all_pricing_model_notebooks_compile_and_have_no_saved_output():
+    notebook_paths = sorted(Path("pricing_models").glob("*/pricing_model.ipynb"))
+    assert notebook_paths
 
-    for index, cell in enumerate(notebook["cells"]):
-        if cell["cell_type"] != "code":
-            continue
-        source = "".join(cell.get("source", []))
-        compile(source, f"{NOTEBOOK_PATH}:cell-{index}", "exec")
-        assert cell.get("execution_count") is None
-        assert cell.get("outputs") == []
+    for notebook_path in notebook_paths:
+        notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            source = "".join(cell.get("source", []))
+            compile(source, f"{notebook_path}:cell-{index}", "exec")
+            assert cell.get("execution_count") is None
+            assert cell.get("outputs") == []
 
 
 def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
@@ -80,12 +91,29 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     ]
     source = "\n".join(code_cells)
 
-    assert "PricingModelSpec" in code_cells[0]
-    assert "MODEL = PricingModelSpec(" in code_cells[1]
-    assert "DATA_AS_OF" in code_cells[1]
-    assert "RUN_EDITOR = False" in code_cells[2]
-    assert "DEPLOY = False" in code_cells[2]
+    assert 'DATABASE_MODE = "local"' in code_cells[0]
+    assert 'EXPECTED_REMOTE_DATABASE = ""' in code_cells[0]
+    assert "ALLOW_REMOTE_WRITES = False" in code_cells[0]
+    assert "PricingModelSpec" in source
+    globals_cell = next(cell for cell in code_cells if "DATABASE_MODE" in cell)
+    assert 'DATABASE_MODE = "local"' in globals_cell
+    assert 'EXPECTED_REMOTE_DATABASE = ""' in globals_cell
+    assert "ALLOW_REMOTE_WRITES = False" in globals_cell
+    assert "DATA_AS_OF" in globals_cell
+    assert "RUN_EDITOR = False" in globals_cell
+    assert "DEPLOY = False" in globals_cell
+    model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)
+    assert "FEATURE_COLUMNS" in model_cell
+    connect_cell = next(cell for cell in code_cells if "pricing = connect(" in cell)
+    assert "mode=DATABASE_MODE" in connect_cell
+    assert 'local_root=MODEL_DIR / ".local"' in connect_cell
+    assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in connect_cell
+    assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in connect_cell
+    assert "pricing.destination" in connect_cell
     assert "EFFECTIVE_FROM" not in source
+    assert ".head(" not in source
+    assert "display(raw" not in source
+    assert "display(frame" not in source
 
     build_cell = next(cell for cell in code_cells if "candidate = build_candidate(" in cell)
     assert "pricing," in build_cell

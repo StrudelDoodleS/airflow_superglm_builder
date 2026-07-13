@@ -353,6 +353,10 @@ uv run python scripts/scaffold_pricing_model.py \
 
 By default, the helper writes a custom-DAG starter:
 
+- `pricing_models/<model_name>/pricing_model.ipynb`: the current notebook-first
+  model workflow. It contains the model decisions and ordinary Python data cell;
+  registration, fingerprints, validation evidence, versions, and SQL audit rows
+  stay behind the notebook helpers.
 - `pricing_models/<model_name>/model.toml`: model identity and validation split
   config.
 - `pricing_models/<model_name>/spec.py`: loads `MODEL_CONFIG` only.
@@ -388,6 +392,39 @@ no registry import edits are needed for normal use.
 `scripts/scaffold_pricing_model.py` is the supported model-authoring path. The
 legacy generic `ModelSpec` / `build_pricing_model_dag(...)` builder is not used
 by the candidate workbench workflow.
+
+### Notebook-first database target
+
+For the current Cloud PC workflow, open the model's own
+`pricing_model.ipynb`. Its first settings cell has three database controls:
+
+```python
+DATABASE_MODE = "local"  # "local" or "remote"
+EXPECTED_REMOTE_DATABASE = ""
+ALLOW_REMOTE_WRITES = False
+```
+
+`local` is the safe default. It creates and reuses `pricing.sqlite`,
+`pricing_stg.sqlite`, and `mlops.sqlite` beneath the model's ignored `.local/`
+directory, along with local rating, split, and candidate artifacts. Rerunning
+the notebook creates missing tables but never resets existing rows. Local mode
+records candidate audit evidence; live editor revision publication and deployment
+require the governed remote database.
+
+At work, keep the connection implementation and credentials in the existing
+private Python module and set `PRICING_RUNTIME_MODULE` outside the committed
+notebook. Change `DATABASE_MODE` to `remote`, enter the exact expected database
+name, run the connection cell, and read the displayed destination. Registration,
+candidate building, publication, editor persistence, and deployment remain
+blocked until `ALLOW_REMOTE_WRITES = True`. A database-name mismatch always
+fails before a write. The pricing notebook never creates or migrates a remote
+database; use the separate administrative DDL setup for that.
+
+The data-loading cell is intentionally model-owned. Replace the scaffold's
+small generated frame with the normal work SQL helper, pandas/parquet read, or
+other approved source. That source connection does not need to be the same as
+the SQL audit destination. Airflow/DAG files remain available as a later
+automation path, but are not required for the approved notebook-first workflow.
 
 - Global code in `pricing_pipeline/` owns SQL lifecycle access for schema
   application, dataset manifests, rating export publishing, and lineage writes.

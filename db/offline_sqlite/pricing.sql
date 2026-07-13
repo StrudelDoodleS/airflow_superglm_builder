@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (
     UNIQUE (model_name)
 );
 
+CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL_VERSION_RESERVATION (
+    model_id INTEGER NOT NULL,
+    export_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    reserved_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (model_id, export_id),
+    UNIQUE (model_id, model_version)
+);
+
 CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     model_run_id TEXT PRIMARY KEY,
     model_id INTEGER NOT NULL,

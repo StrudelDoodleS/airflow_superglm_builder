@@ -757,6 +757,25 @@ def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(t
     notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
     original = hash_model_source(tmp_path)
 
+    checkpoint_dir = tmp_path / ".ipynb_checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir / "pricing_model-checkpoint.ipynb"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                **notebook,
+                "cells": [
+                    {
+                        **notebook["cells"][0],
+                        "source": ["MODEL_NAME = 'STALE_CHECKPOINT'\n"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    checkpoint_only_change = hash_model_source(tmp_path)
+
     notebook["cells"][0]["execution_count"] = 7
     notebook["cells"][0]["outputs"] = [{"output_type": "stream", "text": ["trained\n"]}]
     notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
@@ -766,5 +785,6 @@ def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(t
     notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
     source_change = hash_model_source(tmp_path)
 
+    assert checkpoint_only_change == original
     assert output_only_change == original
     assert source_change != original

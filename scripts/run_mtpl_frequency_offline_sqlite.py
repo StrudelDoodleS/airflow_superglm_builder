@@ -12,8 +12,7 @@ from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -37,6 +36,11 @@ from pricing_pipeline.data.fremtpl import (  # noqa: E402
 from pricing_pipeline.data.manifest import create_model_frame_manifest_with_split  # noqa: E402
 from pricing_pipeline.infra.config import Settings  # noqa: E402
 from pricing_pipeline.infra.mlflow_tracking import configure_mlflow  # noqa: E402
+from pricing_pipeline.infra.offline_sqlite import (  # noqa: E402
+    SCHEMA_DB_FILES,
+    apply_offline_ddl,
+    sqlite_engine_with_offline_schemas,
+)
 from pricing_pipeline.orchestration.completed_build_helpers import (  # noqa: E402
     completed_model_build_payload,
     effective_from_for_run,
@@ -47,12 +51,6 @@ from pricing_pipeline.publishing.staging import stage_rating_export  # noqa: E40
 
 
 DEFAULT_DB_ROOT = Path("state/offline/mtpl_frequency")
-OFFLINE_DDL_DIR = ROOT / "db" / "offline_sqlite"
-SCHEMA_DB_FILES = {
-    "pricing": "pricing.sqlite",
-    "pricing_stg": "pricing_stg.sqlite",
-    "mlops": "mlops.sqlite",
-}
 INSPECTABLE_TABLES = {
     "pricing": [
         "FREMTPL_RAW",
@@ -127,34 +125,6 @@ def parse_args() -> argparse.Namespace:
         help="Delete the existing offline SQLite files and artifacts before running.",
     )
     return parser.parse_args()
-
-
-def sqlite_engine_with_offline_schemas(db_paths: dict[str, Path]):
-    for db_path in db_paths.values():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def _attach_pricing_schema(dbapi_connection, _connection_record):
-        for schema, db_path in db_paths.items():
-            dbapi_connection.execute(f"ATTACH DATABASE '{db_path.as_posix()}' AS {schema}")
-
-    return engine
-
-
-def apply_offline_ddl(engine) -> None:
-    connection = engine.raw_connection()
-    try:
-        for schema in SCHEMA_DB_FILES:
-            ddl_path = OFFLINE_DDL_DIR / f"{schema}.sql"
-            connection.executescript(ddl_path.read_text(encoding="utf-8"))
-        connection.commit()
-    finally:
-        connection.close()
 
 
 def fre_mtpl_like_raw_frame(row_count: int) -> pd.DataFrame:
