@@ -148,7 +148,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     publish_kwargs = calls[1][1]
     assert publish_kwargs["parent_rate_package_id"] == submission.parent_rate_package_id
     assert publish_kwargs["revision_metadata_json"] == (
-        '{"kind":"SUPERGLM_EDITOR","published_by":"analyst@example.test"}'
+        '{"claimed_identity":"analyst@example.test","kind":"SUPERGLM_EDITOR",'
+        '"published_by":"analyst@example.test"}'
     )
     assert callable(publish_kwargs["package_lineage_writer"])
     assert publish_kwargs["expected_staged_metadata"] == {
@@ -499,9 +500,11 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         return "1" * 64
 
     def fake_review_hook(hook, *, output_path, **kwargs):
-        Path(output_path).write_bytes(b"review")
+        nested_path = Path(output_path).parent / "reports" / Path(output_path).name
+        nested_path.parent.mkdir()
+        nested_path.write_bytes(b"review")
         return SimpleNamespace(
-            path=str(output_path),
+            path=str(nested_path),
             sha256="2" * 64,
             size_bytes=6,
         )
@@ -537,7 +540,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert not final_dir.exists()
     envelope = joblib.load(write_dir / "candidate_bundle.joblib")
     assert envelope["bundle"].review_artifact["path"] == str(
-        final_dir / "rating_tables_review.xlsx"
+        final_dir / "reports" / "rating_tables_review.xlsx"
     )
 
 

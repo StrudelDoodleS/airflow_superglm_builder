@@ -23,6 +23,48 @@ SCHEMA_DB_FILES = {
 _OFFLINE_COLUMN_UPGRADES = (
     (
         "pricing",
+        "MODEL_RUN",
+        "candidate_artifact_path",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_artifact_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_artifact_format",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_artifact_size_bytes",
+        "INTEGER",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_python_version",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_superglm_version",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "model_source_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
         "PRICING_RATE_PACKAGE",
         "staging_content_sha256",
         "TEXT",

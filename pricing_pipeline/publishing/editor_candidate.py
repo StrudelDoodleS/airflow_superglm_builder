@@ -700,6 +700,7 @@ def _revision_with_publisher_identity(value: str, created_by: str) -> str:
     publisher_identity = str(created_by).strip()
     if not publisher_identity:
         raise EditorSubmissionError("publisher identity is required")
+    payload["claimed_identity"] = publisher_identity
     payload["published_by"] = publisher_identity
     return _canonical_json(payload)
 
@@ -788,6 +789,11 @@ def export_edited_model(
         output_path=output_dir / "rating_tables_review.xlsx",
         allowed_root=output_dir,
     )
+    review_relative_path = (
+        None
+        if review_artifact is None
+        else Path(review_artifact.path).resolve().relative_to(output_dir)
+    )
     edited_bundle = replace(
         parent.bundle,
         fitted_model=edited_model,
@@ -795,7 +801,7 @@ def export_edited_model(
             None
             if review_artifact is None
             else {
-                "path": str(final_dir / Path(review_artifact.path).name),
+                "path": str(final_dir / review_relative_path),
                 "sha256": review_artifact.sha256,
                 "size_bytes": review_artifact.size_bytes,
             }

@@ -596,13 +596,25 @@ def build_candidate(
             raise ValueError(
                 f"exposure column {column!r} must contain finite positive values"
             )
-        if offset is None:
+        derived_exposure_offset = offset is None
+        if derived_exposure_offset:
             offset = np.log(exposure)
+        else:
+            missing_offset_metadata = []
+            if offset_contract is None:
+                missing_offset_metadata.append("offset_contract")
+            if offset_export_options is None:
+                missing_offset_metadata.append("offset_export_options")
+            if missing_offset_metadata:
+                raise ValueError(
+                    "caller-supplied offset requires "
+                    + " and ".join(missing_offset_metadata)
+                )
         if export_weight is None:
             export_weight = exposure
         export_weight_name = export_weight_name or column
         weight_column = weight_column or column
-        if offset_contract is None:
+        if offset_contract is None and derived_exposure_offset:
             offset_contract = OffsetExportContract(
                 handling="EXPORTED_FACTOR",
                 source_factor_name=column,
@@ -610,7 +622,7 @@ def build_candidate(
                 source_name=column,
                 label=f"log({column})",
             )
-        if offset_export_options is None:
+        if offset_export_options is None and derived_exposure_offset:
             offset_export_options = {
                 "offset_source": exposure,
                 "offset_name": column,

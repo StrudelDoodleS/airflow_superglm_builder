@@ -52,6 +52,22 @@ def test_staging_content_digest_migration_binds_staged_rows():
     assert "LIKE '%[^0-9a-f]%'" in sql
 
 
+def test_current_scorer_upgrade_matches_package_term_semantics():
+    path = Path("db/migrations/V029__current_rate_package_scoring.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "CREATE OR ALTER PROCEDURE pricing.PREDICT_CURRENT_RATE" in sql
+    assert "@model_name NVARCHAR(128)" in sql
+    assert "@deployment_slot NVARCHAR(64)" in sql
+    assert "pricing.V_CURRENT_RATE_PACKAGE" in sql
+    assert "EXEC pricing.PREDICT_RATE_PACKAGE" in sql
+    assert "@rate_package_id = @rate_package_id" in sql
+    assert "@features_json = @features_json" in sql
+    assert "@exposure = @exposure" in sql
+    assert "@include_breakdown = @include_breakdown" in sql
+
+
 def _create_table_bodies(ddl: str) -> dict[str, str]:
     bodies = {}
     current_table = None

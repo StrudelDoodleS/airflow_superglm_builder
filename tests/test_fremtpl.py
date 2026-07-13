@@ -129,6 +129,40 @@ def test_open_offline_sqlite_adds_digest_columns_to_existing_store(tmp_path):
     assert "staging_content_sha256" in staging_columns
 
 
+def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
+    tmp_path,
+):
+    import sqlite3
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    candidate_columns = {
+        "candidate_artifact_path",
+        "candidate_artifact_sha256",
+        "candidate_artifact_format",
+        "candidate_artifact_size_bytes",
+        "candidate_python_version",
+        "candidate_superglm_version",
+        "model_source_sha256",
+    }
+    engine, paths = open_offline_sqlite(tmp_path)
+    engine.dispose()
+    with sqlite3.connect(paths["pricing"]) as connection:
+        for column in sorted(candidate_columns):
+            connection.execute(f"ALTER TABLE MODEL_RUN DROP COLUMN {column}")
+
+    upgraded, _paths = open_offline_sqlite(tmp_path)
+    with upgraded.connect() as connection:
+        model_run_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing.table_info('MODEL_RUN')"
+            )
+        }
+
+    assert candidate_columns <= model_run_columns
+
+
 def test_ensure_local_fremtpl_demo_refuses_non_sqlite_engines():
     from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
 

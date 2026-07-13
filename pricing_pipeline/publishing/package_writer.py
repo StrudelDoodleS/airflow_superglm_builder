@@ -269,6 +269,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     )
 
         if parent_rate_package_id is None:
+            staged_version = _identity_text(meta["model_version"])
+            if staged_version is None:
+                raise ValueError("root package publication requires model_version")
             reservation = (
                 con.execute(
                     text("""
@@ -287,18 +290,32 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 .one_or_none()
             )
             if reservation is None:
-                raise ValueError(
-                    "root package publication requires a model-version reservation for "
-                    f"model_id={model_id}, export_id={args.export_id!r}"
+                con.execute(
+                    text("""
+                    INSERT INTO pricing.PRICING_MODEL_VERSION_RESERVATION (
+                        model_id,
+                        export_id,
+                        model_version
+                    ) VALUES (
+                        :model_id,
+                        :export_id,
+                        :model_version
+                    )
+                    """),
+                    {
+                        "model_id": model_id,
+                        "export_id": args.export_id,
+                        "model_version": staged_version,
+                    },
                 )
-            reserved_version = _identity_text(reservation["model_version"])
-            staged_version = _identity_text(meta["model_version"])
-            if reserved_version != staged_version:
-                raise ValueError(
-                    f"reserved model_version {reserved_version!r} does not match "
-                    f"staged model_version {staged_version!r} for "
-                    f"export_id={args.export_id!r}"
-                )
+            else:
+                reserved_version = _identity_text(reservation["model_version"])
+                if reserved_version != staged_version:
+                    raise ValueError(
+                        f"reserved model_version {reserved_version!r} does not match "
+                        f"staged model_version {staged_version!r} for "
+                        f"export_id={args.export_id!r}"
+                    )
 
         offset_handling = meta["offset_handling"] or "UNKNOWN"
         offset_factor_name = meta["offset_factor_name"]

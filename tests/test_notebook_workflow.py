@@ -485,6 +485,56 @@ def test_build_candidate_derives_simple_spec_inputs(monkeypatch, tmp_path):
     assert export_options["offset_source"].equals(inputs.export_weight)
 
 
+def test_build_candidate_requires_metadata_for_caller_supplied_spec_offset(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_spec_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "exposure": [1.0, 0.5, 1.5, 0.75],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    monkeypatch.setattr(
+        api,
+        "validation_split_indices",
+        lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
+    )
+    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: "v1",
+    )
+    monkeypatch.setattr(
+        api,
+        "run_standard_superglm_build",
+        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="caller-supplied offset.*offset_contract.*offset_export_options",
+    ):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            model_factory=lambda: object(),
+            offset=np.array([0.0, 0.2, -0.1, 0.4]),
+            data_as_of="2026-06-30",
+            run_key="custom-offset",
+            created_by="analyst@example.test",
+        )
+
+
 def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 

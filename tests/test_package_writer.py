@@ -494,17 +494,30 @@ def test_package_writer_reuses_legacy_package_without_staging_digest():
     assert args.was_existing is True
 
 
-def test_package_writer_rejects_root_package_without_version_reservation():
+def test_package_writer_reserves_staged_version_for_direct_root_publication():
     engine = _FakeNewPackageEngine(reservation={})
     engine.connection.reservation = None
 
-    with pytest.raises(ValueError, match="model-version reservation"):
-        load_staging_to_rating_package(engine, _new_package_args())
+    assert load_staging_to_rating_package(engine, _new_package_args()) == 42
 
-    assert not any(
-        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
-        for sql, _params in engine.connection.statements
+    reservation_insert = next(
+        statement
+        for statement in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_MODEL_VERSION_RESERVATION" in statement[0]
     )
+    package_insert = next(
+        statement
+        for statement in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in statement[0]
+    )
+    assert reservation_insert[1] == {
+        "model_id": 17,
+        "export_id": "export-1",
+        "model_version": "20260529",
+    }
+    assert engine.connection.statements.index(
+        reservation_insert
+    ) < engine.connection.statements.index(package_insert)
 
 
 def test_package_writer_rejects_root_package_with_different_reserved_version():
