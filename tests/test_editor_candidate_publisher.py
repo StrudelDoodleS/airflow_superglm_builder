@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,12 +66,24 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         allowed_roots.append(("parent", allowed_root))
         return parent
 
-    def fake_export_edited_model(loaded_parent, loaded_submission, *, allowed_root):
+    def fake_export_edited_model(
+        loaded_parent,
+        loaded_submission,
+        *,
+        allowed_root,
+        write_dir,
+        published_dir,
+    ):
         allowed_roots.append(("edited", allowed_root))
         return exported
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", fake_load_parent_candidate)
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export_edited_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "_resolve_existing_editor_publication",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(
         editor_candidate,
         "stage_editor_export",
@@ -141,6 +154,408 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert lineage_kwargs["split_set_id"] == submission.split_set_id
     assert lineage_kwargs["candidate_artifact_sha256"] == "d" * 64
     assert allowed_roots == [("parent", tmp_path), ("edited", tmp_path)]
+
+
+def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, tmp_path):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission_path = tmp_path / "submission" / "submission.json"
+    submission_path.parent.mkdir()
+    submission = SimpleNamespace(
+        path=str(submission_path),
+        sha256="a" * 64,
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        parent_rate_package_id=107,
+    )
+    existing = editor_candidate.EditorPublicationResult(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        parent_rate_package_id=107,
+        rate_package_id=108,
+        package_version=8,
+        model_run_id=908,
+        package_status="PUBLISHED",
+        was_existing=True,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_verified_submission",
+        lambda *args, **kwargs: submission,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "_resolve_existing_editor_publication",
+        lambda *args, **kwargs: existing,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_parent_candidate",
+        lambda *args, **kwargs: pytest.fail("existing publication must return first"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "export_edited_model",
+        lambda *args, **kwargs: pytest.fail("existing publication must not write files"),
+    )
+
+    result = editor_candidate.publish_editor_submission(
+        object(),
+        settings=Settings(workbench_artifact_root=tmp_path),
+        submission_path=str(submission_path),
+        submission_sha256="a" * 64,
+        dag_id="pricing_publish_editor_candidate",
+        airflow_run_id="manual__submission-1",
+        created_by="analyst@example.test",
+    )
+
+    assert result == existing
+
+
+def test_existing_editor_publication_verifies_committed_candidate_bytes(
+    monkeypatch,
+    tmp_path,
+):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+    from pricing_pipeline.workbench.submission import EditorSubmissionError
+
+    bundle = CandidateBundle(
+        fitted_model={"model": "edited"},
+        X=pd.DataFrame({"x": [1.0]}),
+        y=np.array([0.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    artifact = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
+    row = {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "package_status": "PUBLISHED",
+        "parent_rate_package_id": 107,
+        "model_run_id": 908,
+        "run_status": "SUCCESS",
+        "candidate_artifact_path": artifact.path,
+        "candidate_artifact_sha256": artifact.sha256,
+        "candidate_artifact_format": artifact.format,
+        "candidate_artifact_size_bytes": artifact.size_bytes,
+        "candidate_python_version": artifact.python_version,
+        "candidate_superglm_version": artifact.superglm_version,
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing"),
+    )
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        parent_rate_package_id=107,
+    )
+
+    result = editor_candidate._resolve_existing_editor_publication(
+        Engine(),
+        submission,
+        allowed_root=tmp_path,
+    )
+
+    assert result is not None
+    assert result.model_run_id == 908
+    assert result.was_existing is True
+
+    Path(artifact.path).write_bytes(b"overwritten")
+    with pytest.raises(EditorSubmissionError, match="failed verification"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+
+
+def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, tmp_path):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission_path = tmp_path / "submission" / "submission.json"
+    submission_path.parent.mkdir()
+    submission = SimpleNamespace(
+        path=str(submission_path),
+        sha256="a" * 64,
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        source_package_version=7,
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
+    )
+    parent = SimpleNamespace(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        config=SimpleNamespace(default_package_status="PUBLISHED"),
+    )
+    committed_artifact = tmp_path / "committed" / "candidate_bundle.joblib"
+    committed_artifact.parent.mkdir()
+    committed_artifact.write_bytes(b"committed bytes")
+    attempt_paths = []
+
+    def fake_export(
+        loaded_parent,
+        loaded_submission,
+        *,
+        allowed_root,
+        write_dir,
+        published_dir,
+    ):
+        write_dir = Path(write_dir)
+        published_dir = Path(published_dir)
+        candidate_path = write_dir / "candidate_bundle.joblib"
+        candidate_path.write_bytes(b"retry bytes")
+        attempt_paths.append((write_dir, published_dir))
+        return SimpleNamespace(
+            export_id="editor__submission_1",
+            rating_workbook_path=str(published_dir / "rating_tables.xlsx"),
+            publication_receipt_path=str(published_dir / "publication_receipt.json"),
+            publication_receipt_sha256="c" * 64,
+            candidate_artifact_path=str(published_dir / "candidate_bundle.joblib"),
+            candidate_artifact_sha256="d" * 64,
+            candidate_artifact_format="superglm-candidate-joblib-v1",
+            candidate_artifact_size_bytes=11,
+            candidate_python_version="3.14.4",
+            candidate_superglm_version="0.11.0",
+            revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
+            metrics={},
+            metric_scopes={},
+            edited_model=object(),
+            bundle=object(),
+        )
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_verified_submission",
+        lambda *args, **kwargs: submission,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "_resolve_existing_editor_publication",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_parent_candidate",
+        lambda *args, **kwargs: parent,
+    )
+    monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export)
+    monkeypatch.setattr(editor_candidate, "stage_editor_export", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        editor_candidate,
+        "publish_rating_package",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected SQL failure")),
+    )
+
+    for _attempt_no in range(2):
+        with pytest.raises(RuntimeError, match="injected SQL failure"):
+            editor_candidate.publish_editor_submission(
+                object(),
+                settings=Settings(workbench_artifact_root=tmp_path),
+                submission_path=str(submission_path),
+                submission_sha256="a" * 64,
+                dag_id="pricing_publish_editor_candidate",
+                airflow_run_id="manual__submission-1",
+                created_by="analyst@example.test",
+            )
+
+    assert len(attempt_paths) == 2
+    assert attempt_paths[0] != attempt_paths[1]
+    for write_dir, published_dir in attempt_paths:
+        assert not write_dir.exists()
+        assert not published_dir.exists()
+    assert committed_artifact.read_bytes() == b"committed bytes"
+
+
+def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
+    monkeypatch,
+    tmp_path,
+):
+    import joblib
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    submission_dir = tmp_path / "submission"
+    write_dir = submission_dir / "published" / ".staging" / "attempt-a"
+    final_dir = submission_dir / "published" / "attempts" / "attempt-a"
+    write_dir.mkdir(parents=True)
+    bundle = CandidateBundle(
+        fitted_model={"model": "parent"},
+        X=pd.DataFrame({"x": [1.0]}),
+        y=np.array([0.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    parent = SimpleNamespace(
+        bundle=bundle,
+        champion=editor_candidate.ChampionSnapshot(
+            deployment_slot="HOME_FREQ_UAT",
+            rate_package_id=None,
+            bundle=None,
+            unavailable_reason="no champion is deployed in HOME_FREQ_UAT",
+        ),
+    )
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        reason="Market calibration",
+        claimed_identity="analyst@example.test",
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        path=str(submission_dir / "submission.json"),
+        sha256="c" * 64,
+        editor_session_path=str(submission_dir / "editor_session.json"),
+        editor_session_sha256="d" * 64,
+        editor_session_size_bytes=10,
+        edited_model_path=str(submission_dir / "edited_model.joblib"),
+        edited_model_sha256="e" * 64,
+        edited_model_size_bytes=11,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        baseline_candidate_sha256="f" * 64,
+    )
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "_load_edited_model",
+        lambda *args, **kwargs: {"model": "edited"},
+    )
+
+    def fake_export_rating_tables(*args, output_path, **kwargs):
+        Path(output_path).write_bytes(b"workbook")
+
+    def fake_write_receipt(receipt, path):
+        Path(path).write_bytes(b"receipt")
+        return "1" * 64
+
+    def fake_review_hook(hook, *, output_path, **kwargs):
+        Path(output_path).write_bytes(b"review")
+        return SimpleNamespace(
+            path=str(output_path),
+            sha256="2" * 64,
+            size_bytes=6,
+        )
+
+    monkeypatch.setattr(editor_candidate, "export_rating_tables", fake_export_rating_tables)
+    monkeypatch.setattr(
+        editor_candidate,
+        "build_superglm_publication_receipt",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(editor_candidate, "write_publication_receipt", fake_write_receipt)
+    monkeypatch.setattr(editor_candidate, "call_review_hook", fake_review_hook)
+    monkeypatch.setattr(editor_candidate, "inherited_cv_metrics", lambda bundle: ({}, {}))
+    monkeypatch.setattr(
+        editor_candidate,
+        "training_comparison_metrics",
+        lambda *args, **kwargs: ({}, {}),
+    )
+
+    exported = editor_candidate.export_edited_model(
+        parent,
+        submission,
+        allowed_root=tmp_path,
+        write_dir=write_dir,
+        published_dir=final_dir,
+    )
+
+    assert Path(exported.rating_workbook_path) == final_dir / "rating_tables.xlsx"
+    assert Path(exported.publication_receipt_path) == final_dir / "publication_receipt.json"
+    assert Path(exported.candidate_artifact_path) == final_dir / "candidate_bundle.joblib"
+    assert (write_dir / "rating_tables.xlsx").read_bytes() == b"workbook"
+    assert (write_dir / "candidate_bundle.joblib").is_file()
+    assert not final_dir.exists()
+    envelope = joblib.load(write_dir / "candidate_bundle.joblib")
+    assert envelope["bundle"].review_artifact["path"] == str(
+        final_dir / "rating_tables_review.xlsx"
+    )
+
+
+def test_editor_publication_lock_serializes_the_same_submission(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from pricing_pipeline.publishing.editor_candidate import _editor_publication_lock
+
+    first_acquired = Event()
+    release_first = Event()
+    second_started = Event()
+    second_acquired = Event()
+
+    def first_worker():
+        with _editor_publication_lock(tmp_path):
+            first_acquired.set()
+            assert release_first.wait(timeout=2)
+
+    def second_worker():
+        second_started.set()
+        with _editor_publication_lock(tmp_path):
+            second_acquired.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(first_worker)
+        assert first_acquired.wait(timeout=2)
+        second = executor.submit(second_worker)
+        assert second_started.wait(timeout=2)
+        assert not second_acquired.wait(timeout=0.05)
+        release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert second_acquired.is_set()
 
 
 @pytest.mark.parametrize(
