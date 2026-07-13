@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -80,6 +82,26 @@ def test_all_pricing_model_notebooks_compile_and_have_no_saved_output():
             compile(source, f"{notebook_path}:cell-{index}", "exec")
             assert cell.get("execution_count") is None
             assert cell.get("outputs") == []
+
+
+def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    code_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+    ]
+
+    result = subprocess.run(
+        [sys.executable, "-c", "\n\n".join(code_cells[:2])],
+        cwd=NOTEBOOK_PATH.parent.resolve(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "pricing_pipeline" not in result.stderr
 
 
 def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():

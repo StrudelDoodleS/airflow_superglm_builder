@@ -155,6 +155,8 @@ def test_scaffold_pricing_model_writes_model_package_and_dag(tmp_path):
     assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in connection_cell
     assert "pricing.destination" in connection_cell
     assert "PRICING_RUNTIME_MODULE" in source
+    assert "PROJECT_ROOT = next(" in source
+    assert "sys.path.insert(0, str(PROJECT_ROOT))" in source
     assert "private-server" not in source
     assert "mssql_server" not in source
     assert ".head(" not in source

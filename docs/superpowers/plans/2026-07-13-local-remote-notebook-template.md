@@ -261,3 +261,42 @@ Run: `git diff --check`
 Run: `git status --short`
 
 Expected: no SQLite files or private screenshot files are staged; `builder_screenshot/` remains untracked.
+
+### Task 5: Make repository imports independent of the kernel directory
+
+**Files:**
+- Modify: `scripts/scaffold_pricing_model.py`
+- Modify: `pricing_models/mtpl_frequency/pricing_model.ipynb`
+- Test: `tests/test_pricing_model_notebooks.py`
+- Test: `tests/test_scaffold_pricing_model.py`
+
+- [x] **Step 1: Reproduce the import failure**
+
+Execute the MTPL notebook's controls and import/setup cells in a subprocess
+whose working directory is `pricing_models/mtpl_frequency`. Assert that the
+cell succeeds; before the fix it fails with `ModuleNotFoundError` because the
+repository root is not on `sys.path`.
+
+- [x] **Step 2: Add the minimal repository-root bootstrap**
+
+Before the `pricing_pipeline` imports, walk `Path.cwd()` and its parents for a
+directory containing both `pricing_pipeline` and `pricing_models`. Raise a
+clear `RuntimeError` when absent, otherwise prepend the resolved root to
+`sys.path` and derive `MODEL_DIR` from it. Apply the identical pattern to the
+scaffold template and the MTPL example.
+
+- [x] **Step 3: Verify generated and example notebooks**
+
+Run:
+
+```bash
+pytest tests/test_pricing_model_notebooks.py tests/test_scaffold_pricing_model.py -q
+```
+
+Expected: the setup cells compile, the MTPL setup executes from its own model
+directory, and newly scaffolded notebooks include the bootstrap.
+
+- [x] **Step 4: Run complete verification and commit**
+
+Run Ruff, compileall, `git diff --check`, and the full project test suite before
+committing the fix.

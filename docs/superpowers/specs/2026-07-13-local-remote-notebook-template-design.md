@@ -83,6 +83,16 @@ The notebook is intentionally small:
 
 The framework derives dataset fingerprints, primary-key tracking, split metadata, model revisions, transform metadata, offsets, weights, metrics, and audit rows wherever the available inputs make that possible. Analysts supply genuine modelling decisions; they do not manually assemble audit records.
 
+## Repository imports
+
+The notebook must run when VS Code starts its kernel in the pricing model
+directory, even though this repository is not installed into the virtual
+environment as a package. Before importing `pricing_pipeline`, the setup cell
+walks from the current directory through its parents, finds the repository root
+containing both `pricing_pipeline` and `pricing_models`, and prepends that root
+to `sys.path`. It raises an actionable error if no such root exists. This keeps
+kernel selection and editable-package installation out of the analyst workflow.
+
 ## Verification
 
 Tests will demonstrate that:

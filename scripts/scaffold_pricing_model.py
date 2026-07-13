@@ -753,6 +753,24 @@ def _pricing_notebook_template(
             f"""
             from datetime import date
             from pathlib import Path
+            import sys
+
+            _search_root = Path.cwd().resolve()
+            PROJECT_ROOT = next(
+                (
+                    root
+                    for root in (_search_root, *_search_root.parents)
+                    if (root / "pricing_pipeline").is_dir()
+                    and (root / "pricing_models").is_dir()
+                ),
+                None,
+            )
+            if PROJECT_ROOT is None:
+                raise RuntimeError(
+                    "Open this notebook from inside the pricing repository."
+                )
+            if str(PROJECT_ROOT) not in sys.path:
+                sys.path.insert(0, str(PROJECT_ROOT))
 
             import numpy as np
             import pandas as pd
@@ -770,10 +788,7 @@ def _pricing_notebook_template(
                 register_model,
             )
 
-            MODEL_DIR = Path("pricing_models/{package_name}")
-            if not MODEL_DIR.is_dir():
-                MODEL_DIR = Path.cwd()
-            MODEL_DIR = MODEL_DIR.resolve()
+            MODEL_DIR = PROJECT_ROOT / "pricing_models/{package_name}"
             """
         ),
         _notebook_markdown_cell("## Connect and verify the destination"),
