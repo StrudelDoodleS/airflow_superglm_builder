@@ -162,8 +162,28 @@ def test_seed_package_registers_model_before_staging(monkeypatch):
         lambda *args, **kwargs: calls.append(("record_run", kwargs)),
     )
 
+    class CurrentResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class Connection:
+        def execute(self, statement, params):
+            calls.append(("current", params))
+            return CurrentResult()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
     rate_package_id = seed_demo_model_variants.seed_package(
-        object(),
+        Engine(),
         package,
         created_by="pytest",
     )
@@ -173,6 +193,7 @@ def test_seed_package_registers_model_before_staging(monkeypatch):
         "ensure_model",
         "stage",
         "publish",
+        "current",
         "deploy",
         "record_run",
     ]

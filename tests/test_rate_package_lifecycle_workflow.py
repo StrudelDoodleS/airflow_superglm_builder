@@ -224,6 +224,7 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
         assert package["package_status"] == "PUBLISHED"
         slot = (kwargs["deployment_slot"] or config_arg.deployment_slot).strip().upper()
         previous = state.current_by_slot.get(slot)
+        assert kwargs["expected_current_rate_package_id"] == previous
         state.current_by_slot[slot] = package["rate_package_id"]
         result = DeploymentResult(
             model_id=kwargs["model_id"],
@@ -351,6 +352,7 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
     )
     first_deploy = publisher.deploy(
         rate_package_id=int(first_build["rate_package_id"]),
+        expected_current_rate_package_id=None,
         deployment_reason="initial approval",
         deployed_by="airflow",
     )
@@ -368,6 +370,7 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
     )
     second_deploy = publisher.deploy(
         rate_package_id=int(second_build["rate_package_id"]),
+        expected_current_rate_package_id=101,
         deployment_reason="more data approval",
         deployed_by="airflow",
     )
@@ -385,6 +388,7 @@ def test_build_deploy_retrain_deploy_manual_uplift_deploy_workflow(
     )
     manual_deploy = publisher.deploy(
         rate_package_id=manual_revision.rate_package_id,
+        expected_current_rate_package_id=102,
         deployment_reason="manual uplift approval",
         deployed_by="pricing-user",
     )

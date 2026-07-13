@@ -589,6 +589,13 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
     }
     airflow_client.run_state = "success"
     airflow_client.triggering_user_name = "analyst@example.test"
+    champion_calls = []
+    candidate.workbench.current_champion_rate_package_id = (
+        lambda model_name, *, deployment_slot: champion_calls.append(
+            (model_name, deployment_slot)
+        )
+        or 107
+    )
 
     status = submission.status()
     deployment_run = submission.request_deployment(
@@ -604,11 +611,13 @@ def test_submission_status_resolves_published_child_and_requests_deployment(tmp_
         f"manual__{submission.submission_id}"
     )
     assert deployment_run.state == "queued"
+    assert champion_calls == [("HOME_FREQ", "HOME_FREQ_UAT")]
     trigger = airflow_client.triggered[-1]
     assert trigger.dag_id == "pricing_deploy_rate_package"
     assert trigger.conf == {
         "model_name": "HOME_FREQ",
         "package_version": 8,
+        "expected_current_rate_package_id": 107,
         "deployment_slot": "HOME_FREQ_UAT",
         "deployment_reason": "Approved market calibration",
     }

@@ -15,6 +15,10 @@ class DeploymentError(RuntimeError):
     """Raised when a rate package cannot be deployed."""
 
 
+class StaleChampionError(DeploymentError):
+    """Raised when the active champion changed after deployment approval."""
+
+
 def _required_text(value: str | None, field_name: str) -> str:
     if value is None:
         raise DeploymentError(f"{field_name} is required")
@@ -105,6 +109,7 @@ def deploy_rate_package(
     *,
     rate_package_id: int | None = None,
     package_version: int | None = None,
+    expected_current_rate_package_id: int | None,
     deployment_slot: str | None = None,
     deployment_reason: str,
     deployed_by: str,
@@ -140,7 +145,21 @@ def deploy_rate_package(
         )
         resolved_rate_package_id = int(package["rate_package_id"])
         if previous_rate_package_id == resolved_rate_package_id:
-            raise DeploymentError("rate package is already current for deployment slot")
+            return DeploymentResult(
+                model_id=int(model_id),
+                deployment_slot=slot,
+                previous_rate_package_id=expected_current_rate_package_id,
+                rate_package_id=resolved_rate_package_id,
+                package_version=int(package["package_version"]),
+                deployed_by=deployed_by,
+                deployment_reason=deployment_reason,
+            )
+        if previous_rate_package_id != expected_current_rate_package_id:
+            raise StaleChampionError(
+                "deployment approval is stale: expected current "
+                f"rate_package_id={expected_current_rate_package_id}, "
+                f"found {previous_rate_package_id}"
+            )
 
         con.execute(text("""
             UPDATE pricing.PRICING_MODEL_DEPLOYMENT

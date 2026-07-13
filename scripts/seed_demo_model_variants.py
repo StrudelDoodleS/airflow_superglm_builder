@@ -461,6 +461,20 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
     )
     manifest_id = ensure_demo_manifest(engine, package, created_by=created_by)
     if package.package_status == "PUBLISHED":
+        with engine.begin() as con:
+            expected_current_rate_package_id = con.execute(
+                text("""
+                    SELECT rate_package_id
+                    FROM pricing.PRICING_MODEL_DEPLOYMENT
+                    WHERE model_id = :model_id
+                      AND deployment_slot = :deployment_slot
+                      AND effective_to_ts IS NULL
+                """),
+                {
+                    "model_id": model_id,
+                    "deployment_slot": package.pointer_name,
+                },
+            ).scalar_one_or_none()
         deploy_rate_package(
             engine,
             ModelBuildConfig(
@@ -472,6 +486,7 @@ def seed_package(engine, package: DemoPackage, *, created_by: str) -> int:
                 default_package_status="PUBLISHED",
             ),
             rate_package_id=rate_package_id,
+            expected_current_rate_package_id=expected_current_rate_package_id,
             deployment_slot=package.pointer_name,
             deployment_reason="seed demo package",
             deployed_by=created_by,

@@ -179,6 +179,49 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "split_link.dataset_role = 'training'" in statements[0][0]
 
 
+@pytest.mark.parametrize("current_rate_package_id", [113, None])
+def test_workbench_reads_current_champion_at_decision_time(current_rate_package_id):
+    statements = []
+
+    class Result:
+        def scalar_one_or_none(self):
+            return current_rate_package_id
+
+    class Connection:
+        def execute(self, statement, params):
+            statements.append((str(statement), params))
+            return Result()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    workbench = _api().Workbench(
+        engine=Engine(),
+        settings=_settings(),
+        config_loader=lambda name: SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+    )
+
+    result = workbench.current_champion_rate_package_id(
+        "HOME_FREQ",
+        deployment_slot="home_freq_prod",
+    )
+
+    assert result == current_rate_package_id
+    assert "effective_to_ts IS NULL" in statements[0][0]
+    assert statements[0][1] == {
+        "model_name": "HOME_FREQ",
+        "deployment_slot": "HOME_FREQ_PROD",
+    }
+
+
 def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypatch):
     api = _api()
     metadata = save_candidate_bundle(_bundle(), tmp_path / "candidate.joblib")

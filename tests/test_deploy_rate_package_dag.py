@@ -74,6 +74,7 @@ def test_pricing_deploy_rate_package_dag_exposes_manual_params(monkeypatch):
         "model_name",
         "rate_package_id",
         "package_version",
+        "expected_current_rate_package_id",
         "deployment_slot",
         "deployment_reason",
         "deployed_by",
@@ -133,6 +134,7 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
             "model_name": " MTPL_FREQ ",
             "rate_package_id": "",
             "package_version": "4",
+            "expected_current_rate_package_id": "101",
             "deployment_slot": "MTPL_FREQ_UAT",
             "deployment_reason": " approved ",
             "deployed_by": " airflow ",
@@ -148,6 +150,7 @@ def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_stri
             {
                 "rate_package_id": None,
                 "package_version": 4,
+                "expected_current_rate_package_id": 101,
                 "deployment_slot": "MTPL_FREQ_UAT",
                 "deployment_reason": " approved ",
                 "deployed_by": " airflow ",
@@ -197,6 +200,7 @@ def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
             "model_name": "MTPL_FREQ",
             "rate_package_id": " 202 ",
             "package_version": None,
+            "expected_current_rate_package_id": 101,
             "deployment_reason": "approved",
             "deployed_by": "airflow",
         }
@@ -209,6 +213,7 @@ def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
             {
                 "rate_package_id": 202,
                 "package_version": None,
+                "expected_current_rate_package_id": 101,
                 "deployment_slot": None,
                 "deployment_reason": "approved",
                 "deployed_by": "airflow",
@@ -225,6 +230,8 @@ def test_deploy_rate_package_from_params_accepts_whitespace_integer_string(
         ("package_version", False),
         ("package_version", 4.9),
         ("package_version", "4.9"),
+        ("expected_current_rate_package_id", True),
+        ("expected_current_rate_package_id", "4.9"),
     ],
 )
 def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
@@ -242,8 +249,11 @@ def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
         "model_name": "MTPL_FREQ",
         "rate_package_id": None,
         "package_version": None,
+        "expected_current_rate_package_id": None,
         field_name: field_value,
     }
+    if field_name == "expected_current_rate_package_id":
+        params["package_version"] = 4
 
     with pytest.raises(ValueError, match=f"{field_name} must be an integer"):
         module.deploy_rate_package_from_params(params)
@@ -257,6 +267,10 @@ def test_deploy_rate_package_from_params_rejects_non_integer_selector_values(
         (
             {"model_name": "MTPL_FREQ", "rate_package_id": 1, "package_version": 4},
             "exactly one",
+        ),
+        (
+            {"model_name": "MTPL_FREQ", "rate_package_id": 1},
+            "expected_current_rate_package_id",
         ),
     ],
 )

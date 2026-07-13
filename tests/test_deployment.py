@@ -1,7 +1,11 @@
 import pytest
 
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.publishing.deployment import DeploymentError, deploy_rate_package
+from pricing_pipeline.publishing.deployment import (
+    DeploymentError,
+    StaleChampionError,
+    deploy_rate_package,
+)
 from pricing_pipeline.publishing.lifecycle import DeploymentResult
 
 
@@ -68,6 +72,56 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
+class StatefulConnection:
+    def __init__(self, *, packages, current_rate_package_id):
+        self.packages = {int(row["rate_package_id"]): row for row in packages}
+        self.current_rate_package_id = current_rate_package_id
+        self.events = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        params = params or {}
+        self.events.append((sql, params))
+        if "sys.sp_getapplock" in sql:
+            return FakeResult(scalar=0)
+        if "FROM pricing.PRICING_RATE_PACKAGE" in sql:
+            if params.get("rate_package_id") is not None:
+                package = self.packages.get(int(params["rate_package_id"]))
+            else:
+                package = next(
+                    (
+                        row
+                        for row in self.packages.values()
+                        if int(row["model_id"]) == int(params["model_id"])
+                        and int(row["package_version"])
+                        == int(params["package_version"])
+                    ),
+                    None,
+                )
+            return FakeResult(package)
+        if "FROM pricing.PRICING_MODEL_DEPLOYMENT" in sql:
+            current = (
+                None
+                if self.current_rate_package_id is None
+                else {"rate_package_id": self.current_rate_package_id}
+            )
+            return FakeResult(current)
+        if "INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT" in sql:
+            self.current_rate_package_id = int(params["rate_package_id"])
+        return FakeResult()
+
+
+class StatefulEngine:
+    def __init__(self, *, packages, current_rate_package_id):
+        self.connection = StatefulConnection(
+            packages=packages,
+            current_rate_package_id=current_rate_package_id,
+        )
+
+    def begin(self):
+        return FakeBegin(self.connection)
+
+
 def config() -> ModelBuildConfig:
     return ModelBuildConfig(
         model_name="MTPL_FREQ",
@@ -115,6 +169,7 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
         engine,
         config(),
         rate_package_id=101,
+        expected_current_rate_package_id=99,
         deployment_slot="MTPL_FREQ_PROD",
         deployment_reason=" approved for launch ",
         deployed_by=" airflow ",
@@ -182,6 +237,7 @@ def test_deploy_rate_package_resolves_by_model_and_package_version_using_default
         engine,
         config(),
         package_version=4,
+        expected_current_rate_package_id=None,
         deployment_reason="UAT signoff",
         deployed_by="airflow",
         model_id=17,
@@ -207,6 +263,7 @@ def test_deploy_rate_package_canonicalizes_deployment_slot_before_lock_and_write
         engine,
         config(),
         rate_package_id=101,
+        expected_current_rate_package_id=None,
         deployment_slot="  mtpl_FREQ_prod  ",
         deployment_reason="approved",
         deployed_by="airflow",
@@ -240,6 +297,7 @@ def test_deploy_rate_package_rejects_blank_default_deployment_slot():
             engine,
             config_with_slot("   "),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
             model_id=17,
@@ -257,6 +315,7 @@ def test_deploy_rate_package_rejects_blank_deployment_slot_override(deployment_s
             engine,
             config(),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_slot=deployment_slot,
             deployment_reason="approved",
             deployed_by="airflow",
@@ -274,6 +333,7 @@ def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
             engine,
             config(),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
             model_id=17,
@@ -308,6 +368,7 @@ def test_deploy_rate_package_requires_exactly_one_package_selector(
             config(),
             rate_package_id=rate_package_id,
             package_version=package_version,
+            expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
             model_id=17,
@@ -335,6 +396,7 @@ def test_deploy_rate_package_requires_reason_and_deployer(
             engine,
             config(),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_reason=deployment_reason,
             deployed_by=deployed_by,
             model_id=17,
@@ -349,6 +411,7 @@ def test_deploy_rate_package_rejects_non_published_package():
             engine,
             config(),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
             model_id=17,
@@ -363,27 +426,28 @@ def test_deploy_rate_package_rejects_package_model_mismatch():
             engine,
             config(),
             rate_package_id=101,
+            expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
             model_id=17,
         )
 
 
-def test_deploy_rate_package_rejects_already_current_package_without_writes():
+def test_deploy_rate_package_reuses_already_current_package_without_writes():
     engine = FakeEngine(
         package_row=published_package(),
         current_row={"rate_package_id": 101},
     )
 
-    with pytest.raises(DeploymentError, match="already current"):
-        deploy_rate_package(
-            engine,
-            config(),
-            rate_package_id=101,
-            deployment_reason="approved",
-            deployed_by="airflow",
-            model_id=17,
-        )
+    result = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=101,
+        expected_current_rate_package_id=99,
+        deployment_reason="approved",
+        deployed_by="airflow",
+        model_id=17,
+    )
 
     write_sql = [
         statement
@@ -391,3 +455,105 @@ def test_deploy_rate_package_rejects_already_current_package_without_writes():
         if statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
     ]
     assert write_sql == []
+    assert result.previous_rate_package_id == 99
+    assert result.rate_package_id == 101
+
+
+def test_stale_review_cannot_replace_a_newer_champion():
+    packages = [
+        published_package(rate_package_id=101, package_version=1),
+        published_package(rate_package_id=202, package_version=2),
+        published_package(rate_package_id=303, package_version=3),
+    ]
+    engine = StatefulEngine(packages=packages, current_rate_package_id=101)
+
+    first = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=202,
+        expected_current_rate_package_id=101,
+        deployment_reason="B approved",
+        deployed_by="airflow",
+        model_id=17,
+    )
+    assert first.previous_rate_package_id == 101
+    assert engine.connection.current_rate_package_id == 202
+    events_before_stale_attempt = len(engine.connection.events)
+
+    with pytest.raises(StaleChampionError) as exc_info:
+        deploy_rate_package(
+            engine,
+            config(),
+            rate_package_id=303,
+            expected_current_rate_package_id=101,
+            deployment_reason="stale C approval",
+            deployed_by="airflow",
+            model_id=17,
+        )
+
+    assert "expected current rate_package_id=101" in str(exc_info.value)
+    assert "found 202" in str(exc_info.value)
+    assert engine.connection.current_rate_package_id == 202
+    stale_sql = executed_sql(engine)[events_before_stale_attempt:]
+    assert not any(
+        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+        for statement in stale_sql
+    )
+
+
+def test_deploy_rate_package_handles_no_current_champion():
+    engine = StatefulEngine(
+        packages=[published_package(rate_package_id=202, package_version=2)],
+        current_rate_package_id=None,
+    )
+
+    result = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=202,
+        expected_current_rate_package_id=None,
+        deployment_reason="initial champion",
+        deployed_by="airflow",
+        model_id=17,
+    )
+
+    assert result.previous_rate_package_id is None
+    assert engine.connection.current_rate_package_id == 202
+
+
+def test_deploy_rate_package_retry_is_idempotent_with_original_expectation():
+    engine = StatefulEngine(
+        packages=[published_package(rate_package_id=202, package_version=2)],
+        current_rate_package_id=101,
+    )
+
+    first = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=202,
+        expected_current_rate_package_id=101,
+        deployment_reason="approved",
+        deployed_by="airflow",
+        model_id=17,
+    )
+    write_count = sum(
+        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+        for statement in executed_sql(engine)
+    )
+
+    retried = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=202,
+        expected_current_rate_package_id=101,
+        deployment_reason="approved",
+        deployed_by="airflow",
+        model_id=17,
+    )
+
+    assert retried == first
+    assert engine.connection.current_rate_package_id == 202
+    assert sum(
+        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+        for statement in executed_sql(engine)
+    ) == write_count

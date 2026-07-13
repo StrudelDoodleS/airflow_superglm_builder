@@ -15,6 +15,7 @@ _PARAMS = {
     "model_name": "",
     "rate_package_id": None,
     "package_version": None,
+    "expected_current_rate_package_id": None,
     "deployment_slot": None,
     "deployment_reason": "",
     "deployed_by": "",
@@ -90,11 +91,18 @@ def deploy_rate_package_from_params(params: Mapping[str, object]) -> dict[str, s
     package_version = _optional_int(params.get("package_version"), "package_version")
     if (rate_package_id is None) == (package_version is None):
         raise ValueError("provide exactly one of rate_package_id or package_version")
+    if "expected_current_rate_package_id" not in params:
+        raise ValueError("expected_current_rate_package_id is required")
+    expected_current_rate_package_id = _optional_int(
+        params.get("expected_current_rate_package_id"),
+        "expected_current_rate_package_id",
+    )
 
     config = get_model_config(model_name)
     result = ModelPublisher(get_engine(), config).deploy(
         rate_package_id=rate_package_id,
         package_version=package_version,
+        expected_current_rate_package_id=expected_current_rate_package_id,
         deployment_slot=_optional_text(params.get("deployment_slot")),
         deployment_reason=_text_value(params.get("deployment_reason")),
         deployed_by=_text_value(params.get("deployed_by")),

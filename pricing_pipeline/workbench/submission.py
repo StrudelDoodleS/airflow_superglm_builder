@@ -173,13 +173,22 @@ class EditorSubmission:
             raise RuntimeError("The edited candidate must be published before deployment")
         if self._airflow_client is None:
             raise RuntimeError("This submission has no live Airflow client")
+        if self._workbench is None:
+            raise RuntimeError("This submission cannot read the current champion")
         slot = str(deployment_slot or self.deployment_slot).strip()
         if not slot:
             raise ValueError("deployment_slot is required")
+        expected_current_rate_package_id = (
+            self._workbench.current_champion_rate_package_id(
+                self.model_name,
+                deployment_slot=slot,
+            )
+        )
         deployment_identity = json.dumps(
             {
                 "submission_id": self.submission_id,
                 "package_version": self.published_package_version,
+                "expected_current_rate_package_id": expected_current_rate_package_id,
                 "deployment_slot": slot,
                 "reason": cleaned_reason,
             },
@@ -193,6 +202,7 @@ class EditorSubmission:
             conf={
                 "model_name": self.model_name,
                 "package_version": self.published_package_version,
+                "expected_current_rate_package_id": expected_current_rate_package_id,
                 "deployment_slot": slot,
                 "deployment_reason": cleaned_reason,
             },

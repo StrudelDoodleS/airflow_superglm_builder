@@ -87,6 +87,7 @@ def test_model_publisher_deploy_validates_model_and_delegates(monkeypatch):
 
     result = publisher.deploy(
         package_version=4,
+        expected_current_rate_package_id=101,
         deployment_reason="approved",
         deployed_by="airflow",
     )
@@ -101,6 +102,7 @@ def test_model_publisher_deploy_validates_model_and_delegates(monkeypatch):
             {
                 "rate_package_id": None,
                 "package_version": 4,
+                "expected_current_rate_package_id": 101,
                 "deployment_slot": None,
                 "deployment_reason": "approved",
                 "deployed_by": "airflow",

@@ -138,6 +138,44 @@ class Workbench:
         """Return the logical model names discovered by the model registry."""
         return list(self._model_names_loader())
 
+    def current_champion_rate_package_id(
+        self,
+        model_name: str,
+        *,
+        deployment_slot: str | None = None,
+    ) -> int | None:
+        """Read the active champion at the moment an analyst requests deployment."""
+        model_name = self._required_model_name(model_name)
+        raw_slot = (
+            self._config_loader(model_name).deployment_slot
+            if deployment_slot is None
+            else deployment_slot
+        )
+        slot = str(raw_slot).strip().upper()
+        if not slot:
+            raise ValueError("deployment_slot is required")
+        schemas = schema_names_from_connectable(self.engine)
+        query = text(
+            f"""
+            SELECT deployment.rate_package_id
+            FROM {schemas.pricing}.PRICING_MODEL AS pm
+            JOIN {schemas.pricing}.PRICING_MODEL_DEPLOYMENT AS deployment
+              ON deployment.model_id = pm.model_id
+            WHERE pm.model_name = :model_name
+              AND deployment.deployment_slot = :deployment_slot
+              AND deployment.effective_to_ts IS NULL
+            """
+        )
+        with self.engine.begin() as connection:
+            value = connection.execute(
+                query,
+                {
+                    "model_name": model_name,
+                    "deployment_slot": slot,
+                },
+            ).scalar_one_or_none()
+        return None if value is None else int(value)
+
     def resolve_editor_publication(self, submission) -> dict[str, Any]:
         schemas = schema_names_from_connectable(self.engine)
         export_id = f"editor__{submission.submission_id.replace('-', '_')}"
