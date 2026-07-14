@@ -98,6 +98,21 @@ def test_deployment_context_uses_authenticated_airflow_trigger_identity(monkeypa
     assert params["deployed_by"] == "approver@example.test"
 
 
+def test_deployment_context_rejects_missing_authenticated_trigger_identity(monkeypatch):
+    module = _import_deploy_dag_module(monkeypatch)
+    context = {
+        "params": {
+            "model_name": "HOME_FREQ",
+            "package_version": 8,
+            "deployed_by": "spoofed-notebook-value",
+        },
+        "dag_run": types.SimpleNamespace(triggering_user_name=None),
+    }
+
+    with pytest.raises(ValueError, match="authenticated Airflow trigger identity"):
+        module.deployment_params_from_context(context)
+
+
 def test_deploy_rate_package_from_params_converts_selector_and_returns_xcom_strings(
     monkeypatch,
 ):

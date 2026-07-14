@@ -76,9 +76,21 @@ def _string_id(value: int | None) -> str:
 def deployment_params_from_context(context: Mapping[str, object]) -> dict[str, object]:
     params = dict(context.get("params") or {})
     dag_run = context.get("dag_run")
-    triggering_user_name = getattr(dag_run, "triggering_user_name", None)
-    if triggering_user_name and str(triggering_user_name).strip():
-        params["deployed_by"] = str(triggering_user_name).strip()
+    identity_candidates = (
+        context.get("triggering_user_name"),
+        getattr(dag_run, "triggering_user_name", None),
+    )
+    triggering_user_name = next(
+        (
+            str(value).strip()
+            for value in identity_candidates
+            if value is not None and str(value).strip()
+        ),
+        None,
+    )
+    if triggering_user_name is None:
+        raise ValueError("an authenticated Airflow trigger identity is required")
+    params["deployed_by"] = triggering_user_name
     return params
 
 

@@ -417,16 +417,32 @@ def test_build_candidate_derives_audit_plumbing(monkeypatch, tmp_path):
     assert captured["offset_export_options"] is offset_options
 
 
-def test_build_candidate_derives_simple_spec_inputs(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("exposure_column", "published_factor_name"),
+    [
+        ("exposure", "exposure"),
+        ("Earned Exposure", "Earned_Exposure"),
+    ],
+)
+def test_build_candidate_derives_simple_spec_inputs(
+    monkeypatch,
+    tmp_path,
+    exposure_column,
+    published_factor_name,
+):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
-    model = _registered_spec_model(api, tmp_path)
+    model = _registered_spec_model(
+        api,
+        tmp_path,
+        exposure_column=exposure_column,
+    )
     frame = pd.DataFrame(
         {
             "policy_id": [10, 20, 30, 40],
             "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "exposure": [1.0, 0.5, 1.5, 0.75],
+            exposure_column: [1.0, 0.5, 1.5, 0.75],
             "age": [25.0, 45.0, 35.0, 52.0],
             "region": ["N", "S", "N", "S"],
         }
@@ -472,21 +488,25 @@ def test_build_candidate_derives_simple_spec_inputs(monkeypatch, tmp_path):
     inputs = captured["inputs"]
     assert list(inputs.X.columns) == ["age", "region"]
     assert inputs.y.name == "claim_count"
-    assert np.allclose(inputs.offset.to_numpy(), np.log(frame["exposure"]))
-    assert inputs.export_weight.name == "exposure"
-    assert np.allclose(inputs.export_weight.to_numpy(), frame["exposure"])
+    assert np.allclose(inputs.offset.to_numpy(), np.log(frame[exposure_column]))
+    assert inputs.export_weight.name == exposure_column
+    assert np.allclose(inputs.export_weight.to_numpy(), frame[exposure_column])
     manifest_spec = captured["manifest_spec"]
     assert manifest_spec.dataset_name == "claim_frequency_frame"
     assert manifest_spec.source_system == "pricing_sql"
     assert manifest_spec.data_as_of_date.isoformat() == "2026-06-30"
     assert manifest_spec.pk_columns == ("policy_id",)
     assert manifest_spec.target_column == "claim_count"
-    assert manifest_spec.weight_column == "exposure"
+    assert manifest_spec.weight_column == exposure_column
     assert captured["scoring"] == ("deviance",)
     assert captured["fit_mode"] == "fit_reml"
-    assert captured["offset_contract"].handling == "EXPORTED_FACTOR"
+    contract = captured["offset_contract"]
+    assert contract.handling == "EXPORTED_FACTOR"
+    assert contract.source_factor_name == exposure_column
+    assert contract.published_factor_name == published_factor_name
+    assert contract.source_name == exposure_column
     export_options = captured["offset_export_options"]
-    assert export_options["offset_name"] == "exposure"
+    assert export_options["offset_name"] == exposure_column
     assert export_options["offset_kind"] == "auto"
     assert export_options["offset_source"].equals(inputs.export_weight)
 

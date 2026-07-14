@@ -270,6 +270,9 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "candidate_artifact_size_bytes": artifact.size_bytes,
         "candidate_python_version": artifact.python_version,
         "candidate_superglm_version": artifact.superglm_version,
+        "manifest_id": bundle.manifest_id,
+        "split_set_id": bundle.split_set_id,
+        "model_source_sha256": bundle.model_source_sha256,
     }
 
     class Rows:
@@ -297,12 +300,15 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
     monkeypatch.setattr(
         editor_candidate,
         "schema_names_from_connectable",
-        lambda engine: SimpleNamespace(pricing="pricing"),
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
     )
     submission = SimpleNamespace(
         submission_id="submission-1",
         model_name="HOME_FREQ",
         parent_rate_package_id=107,
+        manifest_id=bundle.manifest_id,
+        split_set_id=bundle.split_set_id,
+        model_source_sha256=bundle.model_source_sha256,
     )
 
     result = editor_candidate._resolve_existing_editor_publication(
@@ -317,6 +323,102 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
 
     Path(artifact.path).write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="failed verification"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("lineage_owner", ["sql", "bundle"])
+@pytest.mark.parametrize(
+    ("field_name", "different_value"),
+    [
+        ("manifest_id", "different-manifest"),
+        ("split_set_id", "different-split"),
+        ("model_source_sha256", "c" * 64),
+    ],
+)
+def test_existing_editor_publication_rejects_mismatched_lineage(
+    monkeypatch,
+    tmp_path,
+    lineage_owner,
+    field_name,
+    different_value,
+):
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.submission import EditorSubmissionError
+
+    expected = {
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "model_source_sha256": "b" * 64,
+    }
+    sql_lineage = dict(expected)
+    bundle_lineage = dict(expected)
+    if lineage_owner == "sql":
+        sql_lineage[field_name] = different_value
+    else:
+        bundle_lineage[field_name] = different_value
+
+    row = {
+        "model_name": "HOME_FREQ",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "package_status": "PUBLISHED",
+        "parent_rate_package_id": 107,
+        "model_run_id": 908,
+        "run_status": "SUCCESS",
+        "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
+        "candidate_artifact_sha256": "d" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+        **sql_lineage,
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_candidate_bundle",
+        lambda *args, **kwargs: SimpleNamespace(**bundle_lineage),
+    )
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        parent_rate_package_id=107,
+        **expected,
+    )
+
+    expected_layer = "SQL lineage" if lineage_owner == "sql" else "bundle lineage"
+    with pytest.raises(EditorSubmissionError, match=expected_layer):
         editor_candidate._resolve_existing_editor_publication(
             Engine(),
             submission,
@@ -913,6 +1015,90 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
     assert snapshot.unavailable_reason is None
     assert snapshot.bundle is not None
     assert snapshot.bundle.manifest_id == "champion-manifest"
+
+
+def test_champion_comparison_rejects_different_offset_contract(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+
+    parent = SimpleNamespace(
+        X=pd.DataFrame({"x": [1.0]}),
+        offset_contract={
+            "handling": "EXPORTED_FACTOR",
+            "source_factor_name": "Exposure",
+            "published_factor_name": "Exposure",
+            "source_name": "Exposure",
+            "label": "log(Exposure)",
+        },
+    )
+    champion = SimpleNamespace(
+        X=pd.DataFrame({"x": [8.0]}),
+        offset_contract={
+            "handling": "EXPORTED_FACTOR",
+            "source_factor_name": "Duration",
+            "published_factor_name": "Duration",
+            "source_name": "Duration",
+            "label": "log(Duration)",
+        },
+    )
+    row = {
+        "rate_package_id": 107,
+        "run_status": "SUCCESS",
+        "candidate_artifact_path": str(tmp_path / "champion.joblib"),
+        "candidate_artifact_sha256": "a" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_candidate_bundle",
+        lambda *args, **kwargs: champion,
+    )
+
+    snapshot = editor_candidate._load_champion_bundle(
+        Engine(),
+        model_id=17,
+        deployment_slot="HOME_FREQ_UAT",
+        allowed_root=tmp_path,
+        parent_bundle=parent,
+    )
+
+    assert snapshot.status == "UNAVAILABLE"
+    assert snapshot.bundle is None
+    assert snapshot.unavailable_reason == (
+        "the deployed champion uses a different offset contract"
+    )
 
 
 @pytest.mark.parametrize(

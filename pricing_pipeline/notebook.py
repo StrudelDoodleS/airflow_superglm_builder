@@ -609,7 +609,7 @@ def build_candidate(
             offset_contract = OffsetExportContract(
                 handling="EXPORTED_FACTOR",
                 source_factor_name=column,
-                published_factor_name=column,
+                published_factor_name=clean_identifier(column),
                 source_name=column,
                 label=f"log({column})",
             )

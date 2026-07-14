@@ -201,6 +201,9 @@ def _resolve_existing_editor_publication(
             rp.parent_rate_package_id,
             mr.model_run_id,
             mr.run_status,
+            mr.manifest_id,
+            split_link.split_set_id,
+            mr.model_source_sha256,
             mr.candidate_artifact_path,
             mr.candidate_artifact_sha256,
             mr.candidate_artifact_format,
@@ -212,6 +215,11 @@ def _resolve_existing_editor_publication(
           ON pm.model_id = rp.model_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = rp.rate_package_id
+        LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
+          ON split_link.model_run_id = mr.model_run_id
+         AND split_link.manifest_id = mr.manifest_id
+         AND split_link.dataset_role = 'training'
+         AND split_link.split_role = 'validation'
         WHERE pm.model_name = :model_name
           AND rp.parent_rate_package_id = :parent_rate_package_id
           AND rp.source_export_id = :export_id
@@ -258,8 +266,23 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             "editor publication requires lineage repair: candidate artifact metadata is incomplete"
         )
+    expected_lineage = {
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        "model_source_sha256": submission.model_source_sha256,
+    }
+    sql_mismatches = [
+        field
+        for field, expected in expected_lineage.items()
+        if row.get(field) != expected
+    ]
+    if sql_mismatches:
+        raise EditorSubmissionError(
+            "existing editor publication SQL lineage does not match the submission: "
+            + ", ".join(sql_mismatches)
+        )
     try:
-        load_candidate_bundle(
+        bundle = load_candidate_bundle(
             row["candidate_artifact_path"],
             expected_sha256=row["candidate_artifact_sha256"],
             expected_size_bytes=int(row["candidate_artifact_size_bytes"]),
@@ -272,6 +295,16 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             f"existing editor publication candidate artifact failed verification: {exc}"
         ) from exc
+    bundle_mismatches = [
+        field
+        for field, expected in expected_lineage.items()
+        if getattr(bundle, field) != expected
+    ]
+    if bundle_mismatches:
+        raise EditorSubmissionError(
+            "existing editor publication bundle lineage does not match the submission: "
+            + ", ".join(bundle_mismatches)
+        )
     return EditorPublicationResult(
         submission_id=submission.submission_id,
         model_name=str(row["model_name"]),
@@ -512,9 +545,7 @@ def _load_champion_bundle(
             bundle=None,
             unavailable_reason="the deployed champion uses a different prepared feature frame",
         )
-    if champion.offset_contract.get("handling") != parent_bundle.offset_contract.get(
-        "handling"
-    ):
+    if champion.offset_contract != parent_bundle.offset_contract:
         return ChampionSnapshot(
             deployment_slot=deployment_slot,
             rate_package_id=rate_package_id,
