@@ -163,6 +163,164 @@ def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
     assert candidate_columns <= model_run_columns
 
 
+def _create_legacy_effective_date_store(offline_sqlite, tmp_path):
+    paths = offline_sqlite.offline_database_paths(tmp_path)
+    legacy_engine = offline_sqlite.sqlite_engine_with_offline_schemas(paths)
+    connection = legacy_engine.raw_connection()
+    try:
+        legacy_ddl = (
+            (offline_sqlite.OFFLINE_DDL_DIR / "pricing.sql")
+            .read_text(encoding="utf-8")
+            .replace("effective_from TEXT,", "effective_from TEXT NOT NULL,")
+            .replace(
+                "effective_from_date TEXT,",
+                "effective_from_date TEXT NOT NULL,",
+            )
+        )
+        connection.executescript(legacy_ddl)
+        connection.execute(
+            """
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                rate_package_id,
+                model_id,
+                model_name,
+                package_version,
+                base_rate,
+                effective_from_date,
+                package_status,
+                created_by
+            ) VALUES (7, 1, 'LEGACY_MODEL', 1, 1.0, '2026-01-01', 'DRAFT', 'test')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO pricing.MODEL_RUN (
+                model_run_id,
+                model_id,
+                model_version,
+                export_id,
+                manifest_id,
+                rate_package_id,
+                rating_workbook_path,
+                effective_from,
+                created_by
+            ) VALUES (
+                'legacy-run', 1, 'v1', 'legacy-export', 'manifest-1', 7,
+                'rating_tables.xlsx', '2026-01-01', 'test'
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+        legacy_engine.dispose()
+    return paths
+
+
+def test_open_offline_sqlite_relaxes_legacy_effective_date_constraints(tmp_path):
+    from pricing_pipeline.infra import offline_sqlite
+
+    _create_legacy_effective_date_store(offline_sqlite, tmp_path)
+
+    upgraded, _paths = offline_sqlite.open_offline_sqlite(tmp_path)
+    with upgraded.begin() as connection:
+        model_run_columns = {
+            row[1]: row
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing.table_info('MODEL_RUN')"
+            )
+        }
+        package_columns = {
+            row[1]: row
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing.table_info('PRICING_RATE_PACKAGE')"
+            )
+        }
+        assert model_run_columns["effective_from"][3] == 0
+        assert package_columns["effective_from_date"][3] == 0
+        assert connection.exec_driver_sql(
+            "SELECT effective_from FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'"
+        ).scalar_one() == "2026-01-01"
+        assert connection.exec_driver_sql(
+            """
+            SELECT effective_from_date
+            FROM pricing.PRICING_RATE_PACKAGE
+            WHERE rate_package_id = 7
+            """
+        ).scalar_one() == "2026-01-01"
+        connection.exec_driver_sql(
+            """
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                rate_package_id,
+                model_id,
+                model_name,
+                package_version,
+                base_rate,
+                effective_from_date,
+                package_status,
+                created_by
+            ) VALUES (8, 1, 'LEGACY_MODEL', 2, 1.0, NULL, 'DRAFT', 'test')
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO pricing.MODEL_RUN (
+                model_run_id,
+                model_id,
+                model_version,
+                export_id,
+                manifest_id,
+                rate_package_id,
+                rating_workbook_path,
+                effective_from,
+                created_by
+            ) VALUES (
+                'nullable-run', 1, 'v2', 'nullable-export', 'manifest-2', 8,
+                'rating_tables.xlsx', NULL, 'test'
+            )
+            """
+        )
+
+
+def test_offline_nullability_rebuild_rolls_back_on_copy_failure(tmp_path):
+    from pricing_pipeline.infra import offline_sqlite
+
+    paths = _create_legacy_effective_date_store(offline_sqlite, tmp_path)
+    engine = offline_sqlite.sqlite_engine_with_offline_schemas(paths)
+    underlying = engine.raw_connection()
+
+    class FailingConnection:
+        def __getattr__(self, name):
+            return getattr(underlying, name)
+
+        def execute(self, statement, *args):
+            if str(statement).startswith('INSERT INTO pricing."MODEL_RUN"'):
+                raise RuntimeError("simulated copy interruption")
+            return underlying.execute(statement, *args)
+
+    failing_engine = SimpleNamespace(raw_connection=lambda: FailingConnection())
+    try:
+        with pytest.raises(RuntimeError, match="simulated copy interruption"):
+            offline_sqlite.apply_offline_ddl(failing_engine)
+    finally:
+        engine.dispose()
+
+    import sqlite3
+
+    with sqlite3.connect(paths["pricing"]) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "MODEL_RUN" in tables
+        assert "__offline_upgrade_model_run" not in tables
+        assert connection.execute(
+            "SELECT effective_from FROM MODEL_RUN WHERE model_run_id = 'legacy-run'"
+        ).fetchone() == ("2026-01-01",)
+
+
 def test_ensure_local_fremtpl_demo_refuses_non_sqlite_engines():
     from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
 

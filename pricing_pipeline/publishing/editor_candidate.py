@@ -32,6 +32,7 @@ from pricing_pipeline.publishing.staging import stage_rating_export
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
 from pricing_pipeline.publishing.superglm_publication_receipt import (
     OffsetExportContract,
+    SuperGLMPublicationReceipt,
     write_publication_receipt,
 )
 from pricing_pipeline.workbench.artifacts import (
@@ -96,6 +97,7 @@ class EditorExport:
     rating_workbook_path: str
     publication_receipt_path: str
     publication_receipt_sha256: str
+    publication_receipt: SuperGLMPublicationReceipt
     candidate_artifact_path: str
     candidate_artifact_sha256: str
     candidate_artifact_format: str
@@ -848,6 +850,7 @@ def export_edited_model(
         rating_workbook_path=str(workbook_path),
         publication_receipt_path=str(receipt_path),
         publication_receipt_sha256=receipt_sha256,
+        publication_receipt=receipt,
         candidate_artifact_path=artifact.path,
         candidate_artifact_sha256=artifact.sha256,
         candidate_artifact_format=artifact.format,
@@ -961,6 +964,7 @@ def verify_package_sql_parity(
     rate_package_id: int,
     edited_model: Any,
     bundle: CandidateBundle,
+    publication_receipt: SuperGLMPublicationReceipt | None = None,
     sample_size: int = 50,
     rtol: float = 1e-4,
     atol: float = 1e-8,
@@ -983,6 +987,31 @@ def verify_package_sql_parity(
         if contract.handling == "EXPORTED_FACTOR"
         else None
     )
+    published_by_source: dict[str, str] = {}
+    if publication_receipt is not None:
+        for metadata in publication_receipt.term_metadata.values():
+            feature_kind = metadata.get("feature_kind")
+            if feature_kind == "categorical_interaction":
+                source_names = metadata.get("parent_names")
+                published_names = metadata.get("input_column_names")
+                if isinstance(source_names, list | tuple) and isinstance(
+                    published_names, list | tuple
+                ):
+                    published_by_source.update(
+                        (str(source), str(published))
+                        for source, published in zip(
+                            source_names,
+                            published_names,
+                            strict=True,
+                        )
+                    )
+                continue
+            if feature_kind == "offset":
+                continue
+            source_name = metadata.get("source_term_name")
+            published_name = metadata.get("published_term_name")
+            if source_name is not None and published_name is not None:
+                published_by_source[str(source_name)] = str(published_name)
 
     schemas = schema_names_from_connectable(connection)
     statement = text(
@@ -995,7 +1024,10 @@ def verify_package_sql_parity(
         """
     )
     for position, (_, row) in enumerate(sample.iterrows()):
-        features = {str(name): _json_value(value) for name, value in row.items()}
+        features = {
+            published_by_source.get(str(name), str(name)): _json_value(value)
+            for name, value in row.items()
+        }
         exposure = 1.0
         if sample_published_offset_source is not None:
             features[str(contract.published_factor_name)] = _json_value(
@@ -1058,6 +1090,7 @@ def _publish_new_editor_submission(
                 rate_package_id=rate_package_id,
                 edited_model=exported.edited_model,
                 bundle=exported.bundle,
+                publication_receipt=exported.publication_receipt,
             )
 
         model_run_id: int | None = None

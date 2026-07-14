@@ -2931,6 +2931,54 @@ def test_existing_published_run_resolver_requires_exact_complete_lineage(tmp_pat
         pipeline._resolve_existing_published_run(_EvidenceEngine(evidence), export)
 
 
+def test_existing_published_run_rejects_candidate_bundle_source_hash_mismatch(
+    tmp_path: Path,
+):
+    from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+
+    evidence = _existing_retry_evidence(tmp_path)
+    metadata = save_candidate_bundle(
+        CandidateBundle(
+            fitted_model=SimpleNamespace(name="candidate"),
+            X=pd.DataFrame({"age": [42.0]}),
+            y=np.zeros(1),
+            sample_weight=None,
+            offset=None,
+            export_weight=None,
+            cv_report={},
+            manifest_id="manifest-1",
+            split_set_id="split-1",
+            pk_columns=("policy_id",),
+            row_order_sha256="d" * 64,
+            model_source_sha256="b" * 64,
+            offset_contract={"handling": "NONE"},
+        ),
+        tmp_path / "candidate.joblib",
+    )
+    stored_source_hash = "c" * 64
+    artifact_fields = {
+        "candidate_artifact_path": metadata.path,
+        "candidate_artifact_sha256": metadata.sha256,
+        "candidate_artifact_format": metadata.format,
+        "candidate_artifact_size_bytes": metadata.size_bytes,
+        "candidate_python_version": metadata.python_version,
+        "candidate_superglm_version": metadata.superglm_version,
+        "model_source_sha256": stored_source_hash,
+    }
+    evidence["row"].update(artifact_fields)
+    export = replace(_retry_export(tmp_path), **artifact_fields)
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="candidate artifact source hash does not match model-run lineage",
+    ):
+        pipeline._resolve_existing_published_run(
+            _EvidenceEngine(evidence),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
 def test_existing_published_run_resolver_adopts_winner_for_generated_lineage_retry(
     tmp_path: Path,
 ):

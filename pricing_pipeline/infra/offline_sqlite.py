@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -76,6 +77,10 @@ _OFFLINE_COLUMN_UPGRADES = (
         "TEXT",
     ),
 )
+_OFFLINE_NULLABILITY_UPGRADES = (
+    ("pricing", "MODEL_RUN", "effective_from"),
+    ("pricing", "PRICING_RATE_PACKAGE", "effective_from_date"),
+)
 
 
 @contextmanager
@@ -133,6 +138,64 @@ def sqlite_engine_with_offline_schemas(
     return engine
 
 
+def _relax_offline_column_nullability(
+    connection,
+    *,
+    schema: str,
+    table: str,
+    column: str,
+) -> bool:
+    columns = list(
+        connection.execute(f"PRAGMA {schema}.table_info('{table}')").fetchall()
+    )
+    target = next((row for row in columns if str(row[1]) == column), None)
+    if target is None or int(target[3]) == 0:
+        return False
+
+    create_row = connection.execute(
+        f"SELECT sql FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if create_row is None or not create_row[0]:
+        raise RuntimeError(f"cannot rebuild missing offline table {schema}.{table}")
+
+    nullable_sql, replacements = re.subn(
+        rf"(\b{re.escape(column)}\b\s+[A-Z0-9_]+(?:\([^)]*\))?)\s+NOT\s+NULL",
+        r"\1",
+        str(create_row[0]),
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            f"cannot relax offline column {schema}.{table}.{column}: "
+            "stored CREATE TABLE statement is not recognized"
+        )
+    qualified_sql, replacements = re.subn(
+        rf"^CREATE\s+TABLE\s+{re.escape(table)}\s*",
+        f"CREATE TABLE {schema}.{table} ",
+        nullable_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            f"cannot rebuild offline table {schema}.{table}: "
+            "stored CREATE TABLE prefix is not recognized"
+        )
+
+    old_table = f"__offline_upgrade_{table.lower()}"
+    quoted_columns = ", ".join(f'"{str(row[1])}"' for row in columns)
+    connection.execute(f'ALTER TABLE {schema}."{table}" RENAME TO "{old_table}"')
+    connection.execute(qualified_sql)
+    connection.execute(
+        f'INSERT INTO {schema}."{table}" ({quoted_columns}) '
+        f'SELECT {quoted_columns} FROM {schema}."{old_table}"'
+    )
+    connection.execute(f'DROP TABLE {schema}."{old_table}"')
+    return True
+
+
 def apply_offline_ddl(engine: Engine) -> None:
     """Create any missing local tables without deleting existing data."""
     connection = engine.raw_connection()
@@ -152,6 +215,31 @@ def apply_offline_ddl(engine: Engine) -> None:
                     f"ALTER TABLE {schema}.{table} ADD COLUMN {column} {column_type}"
                 )
         connection.commit()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rebuilt_table = False
+            for schema, table, column in _OFFLINE_NULLABILITY_UPGRADES:
+                rebuilt_table = (
+                    _relax_offline_column_nullability(
+                        connection,
+                        schema=schema,
+                        table=table,
+                        column=column,
+                    )
+                    or rebuilt_table
+                )
+            if rebuilt_table:
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS pricing.UX_MODEL_RUN_RATE_PACKAGE
+                    ON MODEL_RUN(rate_package_id)
+                    WHERE rate_package_id IS NOT NULL
+                    """
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
     finally:
         connection.close()
 

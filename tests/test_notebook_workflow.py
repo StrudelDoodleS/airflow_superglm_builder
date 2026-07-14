@@ -346,7 +346,13 @@ def test_build_candidate_derives_audit_plumbing(monkeypatch, tmp_path):
         return standard_result
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
-    offset_contract = SimpleNamespace(handling="EXPORTED_FACTOR")
+    offset_contract = api.OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="exposure",
+        published_factor_name="exposure",
+        source_name="exposure",
+        label="log(exposure)",
+    )
     offset_options = {
         "offset_source": weight,
         "offset_name": "exposure",
@@ -529,6 +535,136 @@ def test_build_candidate_requires_metadata_for_caller_supplied_spec_offset(
             frame=frame,
             model_factory=lambda: object(),
             offset=np.array([0.0, 0.2, -0.1, 0.4]),
+            data_as_of="2026-06-30",
+            run_key="custom-offset",
+            created_by="analyst@example.test",
+        )
+
+
+def test_build_candidate_validates_spec_less_exported_offset_options(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+        }
+    )
+    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: "v1",
+    )
+    monkeypatch.setattr(
+        api,
+        "run_standard_superglm_build",
+        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
+    )
+    contract = api.OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="exposure",
+        published_factor_name="exposure",
+        source_name="exposure",
+        label="log(exposure)",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="offset_export_options.*offset_source.*offset_name",
+    ):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            X=frame[["age"]],
+            y=frame["claim_count"],
+            model_factory=lambda: object(),
+            scoring=("deviance",),
+            dataset_name="claim_frequency_frame",
+            source_system="pricing_sql",
+            data_as_of="2026-06-30",
+            pk_columns=("policy_id",),
+            split_indices=[(np.array([0, 1]), np.array([2, 3]))],
+            offset=np.array([0.0, 0.2, -0.1, 0.4]),
+            offset_contract=contract,
+            offset_export_options={},
+            run_key="custom-offset",
+            created_by="analyst@example.test",
+        )
+
+
+@pytest.mark.parametrize("invalid_options", ["missing", "misaligned"])
+def test_build_candidate_validates_caller_supplied_exported_offset_options(
+    monkeypatch,
+    tmp_path,
+    invalid_options,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_spec_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "exposure": [1.0, 0.5, 1.5, 0.75],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    monkeypatch.setattr(
+        api,
+        "validation_split_indices",
+        lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
+    )
+    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: "v1",
+    )
+    monkeypatch.setattr(
+        api,
+        "run_standard_superglm_build",
+        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
+    )
+    contract = api.OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="exposure",
+        published_factor_name="exposure",
+        source_name="exposure",
+        label="log(exposure)",
+    )
+    options = (
+        {}
+        if invalid_options == "missing"
+        else {
+            "offset_source": frame["exposure"],
+            "offset_name": "different_exposure",
+        }
+    )
+    expected = (
+        "offset_export_options.*offset_source.*offset_name"
+        if invalid_options == "missing"
+        else "offset_name.*published_factor_name"
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            model_factory=lambda: object(),
+            offset=np.array([0.0, 0.2, -0.1, 0.4]),
+            offset_contract=contract,
+            offset_export_options=options,
             data_as_of="2026-06-30",
             run_key="custom-offset",
             created_by="analyst@example.test",

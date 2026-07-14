@@ -1053,6 +1053,83 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
     assert all("PREDICT_RATE_PACKAGE" in sql for sql, _params in connection.calls)
 
 
+def test_package_sql_parity_uses_published_feature_names():
+    import numpy as np
+    import pandas as pd
+    from superglm import Numeric
+
+    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
+    from pricing_pipeline.publishing.superglm_metadata import (
+        build_superglm_publication_receipt,
+    )
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    class Model:
+        _specs = {"a/b": Numeric()}
+        _feature_order = ("a/b",)
+        _fit_used_offset = False
+
+        def predict(self, X, offset=None):
+            return np.asarray(X["a/b"], dtype=float) * 2.0
+
+    class Result:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {"prediction": self.prediction}
+
+    class Connection:
+        def __init__(self):
+            self.payloads = []
+
+        def execute(self, _statement, params):
+            self.payloads.append(json.loads(params["features_json"]))
+            return Result(params["x_prediction"])
+
+    model = Model()
+    bundle = CandidateBundle(
+        fitted_model=model,
+        X=pd.DataFrame({"a/b": [1.5]}),
+        y=np.ones(1),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        manifest_id="manifest-1",
+        split_set_id=None,
+        pk_columns=("id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    connection = Connection()
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    verify_package_sql_parity(
+        connection,
+        rate_package_id=108,
+        edited_model=model,
+        bundle=bundle,
+        publication_receipt=receipt,
+        execute_params_hook=lambda params, expected: {
+            **params,
+            "x_prediction": expected,
+        },
+    )
+
+    assert connection.payloads == [{"a_b": 1.5}]
+
+
 class _ParityResult:
     def __init__(self, prediction):
         self.prediction = prediction

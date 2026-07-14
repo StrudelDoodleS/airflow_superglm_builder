@@ -52,6 +52,22 @@ def test_staging_content_digest_migration_binds_staged_rows():
     assert "LIKE '%[^0-9a-f]%'" in sql
 
 
+def test_staging_content_digest_collation_upgrade_recreates_constraints():
+    path = Path("db/migrations/V030__staging_content_digest_binary_collation.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    for constraint in (
+        "CK_PRICING_RATE_PACKAGE_CONTENT_SHA256",
+        "CK_STG_RATING_EXPORT_CONTENT_SHA256",
+    ):
+        assert f"DROP CONSTRAINT {constraint}" in sql
+        assert f"ADD CONSTRAINT {constraint}" in sql
+    assert sql.count(
+        "staging_content_sha256 COLLATE Latin1_General_BIN2"
+    ) == 2
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 

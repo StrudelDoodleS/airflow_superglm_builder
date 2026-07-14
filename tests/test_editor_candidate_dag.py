@@ -117,3 +117,42 @@ def test_editor_candidate_dag_publishes_from_dag_run_conf(monkeypatch, tmp_path)
         "package_status": "PUBLISHED",
         "was_existing": False,
     }
+
+
+def test_editor_candidate_dag_rejects_missing_trigger_identity(monkeypatch, tmp_path):
+    import pytest
+
+    module = _import_dag(monkeypatch)
+    runtime = types.SimpleNamespace(
+        settings=types.SimpleNamespace(workbench_artifact_root=tmp_path),
+        get_engine=lambda: object(),
+    )
+    monkeypatch.setattr(module, "runtime_from_env_or_module", lambda **kwargs: runtime)
+    monkeypatch.setattr(
+        module,
+        "publish_editor_submission",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            submission_id="submission-1",
+            model_name="HOME_FREQ",
+            parent_rate_package_id=107,
+            rate_package_id=108,
+            package_version=8,
+            model_run_id=908,
+            package_status="PUBLISHED",
+            was_existing=False,
+        ),
+    )
+    context = {
+        "dag": types.SimpleNamespace(dag_id="pricing_publish_editor_candidate"),
+        "dag_run": types.SimpleNamespace(
+            run_id="manual__submission-1",
+            triggering_user_name=None,
+            conf={
+                "submission_path": str(tmp_path / "submission.json"),
+                "submission_sha256": "a" * 64,
+            },
+        ),
+    }
+
+    with pytest.raises(ValueError, match="authenticated Airflow trigger identity"):
+        module.publish_editor_candidate_from_context(context)

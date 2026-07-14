@@ -461,6 +461,10 @@ def _resolve_existing_published_run(
             raise PublishedRunIntegrityError(
                 f"existing candidate artifact failed verification: {exc}"
             ) from exc
+        if bundle.model_source_sha256 != str(row["model_source_sha256"]):
+            raise PublishedRunIntegrityError(
+                "existing candidate artifact source hash does not match model-run lineage"
+            )
         if bundle.manifest_id != str(row["manifest_id"]):
             raise PublishedRunIntegrityError(
                 "existing candidate artifact manifest does not match model-run lineage"

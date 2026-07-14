@@ -42,6 +42,7 @@ from pricing_pipeline.publishing.model_registry import (
     validate_registered_model,
 )
 from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
+from pricing_pipeline.publishing.naming import clean_identifier
 from pricing_pipeline.publishing.deployment import deploy_rate_package
 from pricing_pipeline.publishing.editor_candidate import publish_editor_submission
 from pricing_pipeline.publishing.rating_export import build_export_id
@@ -577,6 +578,7 @@ def build_candidate(
     if resolved_scoring is None:
         raise ValueError("scoring is required when the registered model has no PricingModelSpec")
     resolved_fit_mode = fit_mode or (spec.fit_mode if spec else "fit_reml")
+    caller_supplied_offset = offset is not None
 
     derived_exposure_options = False
     if spec is not None and spec.sample_weight_column is not None and sample_weight is None:
@@ -599,17 +601,6 @@ def build_candidate(
         derived_exposure_offset = offset is None
         if derived_exposure_offset:
             offset = np.log(exposure)
-        else:
-            missing_offset_metadata = []
-            if offset_contract is None:
-                missing_offset_metadata.append("offset_contract")
-            if offset_export_options is None:
-                missing_offset_metadata.append("offset_export_options")
-            if missing_offset_metadata:
-                raise ValueError(
-                    "caller-supplied offset requires "
-                    + " and ".join(missing_offset_metadata)
-                )
         if export_weight is None:
             export_weight = exposure
         export_weight_name = export_weight_name or column
@@ -629,6 +620,45 @@ def build_candidate(
                 "offset_kind": "auto",
             }
             derived_exposure_options = True
+
+    if caller_supplied_offset:
+        missing_offset_metadata = []
+        if offset_contract is None:
+            missing_offset_metadata.append("offset_contract")
+        if offset_export_options is None:
+            missing_offset_metadata.append("offset_export_options")
+        if missing_offset_metadata:
+            raise ValueError(
+                "caller-supplied offset requires "
+                + " and ".join(missing_offset_metadata)
+            )
+        if offset_contract.handling == "EXPORTED_FACTOR":
+            missing_export_options = [
+                name
+                for name in ("offset_source", "offset_name")
+                if offset_export_options.get(name) is None
+                or (
+                    name == "offset_name"
+                    and not str(offset_export_options.get(name)).strip()
+                )
+            ]
+            if missing_export_options:
+                raise ValueError(
+                    "offset_export_options requires "
+                    + " and ".join(missing_export_options)
+                    + " for an EXPORTED_FACTOR offset contract"
+                )
+            offset_name = str(offset_export_options["offset_name"]).strip()
+            published_factor_name = str(
+                offset_contract.published_factor_name or ""
+            ).strip()
+            if clean_identifier(offset_name) != clean_identifier(
+                published_factor_name
+            ):
+                raise ValueError(
+                    "offset_export_options offset_name must align with "
+                    "offset_contract.published_factor_name"
+                )
 
     resolved_run_key = _required_text(run_key or _new_notebook_run_key(), "run_key")
     export_id = build_export_id(model.name, resolved_run_key)

@@ -32,11 +32,20 @@ def publish_editor_candidate_from_context(context: Mapping[str, Any]) -> dict[st
     runtime = runtime_from_env_or_module(env=os.environ)
     dag_obj = context.get("dag")
     dag_id = str(getattr(dag_obj, "dag_id", None) or getattr(dag_run, "dag_id"))
-    triggering_identity = str(
-        context.get("triggering_user_name")
-        or getattr(dag_run, "triggering_user_name", None)
-        or "prototype-airflow-trigger-identity-unavailable"
+    identity_candidates = (
+        context.get("triggering_user_name"),
+        getattr(dag_run, "triggering_user_name", None),
     )
+    triggering_identity = next(
+        (
+            str(value).strip()
+            for value in identity_candidates
+            if value is not None and str(value).strip()
+        ),
+        None,
+    )
+    if triggering_identity is None:
+        raise ValueError("an authenticated Airflow trigger identity is required")
     result = publish_editor_submission(
         runtime.get_engine(),
         settings=runtime.settings,
