@@ -950,7 +950,13 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         pk_columns=("id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
-        offset_contract={"handling": "NONE"},
+        offset_contract={
+            "handling": "NONE",
+            "source_factor_name": None,
+            "published_factor_name": None,
+            "source_name": None,
+            "label": None,
+        },
     )
     champion = CandidateBundle(
         fitted_model={"model": "champion"},
@@ -1017,7 +1023,31 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
     assert snapshot.bundle.manifest_id == "champion-manifest"
 
 
-def test_champion_comparison_rejects_different_offset_contract(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("champion_offset_contract", "expected_reason"),
+    [
+        (
+            {
+                "handling": "EXPORTED_FACTOR",
+                "source_factor_name": "Duration",
+                "published_factor_name": "Duration",
+                "source_name": "Duration",
+                "label": "log(Duration)",
+            },
+            "the deployed champion uses a different offset contract",
+        ),
+        (
+            {"handling": "NONE", "source_name": "invalid"},
+            "the deployed champion has an invalid offset contract",
+        ),
+    ],
+)
+def test_champion_comparison_rejects_incompatible_offset_contract(
+    monkeypatch,
+    tmp_path,
+    champion_offset_contract,
+    expected_reason,
+):
     import pandas as pd
 
     from pricing_pipeline.publishing import editor_candidate
@@ -1034,13 +1064,7 @@ def test_champion_comparison_rejects_different_offset_contract(monkeypatch, tmp_
     )
     champion = SimpleNamespace(
         X=pd.DataFrame({"x": [8.0]}),
-        offset_contract={
-            "handling": "EXPORTED_FACTOR",
-            "source_factor_name": "Duration",
-            "published_factor_name": "Duration",
-            "source_name": "Duration",
-            "label": "log(Duration)",
-        },
+        offset_contract=champion_offset_contract,
     )
     row = {
         "rate_package_id": 107,
@@ -1096,9 +1120,7 @@ def test_champion_comparison_rejects_different_offset_contract(monkeypatch, tmp_
 
     assert snapshot.status == "UNAVAILABLE"
     assert snapshot.bundle is None
-    assert snapshot.unavailable_reason == (
-        "the deployed champion uses a different offset contract"
-    )
+    assert snapshot.unavailable_reason == expected_reason
 
 
 @pytest.mark.parametrize(

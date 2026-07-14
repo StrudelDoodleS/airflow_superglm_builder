@@ -545,7 +545,21 @@ def _load_champion_bundle(
             bundle=None,
             unavailable_reason="the deployed champion uses a different prepared feature frame",
         )
-    if champion.offset_contract != parent_bundle.offset_contract:
+    try:
+        champion_offset_contract = OffsetExportContract.model_validate(
+            champion.offset_contract
+        ).model_dump(mode="json")
+    except ValueError:
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason="the deployed champion has an invalid offset contract",
+        )
+    parent_offset_contract = OffsetExportContract.model_validate(
+        parent_bundle.offset_contract
+    ).model_dump(mode="json")
+    if champion_offset_contract != parent_offset_contract:
         return ChampionSnapshot(
             deployment_slot=deployment_slot,
             rate_package_id=rate_package_id,
