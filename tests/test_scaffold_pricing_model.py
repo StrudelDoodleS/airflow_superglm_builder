@@ -93,8 +93,15 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert 'EXPECTED_REMOTE_DATABASE = ""' in cells[0]
     assert "ALLOW_REMOTE_WRITES = False" in cells[0]
     assert "PricingModelSpec(" in source
+    assert "from superglm import Numeric, SuperGLM" in source
+    assert source.count("FEATURES = {") == 1
+    assert source.count("superglm_model = SuperGLM(") == 1
+    assert '"feature_1": Numeric()' in source
+    assert "features=FEATURES," in source
+    assert "features=tuple(FEATURES)," in source
     assert "register_model(" in source
     assert "build_candidate(" in source
+    assert "superglm_model=superglm_model" in source
     assert "publish_candidate(" in source
     assert "open_candidate(" in source
     assert "publish_edits(" in source
@@ -106,6 +113,8 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert "Airflow" not in source
     assert "private-server" not in source
     assert "mssql_server" not in source
+    for hidden_model_surface in ("FEATURE_COLUMNS", "make_model", "model_factory"):
+        assert hidden_model_surface not in source
 
 
 def test_scaffold_preserves_existing_notebook_and_recreates_missing_init(tmp_path):

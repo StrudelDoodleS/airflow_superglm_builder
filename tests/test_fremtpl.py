@@ -51,6 +51,7 @@ def test_fetch_fremtpl_uses_openml_id_and_resets_index(monkeypatch):
 
     assert FREMTPL_OPENML_ID == 41214
     assert FREMTPL_DATASET_NAME == "freMTPL2freq"
+    assert fremtpl.FREMTPL_EXPECTED_ROW_COUNT == 678_013
     assert calls == [{"data_id": 41214, "as_frame": True}]
     assert out.index.tolist() == [0]
 
@@ -76,20 +77,9 @@ def test_validate_fremtpl_raw_rejects_missing_columns():
     assert "Region" in message
 
 
-def test_ensure_local_fremtpl_demo_seeds_an_empty_sqlite_store_once(tmp_path):
-    from sqlalchemy import text
-
-    from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
-    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
-
-    engine, _paths = open_offline_sqlite(tmp_path)
-
-    assert ensure_local_fremtpl_demo(engine, row_count=12) == 12
-    assert ensure_local_fremtpl_demo(engine, row_count=99) == 12
-    with engine.connect() as connection:
-        count = connection.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
-
-    assert count == 12
+def test_fremtpl_data_api_has_no_synthetic_demo_seed_helpers():
+    assert not hasattr(fremtpl, "synthetic_fremtpl_raw_frame")
+    assert not hasattr(fremtpl, "ensure_local_fremtpl_demo")
 
 
 def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
@@ -109,6 +99,12 @@ def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
         ignore_index=True,
     )
     engine, _paths = open_offline_sqlite(tmp_path)
+    monkeypatch.setattr(
+        fremtpl,
+        "FREMTPL_EXPECTED_ROW_COUNT",
+        len(source),
+        raising=False,
+    )
     monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
 
     inserted = load_fremtpl_raw(engine)
@@ -132,6 +128,12 @@ def test_load_fremtpl_raw_second_non_replace_call_reuses_sqlite_rows(
         ignore_index=True,
     )
     engine, _paths = open_offline_sqlite(tmp_path)
+    monkeypatch.setattr(
+        fremtpl,
+        "FREMTPL_EXPECTED_ROW_COUNT",
+        len(source),
+        raising=False,
+    )
     monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
     assert load_fremtpl_raw(engine) == len(source)
     monkeypatch.setattr(
@@ -143,7 +145,7 @@ def test_load_fremtpl_raw_second_non_replace_call_reuses_sqlite_rows(
     assert load_fremtpl_raw(engine, replace=False) == len(source)
 
 
-def test_load_fremtpl_raw_fetch_failure_does_not_clear_existing_sqlite_rows(
+def test_load_fremtpl_raw_partial_store_survives_fetch_failure(
     monkeypatch,
     tmp_path,
 ):
@@ -160,7 +162,39 @@ def test_load_fremtpl_raw_fetch_failure_does_not_clear_existing_sqlite_rows(
     monkeypatch.setattr(fremtpl, "fetch_fremtpl", fail_fetch)
 
     with pytest.raises(RuntimeError, match="fetch failed"):
-        load_fremtpl_raw(engine, replace=True)
+        load_fremtpl_raw(engine, replace=False)
+
+    with engine.connect() as connection:
+        ids = connection.execute(
+            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
+        ).scalars().all()
+    assert ids == [41]
+
+
+def test_load_fremtpl_raw_wrong_fetched_count_does_not_clear_partial_store(
+    monkeypatch,
+    tmp_path,
+):
+    from sqlalchemy import text
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, _paths = open_offline_sqlite(tmp_path)
+    bulk_insert_fremtpl_raw(engine, fremtpl_frame(IDpol=[41]))
+    source = pd.concat(
+        [fremtpl_frame(IDpol=[1]), fremtpl_frame(IDpol=[2])],
+        ignore_index=True,
+    )
+    monkeypatch.setattr(
+        fremtpl,
+        "FREMTPL_EXPECTED_ROW_COUNT",
+        3,
+        raising=False,
+    )
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
+
+    with pytest.raises(ValueError, match="expected 3 rows, got 2"):
+        load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
         ids = connection.execute(
@@ -478,15 +512,6 @@ def test_offline_nullability_rebuild_rolls_back_on_copy_failure(tmp_path):
         ).fetchone() == ("2026-01-01",)
 
 
-def test_ensure_local_fremtpl_demo_refuses_non_sqlite_engines():
-    from pricing_pipeline.data.fremtpl import ensure_local_fremtpl_demo
-
-    engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
-
-    with pytest.raises(ValueError, match="local SQLite"):
-        ensure_local_fremtpl_demo(engine)
-
-
 def test_fremtpl_insert_rows_preserves_order_and_converts_missing_to_none():
     frame = fremtpl_frame(
         Area=[None],
@@ -732,7 +757,8 @@ def test_bulk_insert_fremtpl_raw_rolls_back_and_closes_on_executemany_failure():
 
 
 def test_load_fremtpl_raw_returns_existing_count_without_fetching(monkeypatch):
-    engine = FakeEngine(existing_count=7)
+    assert fremtpl.FREMTPL_EXPECTED_ROW_COUNT == 678_013
+    engine = FakeEngine(existing_count=fremtpl.FREMTPL_EXPECTED_ROW_COUNT)
     monkeypatch.setattr(
         fremtpl,
         "fetch_fremtpl",
@@ -741,10 +767,36 @@ def test_load_fremtpl_raw_returns_existing_count_without_fetching(monkeypatch):
 
     rows = load_fremtpl_raw(engine, replace=False)
 
-    assert rows == 7
+    assert rows == fremtpl.FREMTPL_EXPECTED_ROW_COUNT
     assert engine.begin_connection.statements == [
         ("SELECT COUNT(*) FROM pricing.FREMTPL_RAW", None)
     ]
+
+
+def test_load_fremtpl_raw_replaces_legacy_120_row_store(monkeypatch):
+    events = []
+    cursor = FakeCursor(events=events)
+    raw_connection = FakeRawConnection(cursor)
+    engine = FakeEngine(existing_count=120, raw_connection=raw_connection)
+    source = fremtpl_frame()
+
+    def fake_fetch_fremtpl():
+        events.append("fetch")
+        return source
+
+    monkeypatch.setattr(
+        fremtpl,
+        "FREMTPL_EXPECTED_ROW_COUNT",
+        len(source),
+        raising=False,
+    )
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", fake_fetch_fremtpl)
+
+    rows = load_fremtpl_raw(engine, replace=False)
+
+    assert rows == len(source)
+    assert events == ["fetch", "truncate", "executemany"]
+    assert cursor.execute_calls == ["TRUNCATE TABLE pricing.FREMTPL_RAW"]
 
 
 def test_load_fremtpl_raw_fetches_and_prepares_before_replace_truncate(monkeypatch):
@@ -758,6 +810,12 @@ def test_load_fremtpl_raw_fetches_and_prepares_before_replace_truncate(monkeypat
         events.append("fetch")
         return source
 
+    monkeypatch.setattr(
+        fremtpl,
+        "FREMTPL_EXPECTED_ROW_COUNT",
+        len(source),
+        raising=False,
+    )
     monkeypatch.setattr(fremtpl, "fetch_fremtpl", fake_fetch_fremtpl)
     rows = load_fremtpl_raw(engine, replace=True)
 

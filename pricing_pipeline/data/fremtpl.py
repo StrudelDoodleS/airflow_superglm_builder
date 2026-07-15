@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from sklearn.datasets import fetch_openml
 from sqlalchemy import text
@@ -13,6 +12,7 @@ from pricing_pipeline.infra.schema import render_sql_schemas, schema_names_from_
 
 FREMTPL_OPENML_ID = 41214
 FREMTPL_DATASET_NAME = "freMTPL2freq"
+FREMTPL_EXPECTED_ROW_COUNT = 678_013
 FREMTPL_COLUMNS = [
     "IDpol",
     "ClaimNb",
@@ -47,52 +47,6 @@ def prepare_fremtpl_raw_frame(frame: pd.DataFrame) -> pd.DataFrame:
     out["IDpol"] = out["IDpol"].astype("int64")
     out["ClaimNb"] = out["ClaimNb"].astype("int64")
     return out
-
-
-def synthetic_fremtpl_raw_frame(row_count: int = 120) -> pd.DataFrame:
-    """Build deterministic freMTPL-shaped rows for the local demo store."""
-    if row_count < 5:
-        raise ValueError("row_count must be at least 5 for the configured 5-fold split")
-
-    rng = np.random.default_rng(20260616)
-    index = np.arange(row_count)
-    exposure = rng.uniform(0.1, 1.0, size=row_count).round(6)
-    veh_age = rng.integers(0, 25, size=row_count)
-    driv_age = rng.integers(18, 85, size=row_count)
-    bonus_malus = rng.integers(50, 180, size=row_count)
-    density = rng.lognormal(mean=5.5, sigma=1.0, size=row_count).round(6)
-    area = np.array(["A", "B", "C", "D", "E", "F"])[index % 6]
-    veh_power = rng.integers(4, 12, size=row_count)
-    veh_brand = np.array(["B1", "B2", "B3", "B4", "B5"])[index % 5]
-    veh_gas = np.where(index % 3 == 0, "Diesel", "Regular")
-    region = np.array(["R11", "R21", "R22", "R23", "R24"])[index % 5]
-    log_rate = (
-        -3.3
-        + 0.006 * (bonus_malus - 100)
-        + 0.012 * np.maximum(driv_age - 65, 0)
-        + 0.015 * np.maximum(veh_age - 10, 0)
-        + 0.08 * (area == "F")
-        + 0.04 * (veh_gas == "Diesel")
-    )
-    claim_nb = rng.poisson(exposure * np.exp(log_rate))
-
-    return pd.DataFrame(
-        {
-            "IDpol": (100000 + index).astype("int64"),
-            "ClaimNb": claim_nb.astype("int64"),
-            "Exposure": exposure.astype(float),
-            "Area": area,
-            "VehPower": veh_power.astype("int64"),
-            "VehAge": veh_age.astype("int64"),
-            "DrivAge": driv_age.astype("int64"),
-            "BonusMalus": bonus_malus.astype("int64"),
-            "VehBrand": veh_brand,
-            "VehGas": veh_gas,
-            "Density": density.astype(float),
-            "Region": region,
-        },
-        columns=FREMTPL_COLUMNS,
-    )
 
 
 def _db_value(value: Any) -> Any:
@@ -183,33 +137,23 @@ def bulk_insert_fremtpl_raw(
     return len(rows)
 
 
-def ensure_local_fremtpl_demo(engine: Engine, *, row_count: int = 120) -> int:
-    """Seed an empty local SQLite source table and preserve it on reruns."""
-    if engine.dialect.name != "sqlite":
-        raise ValueError("freMTPL demo seeding is restricted to local SQLite")
-
-    with engine.begin() as connection:
-        existing_count = int(
-            connection.execute(
-                text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
-            ).scalar_one()
-        )
-    if existing_count:
-        return existing_count
-
-    return bulk_insert_fremtpl_raw(
-        engine,
-        synthetic_fremtpl_raw_frame(row_count),
-    )
-
-
 def load_fremtpl_raw(engine: Engine, *, replace: bool = False) -> int:
     with engine.begin() as con:
         existing_count = int(
             con.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
         )
-        if existing_count and not replace:
+        if existing_count == FREMTPL_EXPECTED_ROW_COUNT and not replace:
             return existing_count
 
     frame = prepare_fremtpl_raw_frame(fetch_fremtpl())
-    return bulk_insert_fremtpl_raw(engine, frame, replace=replace)
+    actual_count = len(frame)
+    if actual_count != FREMTPL_EXPECTED_ROW_COUNT:
+        raise ValueError(
+            "freMTPL OpenML data row count mismatch: "
+            f"expected {FREMTPL_EXPECTED_ROW_COUNT} rows, got {actual_count}"
+        )
+    return bulk_insert_fremtpl_raw(
+        engine,
+        frame,
+        replace=replace or existing_count > 0,
+    )

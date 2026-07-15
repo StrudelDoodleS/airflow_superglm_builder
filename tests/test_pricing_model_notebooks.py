@@ -23,9 +23,9 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "connect(" in source
     assert "register_model(" in source
     assert "pd.read_sql_query(" in source
-    assert "ensure_local_fremtpl_demo" in source
+    assert "load_fremtpl_raw" in source
     assert 'frame["LogDensity"]' in source
-    assert "def make_model()" in source
+    assert "superglm_model = SuperGLM(" in source
     assert "ValidationSplitConfig.kfold(" in source
     assert "build_candidate(" in source
     assert "publish_candidate(" in source
@@ -49,7 +49,8 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     )
     source_code = "".join(source_cell["source"])
     assert 'if pricing.mode == "local":' in source_code
-    assert "ensure_local_fremtpl_demo(pricing.engine" in source_code
+    assert source_code.count("load_fremtpl_raw(") == 1
+    assert "load_fremtpl_raw(pricing.engine, replace=REFRESH_LOCAL_RAW)" in source_code
 
     assert "model.toml" not in lowered
     assert "model_config" not in lowered
@@ -119,16 +120,34 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "RUNTIME_MODULE = None" in code_cells[0]
     assert 'EXPECTED_REMOTE_DATABASE = ""' in code_cells[0]
     assert "ALLOW_REMOTE_WRITES = False" in code_cells[0]
+    assert "REFRESH_LOCAL_RAW = False" in code_cells[0]
     assert "PricingModelSpec" in source
     globals_cell = next(cell for cell in code_cells if "DATABASE_MODE" in cell)
     assert 'DATABASE_MODE = "local"' in globals_cell
     assert 'EXPECTED_REMOTE_DATABASE = ""' in globals_cell
     assert "ALLOW_REMOTE_WRITES = False" in globals_cell
+    assert "REFRESH_LOCAL_RAW = False" in globals_cell
     assert "DATA_AS_OF" in globals_cell
     assert "RUN_EDITOR = False" in globals_cell
     assert "DEPLOY = False" in globals_cell
     model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)
-    assert "FEATURE_COLUMNS" in model_cell
+    assert "from superglm import Categorical, Numeric, Spline, SuperGLM" in source
+    assert source.count("FEATURES = {") == 1
+    assert source.count("superglm_model = SuperGLM(") == 1
+    assert "features=FEATURES," in model_cell
+    assert "features=tuple(FEATURES)," in model_cell
+    for feature_declaration in (
+        '"VehAge": Spline()',
+        '"DrivAge": Spline()',
+        '"BonusMalus": Spline()',
+        '"LogDensity": Numeric()',
+        '"Area": Categorical()',
+        '"VehPower": Categorical()',
+        '"VehBrand": Categorical()',
+        '"VehGas": Categorical()',
+        '"Region": Categorical()',
+    ):
+        assert feature_declaration in model_cell
     connect_cell = next(cell for cell in code_cells if "pricing = connect(" in cell)
     assert "mode=DATABASE_MODE" in connect_cell
     assert "runtime_module=RUNTIME_MODULE" in connect_cell
@@ -140,12 +159,23 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert ".head(" not in source
     assert "display(raw" not in source
     assert "display(frame" not in source
+    assert 'frame["LogDensity"] = np.log(' in source
+    assert '*FEATURES]' in source
+
+    for hidden_model_surface in (
+        "FEATURE_COLUMNS",
+        "make_model",
+        "model_factory",
+        "ensure_local_fremtpl_demo",
+        "row_count=120",
+    ):
+        assert hidden_model_surface not in source
 
     build_cell = next(cell for cell in code_cells if "candidate = build_candidate(" in cell)
     assert "pricing," in build_cell
     assert "model=model" in build_cell
     assert "frame=frame" in build_cell
-    assert "model_factory=make_model" in build_cell
+    assert "superglm_model=superglm_model" in build_cell
     assert "data_as_of=DATA_AS_OF" in build_cell
     for hidden_argument in (
         "X=X",
