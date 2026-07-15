@@ -11,8 +11,8 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.orchestration.publish_completed_build import (
-    CompletedModelBuild,
     CompletedModelPublishResult,
 )
 from pricing_pipeline.publishing.model_registry import PricingModelRecord
@@ -96,7 +96,7 @@ def _registered_spec_model(api, tmp_path: Path, **spec_overrides):
     )
 
 
-def _approved_build(tmp_path: Path, **overrides) -> CompletedModelBuild:
+def _approved_build(tmp_path: Path, **overrides) -> ApprovedModelBuild:
     values = {
         "model_id": 17,
         "model_name": "CLAIM_FREQUENCY",
@@ -123,7 +123,7 @@ def _approved_build(tmp_path: Path, **overrides) -> CompletedModelBuild:
         "model_frame_sha256": "e" * 64,
     }
     values.update(overrides)
-    return CompletedModelBuild(**values)
+    return ApprovedModelBuild(**values)
 
 
 def test_pricing_model_spec_holds_analyst_decisions():
