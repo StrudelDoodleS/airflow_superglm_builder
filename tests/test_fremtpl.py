@@ -92,6 +92,83 @@ def test_ensure_local_fremtpl_demo_seeds_an_empty_sqlite_store_once(tmp_path):
     assert count == 12
 
 
+def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
+    monkeypatch,
+    tmp_path,
+):
+    from sqlalchemy import text
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    source = pd.concat(
+        [
+            fremtpl_frame(IDpol=[1], ClaimNb=[0]),
+            fremtpl_frame(IDpol=[2], ClaimNb=[1]),
+            fremtpl_frame(IDpol=[3], ClaimNb=[0]),
+        ],
+        ignore_index=True,
+    )
+    engine, _paths = open_offline_sqlite(tmp_path)
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
+
+    inserted = load_fremtpl_raw(engine)
+
+    assert inserted == len(source)
+    with engine.connect() as connection:
+        count = connection.execute(
+            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
+        ).scalar_one()
+    assert count == len(source)
+
+
+def test_load_fremtpl_raw_second_non_replace_call_reuses_sqlite_rows(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    source = pd.concat(
+        [fremtpl_frame(IDpol=[1]), fremtpl_frame(IDpol=[2])],
+        ignore_index=True,
+    )
+    engine, _paths = open_offline_sqlite(tmp_path)
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", lambda: source)
+    assert load_fremtpl_raw(engine) == len(source)
+    monkeypatch.setattr(
+        fremtpl,
+        "fetch_fremtpl",
+        lambda: pytest.fail("fetch_fremtpl should not run when raw rows exist"),
+    )
+
+    assert load_fremtpl_raw(engine, replace=False) == len(source)
+
+
+def test_load_fremtpl_raw_fetch_failure_does_not_clear_existing_sqlite_rows(
+    monkeypatch,
+    tmp_path,
+):
+    from sqlalchemy import text
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, _paths = open_offline_sqlite(tmp_path)
+    bulk_insert_fremtpl_raw(engine, fremtpl_frame(IDpol=[41]))
+
+    def fail_fetch():
+        raise RuntimeError("fetch failed")
+
+    monkeypatch.setattr(fremtpl, "fetch_fremtpl", fail_fetch)
+
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        load_fremtpl_raw(engine, replace=True)
+
+    with engine.connect() as connection:
+        ids = connection.execute(
+            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
+        ).scalars().all()
+    assert ids == [41]
+
+
 def test_open_offline_sqlite_adds_digest_columns_to_existing_store(tmp_path):
     import sqlite3
 
@@ -438,7 +515,7 @@ class FakeBeginConnection:
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append((sql, params))
-        if sql.startswith("SELECT COUNT_BIG(*) FROM pricing.FREMTPL_RAW"):
+        if sql.startswith("SELECT COUNT(*) FROM pricing.FREMTPL_RAW"):
             return ScalarResult(self.existing_count)
         return ScalarResult(None)
 
@@ -505,14 +582,14 @@ class FakeEngine:
         *,
         existing_count=0,
         raw_connection=None,
+        dialect_name="mssql",
         paramstyle=None,
         execution_options=None,
     ):
         self.begin_connection = FakeBeginConnection(existing_count)
         self.raw_connection_obj = raw_connection
         self._execution_options = execution_options or {}
-        if paramstyle is not None:
-            self.dialect = SimpleNamespace(paramstyle=paramstyle)
+        self.dialect = SimpleNamespace(name=dialect_name, paramstyle=paramstyle)
 
     def begin(self):
         return FakeBegin(self.begin_connection)
@@ -587,10 +664,32 @@ def test_bulk_insert_fremtpl_raw_uses_configured_schema_for_raw_cursor_sql():
     assert cursor.executemany_calls[0][0].startswith("INSERT INTO python_pricing.FREMTPL_RAW")
 
 
-def test_bulk_insert_fremtpl_raw_replace_truncates_and_inserts_in_one_transaction():
+def test_bulk_insert_fremtpl_raw_sqlite_replace_deletes_existing_rows(tmp_path):
+    from sqlalchemy import text
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, _paths = open_offline_sqlite(tmp_path)
+    bulk_insert_fremtpl_raw(engine, fremtpl_frame(IDpol=[1]))
+    replacement = pd.concat(
+        [fremtpl_frame(IDpol=[2]), fremtpl_frame(IDpol=[3])],
+        ignore_index=True,
+    )
+
+    inserted = bulk_insert_fremtpl_raw(engine, replacement, replace=True)
+
+    assert inserted == len(replacement)
+    with engine.connect() as connection:
+        ids = connection.execute(
+            text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol")
+        ).scalars().all()
+    assert ids == [2, 3]
+
+
+def test_bulk_insert_fremtpl_raw_non_sqlite_replace_uses_truncate():
     cursor = FakeCursor()
     raw_connection = FakeRawConnection(cursor)
-    engine = FakeEngine(raw_connection=raw_connection)
+    engine = FakeEngine(raw_connection=raw_connection, dialect_name="mssql")
 
     inserted = bulk_insert_fremtpl_raw(engine, fremtpl_frame(), replace=True)
 
@@ -644,7 +743,7 @@ def test_load_fremtpl_raw_returns_existing_count_without_fetching(monkeypatch):
 
     assert rows == 7
     assert engine.begin_connection.statements == [
-        ("SELECT COUNT_BIG(*) FROM pricing.FREMTPL_RAW", None)
+        ("SELECT COUNT(*) FROM pricing.FREMTPL_RAW", None)
     ]
 
 
@@ -664,7 +763,7 @@ def test_load_fremtpl_raw_fetches_and_prepares_before_replace_truncate(monkeypat
 
     assert rows == 1
     assert engine.begin_connection.statements == [
-        ("SELECT COUNT_BIG(*) FROM pricing.FREMTPL_RAW", None),
+        ("SELECT COUNT(*) FROM pricing.FREMTPL_RAW", None),
     ]
     assert events == ["fetch", "truncate", "executemany"]
     assert cursor.execute_calls == ["TRUNCATE TABLE pricing.FREMTPL_RAW"]
