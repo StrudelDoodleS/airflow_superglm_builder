@@ -155,6 +155,10 @@ class Workbench:
             raise CandidateLineageError(
                 "candidate bundle model source hash does not match SQL lineage"
             )
+        if bundle.model_frame_sha256 != row.get("model_frame_sha256"):
+            raise CandidateLineageError(
+                "candidate bundle model_frame_sha256 does not match SQL lineage"
+            )
         expected_identity = {
             "model_name": model_name,
             "model_version": row.get("model_version"),
@@ -216,6 +220,7 @@ class Workbench:
                 mr.candidate_python_version,
                 mr.candidate_superglm_version,
                 mr.model_source_sha256,
+                manifest.model_frame_sha256,
                 manifest.data_as_of_date,
                 deployment.rate_package_id AS current_rate_package_id,
                 COALESCE(cv.metric_value, parent_cv.metric_value) AS baseline_cv_deviance,
