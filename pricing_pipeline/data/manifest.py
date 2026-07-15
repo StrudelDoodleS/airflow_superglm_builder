@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
-import re
 import hashlib
+import json
 import platform
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -14,33 +14,29 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, train_test_split
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ValidationSplitConfig
-from pricing_pipeline.models.spec import DatasetSpec
 
 
 FREMTPL_DATASET_NAME = "freMTPL2freq"
+
+
 FREMTPL_SOURCE_SYSTEM = "openml_41214"
+
+
 FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
 
 
 @dataclass(frozen=True)
 class DatasetManifestResult:
     manifest_id: str
+    model_frame_sha256: str
     split_set_id: str | None = None
     split_artifact_uri: str | None = None
-
-    def to_dict(self) -> dict[str, str | None]:
-        return {
-            "manifest_id": self.manifest_id,
-            "split_set_id": self.split_set_id,
-            "split_artifact_uri": self.split_artifact_uri,
-        }
 
 
 def _normalise_date(value: date | datetime | str, *, field_name: str) -> date:
@@ -93,6 +89,9 @@ class ModelFrameManifestSpec:
     pk_columns: tuple[str, ...]
     target_column: str | None
     weight_column: str | None = None
+    feature_columns: tuple[str, ...] = ()
+    exposure_column: str | None = None
+    data_as_of_column: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -121,178 +120,222 @@ class ModelFrameManifestSpec:
             "weight_column",
             _optional_text(self.weight_column, field_name="weight_column"),
         )
+        feature_columns = tuple(
+            _required_text(column, field_name="feature_columns") for column in self.feature_columns
+        )
+        if len(set(feature_columns)) != len(feature_columns):
+            raise ValueError("feature_columns must not contain duplicates")
+        object.__setattr__(self, "feature_columns", feature_columns)
+        object.__setattr__(
+            self,
+            "exposure_column",
+            _optional_text(self.exposure_column, field_name="exposure_column"),
+        )
+        object.__setattr__(
+            self,
+            "data_as_of_column",
+            _optional_text(self.data_as_of_column, field_name="data_as_of_column"),
+        )
 
 
-def _package_version(package_name: str) -> str | None:
-    try:
-        return metadata.version(package_name)
-    except metadata.PackageNotFoundError:
-        return None
-
-
-def runtime_dependency_metadata() -> str:
-    payload = {
-        "python_version": sys.version,
-        "platform": platform.platform(),
-        "implementation": platform.python_implementation(),
-        "machine": platform.machine(),
-        "packages": {
-            "numpy": np.__version__,
-            "pandas": pd.__version__,
-            "sklearn": _package_version("scikit-learn"),
-            "superglm": _package_version("superglm"),
-        },
-    }
-    return json.dumps(payload, sort_keys=True)
-
-
-def new_manifest_id(dataset_name: str) -> str:
-    prefix = re.sub(r"[^A-Za-z0-9_]+", "_", dataset_name).strip("_") or "dataset"
-    return f"{prefix}_{date.today():%Y%m%d}_{uuid.uuid4().hex[:10]}"
-
-
-def build_column_metadata(
+def create_model_frame_manifest_with_split(
+    engine: Engine,
+    *,
     frame: pd.DataFrame,
-    *,
-    manifest_id: str,
-    pk_columns: tuple[str, ...] = ("IDpol",),
-    target_column: str | None = "ClaimNb",
-    weight_column: str | None = "Exposure",
-    split_column: str | None = None,
-) -> pd.DataFrame:
-    column_df = pd.DataFrame(
-        {
-            "manifest_id": manifest_id,
-            "ordinal_no": np.arange(1, len(frame.columns) + 1, dtype=np.int32),
-            "column_name": frame.columns,
-            "column_role": "FEATURE",
-            "pandas_dtype": frame.dtypes.astype(str).to_numpy(),
-            "null_count": frame.isna().sum().astype("int64").to_numpy(),
-            "distinct_count": frame.nunique(dropna=True).astype("int64").to_numpy(),
-        }
+    spec: ModelFrameManifestSpec,
+    manifest_id: str | None = None,
+    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
+    validation_split_artifact_root: Path | None = None,
+    split_indices: list[tuple[object, object]] | None = None,
+    created_by: str = "airflow",
+) -> DatasetManifestResult:
+    _validate_model_frame(frame, spec=spec, validation_split=validation_split)
+    supplied_split_indices = (
+        _normalise_supplied_split_indices(split_indices, row_count=len(frame))
+        if split_indices is not None
+        else None
     )
-
-    column_df.loc[column_df["column_name"].isin(pk_columns), "column_role"] = "KEY"
-    if target_column is not None:
-        column_df.loc[column_df["column_name"].eq(target_column), "column_role"] = "TARGET"
-    if weight_column is not None:
-        column_df.loc[column_df["column_name"].eq(weight_column), "column_role"] = "WEIGHT"
-    if split_column is not None:
-        column_df.loc[column_df["column_name"].eq(split_column), "column_role"] = "SPLIT"
-    return column_df
-
-
-def split_set_id_for_manifest(
-    manifest_id: str,
-    *,
-    n_splits: int,
-    random_state: int,
-) -> str:
-    return f"{manifest_id}__kfold_{n_splits}_seed_{random_state}"
-
-
-def _format_split_float(value: float) -> str:
-    formatted = f"{value:.12g}"
-    return formatted.replace(".", "_").replace("-", "neg_")
-
-
-def split_set_id_for_validation_split(
-    manifest_id: str,
-    validation_split: ValidationSplitConfig,
-) -> str | None:
-    if validation_split.method == "none":
-        return None
-    if validation_split.method == "kfold":
-        return split_set_id_for_manifest(
-            manifest_id,
-            n_splits=int(validation_split.n_splits or 5),
-            random_state=int(validation_split.random_state or 0),
-        )
-    if validation_split.method == "train_test_split":
-        return (
-            f"{manifest_id}__train_test_split_test_"
-            f"{_format_split_float(float(validation_split.test_size or 0.2))}"
-            f"_seed_{validation_split.random_state}"
-        )
-    if validation_split.method in {"column_kfold", "column_holdout"}:
-        column_token = re.sub(r"[^A-Za-z0-9_]+", "_", str(validation_split.column)).strip("_")
-        column_token = column_token or "source_column"
-        return f"{manifest_id}__{validation_split.method}_{column_token}"
     if validation_split.method == "custom":
-        return f"{manifest_id}__custom"
-    raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+        if supplied_split_indices is None:
+            raise ValueError("custom validation split requires model-supplied split_indices")
+        if not supplied_split_indices:
+            raise ValueError("custom validation split requires at least one supplied fold")
+        if not validation_split.materialize:
+            raise ValueError("custom validation split requires materialize=true")
+    elif supplied_split_indices is not None:
+        _validate_supplied_split_indices_match_config(
+            frame,
+            validation_split=validation_split,
+            split_indices=supplied_split_indices,
+        )
 
+    manifest_id = manifest_id or new_manifest_id(spec.dataset_name)
+    model_frame_sha256, frame_hash_metadata_json = model_frame_evidence(frame)
+    manifest_df = pd.DataFrame(
+        [
+            {
+                "manifest_id": manifest_id,
+                "dataset_name": spec.dataset_name,
+                "source_system": spec.source_system,
+                "data_as_of_date": spec.data_as_of_date,
+                "row_count": int(len(frame)),
+                "pk_columns_json": json.dumps(list(spec.pk_columns)),
+                "target_column": spec.target_column,
+                "weight_column": spec.weight_column,
+                "model_frame_sha256": model_frame_sha256,
+                "frame_hash_metadata_json": frame_hash_metadata_json,
+                "exposure_column": spec.exposure_column,
+                "data_as_of_column": spec.data_as_of_column,
+                "created_by": created_by,
+            }
+        ]
+    )
+    column_df = build_column_metadata(
+        frame,
+        manifest_id=manifest_id,
+        spec=spec,
+        split_column=validation_split_source_column(validation_split),
+    )
+    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
+    split_artifact_uri = None
+    split_artifact_sha256 = None
+    if validation_split.materialize and split_set_id is not None:
+        if validation_split_artifact_root is None:
+            raise ValueError("validation_split_artifact_root is required when materialize=true")
+        artifact_path = Path(validation_split_artifact_root) / f"{split_set_id}.npz"
+        split_artifact_sha256 = write_validation_split_npz(
+            frame,
+            validation_split=validation_split,
+            output_path=artifact_path,
+            pk_columns=spec.pk_columns,
+            split_indices=supplied_split_indices,
+        )
+        split_artifact_uri = str(artifact_path)
 
-def validation_split_source_column(validation_split: ValidationSplitConfig) -> str | None:
-    if validation_split.method in {"column_kfold", "column_holdout"}:
-        return _required_text(validation_split.column, field_name="validation_split.column")
-    return None
+    split_set_df = build_validation_split_set(
+        frame,
+        manifest_id=manifest_id,
+        validation_split=validation_split,
+        pk_columns=spec.pk_columns,
+        created_by=created_by,
+        artifact_uri=split_artifact_uri,
+        artifact_sha256=split_artifact_sha256,
+        split_indices=supplied_split_indices,
+    )
+    cv_fold_df = (
+        build_validation_folds(
+            frame,
+            split_set_id=split_set_id,
+            validation_split=validation_split,
+            split_indices=supplied_split_indices,
+        )
+        if split_set_id is not None
+        else pd.DataFrame()
+    )
+    schemas = schema_names_from_connectable(engine)
+    with engine.begin() as con:
+        manifest_df.to_sql(
+            "DATASET_MANIFEST",
+            con,
+            schema=schemas.pricing,
+            if_exists="append",
+            index=False,
+        )
+        column_df.to_sql(
+            "DATASET_COLUMN",
+            con,
+            schema=schemas.pricing,
+            if_exists="append",
+            index=False,
+            chunksize=5000,
+        )
+        if not split_set_df.empty:
+            split_set_df.to_sql(
+                "CV_SPLIT_SET",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+            )
+        if not cv_fold_df.empty:
+            cv_fold_df.to_sql(
+                "CV_FOLD",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+            )
 
-
-def _json_clean_value(value):
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if isinstance(value, date | datetime):
-        return value.isoformat()
-    return value
-
-
-def _ordered_unique_non_null_values(series: pd.Series, *, column: str) -> list:
-    if series.isna().any():
-        raise ValueError(f"validation split column {column!r} contains null values")
-    values = list(pd.unique(series))
-    return sorted(values, key=lambda value: str(_json_clean_value(value)))
-
-
-def _source_column_splitter_params(
-    frame: pd.DataFrame,
-    validation_split: ValidationSplitConfig,
-) -> dict[str, object]:
-    column = validation_split_source_column(validation_split)
-    if column is None:
-        raise ValueError("validation split is not source-column based")
-    if column not in frame.columns:
-        raise ValueError(f"validation split column is missing from model frame: {column}")
-
-    if validation_split.method == "column_kfold":
-        return {
-            "method": validation_split.method,
-            "column": column,
-            "fold_values": [
-                _json_clean_value(value)
-                for value in _ordered_unique_non_null_values(frame[column], column=column)
-            ],
-        }
-    if validation_split.method == "column_holdout":
-        return {
-            "method": validation_split.method,
-            "column": column,
-            "train_values": [_json_clean_value(value) for value in validation_split.train_values],
-            "test_values": [_json_clean_value(value) for value in validation_split.test_values],
-            "unexpected_values": "error",
-        }
-    raise ValueError(
-        f"Unsupported source-column validation split method: {validation_split.method}"
+    return DatasetManifestResult(
+        manifest_id=manifest_id,
+        model_frame_sha256=model_frame_sha256,
+        split_set_id=split_set_id,
+        split_artifact_uri=split_artifact_uri,
     )
 
 
-def _normalise_index_array(value, *, field_name: str, row_count: int) -> np.ndarray:
-    array = np.asarray(value)
-    if array.ndim != 1:
-        raise ValueError(f"{field_name} must be a one-dimensional index array")
-    if not np.issubdtype(array.dtype, np.integer):
-        raise ValueError(f"{field_name} must contain integer row positions")
+def _validate_model_frame(
+    frame: pd.DataFrame,
+    *,
+    spec: ModelFrameManifestSpec,
+    validation_split: ValidationSplitConfig,
+) -> None:
+    if frame.empty:
+        raise ValueError("model frame must not be empty")
 
-    array = array.astype(np.int64, copy=False)
-    if len(array) == 0:
-        raise ValueError(f"{field_name} must not be empty")
-    if np.any(array < 0) or np.any(array >= row_count):
-        raise ValueError(f"{field_name} contains row positions outside the model frame")
-    if len(np.unique(array)) != len(array):
-        raise ValueError(f"{field_name} must not contain duplicate row positions")
-    return array
+    column_names = [str(column).strip() for column in frame.columns]
+    if any(not column for column in column_names):
+        raise ValueError("model frame contains a blank column name")
+    if len(set(column_names)) != len(column_names):
+        raise ValueError("model frame contains duplicate column names")
+
+    required_columns = [*spec.pk_columns, *spec.feature_columns]
+    if spec.target_column is not None:
+        required_columns.append(spec.target_column)
+    if spec.weight_column is not None:
+        required_columns.append(spec.weight_column)
+    if spec.exposure_column is not None:
+        required_columns.append(spec.exposure_column)
+    if spec.data_as_of_column is not None:
+        required_columns.append(spec.data_as_of_column)
+    missing = [column for column in required_columns if column not in frame.columns]
+    if missing:
+        raise ValueError("model frame missing required columns: " + ", ".join(missing))
+
+    if frame.loc[:, list(spec.pk_columns)].isna().any().any():
+        raise ValueError("model frame primary key columns contain null values")
+    if frame.duplicated(subset=list(spec.pk_columns)).any():
+        raise ValueError("model frame primary key columns contain duplicate values")
+
+    if (
+        validation_split.stratify_column is not None
+        and validation_split.stratify_column not in frame.columns
+    ):
+        raise ValueError(
+            "validation_split.stratify_column is missing from model frame: "
+            f"{validation_split.stratify_column}"
+        )
+    if validation_split.method == "kfold":
+        n_splits = int(validation_split.n_splits or 5)
+        if n_splits > len(frame):
+            raise ValueError(
+                f"validation_split.n_splits ({n_splits}) must not exceed row count ({len(frame)})"
+            )
+    split_column = validation_split_source_column(validation_split)
+    if split_column is not None:
+        if split_column in spec.pk_columns:
+            raise ValueError("validation split column must not be a primary key column")
+        if split_column == spec.target_column:
+            raise ValueError("validation split column must not be the target column")
+        if split_column == spec.weight_column:
+            raise ValueError("validation split column must not be the weight column")
+        if split_column == spec.exposure_column:
+            raise ValueError("validation split column must not be the exposure column")
+        if split_column == spec.data_as_of_column:
+            raise ValueError("validation split column must not be the data-as-of column")
+        if split_column in spec.feature_columns:
+            raise ValueError("validation split column must not be a feature column")
+        validation_split_indices(frame, validation_split)
 
 
 def _normalise_supplied_split_indices(
@@ -316,6 +359,23 @@ def _normalise_supplied_split_indices(
             raise ValueError(f"split_indices[{fold_no}] train/test rows must not overlap")
         folds.append((train_idx, test_idx))
     return folds
+
+
+def _normalise_index_array(value, *, field_name: str, row_count: int) -> np.ndarray:
+    array = np.asarray(value)
+    if array.ndim != 1:
+        raise ValueError(f"{field_name} must be a one-dimensional index array")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise ValueError(f"{field_name} must contain integer row positions")
+
+    array = array.astype(np.int64, copy=False)
+    if len(array) == 0:
+        raise ValueError(f"{field_name} must not be empty")
+    if np.any(array < 0) or np.any(array >= row_count):
+        raise ValueError(f"{field_name} contains row positions outside the model frame")
+    if len(np.unique(array)) != len(array):
+        raise ValueError(f"{field_name} must not contain duplicate row positions")
+    return array
 
 
 def _validate_supplied_split_indices_match_config(
@@ -350,45 +410,194 @@ def _validate_supplied_split_indices_match_config(
             )
 
 
-def build_cv_split_set(
+def new_manifest_id(dataset_name: str) -> str:
+    prefix = re.sub(r"[^A-Za-z0-9_]+", "_", dataset_name).strip("_") or "dataset"
+    return f"{prefix}_{date.today():%Y%m%d}_{uuid.uuid4().hex[:10]}"
+
+
+def model_frame_evidence(frame: pd.DataFrame) -> tuple[str, str]:
+    """Hash the ordered model-frame schema and values, excluding its incidental index."""
+    schema = {
+        "row_count": len(frame),
+        "columns": [
+            {
+                "name": str(column),
+                "dtype": str(dtype),
+                "dtype_repr": repr(dtype),
+                "dtype_class": f"{type(dtype).__module__}.{type(dtype).__qualname__}",
+            }
+            for column, dtype in zip(frame.columns, frame.dtypes, strict=True)
+        ],
+    }
+    schema_bytes = json.dumps(
+        schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    row_hashes = pd.util.hash_pandas_object(
+        frame,
+        index=False,
+        encoding="utf8",
+        hash_key="pricingframehash",
+        categorize=False,
+    ).to_numpy(dtype=np.uint64, copy=False)
+
+    digest = hashlib.sha256()
+    digest.update(b"pricing-model-frame-v1\0")
+    digest.update(len(schema_bytes).to_bytes(8, "big"))
+    digest.update(schema_bytes)
+    digest.update(row_hashes.astype("<u8", copy=False).tobytes())
+
+    runtime = json.loads(runtime_dependency_metadata())
+    runtime["frame_hash"] = {
+        "algorithm": "sha256",
+        "format_version": 1,
+        "canonicalization": "pandas.util.hash_pandas_object",
+        "hash_key": "pricingframehash",
+        "categorize": False,
+        "dataframe_index_included": False,
+        "evidence": ["column order", "column names", "dtypes", "values", "row order"],
+    }
+    return digest.hexdigest(), json.dumps(runtime, sort_keys=True)
+
+
+def runtime_dependency_metadata() -> str:
+    payload = {
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "implementation": platform.python_implementation(),
+        "machine": platform.machine(),
+        "packages": {
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "sklearn": _package_version("scikit-learn"),
+            "superglm": _package_version("superglm"),
+        },
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _package_version(package_name: str) -> str | None:
+    try:
+        return metadata.version(package_name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def build_column_metadata(
     frame: pd.DataFrame,
     *,
     manifest_id: str,
+    spec: ModelFrameManifestSpec,
+    split_column: str | None = None,
+) -> pd.DataFrame:
+    role_by_column: dict[str, str] = {}
+    role_columns = (
+        ("KEY", spec.pk_columns),
+        ("TARGET", () if spec.target_column is None else (spec.target_column,)),
+        ("WEIGHT", () if spec.weight_column is None else (spec.weight_column,)),
+        ("EXPOSURE", () if spec.exposure_column is None else (spec.exposure_column,)),
+        (
+            "DATA_AS_OF",
+            () if spec.data_as_of_column is None else (spec.data_as_of_column,),
+        ),
+        ("SPLIT", () if split_column is None else (split_column,)),
+        ("FEATURE", spec.feature_columns),
+    )
+    for role, columns in role_columns:
+        for column in columns:
+            previous_role = role_by_column.get(column)
+            if previous_role is not None:
+                raise ValueError(
+                    f"column {column!r} is declared as both {previous_role} and {role}"
+                )
+            role_by_column[column] = role
+
+    column_df = pd.DataFrame(
+        {
+            "manifest_id": manifest_id,
+            "ordinal_no": np.arange(1, len(frame.columns) + 1, dtype=np.int32),
+            "column_name": frame.columns,
+            "column_role": "OTHER",
+            "pandas_dtype": frame.dtypes.astype(str).to_numpy(),
+            "null_count": frame.isna().sum().astype("int64").to_numpy(),
+            "distinct_count": frame.nunique(dropna=True).astype("int64").to_numpy(),
+        }
+    )
+    column_df["column_role"] = column_df["column_name"].map(role_by_column).fillna("OTHER")
+    return column_df
+
+
+def validation_split_source_column(validation_split: ValidationSplitConfig) -> str | None:
+    if validation_split.method in {"column_kfold", "column_holdout"}:
+        return _required_text(validation_split.column, field_name="validation_split.column")
+    return None
+
+
+def split_set_id_for_validation_split(
+    manifest_id: str,
+    validation_split: ValidationSplitConfig,
+) -> str | None:
+    if validation_split.method == "none":
+        return None
+    if validation_split.method == "kfold":
+        return split_set_id_for_manifest(
+            manifest_id,
+            n_splits=int(validation_split.n_splits or 5),
+            random_state=int(validation_split.random_state or 0),
+        )
+    if validation_split.method == "train_test_split":
+        return (
+            f"{manifest_id}__train_test_split_test_"
+            f"{_format_split_float(float(validation_split.test_size or 0.2))}"
+            f"_seed_{validation_split.random_state}"
+        )
+    if validation_split.method in {"column_kfold", "column_holdout"}:
+        column_token = re.sub(r"[^A-Za-z0-9_]+", "_", str(validation_split.column)).strip("_")
+        column_token = column_token or "source_column"
+        return f"{manifest_id}__{validation_split.method}_{column_token}"
+    if validation_split.method == "custom":
+        return f"{manifest_id}__custom"
+    raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+
+def split_set_id_for_manifest(
+    manifest_id: str,
+    *,
     n_splits: int,
     random_state: int,
+) -> str:
+    return f"{manifest_id}__kfold_{n_splits}_seed_{random_state}"
+
+
+def _format_split_float(value: float) -> str:
+    formatted = f"{value:.12g}"
+    return formatted.replace(".", "_").replace("-", "neg_")
+
+
+def write_validation_split_npz(
+    frame: pd.DataFrame,
+    *,
+    validation_split: ValidationSplitConfig,
+    output_path: Path,
     pk_columns: tuple[str, ...] = ("IDpol",),
-    created_by: str = "airflow",
-) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "split_set_id": split_set_id_for_manifest(
-                    manifest_id,
-                    n_splits=n_splits,
-                    random_state=random_state,
-                ),
-                "manifest_id": manifest_id,
-                "split_mode": "REPLAYABLE",
-                "splitter_class": "sklearn.model_selection.KFold",
-                "splitter_params_json": json.dumps(
-                    {
-                        "n_splits": n_splits,
-                        "shuffle": True,
-                        "random_state": random_state,
-                    },
-                    sort_keys=True,
-                ),
-                "row_order_sha256": compute_row_order_sha256(frame, pk_columns=pk_columns),
-                "row_count": int(len(frame)),
-                "fold_count": n_splits,
-                "groups_column": None,
-                "stratify_column": None,
-                "artifact_uri": None,
-                "artifact_sha256": None,
-                "runtime_metadata_json": runtime_dependency_metadata(),
-                "created_by": created_by,
-            }
-        ]
+    split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
+) -> str:
+    folds = {
+        fold_no: (train_idx, test_idx)
+        for fold_no, (train_idx, test_idx) in enumerate(
+            split_indices
+            if split_indices is not None
+            else validation_split_indices(frame, validation_split),
+            start=1,
+        )
+    }
+    return write_split_artifact_npz(
+        folds,
+        validation_split=validation_split,
+        pk_columns=pk_columns,
+        row_count=len(frame),
+        output_path=output_path,
     )
 
 
@@ -471,6 +680,55 @@ def build_validation_split_set(
     )
 
 
+def _source_column_splitter_params(
+    frame: pd.DataFrame,
+    validation_split: ValidationSplitConfig,
+) -> dict[str, object]:
+    column = validation_split_source_column(validation_split)
+    if column is None:
+        raise ValueError("validation split is not source-column based")
+    if column not in frame.columns:
+        raise ValueError(f"validation split column is missing from model frame: {column}")
+
+    if validation_split.method == "column_kfold":
+        return {
+            "method": validation_split.method,
+            "column": column,
+            "fold_values": [
+                _json_clean_value(value)
+                for value in _ordered_unique_non_null_values(frame[column], column=column)
+            ],
+        }
+    if validation_split.method == "column_holdout":
+        return {
+            "method": validation_split.method,
+            "column": column,
+            "train_values": [_json_clean_value(value) for value in validation_split.train_values],
+            "test_values": [_json_clean_value(value) for value in validation_split.test_values],
+            "unexpected_values": "error",
+        }
+    raise ValueError(
+        f"Unsupported source-column validation split method: {validation_split.method}"
+    )
+
+
+def _ordered_unique_non_null_values(series: pd.Series, *, column: str) -> list:
+    if series.isna().any():
+        raise ValueError(f"validation split column {column!r} contains null values")
+    values = list(pd.unique(series))
+    return sorted(values, key=lambda value: str(_json_clean_value(value)))
+
+
+def _json_clean_value(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    return value
+
+
 def build_validation_folds(
     frame: pd.DataFrame,
     *,
@@ -494,23 +752,6 @@ def build_validation_folds(
             }
         )
     return pd.DataFrame(rows)
-
-
-def build_cv_folds(
-    frame: pd.DataFrame,
-    *,
-    split_set_id: str,
-    n_splits: int,
-    random_state: int,
-) -> pd.DataFrame:
-    return build_validation_folds(
-        frame,
-        split_set_id=split_set_id,
-        validation_split=ValidationSplitConfig.kfold(
-            n_splits=n_splits,
-            random_state=random_state,
-        ),
-    )
 
 
 def validation_split_indices(
@@ -604,298 +845,3 @@ def validation_split_indices(
             "define them in modeling.py"
         )
     raise ValueError(f"Unsupported validation split method: {validation_split.method}")
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def write_validation_split_npz(
-    frame: pd.DataFrame,
-    *,
-    validation_split: ValidationSplitConfig,
-    output_path: Path,
-    pk_columns: tuple[str, ...] = ("IDpol",),
-    split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
-) -> str:
-    folds = {
-        fold_no: (train_idx, test_idx)
-        for fold_no, (train_idx, test_idx) in enumerate(
-            split_indices
-            if split_indices is not None
-            else validation_split_indices(frame, validation_split),
-            start=1,
-        )
-    }
-    return write_split_artifact_npz(
-        folds,
-        validation_split=validation_split,
-        pk_columns=pk_columns,
-        row_count=len(frame),
-        output_path=output_path,
-    )
-
-
-def _validate_model_frame(
-    frame: pd.DataFrame,
-    *,
-    spec: ModelFrameManifestSpec,
-    validation_split: ValidationSplitConfig,
-) -> None:
-    if frame.empty:
-        raise ValueError("model frame must not be empty")
-
-    column_names = [str(column).strip() for column in frame.columns]
-    if any(not column for column in column_names):
-        raise ValueError("model frame contains a blank column name")
-    if len(set(column_names)) != len(column_names):
-        raise ValueError("model frame contains duplicate column names")
-
-    required_columns = list(spec.pk_columns)
-    if spec.target_column is not None:
-        required_columns.append(spec.target_column)
-    if spec.weight_column is not None:
-        required_columns.append(spec.weight_column)
-    missing = [column for column in required_columns if column not in frame.columns]
-    if missing:
-        raise ValueError("model frame missing required columns: " + ", ".join(missing))
-
-    if frame.loc[:, list(spec.pk_columns)].isna().any().any():
-        raise ValueError("model frame primary key columns contain null values")
-    if frame.duplicated(subset=list(spec.pk_columns)).any():
-        raise ValueError("model frame primary key columns contain duplicate values")
-
-    if (
-        validation_split.stratify_column is not None
-        and validation_split.stratify_column not in frame.columns
-    ):
-        raise ValueError(
-            "validation_split.stratify_column is missing from model frame: "
-            f"{validation_split.stratify_column}"
-        )
-    if validation_split.method == "kfold":
-        n_splits = int(validation_split.n_splits or 5)
-        if n_splits > len(frame):
-            raise ValueError(
-                f"validation_split.n_splits ({n_splits}) must not exceed row count ({len(frame)})"
-            )
-    split_column = validation_split_source_column(validation_split)
-    if split_column is not None:
-        if split_column in spec.pk_columns:
-            raise ValueError("validation split column must not be a primary key column")
-        if split_column == spec.target_column:
-            raise ValueError("validation split column must not be the target column")
-        if split_column == spec.weight_column:
-            raise ValueError("validation split column must not be the weight column")
-        validation_split_indices(frame, validation_split)
-
-
-def create_model_frame_manifest_with_split(
-    engine: Engine,
-    *,
-    frame: pd.DataFrame,
-    spec: ModelFrameManifestSpec,
-    manifest_id: str | None = None,
-    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
-    validation_split_artifact_root: Path | None = None,
-    split_indices: list[tuple[object, object]] | None = None,
-    created_by: str = "airflow",
-) -> DatasetManifestResult:
-    _validate_model_frame(frame, spec=spec, validation_split=validation_split)
-    supplied_split_indices = (
-        _normalise_supplied_split_indices(split_indices, row_count=len(frame))
-        if split_indices is not None
-        else None
-    )
-    if validation_split.method == "custom":
-        if supplied_split_indices is None:
-            raise ValueError("custom validation split requires model-supplied split_indices")
-        if not supplied_split_indices:
-            raise ValueError("custom validation split requires at least one supplied fold")
-        if not validation_split.materialize:
-            raise ValueError("custom validation split requires materialize=true")
-    elif supplied_split_indices is not None:
-        _validate_supplied_split_indices_match_config(
-            frame,
-            validation_split=validation_split,
-            split_indices=supplied_split_indices,
-        )
-
-    manifest_id = manifest_id or new_manifest_id(spec.dataset_name)
-    manifest_df = pd.DataFrame(
-        [
-            {
-                "manifest_id": manifest_id,
-                "dataset_name": spec.dataset_name,
-                "source_system": spec.source_system,
-                "data_as_of_date": spec.data_as_of_date,
-                "row_count": int(len(frame)),
-                "pk_columns_json": json.dumps(list(spec.pk_columns)),
-                "target_column": spec.target_column,
-                "weight_column": spec.weight_column,
-                "created_by": created_by,
-            }
-        ]
-    )
-    column_df = build_column_metadata(
-        frame,
-        manifest_id=manifest_id,
-        pk_columns=spec.pk_columns,
-        target_column=spec.target_column,
-        weight_column=spec.weight_column,
-        split_column=validation_split_source_column(validation_split),
-    )
-    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
-    split_artifact_uri = None
-    split_artifact_sha256 = None
-    if validation_split.materialize and split_set_id is not None:
-        if validation_split_artifact_root is None:
-            raise ValueError("validation_split_artifact_root is required when materialize=true")
-        artifact_path = Path(validation_split_artifact_root) / f"{split_set_id}.npz"
-        split_artifact_sha256 = write_validation_split_npz(
-            frame,
-            validation_split=validation_split,
-            output_path=artifact_path,
-            pk_columns=spec.pk_columns,
-            split_indices=supplied_split_indices,
-        )
-        split_artifact_uri = str(artifact_path)
-
-    split_set_df = build_validation_split_set(
-        frame,
-        manifest_id=manifest_id,
-        validation_split=validation_split,
-        pk_columns=spec.pk_columns,
-        created_by=created_by,
-        artifact_uri=split_artifact_uri,
-        artifact_sha256=split_artifact_sha256,
-        split_indices=supplied_split_indices,
-    )
-    cv_fold_df = (
-        build_validation_folds(
-            frame,
-            split_set_id=split_set_id,
-            validation_split=validation_split,
-            split_indices=supplied_split_indices,
-        )
-        if split_set_id is not None
-        else pd.DataFrame()
-    )
-    schemas = schema_names_from_connectable(engine)
-    with engine.begin() as con:
-        manifest_df.to_sql(
-            "DATASET_MANIFEST",
-            con,
-            schema=schemas.pricing,
-            if_exists="append",
-            index=False,
-        )
-        column_df.to_sql(
-            "DATASET_COLUMN",
-            con,
-            schema=schemas.pricing,
-            if_exists="append",
-            index=False,
-            chunksize=5000,
-        )
-        if not split_set_df.empty:
-            split_set_df.to_sql(
-                "CV_SPLIT_SET",
-                con,
-                schema=schemas.pricing,
-                if_exists="append",
-                index=False,
-            )
-        if not cv_fold_df.empty:
-            cv_fold_df.to_sql(
-                "CV_FOLD",
-                con,
-                schema=schemas.pricing,
-                if_exists="append",
-                index=False,
-            )
-
-    return DatasetManifestResult(
-        manifest_id=manifest_id,
-        split_set_id=split_set_id,
-        split_artifact_uri=split_artifact_uri,
-    )
-
-
-def create_dataset_manifest_with_split(
-    engine: Engine,
-    *,
-    dataset: DatasetSpec,
-    manifest_id: str,
-    validation_split: ValidationSplitConfig = ValidationSplitConfig.kfold(),
-    validation_split_artifact_root: Path | None = None,
-    created_by: str = "airflow",
-) -> DatasetManifestResult:
-    frame = pd.read_sql_query(text(dataset.manifest_sql), engine)
-    return create_model_frame_manifest_with_split(
-        engine,
-        frame=frame,
-        spec=ModelFrameManifestSpec(
-            dataset_name=dataset.dataset_name,
-            source_system=dataset.source_system,
-            data_as_of_date=date.today(),
-            pk_columns=dataset.pk_columns,
-            target_column=dataset.target_column,
-            weight_column=dataset.weight_column,
-        ),
-        manifest_id=manifest_id,
-        validation_split=validation_split,
-        validation_split_artifact_root=validation_split_artifact_root,
-        created_by=created_by,
-    )
-
-
-def create_dataset_manifest(
-    engine: Engine,
-    *,
-    dataset: DatasetSpec,
-    manifest_id: str,
-    n_splits: int = 5,
-    random_state: int = 42,
-    created_by: str = "airflow",
-) -> str:
-    return create_dataset_manifest_with_split(
-        engine,
-        dataset=dataset,
-        manifest_id=manifest_id,
-        validation_split=ValidationSplitConfig.kfold(
-            n_splits=n_splits,
-            random_state=random_state,
-        ),
-        created_by=created_by,
-    ).manifest_id
-
-
-def create_fremtpl_manifest(
-    engine: Engine,
-    *,
-    manifest_id: str,
-    n_splits: int = 5,
-    random_state: int = 42,
-    created_by: str = "airflow",
-) -> str:
-    dataset = DatasetSpec(
-        dataset_name=FREMTPL_DATASET_NAME,
-        source_system=FREMTPL_SOURCE_SYSTEM,
-        manifest_sql=FREMTPL_RAW_SELECT_SQL,
-        pk_columns=("IDpol",),
-        target_column="ClaimNb",
-        weight_column="Exposure",
-    )
-    return create_dataset_manifest(
-        engine,
-        dataset=dataset,
-        manifest_id=manifest_id,
-        n_splits=n_splits,
-        random_state=random_state,
-        created_by=created_by,
-    )

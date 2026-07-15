@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+import hashlib
 import json
 
 import pytest
@@ -12,7 +13,6 @@ from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
     canonical_receipt_bytes,
     load_publication_receipt,
-    publication_receipt_sha256,
     write_publication_receipt,
 )
 
@@ -91,7 +91,7 @@ def test_canonical_receipt_hash_uses_exact_canonical_bytes(tmp_path):
     digest = write_publication_receipt(receipt, path)
 
     assert path.read_bytes() == expected
-    assert digest == publication_receipt_sha256(receipt)
+    assert digest == hashlib.sha256(expected).hexdigest()
     assert load_publication_receipt(path, expected_sha256=digest) == receipt
     assert load_publication_receipt(path, digest) == receipt
 
@@ -147,17 +147,17 @@ def test_receipt_rejects_nested_non_finite_term_metadata():
 
 def test_receipt_metadata_cannot_mutate_after_construction():
     receipt = _receipt()
-    digest = publication_receipt_sha256(receipt)
+    canonical = canonical_receipt_bytes(receipt)
 
     with pytest.raises(TypeError):
         receipt.package_metadata["model"]["family"] = "gamma"
 
-    assert publication_receipt_sha256(receipt) == digest
+    assert canonical_receipt_bytes(receipt) == canonical
 
 
 def test_receipt_loader_rejects_noncanonical_equivalent_json(tmp_path):
     receipt = _receipt()
-    canonical_digest = publication_receipt_sha256(receipt)
+    canonical_digest = hashlib.sha256(canonical_receipt_bytes(receipt)).hexdigest()
     path = tmp_path / "receipt.json"
     path.write_text(json.dumps(receipt.model_dump(mode="json"), indent=2), encoding="utf-8")
 

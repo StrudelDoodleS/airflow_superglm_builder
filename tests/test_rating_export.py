@@ -1,90 +1,45 @@
 from __future__ import annotations
 
 import json
-import os
-import pickle
-import shutil
-import subprocess
-import sys
+from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 from sqlalchemy import text
 
+from pricing_pipeline.infra.offline_sqlite import (
+    apply_offline_ddl,
+    sqlite_engine_with_offline_schemas,
+)
+from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.orchestration import pipeline
-from pricing_pipeline.publishing import lineage, rating_export, rating_package, staging
-from pricing_pipeline.publishing.lifecycle import PublishResult
+from pricing_pipeline.publishing import lineage, rating_export, staging
+from pricing_pipeline.publishing.lifecycle import (
+    CompletedModelPublishResult,
+    PublishResult,
+)
 from pricing_pipeline.publishing.superglm_publication_receipt import (
     OffsetExportContract,
     SuperGLMPublicationReceipt,
     write_publication_receipt,
 )
-from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.data.datasets import FREMTPL_DATASET_SPEC
-from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ModelSpec
-from pricing_pipeline.models.spec import ModelExportResult
-from pricing_pipeline.publishing.publisher import ModelPublisher
-from pricing_pipeline.publishing.model_registry import ModelRegistryError, ensure_pricing_model
-from pricing_models.mtpl_frequency.training import (
-    FEATURE_COLUMNS,
-    TRAINING_SQL,
-    build_training_frame,
+from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+
+
+MODEL_CONFIG = ModelBuildConfig(
+    model_name="MTPL_FREQ",
+    model_label="MTPL frequency",
+    target_name="ClaimNb",
+    model_type="superglm_poisson",
+    deployment_slot="MTPL_FREQ_UAT",
 )
-from pricing_models.mtpl_frequency.spec import MODEL_CONFIG
-from scripts import load_staging_to_rating_package
-from scripts import load_superglm_excel_to_staging
-from scripts import smoke_check
 
 
-def raw_training_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "IDpol": [1, 2],
-            "ClaimNb": [0, 1],
-            "Exposure": [0.5, 2.0],
-            "Area": ["A", "B"],
-            "VehPower": [6, 7],
-            "VehAge": [3, 4],
-            "DrivAge": [45, 50],
-            "BonusMalus": [50, 60],
-            "VehBrand": ["B1", "B2"],
-            "VehGas": ["Regular", "Diesel"],
-            "Density": [1.0, 123.0],
-            "Region": ["R1", "R2"],
-        }
-    )
-
-
-def test_build_export_id_is_path_safe():
-    export_id = rating_export.build_export_id("MTPL_FREQ", "scheduled__2026-04-27T10:30:00+00:00")
-
-    assert export_id == "mtpl_freq__scheduled__20260427t1030000000"
-
-
-def test_build_rating_export_path_uses_model_and_date(tmp_path: Path):
-    path = rating_export.build_rating_export_path(
-        tmp_path,
-        model_name="MTPL_FREQ",
-        logical_date="2026-04-27",
-        export_id="mtpl_freq__run1",
-    )
-
-    assert path == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
-
-
-def test_build_rating_export_path_accepts_positional_call_shape(tmp_path: Path):
-    path = rating_export.build_rating_export_path(
-        tmp_path, "MTPL_FREQ", "2026-04-27", "mtpl_freq__run1"
-    )
-
-    assert path == tmp_path / "MTPL_FREQ" / "2026-04-27" / "mtpl_freq__run1" / "rating_tables.xlsx"
-
-
-class FakeExportModel:
+class _ExportModel:
     def __init__(self):
         self.calls = []
 
@@ -93,58 +48,21 @@ class FakeExportModel:
         Path(args[0]).write_bytes(b"workbook")
 
 
-def test_export_rating_tables_creates_parent_calls_model_and_logs_mlflow(
-    monkeypatch, tmp_path: Path
-):
-    model = FakeExportModel()
-    mlflow_calls = []
-    fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
+def test_build_export_id_is_path_safe():
+    export_id = rating_export.build_export_id(
+        "MTPL_FREQ",
+        "scheduled__2026-04-27T10:30:00+00:00",
     )
-    monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
 
+    assert export_id == "mtpl_freq__scheduled__20260427t1030000000"
+
+
+def test_export_rating_tables_forwards_weights_and_offset(tmp_path: Path):
+    model = _ExportModel()
     output_path = tmp_path / "nested" / "rating_tables.xlsx"
     X = pd.DataFrame({"x": [1, 2]})
     y = np.array([0.0, 1.0])
     exposure = np.array([0.5, 2.0])
-
-    result = rating_export.export_rating_tables(model, X, y, exposure, output_path=output_path)
-
-    assert result == output_path
-    assert output_path.read_bytes() == b"workbook"
-    assert model.calls == [((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})]
-    assert mlflow_calls == [(str(output_path), "rating_tables")]
-
-
-def test_export_rating_tables_accepts_positional_output_path(monkeypatch, tmp_path: Path):
-    model = FakeExportModel()
-    mlflow_calls = []
-    fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
-    )
-    monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
-
-    output_path = tmp_path / "nested" / "rating_tables.xlsx"
-    X = pd.DataFrame({"x": [1, 2]})
-    y = np.array([0.0, 1.0])
-    exposure = np.array([0.5, 2.0])
-
-    result = rating_export.export_rating_tables(model, X, y, exposure, output_path)
-
-    assert result == output_path
-    assert output_path.read_bytes() == b"workbook"
-    assert model.calls == [((output_path, X, y), {"sample_weight": exposure, "n_bins": 150})]
-    assert mlflow_calls == [(str(output_path), "rating_tables")]
-
-
-def test_export_rating_tables_forwards_offset_export_kwargs(monkeypatch, tmp_path: Path):
-    model = FakeExportModel()
-    monkeypatch.setattr(rating_export, "mlflow", None)
-
-    output_path = tmp_path / "rating_tables.xlsx"
-    X = pd.DataFrame({"x": [1, 2]})
-    y = np.array([0.0, 1.0])
-    exposure = np.array([1.0, 1.0])
     offset = np.log(np.array([1.0, 3.0]))
     offset_source = pd.Series([12, 36], name="TermMonths")
 
@@ -153,7 +71,7 @@ def test_export_rating_tables_forwards_offset_export_kwargs(monkeypatch, tmp_pat
         X,
         y,
         exposure,
-        output_path=output_path,
+        output_path,
         offset=offset,
         offset_source=offset_source,
         offset_name="TermMonths",
@@ -162,233 +80,32 @@ def test_export_rating_tables_forwards_offset_export_kwargs(monkeypatch, tmp_pat
     )
 
     assert result == output_path
-    assert model.calls == [
-        (
-            (output_path, X, y),
-            {
-                "sample_weight": exposure,
-                "n_bins": 150,
-                "offset": offset,
-                "offset_source": offset_source,
-                "offset_name": "TermMonths",
-                "offset_kind": "discrete",
-                "offset_max_exact_levels": 50,
-            },
-        )
-    ]
+    assert output_path.read_bytes() == b"workbook"
+    args, kwargs = model.calls[0]
+    assert args == (output_path, X, y)
+    np.testing.assert_array_equal(kwargs.pop("sample_weight"), exposure)
+    np.testing.assert_array_equal(kwargs.pop("offset"), offset)
+    pd.testing.assert_series_equal(kwargs.pop("offset_source"), offset_source)
+    assert kwargs == {
+        "n_bins": 150,
+        "offset_name": "TermMonths",
+        "offset_kind": "discrete",
+        "offset_max_exact_levels": 50,
+    }
 
 
-def test_export_rating_tables_requires_superglm_rating_export_support(monkeypatch, tmp_path: Path):
-    mlflow_calls = []
-    fake_mlflow = SimpleNamespace(
-        log_artifact=lambda path, artifact_path=None: mlflow_calls.append((path, artifact_path))
-    )
-    monkeypatch.setattr(rating_export, "mlflow", fake_mlflow)
-
-    output_path = tmp_path / "nested" / "rating_tables.xlsx"
-
-    with pytest.raises(RuntimeError) as exc:
+def test_export_rating_tables_requires_supported_superglm(tmp_path: Path):
+    with pytest.raises(RuntimeError, match=r"SuperGLM.*export_rating_tables"):
         rating_export.export_rating_tables(
             object(),
             pd.DataFrame({"x": [1]}),
             np.array([0.0]),
             np.array([1.0]),
-            output_path,
+            tmp_path / "rating_tables.xlsx",
         )
-
-    message = str(exc.value)
-    assert "SuperGLM" in message
-    assert "export_rating_tables" in message
-    assert "PR #109" in message
-    assert "rating table export support" in message
-    assert not output_path.parent.exists()
-    assert mlflow_calls == []
-
-
-def test_export_rating_tables_ignores_mlflow_logging_failure(monkeypatch, tmp_path: Path):
-    model = FakeExportModel()
-
-    class FailingMlflow:
-        def log_artifact(self, path, artifact_path=None):
-            raise RuntimeError("mlflow unavailable")
-
-    monkeypatch.setattr(rating_export, "mlflow", FailingMlflow())
-
-    output_path = tmp_path / "rating_tables.xlsx"
-    result = rating_export.export_rating_tables(
-        model,
-        pd.DataFrame({"x": [1]}),
-        np.array([0.0]),
-        np.array([1.0]),
-        output_path,
-    )
-
-    assert result == output_path
-    assert output_path.read_bytes() == b"workbook"
-
-
-def test_export_rating_tables_can_use_disabled_mlflow_client(monkeypatch, tmp_path: Path):
-    model = FakeExportModel()
-
-    class RaisingMlflow:
-        def log_artifact(self, path, artifact_path=None):
-            raise AssertionError("global mlflow should not be used")
-
-    monkeypatch.setattr(rating_export, "mlflow", RaisingMlflow())
-
-    output_path = tmp_path / "rating_tables.xlsx"
-    result = rating_export.export_rating_tables(
-        model,
-        pd.DataFrame({"x": [1]}),
-        np.array([0.0]),
-        np.array([1.0]),
-        output_path,
-        mlflow_client=None,
-    )
-
-    assert result == output_path
-    assert output_path.read_bytes() == b"workbook"
-
-
-def test_smoke_check_reports_missing_rating_export_without_failing(capsys):
-    class OldSuperGLM:
-        pass
-
-    exit_code = smoke_check.check_superglm_rating_export(OldSuperGLM)
-
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "smoke_check=rating_export_unavailable" in captured.out
-    assert "PR #109" in captured.out
-    assert "export_rating_tables" in captured.out
-
-
-class FakeFrame:
-    def __init__(self, label: str, events: list[tuple], *, empty: bool = False):
-        self.label = label
-        self.events = events
-        self.empty = empty
-
-    def to_sql(self, name, con, schema=None, if_exists=None, index=None, chunksize=None):
-        self.events.append(("to_sql", self.label, name, con, schema, if_exists, index, chunksize))
-
-
-class FakeBeginConnection:
-    def __init__(self, events: list[tuple]):
-        self.events = events
-
-    def execute(self, statement, params=None):
-        self.events.append(("execute", str(statement), params))
-
-
-class FakeBegin:
-    def __init__(self, connection):
-        self.connection = connection
-
-    def __enter__(self):
-        return self.connection
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
-class FakeEngine:
-    def __init__(self, events: list[tuple], execution_options=None):
-        self.events = events
-        self._execution_options = execution_options or {}
-        self.connection = FakeBeginConnection(events)
-
-    def begin(self):
-        self.events.append(("begin",))
-        return FakeBegin(self.connection)
-
-
-class FakeScalarResult:
-    def __init__(self, value):
-        self.value = value
-
-    def scalar_one(self):
-        return self.value
-
-    def scalar_one_or_none(self):
-        return self.value
-
-
-class FakePricingModelResult:
-    def mappings(self):
-        return self
-
-    def one_or_none(self):
-        return {
-            "model_id": 17,
-            "model_name": "MTPL_FREQ",
-            "model_label": None,
-            "target_name": "ClaimNb",
-            "model_type": "superglm_poisson",
-            "model_status": "ACTIVE",
-        }
-
-
-class FakeModelRegistryConnection(FakeBeginConnection):
-    def execute(self, statement, params=None):
-        self.events.append(("execute", str(statement), params))
-        if "SELECT model_id," in str(statement):
-            return FakePricingModelResult()
-        if "SELECT model_id" in str(statement):
-            return FakeScalarResult(17)
-        return FakeScalarResult(None)
-
-
-class FakeModelRegistryEngine(FakeEngine):
-    def __init__(self, events: list[tuple], execution_options=None):
-        self.events = events
-        self._execution_options = execution_options or {}
-        self.connection = FakeModelRegistryConnection(events)
-
-
-def test_ensure_pricing_model_merges_by_model_name_and_returns_model_id():
-    events = []
-    con = FakeModelRegistryConnection(events)
-
-    model_id = ensure_pricing_model(
-        con,
-        model_name="MTPL_FREQ",
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        created_by="airflow",
-    )
-
-    assert model_id == 17
-    merge_sql = events[0][1]
-    select_sql = events[1][1]
-    assert "MERGE pricing.PRICING_MODEL WITH (HOLDLOCK)" in merge_sql
-    assert "ON tgt.model_name = src.model_name" in merge_sql
-    assert "model_status" in merge_sql
-    assert "SELECT model_id" in select_sql
-    assert events[0][2] == {
-        "model_name": "MTPL_FREQ",
-        "model_label": None,
-        "target_name": "ClaimNb",
-        "model_type": "superglm_poisson",
-        "model_status": "ACTIVE",
-        "created_by": "airflow",
-    }
-
-
-def test_package_staging_module_exposes_excel_staging_functions():
-    from pricing_pipeline.publishing import staging
-
-    assert callable(staging.build_staging_frames)
-    assert callable(staging.insert_staging_frames)
-    assert callable(staging.stage_rating_export)
 
 
 def _offline_staging_engine(tmp_path: Path):
-    from scripts.run_mtpl_frequency_offline_sqlite import (
-        apply_offline_ddl,
-        sqlite_engine_with_offline_schemas,
-    )
-
     engine = sqlite_engine_with_offline_schemas(
         {
             "pricing": tmp_path / "pricing.sqlite",
@@ -400,13 +117,17 @@ def _offline_staging_engine(tmp_path: Path):
     return engine
 
 
-def _minimal_rating_workbook(path: Path, term_name: str = "TermMonths") -> Path:
+def _minimal_rating_workbook(
+    path: Path,
+    *,
+    term_name: str = "TermMonths",
+    level_code: str = "12",
+) -> Path:
     raw = pd.DataFrame([[None] * 3 for _ in range(8)])
     raw.iat[1, 2] = 0.123
     raw.iat[4, 0] = term_name
     raw.iloc[6, 0:3] = [term_name, "Relativity", "Weight"]
-    raw.iloc[7, 0:3] = ["12", 1.0, 10.0]
-    path.parent.mkdir(parents=True, exist_ok=True)
+    raw.iloc[7, 0:3] = [level_code, 1.0, 10.0]
     raw.to_excel(path, sheet_name="Rating Tables", header=False, index=False)
     return path
 
@@ -431,13 +152,6 @@ def _publication_receipt(
                 "source_column": "Exposure",
             }
         }
-    elif handling == "ALREADY_APPLIED_SQL_EXPOSURE":
-        offset_contract = OffsetExportContract(
-            handling="ALREADY_APPLIED_SQL_EXPOSURE",
-            source_name="Exposure",
-            label="Policy exposure term",
-        )
-        default_term_metadata = {}
     else:
         offset_contract = OffsetExportContract(handling="NONE")
         default_term_metadata = {}
@@ -454,33 +168,55 @@ def _publication_receipt(
     )
 
 
-def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
-    tmp_path: Path,
-):
+def test_build_staging_frames_accepts_mapping_and_uses_standard_layout(tmp_path: Path):
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    args = staging.StagingExport(
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_version="v1",
+        effective_from=None,
+        effective_to=None,
+        interaction_features=MappingProxyType({}),
+        created_by="analyst@example.test",
+        replace=False,
+        model_id=17,
+    )
+
+    export, rates, _levels = staging.build_staging_frames(args)
+
+    assert export.iloc[0]["base_rate"] == pytest.approx(0.123)
+    assert export.iloc[0]["source_file"] == str(workbook_path.resolve())
+    assert rates.iloc[0]["term_name"] == "TermMonths"
+
+
+def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path: Path):
     engine = _offline_staging_engine(tmp_path)
     workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(_publication_receipt(), receipt_path)
+    receipt_path = tmp_path / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(_publication_receipt(), receipt_path)
 
-    load_superglm_excel_to_staging.stage_rating_export(
+    content_sha256 = staging.stage_rating_export(
         engine,
         workbook_path=workbook_path,
         export_id="export-1",
         model_name="MTPL_FREQ",
         model_version="20260427",
-        effective_from="2026-04-27",
+        effective_from=None,
         publication_receipt_path=receipt_path,
-        publication_receipt_sha256=digest,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+        publication_receipt_sha256=receipt_sha256,
         replace=True,
         model_id=1,
     )
 
-    with engine.begin() as con:
+    with engine.begin() as connection:
         export = (
-            con.execute(
+            connection.execute(
                 text(
-                    "SELECT publication_receipt_sha256, offset_handling, offset_factor_name "
+                    "SELECT publication_receipt_sha256, offset_handling, "
+                    "offset_factor_name, staging_content_sha256 "
                     "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
                 ),
                 {"export_id": "export-1"},
@@ -489,7 +225,7 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
             .one()
         )
         term = (
-            con.execute(
+            connection.execute(
                 text(
                     "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
                     "WHERE export_id = :export_id AND term_name = :term_name"
@@ -499,149 +235,45 @@ def test_stage_rating_export_stages_publication_receipt_and_offset_metadata(
             .mappings()
             .one()
         )
-        metadata = (
-            con.execute(
-                text(
-                    "SELECT term_metadata_json FROM pricing_stg.STG_TERM_METADATA "
-                    "WHERE export_id = :export_id AND term_name = :term_name"
-                ),
-                {"export_id": "export-1", "term_name": "TermMonths"},
-            )
-            .mappings()
-            .one()
-        )
+        metadata_json = connection.execute(
+            text(
+                "SELECT term_metadata_json FROM pricing_stg.STG_TERM_METADATA "
+                "WHERE export_id = :export_id AND term_name = :term_name"
+            ),
+            {"export_id": "export-1", "term_name": "TermMonths"},
+        ).scalar_one()
 
-    assert export["publication_receipt_sha256"] == digest
+    assert len(content_sha256) == 64
+    assert export["publication_receipt_sha256"] == receipt_sha256
+    assert export["staging_content_sha256"] == content_sha256
     assert export["offset_handling"] == "EXPORTED_FACTOR"
     assert export["offset_factor_name"] == "TermMonths"
     assert term["term_type"] == "OFFSET_FACTOR"
-    assert json.loads(metadata["term_metadata_json"])["feature_kind"] == "offset"
+    assert json.loads(metadata_json)["feature_kind"] == "offset"
 
 
-def test_stage_rating_export_requires_publication_receipt_in_strict_metadata_mode(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
+def test_stage_rating_export_requires_publication_receipt(tmp_path: Path):
     workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
-
-    with pytest.raises(ValueError, match="publication receipt is required"):
-        load_superglm_excel_to_staging.stage_rating_export(
-            engine,
+    with pytest.raises(TypeError, match="publication_receipt"):
+        staging.stage_rating_export(
+            object(),
             workbook_path=workbook_path,
             export_id="export-1",
             model_name="MTPL_FREQ",
-            model_version="20260427",
-            effective_from="2026-04-27",
-            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
+            model_version="v1",
+            effective_from=None,
             model_id=1,
         )
 
 
-def test_stage_rating_export_allows_explicit_workbook_only_metadata_mode(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
-    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
-
-    load_superglm_excel_to_staging.stage_rating_export(
-        engine,
-        workbook_path=workbook_path,
-        export_id="export-1",
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
-        metadata_mode="ALLOW_WORKBOOK_ONLY",
-        replace=True,
-        model_id=1,
-    )
-
-    with engine.begin() as con:
-        export = (
-            con.execute(
-                text(
-                    "SELECT publication_receipt_sha256, offset_handling "
-                    "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
-                ),
-                {"export_id": "export-1"},
-            )
-            .mappings()
-            .one()
-        )
-        term_metadata_count = con.execute(
-            text("SELECT COUNT(*) FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id"),
-            {"export_id": "export-1"},
-        ).scalar_one()
-
-    assert export["publication_receipt_sha256"] is None
-    assert export["offset_handling"] is None
-    assert term_metadata_count == 0
-
-
-def test_stage_rating_export_rejects_missing_exported_offset_factor(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
-    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(
-        _publication_receipt(published_factor_name="MissingOffsetFactor"),
-        receipt_path,
-    )
-
-    with pytest.raises(ValueError, match="MissingOffsetFactor"):
-        load_superglm_excel_to_staging.stage_rating_export(
-            engine,
-            workbook_path=workbook_path,
-            export_id="export-1",
-            model_name="MTPL_FREQ",
-            model_version="20260427",
-            effective_from="2026-04-27",
-            publication_receipt_path=receipt_path,
-            publication_receipt_sha256=digest,
-            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-            replace=True,
-            model_id=1,
-        )
-
-
-def test_stage_rating_export_requires_receipt_metadata_for_staged_terms(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
+def test_stage_rating_export_rejects_receipt_term_missing_from_workbook(tmp_path: Path):
     workbook_path = _minimal_rating_workbook(
-        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+        tmp_path / "rating_tables.xlsx",
+        term_name="LogDensity",
+        level_code="per_unit",
     )
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(
-        _publication_receipt(handling="NONE", term_metadata={}),
-        receipt_path,
-    )
-
-    with pytest.raises(ValueError, match="receipt metadata is missing"):
-        load_superglm_excel_to_staging.stage_rating_export(
-            engine,
-            workbook_path=workbook_path,
-            export_id="export-1",
-            model_name="MTPL_FREQ",
-            model_version="20260427",
-            effective_from="2026-04-27",
-            publication_receipt_path=receipt_path,
-            publication_receipt_sha256=digest,
-            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-            replace=True,
-            model_id=1,
-        )
-
-
-def test_stage_rating_export_rejects_operational_receipt_terms_missing_from_workbook(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
-    workbook_path = _minimal_rating_workbook(
-        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
-    )
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(
+    receipt_path = tmp_path / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(
         _publication_receipt(
             handling="NONE",
             term_metadata={
@@ -653,1379 +285,760 @@ def test_stage_rating_export_rejects_operational_receipt_terms_missing_from_work
     )
 
     with pytest.raises(ValueError, match="not present in staged workbook"):
-        load_superglm_excel_to_staging.stage_rating_export(
-            engine,
+        staging.stage_rating_export(
+            object(),
             workbook_path=workbook_path,
             export_id="export-1",
             model_name="MTPL_FREQ",
-            model_version="20260427",
-            effective_from="2026-04-27",
+            model_version="v1",
+            effective_from=None,
             publication_receipt_path=receipt_path,
-            publication_receipt_sha256=digest,
-            metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-            replace=True,
+            publication_receipt_sha256=receipt_sha256,
             model_id=1,
         )
 
 
-def test_stage_rating_export_uses_receipt_metadata_for_term_type(
+def test_staging_content_sha256_binds_every_frame():
+    export = pd.DataFrame([{"export_id": "export-1", "model_name": "MTPL_FREQ"}])
+    rates = pd.DataFrame(
+        [{"export_id": "export-1", "row_id": 1, "term_name": "Area", "multiplier": 1.1}]
+    )
+    levels = pd.DataFrame(
+        [{"export_id": "export-1", "row_id": 1, "position_no": 1, "level_code": "A"}]
+    )
+    terms = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "term_name": "Area",
+                "term_metadata_json": '{"feature_kind":"categorical"}',
+            }
+        ]
+    )
+    digest = staging.staging_content_sha256(export, rates, levels, terms)
+
+    changed_rates = rates.copy()
+    changed_rates.loc[0, "multiplier"] = 1.2
+    changed_levels = levels.copy()
+    changed_levels.loc[0, "level_code"] = "B"
+    changed_terms = terms.copy()
+    changed_terms.loc[0, "term_metadata_json"] = '{"feature_kind":"numeric"}'
+
+    assert len(digest) == 64
+    assert staging.staging_content_sha256(export, changed_rates, levels, terms) != digest
+    assert staging.staging_content_sha256(export, rates, changed_levels, terms) != digest
+    assert staging.staging_content_sha256(export, rates, levels, changed_terms) != digest
+
+
+def test_stage_rating_export_parses_categorical_interaction_matrix(
+    monkeypatch,
     tmp_path: Path,
 ):
-    engine = _offline_staging_engine(tmp_path)
-    workbook_path = _minimal_rating_workbook(
-        tmp_path / "rating_tables.xlsx", term_name="LogDensity"
+    from superglm import Categorical, SuperGLM
+
+    from pricing_pipeline.publishing.superglm_metadata import (
+        build_superglm_publication_receipt,
     )
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(
-        _publication_receipt(
-            handling="NONE",
-            term_metadata={"LogDensity": {"feature_kind": "numeric"}},
+
+    n_rows = 60
+    X = pd.DataFrame(
+        {
+            "territory": np.resize(["urban", "rural"], n_rows),
+            "age_band": np.resize(["young", "old", "mid"], n_rows),
+        }
+    )
+    y = np.random.default_rng(20260713).poisson(0.4, size=n_rows)
+    weights = np.ones(n_rows)
+    model = SuperGLM(
+        features={
+            "territory": Categorical(base="first"),
+            "age_band": Categorical(base="first"),
+        },
+        interactions=[("territory", "age_band")],
+        selection_penalty=0.0,
+    ).fit(X, y, sample_weight=weights)
+    workbook_path = tmp_path / "rating_tables.xlsx"
+    rating_export.export_rating_tables(
+        model,
+        X,
+        y,
+        weights,
+        workbook_path,
+    )
+    receipt_path = tmp_path / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
         ),
         receipt_path,
     )
+    captured = {}
+    monkeypatch.setattr(
+        staging,
+        "insert_staging_frames",
+        lambda engine, args, export, rates, levels, terms, **kwargs: captured.update(
+            rates=rates.copy(),
+            levels=levels.copy(),
+            terms=terms.copy(),
+        ),
+    )
 
-    load_superglm_excel_to_staging.stage_rating_export(
-        engine,
+    staging.stage_rating_export(
+        object(),
         workbook_path=workbook_path,
         export_id="export-1",
         model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
+        model_version="v1",
+        effective_from=None,
         publication_receipt_path=receipt_path,
-        publication_receipt_sha256=digest,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-        replace=True,
-        model_id=1,
-    )
-
-    with engine.begin() as con:
-        term_type = con.execute(
-            text(
-                "SELECT term_type FROM pricing_stg.STG_RATE_CELL "
-                "WHERE export_id = :export_id AND term_name = :term_name"
-            ),
-            {"export_id": "export-1", "term_name": "LogDensity"},
-        ).scalar_one()
-
-    assert term_type == "NUMERIC_MAIN"
-
-
-def test_stage_rating_export_replace_deletes_old_term_metadata(
-    tmp_path: Path,
-):
-    engine = _offline_staging_engine(tmp_path)
-    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
-    receipt_path = tmp_path / "superglm_publication_receipt.json"
-    digest = write_publication_receipt(_publication_receipt(), receipt_path)
-
-    load_superglm_excel_to_staging.stage_rating_export(
-        engine,
-        workbook_path=workbook_path,
-        export_id="export-1",
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
-        publication_receipt_path=receipt_path,
-        publication_receipt_sha256=digest,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-        replace=True,
-        model_id=1,
-    )
-
-    with engine.begin() as con:
-        con.execute(
-            text(
-                "INSERT INTO pricing_stg.STG_TERM_METADATA "
-                "(export_id, term_name, term_metadata_json) "
-                "VALUES (:export_id, :term_name, :term_metadata_json)"
-            ),
-            {
-                "export_id": "export-1",
-                "term_name": "StaleTerm",
-                "term_metadata_json": '{"feature_kind":"stale"}',
-            },
-        )
-
-    load_superglm_excel_to_staging.stage_rating_export(
-        engine,
-        workbook_path=workbook_path,
-        export_id="export-1",
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
-        publication_receipt_path=receipt_path,
-        publication_receipt_sha256=digest,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-        replace=True,
-        model_id=1,
-    )
-
-    with engine.begin() as con:
-        term_names = (
-            con.execute(
-                text(
-                    "SELECT term_name FROM pricing_stg.STG_TERM_METADATA "
-                    "WHERE export_id = :export_id ORDER BY term_name"
-                ),
-                {"export_id": "export-1"},
-            )
-            .scalars()
-            .all()
-        )
-
-    assert term_names == ["TermMonths"]
-
-
-def test_stage_rating_export_builds_args_deletes_and_inserts_in_one_transaction(
-    monkeypatch, tmp_path: Path
-):
-    events = []
-    captured_args = []
-
-    def fake_build_staging_frames(args):
-        captured_args.append(args)
-        return (
-            FakeFrame("export", events),
-            FakeFrame("rate", events),
-            FakeFrame("level", events),
-        )
-
-    monkeypatch.setattr(staging, "build_staging_frames", fake_build_staging_frames)
-    engine = FakeModelRegistryEngine(events)
-    workbook_path = tmp_path / "rating_tables.xlsx"
-
-    load_superglm_excel_to_staging.stage_rating_export(
-        engine,
-        workbook_path=workbook_path,
-        export_id="export-1",
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
-        effective_to=None,
-        created_by="airflow",
-        replace=True,
-        metadata_mode="ALLOW_WORKBOOK_ONLY",
-    )
-
-    args = captured_args[0]
-    assert args.xlsx == workbook_path
-    assert args.sheet == "Rating Tables"
-    assert args.export_id == "export-1"
-    assert args.model_name == "MTPL_FREQ"
-    assert args.target_name == "ClaimNb"
-    assert args.model_type == "superglm_poisson"
-    assert args.model_status == "ACTIVE"
-    assert args.model_version == "20260427"
-    assert args.effective_from == "2026-04-27"
-    assert args.effective_to is None
-    assert args.created_by == "airflow"
-    assert args.replace is True
-
-    delete_sql = [event[1] for event in events if event[0] == "execute"]
-    assert delete_sql == [
-        "\n                SELECT model_id,\n                    model_name,\n                    model_label,\n                    target_name,\n                    model_type,\n                    model_status\n                FROM pricing.PRICING_MODEL\n                WHERE model_name = :model_name\n                ",
-        "DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id",
-        "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
-        "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
-        "DELETE FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id",
-        "UPDATE pricing_stg.STG_RATING_EXPORT SET model_id = :model_id WHERE export_id = :export_id",
-    ]
-    assert [event[2] for event in events if event[0] == "execute"] == [
-        {"model_name": "MTPL_FREQ"},
-        {"export_id": "export-1"},
-        {"export_id": "export-1"},
-        {"export_id": "export-1"},
-        {"export_id": "export-1"},
-        {"export_id": "export-1", "model_id": 17},
-    ]
-    assert [event[:4] for event in events if event[0] == "to_sql"] == [
-        ("to_sql", "export", "STG_RATING_EXPORT", engine.connection),
-        ("to_sql", "rate", "STG_RATE_CELL", engine.connection),
-        ("to_sql", "level", "STG_CELL_LEVEL", engine.connection),
-    ]
-    assert [event[-1] for event in events if event[0] == "to_sql"] == [
-        None,
-        5000,
-        5000,
-    ]
-    assert events[0] == ("begin",)
-
-
-def test_insert_staging_frames_uses_configured_staging_schema_for_to_sql():
-    events = []
-    engine = FakeModelRegistryEngine(
-        events,
-        {"pricing_staging_schema": "python_pricing_stg"},
-    )
-    args = SimpleNamespace(
-        model_name="MTPL_FREQ",
-        model_label=None,
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        model_status="ACTIVE",
-        created_by="unit-test",
-        replace=False,
-        export_id="export-1",
-    )
-
-    staging.insert_staging_frames(
-        engine,
-        args,
-        FakeFrame("export", events),
-        FakeFrame("rate", events),
-        FakeFrame("level", events),
-    )
-
-    assert [event[4] for event in events if event[0] == "to_sql"] == [
-        "python_pricing_stg",
-        "python_pricing_stg",
-        "python_pricing_stg",
-    ]
-
-
-def test_insert_staging_frames_writes_term_metadata_after_cell_levels():
-    events = []
-    engine = FakeEngine(events)
-    args = SimpleNamespace(
-        model_name="MTPL_FREQ",
-        model_label=None,
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        model_status="ACTIVE",
-        created_by="unit-test",
-        replace=False,
-        export_id="export-1",
+        publication_receipt_sha256=receipt_sha256,
         model_id=17,
     )
 
-    staging.insert_staging_frames(
-        engine,
-        args,
-        FakeFrame("export", events),
-        FakeFrame("rate", events),
-        FakeFrame("level", events),
-        FakeFrame("term_metadata", events),
-    )
-
-    assert [event[1] for event in events if event[0] == "to_sql"] == [
-        "export",
-        "rate",
-        "level",
-        "term_metadata",
+    interactions = captured["rates"].query("term_name == 'territory_age_band'")
+    interaction_levels = captured["levels"].loc[
+        captured["levels"]["row_id"].isin(interactions["row_id"])
     ]
-    assert [event[2] for event in events if event[0] == "to_sql"] == [
-        "STG_RATING_EXPORT",
-        "STG_RATE_CELL",
-        "STG_CELL_LEVEL",
-        "STG_TERM_METADATA",
-    ]
+    assert len(interactions) == 6
+    assert set(interactions["term_type"]) == {"CATEGORICAL_INTERACTION"}
+    assert len(interaction_levels) == 12
+    assert set(interaction_levels["position_no"]) == {1, 2}
+    assert set(captured["terms"]["term_name"]) == {
+        "territory",
+        "age_band",
+        "territory_age_band",
+    }
 
 
-class FakeMissingModelConnection(FakeBeginConnection):
+class _Result:
+    def __init__(self, *, row=None, rows=(), scalar=None):
+        self.row = row
+        self.rows = list(rows)
+        self.scalar = scalar
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self.row
+
+    def all(self):
+        return self.rows
+
+    def scalar_one(self):
+        return self.scalar
+
+    def scalar_one_or_none(self):
+        return self.scalar
+
+
+class _LineageConnection:
+    def __init__(self, *, existing=None, associations=()):
+        self.existing = existing
+        self.associations = list(associations)
+        self.statements = []
+
     def execute(self, statement, params=None):
-        self.events.append(("execute", str(statement), params))
-        if "FROM pricing.PRICING_MODEL" in str(statement):
-            return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: None))
-        raise AssertionError("staging should stop before writing when model is missing")
+        sql = str(statement)
+        self.statements.append((sql, params))
+        if "FROM pricing.MODEL_RUN AS mr" in sql:
+            return _Result(row=self.existing)
+        if "lineage_source" in sql:
+            return _Result(rows=self.associations)
+        if "child_package.parent_rate_package_id" in sql:
+            return _Result(scalar=1)
+        if "SELECT model_run_id" in sql:
+            return _Result(scalar=501)
+        return _Result()
 
 
-class FakeMissingModelEngine(FakeEngine):
-    def __init__(self, events: list[tuple]):
-        self.events = events
-        self._execution_options = {}
-        self.connection = FakeMissingModelConnection(events)
+class _Begin:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
-def test_insert_staging_frames_requires_existing_registered_model(monkeypatch):
-    events = []
-    engine = FakeMissingModelEngine(events)
-    args = SimpleNamespace(
-        model_name="MTPL_FREQ",
-        model_label="Motor frequency",
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        model_status="ACTIVE",
-        created_by="unit-test",
-        replace=False,
-        export_id="export-1",
-    )
-    monkeypatch.setattr(
-        staging,
-        "ensure_pricing_model",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("staging must not create model registry rows")
+class _Engine:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def begin(self):
+        return _Begin(self.connection)
+
+
+def _model_run_build(**overrides):
+    values = {
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_version": "v1",
+        "model_type": "superglm_poisson",
+        "target_name": "ClaimNb",
+        "deployment_slot": "MTPL_FREQ_UAT",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "export_id": "export-1",
+        "rating_workbook_path": "/tmp/rating.xlsx",
+        "rating_workbook_sha256": "f" * 64,
+        "created_by": "analyst@example.test",
+        "mlflow_run_id": None,
+        "publication_receipt_path": "/tmp/publication_receipt.json",
+        "publication_receipt_sha256": "c" * 64,
+        "candidate_artifact_path": "/tmp/candidate.joblib",
+        "candidate_artifact_sha256": "a" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 123,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+        "model_source_sha256": "b" * 64,
+        "model_frame_sha256": "d" * 64,
+    }
+    values.update(overrides)
+    return ModelExportResult(**values)
+
+
+def _model_run_kwargs():
+    return {
+        "build": _model_run_build(),
+        "dag_id": "pricing.model.build",
+        "airflow_run_id": "notebook__2026-07-12",
+        "rate_package_id": 42,
+        "parent_model_run_id": 409,
+    }
+
+
+def _model_run_row():
+    kwargs = _model_run_kwargs()
+    build = kwargs.pop("build")
+    return {
+        "model_run_id": 501,
+        **kwargs,
+        "mlflow_run_id": build.mlflow_run_id,
+        "manifest_id": build.manifest_id,
+        "export_id": build.export_id,
+        "model_id": build.model_id,
+        "model_name": build.model_name,
+        "model_version": build.model_version,
+        "rating_workbook_path": build.rating_workbook_path,
+        "rating_workbook_sha256": build.rating_workbook_sha256,
+        "run_status": "SUCCESS",
+        "created_by": build.created_by,
+        "publication_receipt_path": build.publication_receipt_path,
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+        "candidate_artifact_path": build.candidate_artifact_path,
+        "candidate_artifact_sha256": build.candidate_artifact_sha256,
+        "candidate_artifact_format": build.candidate_artifact_format,
+        "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
+        "candidate_python_version": build.candidate_python_version,
+        "candidate_superglm_version": build.candidate_superglm_version,
+        "model_source_sha256": build.model_source_sha256,
+    }
+
+
+def _model_run_associations():
+    return [
+        {
+            "lineage_source": "actual_dataset",
+            "manifest_id": "manifest-1",
+            "split_set_id": None,
+            "dataset_role": "training",
+            "split_role": None,
+        },
+        {
+            "lineage_source": "actual_dataset",
+            "manifest_id": "parent-manifest",
+            "split_set_id": None,
+            "dataset_role": "training",
+            "split_role": None,
+        },
+        {
+            "lineage_source": "parent_dataset",
+            "manifest_id": "parent-manifest",
+            "split_set_id": None,
+            "dataset_role": "training",
+            "split_role": None,
+        },
+        {
+            "lineage_source": "actual_split",
+            "manifest_id": "manifest-1",
+            "split_set_id": "split-1",
+            "dataset_role": "training",
+            "split_role": "validation",
+        },
+        {
+            "lineage_source": "actual_split",
+            "manifest_id": "parent-manifest",
+            "split_set_id": "parent-split",
+            "dataset_role": "training",
+            "split_role": "benchmark",
+        },
+        {
+            "lineage_source": "parent_split",
+            "manifest_id": "parent-manifest",
+            "split_set_id": "parent-split",
+            "dataset_role": "training",
+            "split_role": "benchmark",
+        },
+    ]
+
+
+def test_record_model_run_writes_identity_associations_parent_and_metrics():
+    connection = _LineageConnection()
+    kwargs = _model_run_kwargs()
+    kwargs["build"] = _model_run_build(
+        metrics={"deviance": 0.42},
+        metric_scopes={"deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
         ),
-        raising=False,
     )
 
-    with pytest.raises(ModelRegistryError, match="not registered"):
-        staging.insert_staging_frames(
-            engine,
-            args,
-            FakeFrame("export", events),
-            FakeFrame("rate", events),
-            FakeFrame("level", events),
+    model_run_id = lineage.record_model_run(
+        _Engine(connection),
+        **kwargs,
+    )
+
+    assert model_run_id == 501
+    model_run_write = next(
+        item for item in connection.statements if "MERGE pricing.MODEL_RUN" in item[0]
+    )
+    assert model_run_write[1]["candidate_artifact_sha256"] == "a" * 64
+    assert model_run_write[1]["model_source_sha256"] == "b" * 64
+    assert model_run_write[1]["parent_model_run_id"] == 409
+    assert any("MERGE mlops.MODEL_RUN_DATASET" in sql for sql, _ in connection.statements)
+    assert any("MERGE mlops.MODEL_RUN_SPLIT_SET" in sql for sql, _ in connection.statements)
+    assert any("MERGE mlops.MODEL_RUN_METRIC" in sql for sql, _ in connection.statements)
+    assert any("MERGE pricing.CV_FOLD_METRIC" in sql for sql, _ in connection.statements)
+    assert any(
+        "parent_dataset.model_run_id = :parent_model_run_id" in sql
+        for sql, _ in connection.statements
+    )
+
+
+def test_record_model_run_exact_retry_is_read_only():
+    connection = _LineageConnection(
+        existing=_model_run_row(),
+        associations=_model_run_associations(),
+    )
+
+    model_run_id = lineage.record_model_run(
+        None,
+        connection=connection,
+        **_model_run_kwargs(),
+    )
+
+    assert model_run_id == 501
+    assert len(connection.statements) == 2
+    assert not any(
+        sql.lstrip().startswith(("MERGE", "DELETE", "INSERT", "UPDATE"))
+        for sql, _ in connection.statements
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "changed_value"),
+    [
+        ("manifest_id", "manifest-2"),
+        ("model_version", "v2"),
+        ("candidate_artifact_sha256", "c" * 64),
+        ("rating_workbook_sha256", "c" * 64),
+        ("parent_model_run_id", 410),
+    ],
+)
+def test_record_model_run_rejects_changed_immutable_retry(field_name, changed_value):
+    connection = _LineageConnection(existing=_model_run_row())
+    kwargs = _model_run_kwargs()
+    if field_name == "parent_model_run_id":
+        kwargs[field_name] = changed_value
+    else:
+        kwargs["build"] = kwargs["build"].model_copy(update={field_name: changed_value})
+
+    with pytest.raises(lineage.ModelRunIdentityError, match=field_name):
+        lineage.record_model_run(None, connection=connection, **kwargs)
+
+    assert len(connection.statements) == 1
+
+
+_RETRY_ARTIFACTS = {}
+
+
+def _retry_artifact_fields(tmp_path: Path):
+    key = tmp_path.resolve()
+    if key not in _RETRY_ARTIFACTS:
+        receipt = tmp_path / "publication_receipt.json"
+        receipt.write_bytes(b"publication receipt")
+        metadata = save_candidate_bundle(
+            CandidateBundle(
+                fitted_model=SimpleNamespace(name="candidate"),
+                X=pd.DataFrame({"age": [42.0]}),
+                y=np.zeros(1),
+                sample_weight=None,
+                offset=None,
+                export_weight=None,
+                cv_report={},
+                model_name="MTPL_FREQ",
+                model_version="v1",
+                export_id="export-1",
+                manifest_id="manifest-1",
+                split_set_id="split-1",
+                pk_columns=("policy_id",),
+                row_order_sha256="d" * 64,
+                model_source_sha256="c" * 64,
+                model_frame_sha256="e" * 64,
+                offset_contract={"handling": "NONE"},
+            ),
+            tmp_path / "candidate.joblib",
         )
+        _RETRY_ARTIFACTS[key] = {
+            "publication_receipt_path": str(receipt),
+            "publication_receipt_sha256": pipeline.sha256_file(receipt),
+            "candidate_artifact_path": str(metadata.path),
+            "candidate_artifact_sha256": metadata.sha256,
+            "candidate_artifact_format": metadata.format,
+            "candidate_artifact_size_bytes": metadata.size_bytes,
+            "candidate_python_version": metadata.python_version,
+            "candidate_superglm_version": metadata.superglm_version,
+            "model_source_sha256": "c" * 64,
+            "model_frame_sha256": "e" * 64,
+        }
+    return _RETRY_ARTIFACTS[key]
 
 
-def test_build_staging_frames_accepts_superglm_export_headers(monkeypatch, tmp_path: Path):
-    raw = pd.DataFrame([[None] * 6 for _ in range(10)])
-    raw.iat[1, 2] = 0.123
-    raw.iat[4, 0] = "VehAge"
-    raw.iat[4, 3] = "DrivAge"
-    raw.iloc[6, 0:3] = ["VehAge", "Relativity", "Weight"]
-    raw.iloc[6, 3:6] = ["DrivAge", "Relativity", "Weight"]
-    raw.iloc[7, 0:3] = ["[0, 1)", 1.2, 10.0]
-    raw.iloc[8, 0:3] = ["[1, 2)", 0.9, 20.0]
-    raw.iloc[7, 3:6] = ["[18, 20)", 1.1, 30.0]
-
-    monkeypatch.setattr(
-        staging.pd,
-        "read_excel",
-        lambda *args, **kwargs: raw,
-    )
-
-    args = SimpleNamespace(
-        xlsx=tmp_path / "rating_tables.xlsx",
-        sheet="Rating Tables",
-        export_id="export-1",
+def _retry_export(tmp_path: Path) -> ModelExportResult:
+    workbook_path = (tmp_path / "rating_tables.xlsx").resolve()
+    if not workbook_path.exists():
+        workbook_path.write_bytes(b"rating workbook")
+    return ModelExportResult(
+        model_id=17,
         model_name="MTPL_FREQ",
-        model_version="20260427",
-        effective_from="2026-04-27",
-        effective_to=None,
-        base_rate=None,
-        base_rate_cell="C2",
-        term_row=5,
-        header_row=7,
-        data_start_row=8,
-        term_type_map_json="{}",
-        interaction_features_json="{}",
-        created_by="airflow",
-    )
-
-    export_df, rate_df, level_df = load_superglm_excel_to_staging.build_staging_frames(args)
-
-    assert export_df.loc[0, "base_rate"] == 0.123
-    assert rate_df["term_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
-    assert rate_df["multiplier"].tolist() == [1.2, 0.9, 1.1]
-    assert level_df["feature_name"].tolist() == ["VehAge", "VehAge", "DrivAge"]
-
-
-def test_publish_rating_package_wrapper_returns_publish_result_without_pointer(monkeypatch):
-    captured = []
-
-    def fake_load(engine, args):
-        captured.append((engine, args))
-        args.package_version = 3
-        return 42
-
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
-        fake_load,
-    )
-    engine = object()
-
-    result = rating_package.publish_rating_package(
-        engine,
+        model_version="v1",
+        model_type="superglm_poisson",
+        target_name="ClaimNb",
+        deployment_slot="MTPL_FREQ_UAT",
+        manifest_id="manifest-1",
+        mlflow_run_id=None,
+        split_set_id="split-1",
         export_id="export-1",
-        created_by="airflow",
-        package_status="PUBLISHED",
+        rating_workbook_path=str(workbook_path),
+        rating_workbook_sha256=pipeline.sha256_file(workbook_path),
+        effective_from=None,
+        created_by="analyst@example.test",
+        metrics={"deviance": 0.42},
+        metric_scopes={"deviance": "cv"},
+        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
+        **_retry_artifact_fields(tmp_path),
     )
 
-    assert result == PublishResult(
-        mlflow_run_id="",
+
+def _retry_evidence(tmp_path: Path):
+    workbook = (tmp_path / "rating_tables.xlsx").resolve()
+    if not workbook.exists():
+        workbook.write_bytes(b"rating workbook")
+    workbook_path = str(workbook)
+    workbook_sha256 = pipeline.sha256_file(workbook)
+    artifacts = _retry_artifact_fields(tmp_path)
+    return {
+        "row": {
+            "model_id": 17,
+            "model_name": "MTPL_FREQ",
+            "model_version": "v1",
+            "source_export_id": "export-1",
+            "rate_package_id": 42,
+            "package_version": 3,
+            "package_status": "PUBLISHED",
+            "parent_rate_package_id": None,
+            "effective_from_date": None,
+            "effective_to_date": None,
+            "source_file": workbook_path,
+            "package_publication_receipt_sha256": artifacts["publication_receipt_sha256"],
+            "model_run_id": 501,
+            "run_status": "SUCCESS",
+            "run_export_id": "export-1",
+            "run_model_id": 17,
+            "run_model_name": "MTPL_FREQ",
+            "run_model_version": "v1",
+            "dag_id": "notebook",
+            "airflow_run_id": "export-1",
+            "manifest_id": "manifest-1",
+            "rating_workbook_path": workbook_path,
+            "rating_workbook_sha256": workbook_sha256,
+            "mlflow_run_id": None,
+            **artifacts,
+        },
+        "datasets": [{"manifest_id": "manifest-1", "dataset_role": "training"}],
+        "splits": [
+            {
+                "manifest_id": "manifest-1",
+                "split_set_id": "split-1",
+                "dataset_role": "training",
+                "split_role": "validation",
+            }
+        ],
+        "metrics": [{"metric_name": "deviance", "metric_value": 0.42, "metric_scope": "cv"}],
+        "folds": [
+            {
+                "split_set_id": "split-1",
+                "fold_no": 1,
+                "metric_name": "deviance",
+                "metric_value": 0.4,
+            }
+        ],
+    }
+
+
+class _EvidenceConnection:
+    def __init__(self, evidence):
+        self.evidence = evidence
+
+    def execute(self, statement, params):
+        sql = str(statement)
+        if "FROM pricing.PRICING_RATE_PACKAGE AS rp" in sql:
+            return _Result(rows=[self.evidence["row"]])
+        if "FROM mlops.MODEL_RUN_DATASET" in sql:
+            return _Result(rows=self.evidence["datasets"])
+        if "FROM mlops.MODEL_RUN_SPLIT_SET" in sql:
+            return _Result(rows=self.evidence["splits"])
+        if "FROM mlops.MODEL_RUN_METRIC" in sql:
+            return _Result(rows=self.evidence["metrics"])
+        if "FROM pricing.CV_FOLD_METRIC" in sql:
+            return _Result(rows=self.evidence["folds"])
+        raise AssertionError(f"unexpected evidence query: {sql}")
+
+
+def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+
+    result = pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        allowed_artifact_root=tmp_path,
+    )
+
+    assert result == CompletedModelPublishResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="v1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
         export_id="export-1",
         rate_package_id=42,
         package_version=3,
-        rating_workbook_path="",
+        package_status="PUBLISHED",
+        rating_workbook_path=export.rating_workbook_path,
+        model_run_id=501,
+        mlflow_run_id=None,
+        publication_receipt_path=export.publication_receipt_path,
+        publication_receipt_sha256=export.publication_receipt_sha256,
+        was_existing=True,
     )
-    assert captured[0][0] is engine
-    args = captured[0][1]
-    assert args.export_id == "export-1"
-    assert args.created_by == "airflow"
-    assert args.package_status == "PUBLISHED"
-    assert args.set_pointer is None
 
-
-def test_publish_rating_package_wrapper_rejects_legacy_pointer_api():
-    engine = object()
-
-    with pytest.raises(ValueError, match="deploy"):
-        rating_package.publish_rating_package(
-            engine,
-            export_id="export-legacy",
-            pointer_name="MTPL_FREQ_UAT",
-            created_by="airflow",
-            package_status="DRAFT",
+    evidence["row"]["model_run_id"] = None
+    with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
         )
 
 
-def test_publish_script_callable_rejects_legacy_pointer_api():
-    engine = object()
+@pytest.mark.parametrize(
+    ("mutation", "field_name"),
+    [
+        (lambda evidence: evidence["row"].update(dag_id="other"), "dag_id"),
+        (
+            lambda evidence: evidence["datasets"].append(
+                {"manifest_id": "extra", "dataset_role": "training"}
+            ),
+            "dataset links",
+        ),
+        (
+            lambda evidence: evidence["splits"][0].update(split_set_id="other"),
+            "split links",
+        ),
+        (
+            lambda evidence: evidence["metrics"][0].update(metric_value=9.0),
+            "metrics",
+        ),
+    ],
+)
+def test_existing_published_run_rejects_conflicting_evidence(
+    tmp_path: Path,
+    mutation,
+    field_name,
+):
+    evidence = deepcopy(_retry_evidence(tmp_path))
+    mutation(evidence)
 
-    with pytest.raises(ValueError, match="deploy"):
-        load_staging_to_rating_package.publish_rating_package(
-            engine,
-            export_id="export-2",
-            pointer_name="MTPL_FREQ_UAT",
-            created_by="python",
-            package_status="DRAFT",
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match=rf"incompatible evidence.*{field_name}",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            _retry_export(tmp_path),
+            allowed_artifact_root=tmp_path,
         )
 
 
-def test_publish_script_callable_builds_args_and_returns_package_id(monkeypatch):
-    captured = []
-
-    def fake_load(engine, args):
-        captured.append((engine, args))
-        return 99
-
-    monkeypatch.setattr(
-        load_staging_to_rating_package,
-        "load_staging_to_rating_package",
-        fake_load,
+def test_existing_published_run_verifies_candidate_bundle_identity(tmp_path: Path):
+    evidence = _retry_evidence(tmp_path)
+    metadata = save_candidate_bundle(
+        CandidateBundle(
+            fitted_model=SimpleNamespace(name="candidate"),
+            X=pd.DataFrame({"age": [42.0]}),
+            y=np.zeros(1),
+            sample_weight=None,
+            offset=None,
+            export_weight=None,
+            cv_report={},
+            model_name="MTPL_FREQ",
+            model_version="v1",
+            export_id="export-1",
+            manifest_id="manifest-1",
+            split_set_id="split-1",
+            pk_columns=("policy_id",),
+            row_order_sha256="d" * 64,
+            model_source_sha256="b" * 64,
+            model_frame_sha256="e" * 64,
+            offset_contract={"handling": "NONE"},
+        ),
+        tmp_path / "candidate.joblib",
     )
-    engine = object()
+    artifact_fields = {
+        "candidate_artifact_path": metadata.path,
+        "candidate_artifact_sha256": metadata.sha256,
+        "candidate_artifact_format": metadata.format,
+        "candidate_artifact_size_bytes": metadata.size_bytes,
+        "candidate_python_version": metadata.python_version,
+        "candidate_superglm_version": metadata.superglm_version,
+        "model_source_sha256": "c" * 64,
+    }
+    evidence["row"].update(artifact_fields)
+    export = ModelExportResult(**{**_retry_export(tmp_path).model_dump(), **artifact_fields})
 
-    package_id = load_staging_to_rating_package.publish_rating_package(
-        engine,
-        export_id="export-2",
-        created_by="python",
-        package_status="DRAFT",
-    )
-
-    assert package_id == 99
-    assert captured[0][0] is engine
-    args = captured[0][1]
-    assert args.export_id == "export-2"
-    assert args.set_pointer is None
-    assert args.created_by == "python"
-    assert args.package_status == "DRAFT"
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="candidate artifact source hash does not match model-run lineage",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
 
 
-def test_model_publisher_publish_training_export_uses_config_and_maps_result(
+def test_publish_model_export_stages_packages_and_records_lineage(
     monkeypatch,
     tmp_path: Path,
 ):
     calls = []
-    engine = object()
-    workbook_path = tmp_path / "rating_tables.xlsx"
-    config = ModelBuildConfig(
-        model_name="CONFIG_MODEL",
-        model_label="Config model",
-        target_name="ConfigTarget",
-        model_type="config_type",
-        deployment_slot="CONFIG_UAT",
-        default_package_status="PUBLISHED",
-    )
-    export = ModelExportResult(
-        model_id=17,
-        model_name="CONFIG_MODEL",
-        model_version="20260527",
-        model_type="config_type",
-        target_name="ConfigTarget",
-        deployment_slot="CONFIG_UAT",
-        manifest_id="manifest-1",
-        dag_id="dag",
-        airflow_run_id="scheduled__2026-05-27",
-        mlflow_run_id="mlflow-1",
-        split_set_id=None,
-        export_id="export-1",
-        rating_workbook_path=str(workbook_path),
-        effective_from="2026-05-27",
-        created_by="airflow",
-        package_status="DRAFT",
+    export = _retry_export(tmp_path)
+    connection = object()
+
+    monkeypatch.setattr(
+        pipeline,
+        "stage_rating_export",
+        lambda engine, **kwargs: calls.append(("stage", engine, kwargs)) or "a" * 64,
     )
 
-    def fake_stage_rating_export(engine_arg, **kwargs):
-        calls.append(("stage", engine_arg, kwargs))
-
-    def fake_publish_rating_package(engine_arg, **kwargs):
-        calls.append(("publish", engine_arg, kwargs))
+    def publish(engine, **kwargs):
+        calls.append(("publish", engine, kwargs))
+        model_run_id = kwargs["package_lineage_writer"](connection, 42)
         return PublishResult(
             mlflow_run_id="",
             export_id="export-1",
             rate_package_id=42,
-            package_version=6,
+            package_version=3,
             rating_workbook_path="",
+            package_status="PUBLISHED",
+            model_run_id=model_run_id,
         )
 
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.publisher.validate_model_on_engine",
-        lambda engine_arg, config_arg: 17,
-    )
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.publisher.stage_rating_export",
-        fake_stage_rating_export,
-    )
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.publisher.publish_rating_package",
-        fake_publish_rating_package,
-    )
-
-    result = ModelPublisher(engine, config).publish_training_export(export)
-
-    assert result == PublishResult(
-        mlflow_run_id="mlflow-1",
-        export_id="export-1",
-        rate_package_id=42,
-        package_version=6,
-        rating_workbook_path=str(workbook_path),
-    )
-    assert calls == [
-        (
-            "stage",
-            engine,
-            {
-                "workbook_path": workbook_path,
-                "export_id": "export-1",
-                "model_name": "CONFIG_MODEL",
-                "model_version": "20260527",
-                "target_name": "ConfigTarget",
-                "model_type": "config_type",
-                "effective_from": "2026-05-27",
-                "created_by": "airflow",
-                "replace": True,
-                "model_id": 17,
-                "metadata_mode": "ALLOW_WORKBOOK_ONLY",
-            },
-        ),
-        (
-            "publish",
-            engine,
-            {
-                "export_id": "export-1",
-                "created_by": "airflow",
-                "package_status": "PUBLISHED",
-            },
-        ),
-    ]
-
-
-def test_record_model_run_uses_parameterized_sql_with_expected_params():
-    events = []
-    engine = FakeLineageEngine(events)
-
-    lineage.record_model_run(
-        engine,
-        dag_id="dag",
-        airflow_run_id="scheduled__2026-04-27",
-        mlflow_run_id="mlflow-1",
-        manifest_id="manifest-1",
-        export_id="export-1",
-        model_id=17,
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        split_set_id="manifest-1__kfold_5_seed_42",
-        rate_package_id=42,
-        rating_workbook_path="/tmp/rating_tables.xlsx",
-        run_status="SUCCESS",
-        created_by="airflow",
-        publication_receipt_path="/tmp/superglm_publication_receipt.json",
-        publication_receipt_sha256="c" * 64,
-    )
-
-    assert len(events) == 5
-    sql = events[1][1]
-    params = events[1][2]
-    assert "MERGE pricing.MODEL_RUN" in sql
-    assert "WHEN MATCHED THEN" in sql
-    assert "WHEN NOT MATCHED THEN" in sql
-    assert "tgt.dag_id = src.dag_id" in sql
-    assert "tgt.airflow_run_id = src.airflow_run_id" in sql
-    assert "tgt.model_id = src.model_id" in sql
-    assert "SYSUTCDATETIME()" in sql
-    assert ":dag_id" in sql
-    assert "publication_receipt_path" in sql
-    assert "publication_receipt_sha256" in sql
-    assert params == {
-        "dag_id": "dag",
-        "airflow_run_id": "scheduled__2026-04-27",
-        "mlflow_run_id": "mlflow-1",
-        "manifest_id": "manifest-1",
-        "export_id": "export-1",
-        "model_id": 17,
-        "model_name": "MTPL_FREQ",
-        "model_version": "20260427",
-        "split_set_id": "manifest-1__kfold_5_seed_42",
-        "dataset_role": "training",
-        "split_role": "validation",
-        "rate_package_id": 42,
-        "rating_workbook_path": "/tmp/rating_tables.xlsx",
-        "run_status": "SUCCESS",
-        "created_by": "airflow",
-        "publication_receipt_path": "/tmp/superglm_publication_receipt.json",
-        "publication_receipt_sha256": "c" * 64,
-    }
-
-
-class FakeLineageConnection(FakeBeginConnection):
-    def execute(self, statement, params=None):
-        self.events.append(("execute", str(statement), params))
-        if "SELECT model_run_id" in str(statement):
-            return FakeScalarResult(501)
-        return FakeScalarResult(None)
-
-
-class FakeLineageEngine(FakeEngine):
-    def __init__(self, events: list[tuple]):
-        self.events = events
-        self.connection = FakeLineageConnection(events)
-
-
-def test_record_model_run_links_run_to_dataset_and_split_set():
-    events = []
-    engine = FakeLineageEngine(events)
-
-    model_run_id = lineage.record_model_run(
-        engine,
-        dag_id="dag",
-        airflow_run_id="scheduled__2026-04-27",
-        mlflow_run_id="mlflow-1",
-        manifest_id="manifest-1",
-        split_set_id="manifest-1__kfold_5_seed_42",
-        export_id="export-1",
-        model_id=17,
-        model_name="MTPL_FREQ",
-        model_version="20260427",
-        rate_package_id=42,
-        rating_workbook_path="/tmp/rating_tables.xlsx",
-        run_status="SUCCESS",
-        created_by="airflow",
-    )
-
-    assert model_run_id == 501
-    executed_sql = [event[1] for event in events if event[0] == "execute"]
-    assert "MERGE pricing.MODEL_RUN" in executed_sql[0]
-    assert "SELECT model_run_id" in executed_sql[1]
-    assert "MERGE mlops.MODEL_RUN_DATASET" in executed_sql[2]
-    assert "MERGE mlops.MODEL_RUN_SPLIT_SET" in executed_sql[3]
-    assert events[3][2] == {
-        "model_run_id": 501,
-        "manifest_id": "manifest-1",
-        "dataset_role": "training",
-    }
-    assert events[4][2] == {
-        "model_run_id": 501,
-        "manifest_id": "manifest-1",
-        "split_set_id": "manifest-1__kfold_5_seed_42",
-        "dataset_role": "training",
-        "split_role": "validation",
-    }
-
-
-def test_pipeline_imports_with_split_airflow_package_without_script_import_side_effects(
-    tmp_path: Path,
-):
-    airflow_root = tmp_path / "airflow"
-    pricing_root = tmp_path / "pricing"
-    airflow_root.mkdir()
-    scripts_dir = pricing_root / "scripts"
-    scripts_dir.mkdir(parents=True)
-    marker_path = tmp_path / "script_imports.txt"
-    (scripts_dir / "__init__.py").write_text("", encoding="utf-8")
-
-    shutil.copytree(
-        Path("pricing_pipeline"),
-        airflow_root / "pricing_pipeline",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    (scripts_dir / "load_superglm_excel_to_staging.py").write_text(
-        "import os\n"
-        "from pathlib import Path\n"
-        "with Path(os.environ['STUB_IMPORT_MARKER']).open('a', encoding='utf-8') as f:\n"
-        "    f.write('stage\\n')\n"
-        "def stage_rating_export(*args, **kwargs):\n    return None\n",
-        encoding="utf-8",
-    )
-    (scripts_dir / "load_staging_to_rating_package.py").write_text(
-        "import os\n"
-        "from pathlib import Path\n"
-        "with Path(os.environ['STUB_IMPORT_MARKER']).open('a', encoding='utf-8') as f:\n"
-        "    f.write('publish\\n')\n"
-        "def publish_rating_package(*args, **kwargs):\n    return 123\n",
-        encoding="utf-8",
-    )
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(airflow_root)
-    env["PRICING_PROJECT_ROOT"] = str(pricing_root)
-    env["STUB_IMPORT_MARKER"] = str(marker_path)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import pricing_pipeline.orchestration.pipeline; print('pipeline_import=ok')",
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert "pipeline_import=ok" in result.stdout
-    assert "ModuleNotFoundError" not in result.stderr
-    assert not marker_path.exists()
-
-
-def test_train_and_export_model_validates_registered_model_without_creating(
-    monkeypatch,
-    tmp_path: Path,
-):
-    raw = raw_training_frame()
-    model = FakePipelineModel()
-    calls = []
-
-    class FakeRun:
-        info = SimpleNamespace(run_id="mlflow-run-1")
-
-    class FakeStartRun:
-        def __enter__(self):
-            return FakeRun()
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    fake_mlflow = SimpleNamespace(
-        set_experiment=lambda experiment: None,
-        start_run=lambda: FakeStartRun(),
-        log_param=lambda key, value: calls.append(("log_param", key, value)),
-        log_artifact=lambda path, artifact_path=None: None,
-        log_metric=lambda key, value, **kwargs: None,
-    )
-
-    monkeypatch.setattr(
-        pipeline,
-        "configure_mlflow",
-        lambda uri, **kwargs: fake_mlflow,
-    )
-    monkeypatch.setattr(pipeline.pd, "read_sql_query", lambda sql, engine: raw)
-    monkeypatch.setattr(
-        pipeline,
-        "ensure_pricing_model",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("production training must not create model registry rows")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "fit_reml_with_diagnostics",
-        lambda model_arg, X, y, *, offset, diagnostics_path, mlflow_client: model_arg,
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "export_rating_tables",
-        lambda fitted_model, X, y, exposure, *, output_path, mlflow_client: output_path,
-    )
-
-    engine = object()
-    settings = Settings.from_env(
-        {
-            "MLFLOW_TRACKING_URI": "http://mlflow.local",
-            "RATING_EXPORT_ROOT": str(tmp_path),
-        }
-    )
-    spec = ModelSpec(
-        model_name="MTPL_FREQ",
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        experiment_name="pricing-mtpl-frequency",
-        deployment_slot="MTPL_FREQ_UAT",
-        dataset=FREMTPL_DATASET_SPEC,
-        training_sql=TRAINING_SQL,
-        feature_columns=tuple(FEATURE_COLUMNS),
-        build_model=lambda: model,
-        build_training_frame=build_training_frame,
-    )
-
-    result = pipeline.train_and_export_model(
-        engine,
-        settings=settings,
-        manifest_id="manifest-1",
-        split_set_id=None,
-        dag_id="pricing_dag",
-        airflow_run_id="manual__strict_registry",
-        logical_date="2026-05-29",
-        spec=spec,
-        model_config=MODEL_CONFIG,
-        created_by="airflow",
-    )
-
-    assert result.model_id == 17
-    assert ("validate_model_on_engine", engine, MODEL_CONFIG) in calls
-    assert ("log_param", "model_id", 17) in calls
-
-
-def test_model_export_result_to_dict_omits_unset_publication_receipt_fields(
-    tmp_path: Path,
-):
-    export = ModelExportResult(
-        model_id=17,
-        model_name="MTPL_FREQ",
-        model_version="20260527",
-        model_type="superglm_poisson",
-        target_name="ClaimNb",
-        deployment_slot="MTPL_FREQ_UAT",
-        manifest_id="manifest-1",
-        dag_id="pricing_dag",
-        airflow_run_id="manual__1",
-        mlflow_run_id="mlflow-run-1",
-        split_set_id=None,
-        export_id="export-1",
-        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
-        effective_from="2026-05-27",
-        created_by="airflow",
-        package_status="PUBLISHED",
-    )
-
-    payload = export.to_dict()
-
-    assert "publication_receipt_path" not in payload
-    assert "publication_receipt_sha256" not in payload
-
-
-def test_model_export_result_to_dict_includes_publication_receipt_fields_when_set(
-    tmp_path: Path,
-):
-    export = ModelExportResult(
-        model_id=17,
-        model_name="MTPL_FREQ",
-        model_version="20260527",
-        model_type="superglm_poisson",
-        target_name="ClaimNb",
-        deployment_slot="MTPL_FREQ_UAT",
-        manifest_id="manifest-1",
-        dag_id="pricing_dag",
-        airflow_run_id="manual__1",
-        mlflow_run_id="mlflow-run-1",
-        split_set_id=None,
-        export_id="export-1",
-        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
-        effective_from="2026-05-27",
-        created_by="airflow",
-        package_status="PUBLISHED",
-        publication_receipt_path="/tmp/superglm_publication_receipt.json",
-        publication_receipt_sha256="c" * 64,
-    )
-
-    payload = export.to_dict()
-
-    assert payload["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
-    assert payload["publication_receipt_sha256"] == "c" * 64
-
-
-class FakePipelineModel:
-    family = "poisson"
-
-    def __init__(self):
-        self.fit_calls = []
-        self.result = SimpleNamespace(deviance=7.25)
-
-    def fit_reml(self, X, y, sample_weight=None, offset=None):
-        self.fit_calls.append(
-            {
-                "X": X.copy(),
-                "y": y.copy(),
-                "sample_weight": None if sample_weight is None else sample_weight.copy(),
-                "offset": offset.copy(),
-            }
-        )
-        return self
-
-
-def test_run_training_export_publish_orchestrates_training_artifacts_and_lineage(
-    monkeypatch, tmp_path: Path
-):
-    raw = raw_training_frame()
-    model = FakePipelineModel()
-    calls = []
-
-    class FakeRun:
-        info = SimpleNamespace(run_id="mlflow-run-1")
-
-    class FakeStartRun:
-        def __enter__(self):
-            calls.append(("start_run_enter",))
-            return FakeRun()
-
-        def __exit__(self, exc_type, exc, tb):
-            calls.append(("start_run_exit", exc_type))
-            return False
-
-    def fake_log_metric(key, value, **kwargs):
-        calls.append(("log_metric", key, value, kwargs))
-
-    fake_mlflow = SimpleNamespace(
-        set_experiment=lambda experiment: calls.append(("set_experiment", experiment)),
-        start_run=lambda: FakeStartRun(),
-        log_param=lambda key, value: calls.append(("log_param", key, value)),
-        log_artifact=lambda path, artifact_path=None: calls.append(
-            ("log_artifact", path, artifact_path)
-        ),
-        log_metric=fake_log_metric,
-    )
-
-    def fake_read_sql_query(sql, engine):
-        calls.append(("read_sql_query", sql, engine))
-        return raw
-
-    def fake_export_rating_tables(
-        fitted_model,
-        X,
-        y,
-        exposure,
-        *,
-        output_path,
-        mlflow_client,
-    ):
-        calls.append(
-            (
-                "export_rating_tables",
-                fitted_model,
-                X.copy(),
-                y.copy(),
-                exposure.copy(),
-                output_path,
-                mlflow_client,
-            )
-        )
-        output_path.write_bytes(b"workbook")
-        return output_path
-
-    class FakePublisher:
-        def __init__(self, engine_arg, config):
-            calls.append(("publisher_init", engine_arg, config))
-            self.engine = engine_arg
-            self.config = config
-
-        def validate_registered_model(self):
-            calls.append(("validate_registered_model",))
-            return 17
-
-        def publish_training_export(self, export):
-            calls.append(("publish_training_export", export))
-            return PublishResult(
-                mlflow_run_id=export.mlflow_run_id,
-                export_id=export.export_id,
-                rate_package_id=123,
-                package_version=4,
-                rating_workbook_path=export.rating_workbook_path,
-            )
-
-    def fake_record_model_run(engine, **kwargs):
-        calls.append(("record_model_run", engine, kwargs))
-
-    monkeypatch.setattr(
-        pipeline,
-        "configure_mlflow",
-        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs)) or fake_mlflow,
-    )
-    monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
-    monkeypatch.setattr(
-        pipeline,
-        "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
-    )
-    monkeypatch.setattr(pipeline, "mlflow", fake_mlflow, raising=False)
-    monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
-    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
-    monkeypatch.setattr(pipeline, "record_model_run", fake_record_model_run)
-
-    dumped = []
-    real_dump = pickle.dump
-
-    def fake_dump(obj, handle):
-        dumped.append((obj, Path(handle.name)))
-        real_dump(obj, handle)
-
-    monkeypatch.setattr(pipeline.pickle, "dump", fake_dump)
-
-    engine = object()
-    settings = Settings.from_env(
-        {
-            "MLFLOW_TRACKING_URI": "http://mlflow.local",
-            "RATING_EXPORT_ROOT": str(tmp_path),
-        }
-    )
-    spec = ModelSpec(
-        model_name="MTPL_FREQ",
-        target_name="ClaimNb",
-        model_type="superglm_poisson",
-        experiment_name="pricing-mtpl-frequency",
-        deployment_slot="MTPL_FREQ_UAT",
-        dataset=FREMTPL_DATASET_SPEC,
-        training_sql=TRAINING_SQL,
-        feature_columns=tuple(FEATURE_COLUMNS),
-        build_model=lambda: model,
-        build_training_frame=build_training_frame,
-    )
-
-    result = pipeline.run_training_export_publish(
-        engine,
-        settings=settings,
-        manifest_id="manifest-1",
-        split_set_id="manifest-1__train_test_split_test_0_2_seed_99",
-        dag_id="pricing_dag",
-        airflow_run_id="scheduled__2026-04-27T10:30:00+00:00",
-        logical_date="2026-04-27",
-        spec=spec,
-        model_config=MODEL_CONFIG,
-        created_by="airflow",
-    )
-
-    export_id = "mtpl_freq__scheduled__20260427t1030000000"
-    workbook_path = tmp_path / "MTPL_FREQ" / "2026-04-27" / export_id / "rating_tables.xlsx"
-    model_path = workbook_path.parent / "superglm_model.pkl"
-
-    assert result == {
-        "mlflow_run_id": "mlflow-run-1",
-        "export_id": export_id,
-        "rate_package_id": "123",
-        "package_version": "4",
-        "package_status": "PUBLISHED",
-        "rating_workbook_path": str(workbook_path),
-        "was_existing": False,
-    }
-    assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
-    assert ("validate_model_on_engine", engine, MODEL_CONFIG) in calls
-    assert ("read_sql_query", "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol", engine) in calls
-    assert ("set_experiment", "pricing-mtpl-frequency") in calls
-    assert ("log_param", "model_name", "MTPL_FREQ") in calls
-    assert ("log_param", "model_id", 17) in calls
-    assert ("log_param", "model_version", "20260427") in calls
-    assert ("log_param", "manifest_id", "manifest-1") in calls
-    assert ("log_param", "target", "ClaimNb") in calls
-    assert ("log_param", "offset", "log(Exposure)") in calls
-    assert ("log_metric", "deviance", 7.25, {}) in calls
-    assert ("log_artifact", str(model_path), "model") in calls
-    assert (
-        "log_artifact",
-        str(workbook_path.parent / "superglm_fit.log"),
-        "training_diagnostics",
-    ) in calls
-    assert dumped == [(model, model_path)]
-
-    assert len(model.fit_calls) == 1
-    fit_call = model.fit_calls[0]
-    assert fit_call["sample_weight"] is None
-    np.testing.assert_allclose(fit_call["offset"], np.log(raw["Exposure"]))
-
-    export_call = next(event for event in calls if event[0] == "export_rating_tables")
-    assert export_call[1] is model
-    np.testing.assert_array_equal(export_call[4], raw["Exposure"].to_numpy(dtype=float))
-    assert export_call[5] == workbook_path
-    assert export_call[6] is fake_mlflow
-
-    assert ("publisher_init", engine, MODEL_CONFIG) in calls
-    assert ("validate_registered_model",) in calls
-    publish_call = next(event for event in calls if event[0] == "publish_training_export")
-    assert publish_call[1].to_dict() == {
-        "model_id": 17,
-        "model_name": "MTPL_FREQ",
-        "model_version": "20260427",
-        "model_type": "superglm_poisson",
-        "target_name": "ClaimNb",
-        "deployment_slot": "MTPL_FREQ_UAT",
-        "manifest_id": "manifest-1",
-        "dag_id": "pricing_dag",
-        "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
-        "mlflow_run_id": "mlflow-run-1",
-        "split_set_id": "manifest-1__train_test_split_test_0_2_seed_99",
-        "export_id": export_id,
-        "rating_workbook_path": str(workbook_path),
-        "effective_from": "2026-04-27",
-        "created_by": "airflow",
-        "package_status": "DRAFT",
-    }
-
-    record_call = next(event for event in calls if event[0] == "record_model_run")
-    assert record_call == (
-        "record_model_run",
-        engine,
-        {
-            "dag_id": "pricing_dag",
-            "airflow_run_id": "scheduled__2026-04-27T10:30:00+00:00",
-            "mlflow_run_id": "mlflow-run-1",
-            "manifest_id": "manifest-1",
-            "split_set_id": "manifest-1__train_test_split_test_0_2_seed_99",
-            "export_id": export_id,
-            "model_id": 17,
-            "model_name": "MTPL_FREQ",
-            "model_version": "20260427",
-            "rate_package_id": 123,
-            "rating_workbook_path": str(workbook_path),
-            "run_status": "SUCCESS",
-            "created_by": "airflow",
-            "publication_receipt_path": None,
-            "publication_receipt_sha256": None,
-        },
-    )
-
-
-def test_run_training_export_publish_continues_when_mlflow_unavailable(
-    monkeypatch,
-    tmp_path: Path,
-):
-    raw = raw_training_frame()
-    model = FakePipelineModel()
-    calls = []
-
-    class NoOpRun:
-        info = SimpleNamespace(run_id="")
-
-    class NoOpStartRun:
-        def __enter__(self):
-            calls.append(("noop_start_run_enter",))
-            return NoOpRun()
-
-        def __exit__(self, exc_type, exc, tb):
-            calls.append(("noop_start_run_exit", exc_type))
-            return False
-
-    class NoOpMlflowClient:
-        def set_experiment(self, experiment):
-            calls.append(("noop_set_experiment", experiment))
-
-        def start_run(self):
-            return NoOpStartRun()
-
-        def log_param(self, key, value):
-            calls.append(("noop_log_param", key, value))
-
-        def log_artifact(self, path, artifact_path=None):
-            calls.append(("noop_log_artifact", path, artifact_path))
-
-        def log_metric(self, key, value, **kwargs):
-            calls.append(("noop_log_metric", key, value, kwargs))
-
-    class RaisingMlflow:
-        def __getattr__(self, name):
-            raise AssertionError(f"pipeline used global mlflow.{name}")
-
-    def fake_read_sql_query(sql, engine):
-        calls.append(("read_sql_query", sql, engine))
-        return raw
-
-    def fake_export_rating_tables(
-        fitted_model,
-        X,
-        y,
-        exposure,
-        *,
-        output_path,
-        mlflow_client,
-    ):
-        calls.append(("export_rating_tables", output_path, mlflow_client))
-        output_path.write_bytes(b"workbook")
-        return output_path
-
-    class FakePublisher:
-        def __init__(self, engine_arg, config):
-            calls.append(("publisher_init", engine_arg, config))
-
-        def validate_registered_model(self):
-            calls.append(("validate_registered_model",))
-            return 17
-
-        def publish_training_export(self, export):
-            calls.append(("publish_training_export", export))
-            return PublishResult(
-                mlflow_run_id=export.mlflow_run_id,
-                export_id=export.export_id,
-                rate_package_id=123,
-                package_version=4,
-                rating_workbook_path=export.rating_workbook_path,
-            )
-
-    monkeypatch.setattr(
-        pipeline,
-        "configure_mlflow",
-        lambda uri, **kwargs: calls.append(("configure_mlflow", uri, kwargs)) or NoOpMlflowClient(),
-    )
-    monkeypatch.setattr(pipeline, "mlflow", RaisingMlflow(), raising=False)
-    monkeypatch.setattr(pipeline.pd, "read_sql_query", fake_read_sql_query)
-    monkeypatch.setattr(
-        pipeline,
-        "validate_model_on_engine",
-        lambda engine, config: calls.append(("validate_model_on_engine", engine, config)) or 17,
-    )
-    monkeypatch.setattr(pipeline, "export_rating_tables", fake_export_rating_tables)
-    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    monkeypatch.setattr(pipeline, "publish_rating_package", publish)
     monkeypatch.setattr(
         pipeline,
         "record_model_run",
-        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
-    )
-
-    engine = object()
-    settings = Settings.from_env(
-        {
-            "MLFLOW_TRACKING_URI": "http://mlflow.local",
-            "RATING_EXPORT_ROOT": str(tmp_path),
-        }
-    )
-    result = pipeline.run_training_export_publish(
-        engine,
-        settings=settings,
-        manifest_id="manifest-1",
-        dag_id="pricing_dag",
-        airflow_run_id="manual__without_mlflow",
-        logical_date="2026-05-28",
-        spec=ModelSpec(
-            model_name="MTPL_FREQ",
-            target_name="ClaimNb",
-            model_type="superglm_poisson",
-            experiment_name="pricing-mtpl-frequency",
-            deployment_slot="MTPL_FREQ_UAT",
-            dataset=FREMTPL_DATASET_SPEC,
-            training_sql=TRAINING_SQL,
-            feature_columns=tuple(FEATURE_COLUMNS),
-            build_model=lambda: model,
-            build_training_frame=build_training_frame,
+        lambda engine, *, connection, **kwargs: (
+            calls.append(("lineage", connection, kwargs)) or 501
         ),
-        model_config=MODEL_CONFIG,
-        created_by="airflow",
     )
 
-    assert result["mlflow_run_id"] == ""
-    assert result["rate_package_id"] == "123"
-    assert ("configure_mlflow", "http://mlflow.local", {"enabled": True}) in calls
-    assert ("noop_start_run_enter",) in calls
-    assert any(call[:2] == ("noop_log_param", "row_count") for call in calls)
-    assert any(call[0] == "publish_training_export" for call in calls)
-    record_call = next(call for call in calls if call[0] == "record_model_run")
-    assert record_call[2]["mlflow_run_id"] == ""
+    result = pipeline.publish_model_export(
+        object(),
+        export,
+        model_config=MODEL_CONFIG,
+        validated_model_id=17,
+    )
+
+    assert isinstance(result, CompletedModelPublishResult)
+    assert result.rate_package_id == 42
+    assert result.model_run_id == 501
+    assert result.was_existing is False
+    stage_call = next(call for call in calls if call[0] == "stage")
+    assert stage_call[2]["workbook_path"] == Path(export.rating_workbook_path)
+    assert stage_call[2]["publication_receipt_path"] == export.publication_receipt_path
+    publish_call = next(call for call in calls if call[0] == "publish")
+    assert "package_status" not in publish_call[2]
+    assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
+    lineage_call = next(call for call in calls if call[0] == "lineage")
+    assert lineage_call[1] is connection
+    assert lineage_call[2]["build"] is export
+    assert lineage_call[2]["rate_package_id"] == 42
 
 
-def test_publish_model_export_returns_candidate_without_deploying(
+def test_publish_model_export_returns_verified_existing_result_without_rewriting_lineage(
     monkeypatch,
     tmp_path: Path,
 ):
-    calls = []
-
-    class FakePublisher:
-        def __init__(self, engine, config):
-            calls.append(("publisher_init", engine, config))
-
-        def validate_registered_model(self):
-            calls.append(("validate_registered_model",))
-            return 17
-
-        def publish_training_export(self, export):
-            calls.append(("publish_training_export", export))
-            return SimpleNamespace(
-                mlflow_run_id="mlflow-run-1",
-                export_id=export.export_id if hasattr(export, "export_id") else export["export_id"],
-                rate_package_id=123,
-                package_version=4,
-                package_status="DRAFT",
-                was_existing=True,
-                rating_workbook_path=(
-                    export.rating_workbook_path
-                    if hasattr(export, "rating_workbook_path")
-                    else export["rating_workbook_path"]
-                ),
-            )
-
-    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
-    monkeypatch.setattr(pipeline, "record_model_run", lambda *args, **kwargs: None)
-    engine = object()
-    export = {
-        "model_id": 17,
-        "model_name": "MTPL_FREQ",
-        "model_version": "20260527",
-        "model_type": "superglm_poisson",
-        "target_name": "ClaimNb",
-        "deployment_slot": "MTPL_FREQ_UAT",
-        "manifest_id": "manifest-1",
-        "dag_id": "pricing_dag",
-        "airflow_run_id": "manual__1",
-        "mlflow_run_id": "mlflow-run-1",
-        "split_set_id": None,
-        "export_id": "export-1",
-        "rating_workbook_path": str(tmp_path / "rating_tables.xlsx"),
-        "effective_from": "2026-05-27",
-        "created_by": "airflow",
-        "package_status": "PUBLISHED",
-    }
-
-    result = pipeline.publish_model_export(engine, export, model_config=MODEL_CONFIG)
-
-    assert result["rate_package_id"] == "123"
-    assert result["package_version"] == "4"
-    assert result["package_status"] == "DRAFT"
-    assert result["was_existing"] is True
-    assert "publication_receipt_path" not in result
-    assert "publication_receipt_sha256" not in result
-    assert ("validate_registered_model",) in calls
-
-
-def test_publish_model_export_includes_publication_receipt_fields_when_set(
-    monkeypatch,
-    tmp_path: Path,
-):
-    calls = []
-
-    class FakePublisher:
-        def __init__(self, engine, config):
-            pass
-
-        def validate_registered_model(self):
-            return 17
-
-        def publish_training_export(self, export):
-            calls.append(("publish_training_export", export))
-            return SimpleNamespace(
-                mlflow_run_id="mlflow-run-1",
-                export_id=export.export_id,
-                rate_package_id=123,
-                package_version=4,
-                package_status="DRAFT",
-                was_existing=False,
-                rating_workbook_path=export.rating_workbook_path,
-            )
-
-    monkeypatch.setattr(pipeline, "ModelPublisher", FakePublisher, raising=False)
+    export = _retry_export(tmp_path)
+    existing = CompletedModelPublishResult(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="v1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        export_id="export-1",
+        rate_package_id=42,
+        package_version=3,
+        package_status="PUBLISHED",
+        rating_workbook_path=export.rating_workbook_path,
+        model_run_id=501,
+        was_existing=True,
+    )
+    monkeypatch.setattr(pipeline, "stage_rating_export", lambda *args, **kwargs: "a" * 64)
+    monkeypatch.setattr(
+        pipeline,
+        "publish_rating_package",
+        lambda *args, **kwargs: PublishResult(
+            mlflow_run_id="",
+            export_id="export-1",
+            rate_package_id=42,
+            package_version=3,
+            rating_workbook_path="",
+            package_status="PUBLISHED",
+            was_existing=True,
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline, "_resolve_existing_published_run", lambda *args, **kwargs: existing
+    )
     monkeypatch.setattr(
         pipeline,
         "record_model_run",
-        lambda engine, **kwargs: calls.append(("record_model_run", engine, kwargs)),
-    )
-    engine = object()
-    export = ModelExportResult(
-        model_id=17,
-        model_name="MTPL_FREQ",
-        model_version="20260527",
-        model_type="superglm_poisson",
-        target_name="ClaimNb",
-        deployment_slot="MTPL_FREQ_UAT",
-        manifest_id="manifest-1",
-        dag_id="pricing_dag",
-        airflow_run_id="manual__1",
-        mlflow_run_id="mlflow-run-1",
-        split_set_id=None,
-        export_id="export-1",
-        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
-        effective_from="2026-05-27",
-        created_by="airflow",
-        package_status="PUBLISHED",
-        publication_receipt_path="/tmp/superglm_publication_receipt.json",
-        publication_receipt_sha256="d" * 64,
+        lambda *args, **kwargs: pytest.fail("existing publication must not rewrite lineage"),
     )
 
-    result = pipeline.publish_model_export(engine, export, model_config=MODEL_CONFIG)
+    result = pipeline.publish_model_export(
+        object(),
+        export,
+        model_config=MODEL_CONFIG,
+        validated_model_id=17,
+    )
 
-    assert result["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
-    assert result["publication_receipt_sha256"] == "d" * 64
-    record_call = next(call for call in calls if call[0] == "record_model_run")
-    assert record_call[2]["publication_receipt_path"] == "/tmp/superglm_publication_receipt.json"
-    assert record_call[2]["publication_receipt_sha256"] == "d" * 64
+    assert result is existing

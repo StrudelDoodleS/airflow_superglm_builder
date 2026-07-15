@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.workbench.artifacts import CandidateBundle
+from pricing_pipeline.workbench.core import Candidate, Workbench
+from pricing_pipeline.workbench.submission import (
+    EditorSubmissionError,
+    load_verified_submission,
+    save_editor_submission,
+)
+
+
+class FakeWidget:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeEditorSession:
+    def __init__(self, *, fail_save: bool = False) -> None:
+        self.widget_value = FakeWidget()
+        self.fail_save = fail_save
+        self.saved_paths: list[Path] = []
+
+    def widget(self):
+        return self.widget_value
+
+    def save(self, path) -> None:
+        target = Path(path)
+        self.saved_paths.append(target)
+        if self.fail_save:
+            raise RuntimeError("injected save failure")
+        target.write_text('{"edits":["age"]}\n', encoding="utf-8")
+
+
+def _bundle() -> CandidateBundle:
+    return CandidateBundle(
+        fitted_model={"coef": [0.1]},
+        X=pd.DataFrame({"age": [20.0, 30.0]}),
+        y=np.array([0.0, 1.0]),
+        sample_weight=np.array([2.0, 3.0]),
+        offset=np.array([0.1, 0.2]),
+        export_weight=np.array([10.0, 20.0]),
+        cv_report={"pooled_scores": {"deviance": 0.482}},
+        model_name="HOME_FREQ",
+        model_version="v1",
+        export_id="export-1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        pk_columns=("policy_id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract={
+            "handling": "ALREADY_APPLIED_SQL_EXPOSURE",
+            "source_name": "Exposure",
+            "label": "log(Exposure)",
+        },
+    )
+
+
+def _candidate(tmp_path: Path, session: FakeEditorSession) -> Candidate:
+    workbench = Workbench(
+        engine=object(),
+        settings=Settings(workbench_artifact_root=tmp_path),
+        model_config=ModelBuildConfig(
+            model_name="HOME_FREQ",
+            model_label="Home frequency",
+            target_name="claim_count",
+            model_type="superglm_poisson",
+            deployment_slot="HOME_FREQ_UAT",
+        ),
+    )
+    workbench.create_editor_session = lambda _bundle: session
+    return Candidate(
+        workbench=workbench,
+        model_name="HOME_FREQ",
+        package_version=7,
+        rate_package_id=107,
+        parent_rate_package_id=None,
+        model_run_id=907,
+        bundle=_bundle(),
+        technical={"candidate_artifact_sha256": "c" * 64},
+    )
+
+
+def _save(candidate: Candidate, session: FakeEditorSession, reason: str = "Market review"):
+    return save_editor_submission(
+        candidate,
+        editor_session=session,
+        reason=reason,
+        claimed_identity="analyst@example",
+    )
+
+
+def test_editor_session_is_retained_and_saved_without_a_second_model_artifact(tmp_path):
+    session = FakeEditorSession()
+    candidate = _candidate(tmp_path, session)
+
+    assert candidate.editor() is session.widget_value
+    assert candidate.editor() is session.widget_value
+    submission = _save(candidate, session)
+
+    payload = json.loads(Path(submission.path).read_text(encoding="utf-8"))
+    assert len(session.saved_paths) == 1
+    assert Path(submission.editor_session_path).is_file()
+    assert not (Path(submission.path).parent / "edited_model.joblib").exists()
+    assert payload["parent_rate_package_id"] == 107
+    assert payload["manifest_id"] == "manifest-1"
+    assert payload["split_set_id"] == "split-1"
+    assert payload["baseline_candidate_sha256"] == "c" * 64
+    assert payload["claimed_identity"] == "analyst@example"
+
+
+def test_submission_loader_verifies_manifest_and_editor_session_hashes(tmp_path):
+    session = FakeEditorSession()
+    submission = _save(_candidate(tmp_path, session), session)
+
+    loaded = load_verified_submission(
+        submission.path,
+        submission.sha256,
+        allowed_root=tmp_path,
+    )
+    assert loaded.submission_id == submission.submission_id
+
+    Path(submission.editor_session_path).write_text("tampered", encoding="utf-8")
+    with pytest.raises(EditorSubmissionError, match="SHA-256"):
+        load_verified_submission(
+            submission.path,
+            submission.sha256,
+            allowed_root=tmp_path,
+        )
+
+
+def test_submission_rejects_blank_reason_and_identity(tmp_path):
+    session = FakeEditorSession()
+    candidate = _candidate(tmp_path, session)
+
+    with pytest.raises(ValueError, match="reason"):
+        save_editor_submission(
+            candidate,
+            editor_session=session,
+            reason=" ",
+            claimed_identity="analyst@example",
+        )
+    with pytest.raises(ValueError, match="claimed_identity"):
+        save_editor_submission(
+            candidate,
+            editor_session=session,
+            reason="Market review",
+            claimed_identity=" ",
+        )
+
+
+def test_identical_save_reuses_immutable_submission_and_rejects_new_reason(tmp_path):
+    session = FakeEditorSession()
+    candidate = _candidate(tmp_path, session)
+
+    first = _save(candidate, session)
+    retried = _save(candidate, session)
+
+    assert retried.path == first.path
+    assert retried.sha256 == first.sha256
+    with pytest.raises(EditorSubmissionError, match="incompatible metadata: reason"):
+        _save(candidate, session, reason="Different rationale")
+
+
+def test_failed_session_save_leaves_no_submission(tmp_path):
+    session = FakeEditorSession(fail_save=True)
+    candidate = _candidate(tmp_path, session)
+
+    with pytest.raises(RuntimeError, match="injected save failure"):
+        _save(candidate, session)
+
+    submission_root = tmp_path / "HOME_FREQ" / "editor_submissions"
+    assert not list(submission_root.glob("submission-*"))
+    assert not list(submission_root.glob(".submission-*"))
+
+
+def test_close_editor_discards_session_and_closes_widget(tmp_path):
+    session = FakeEditorSession()
+    candidate = _candidate(tmp_path, session)
+    candidate.editor()
+
+    candidate.close_editor()
+
+    assert session.widget_value.closed is True
+    assert candidate.editor_session is None
+    assert candidate.editor_widget is None

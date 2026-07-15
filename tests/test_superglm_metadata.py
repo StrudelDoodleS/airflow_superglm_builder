@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from superglm import (
     Categorical,
+    LevelGrouping,
     NegativeBinomial,
     Numeric,
     OrderedCategorical,
@@ -17,6 +18,7 @@ from superglm import (
     Tweedie,
 )
 from superglm.features.spline import PSpline
+from superglm.types import LambdaPolicy
 
 from pricing_pipeline.publishing.superglm_metadata import (
     _grouping_metadata,
@@ -26,7 +28,7 @@ from pricing_pipeline.publishing.superglm_metadata import (
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
-def _fit_model(features, *, family="poisson", offset=None):
+def _fit_model(features, *, family="poisson", offset=None, interactions=None):
     n = 90
     rng = np.random.default_rng(20260619)
     x = pd.DataFrame(
@@ -44,6 +46,7 @@ def _fit_model(features, *, family="poisson", offset=None):
     model = SuperGLM(
         family=family,
         features=features,
+        interactions=interactions,
         selection_penalty=0.0,
         discrete=True,
         n_bins=32,
@@ -128,6 +131,60 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert numeric["effective"]["encoding"] == "identity"
 
 
+def test_extracts_ordered_categorical_interaction_metadata_from_fitted_model():
+    model = _fit_model(
+        {
+            "cat": Categorical(base="most_exposed"),
+            "ord": Categorical(base="most_exposed"),
+        },
+        interactions=[("cat", "ord")],
+    )
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    interaction = receipt.term_metadata["cat_ord"]
+    assert interaction["feature_kind"] == "categorical_interaction"
+    assert interaction["source_term_name"] == "cat:ord"
+    assert interaction["published_term_name"] == "cat_ord"
+    assert list(interaction["parent_names"]) == ["cat", "ord"]
+    assert list(interaction["input_column_names"]) == ["cat", "ord"]
+    assert interaction["interaction_order"] == 2
+    assert interaction["effective"]["encoding"] == "categorical_cross_product"
+
+
+def test_rejects_unsupported_interaction_metadata_before_publication():
+    model = _fit_model(
+        {"age": Numeric(), "num": Numeric()},
+        interactions=[("age", "num")],
+    )
+
+    with pytest.raises(ValueError, match="age:num.*categorical"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_receipt_records_actual_fit_and_export_weight_usage():
+    model = _fit_model({"age": Numeric()})
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+        fit_sample_weight_name="Exposure",
+        export_weight_name="PortfolioExposure",
+    )
+
+    model_metadata = receipt.package_metadata["model"]
+    assert model_metadata["fit_sample_weight_used"] is True
+    assert model_metadata["fit_sample_weight_name"] == "Exposure"
+    assert model_metadata["export_weight_used"] is True
+    assert model_metadata["export_weight_name"] == "PortfolioExposure"
+
+
 def test_extracts_tweedie_family_metadata():
     model = _fit_model({"age": Numeric()}, family=Tweedie(p=1.5))
 
@@ -169,6 +226,22 @@ def test_spline_factory_and_direct_pspline_normalize_to_same_kind():
     assert receipt.term_metadata["poly"]["effective"]["kind"] == "ps"
     assert receipt.term_metadata["age"]["fitted"]["class_name"] == "PSpline"
     assert receipt.term_metadata["poly"]["fitted"]["class_name"] == "PSpline"
+
+
+@pytest.mark.parametrize("kind", ["ps", "bs", "ns", "cr", "cr_cardinal"])
+def test_extracts_every_spline_kind_supported_by_the_pinned_superglm(kind):
+    model = _fit_model({"age": Spline(kind=kind, n_knots=4)})
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    spline = receipt.term_metadata["age"]
+    assert spline["declared"]["kind"] == kind
+    assert spline["effective"]["kind"] == kind
+    assert spline["fitted"]["boundary"] == (18.0, 90.0)
+    assert spline["fitted"]["coefficient_width"] > 0
 
 
 def test_spline_metadata_includes_knot_alpha_only_when_strategy_uses_it():
@@ -215,7 +288,29 @@ def test_ordered_categorical_step_has_no_nested_spline():
     assert "spline" not in metadata
 
 
-def test_name_collision_detection_allows_explicit_non_colliding_mapping():
+def test_ordered_categorical_records_an_explicit_spline_basis_configuration():
+    model = _fit_model(
+        {
+            "ord": OrderedCategorical(
+                order=["low", "medium", "high"],
+                basis=Spline(kind="bs", n_knots=2, degree=2, penalty="none"),
+            )
+        }
+    )
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    declared = receipt.term_metadata["ord"]["declared"]
+    assert declared["kind"] == "bs"
+    assert declared["n_knots_requested"] == 2
+    assert declared["degree"] == 2
+    assert declared["penalty"] == "none"
+
+
+def test_name_collision_detection_rejects_ambiguous_published_names():
     model = _fit_model({"a/b": Numeric(), "a b": Numeric()})
 
     with pytest.raises(ValueError, match="canonical term name collision"):
@@ -224,15 +319,16 @@ def test_name_collision_detection_allows_explicit_non_colliding_mapping():
             offset_contract=OffsetExportContract(handling="NONE"),
         )
 
-    receipt = build_superglm_publication_receipt(
-        model,
-        offset_contract=OffsetExportContract(handling="NONE"),
-        source_to_published_names={"a/b": "a_slash_b", "a b": "a_space_b"},
-    )
 
-    assert set(receipt.term_metadata) == {"a_slash_b", "a_space_b"}
-    assert receipt.term_metadata["a_slash_b"]["source_term_name"] == "a/b"
-    assert receipt.term_metadata["a_space_b"]["source_term_name"] == "a b"
+def test_receipt_builder_does_not_expose_unstageable_term_renaming():
+    model = _fit_model({"age": Numeric()})
+
+    with pytest.raises(TypeError, match="source_to_published_names"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+            source_to_published_names={"age": "renamed_age"},
+        )
 
 
 def test_offset_contract_is_preserved_when_fit_used_offset():
@@ -262,6 +358,21 @@ def test_offset_contract_is_preserved_when_fit_used_offset():
     assert offset_metadata["offset_label"] == "log(TermMonths / 12)"
 
 
+def test_pre_applied_sql_offset_is_recorded_without_a_rating_factor_term():
+    offset = np.log(np.full(90, 0.75))
+    model = _fit_model({"num": Numeric()}, offset=offset)
+    contract = OffsetExportContract(
+        handling="ALREADY_APPLIED_SQL_EXPOSURE",
+        source_name="Exposure",
+        label="log(Exposure)",
+    )
+
+    receipt = build_superglm_publication_receipt(model, offset_contract=contract)
+
+    assert receipt.offset_contract == contract
+    assert all(metadata["feature_kind"] != "offset" for metadata in receipt.term_metadata.values())
+
+
 def test_receipt_uses_installed_superglm_package_version():
     model = _fit_model({"num": Numeric()})
 
@@ -274,16 +385,17 @@ def test_receipt_uses_installed_superglm_package_version():
 
 
 def test_grouping_metadata_preserves_level_grouping_shape():
-    class FakeLevelGrouping:
-        original_to_group = {"A": "small", "B": "small", "C": "large"}
-        group_to_originals = {"small": ["A", "B"], "large": ["C"]}
-        all_original_levels = ["A", "B", "C"]
-        grouped_levels = ["small", "large"]
+    grouping = LevelGrouping(
+        original_to_group={"A": "small", "B": "small", "C": "large"},
+        group_to_originals={"small": ["A", "B"], "large": ["C"]},
+        all_original_levels=["A", "B", "C"],
+        grouped_levels=["small", "large"],
+    )
 
-    metadata = _grouping_metadata(FakeLevelGrouping())
+    metadata = _grouping_metadata(grouping)
 
     assert metadata == {
-        "class_name": "FakeLevelGrouping",
+        "class_name": "LevelGrouping",
         "original_to_group": {"A": "small", "B": "small", "C": "large"},
         "group_to_originals": {"small": ["A", "B"], "large": ["C"]},
         "all_original_levels": ["A", "B", "C"],
@@ -333,12 +445,90 @@ def test_json_value_rejects_non_string_mapping_keys():
 
 
 def test_model_without_feature_specs_is_rejected():
-    class EmptyModel:
-        family = "poisson"
-        _fit_used_offset = False
+    model = _fit_model({"age": Numeric()})
+    model._specs = {}
+    model._feature_order = []
 
     with pytest.raises(ValueError, match="no feature specs"):
         build_superglm_publication_receipt(
-            EmptyModel(),
+            model,
             offset_contract=OffsetExportContract(handling="NONE"),
         )
+
+
+def test_unfitted_superglm_is_rejected_before_metadata_is_published():
+    model = SuperGLM(features={"age": Numeric()})
+
+    with pytest.raises(ValueError, match="must be fitted"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_tampered_feature_order_is_rejected_instead_of_repaired():
+    model = _fit_model({"age": Numeric(), "num": Numeric()})
+    model._feature_order = ["age"]
+
+    with pytest.raises(ValueError, match="feature order"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_malformed_grouping_is_rejected_instead_of_published_as_a_class_name():
+    model = _fit_model({"cat": Categorical()})
+    model._specs["cat"]._grouping = object()
+
+    with pytest.raises(ValueError, match="LevelGrouping"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_spline_lambda_policy_is_serialized_from_the_pinned_superglm_type():
+    model = _fit_model({"age": Spline(kind="ps", n_knots=4)})
+    model._specs["age"]._lambda_policy = LambdaPolicy.fixed(2.5)
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    assert receipt.term_metadata["age"]["declared"]["lambda_policy"] == {
+        "mode": "fixed",
+        "value": 2.5,
+    }
+
+
+def test_receipt_records_the_resolved_fitted_link_name():
+    model = _fit_model({"age": Numeric()})
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    assert receipt.package_metadata["model"]["link"] == "log"
+
+
+def test_unsupported_feature_metadata_is_rejected_clearly():
+    model = _fit_model({"age": Numeric()})
+    model._specs["age"] = object()
+
+    with pytest.raises(ValueError, match="unsupported feature.*object"):
+        build_superglm_publication_receipt(
+            model,
+            offset_contract=OffsetExportContract(handling="NONE"),
+        )
+
+
+def test_json_value_rejects_item_method_compatibility_objects():
+    class ItemLike:
+        def item(self):
+            return 1
+
+    with pytest.raises(ValueError, match="unsupported"):
+        _json_value(ItemLike())

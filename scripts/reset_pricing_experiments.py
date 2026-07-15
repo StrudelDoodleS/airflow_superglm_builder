@@ -52,10 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_args() -> argparse.Namespace:
-    return build_parser().parse_args()
-
-
 def reset_pricing_experiments() -> None:
     engine = get_engine()
     with engine.begin() as con:
@@ -66,7 +62,7 @@ def reset_pricing_experiments() -> None:
 
 
 def main() -> None:
-    args = parse_args()
+    args = build_parser().parse_args()
     if not args.yes:
         raise SystemExit("Refusing to reset pricing experiment tables without --yes")
     reset_pricing_experiments()

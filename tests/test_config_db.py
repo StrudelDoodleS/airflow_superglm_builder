@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra import db
+from pricing_pipeline.infra import schema
 from pricing_pipeline.infra.db import build_odbc_connect_string
 from pricing_pipeline.infra.schema import SchemaNames, render_sql_schemas
 
@@ -53,9 +54,7 @@ def test_odbc_connection_string_brace_escapes_password_delimiters():
     assert "PWD={sec;ret};" in semicolon_odbc
 
     brace_settings = Settings.from_env({"MSSQL_PASSWORD": "sec}ret"})
-    brace_odbc = build_odbc_connect_string(
-        brace_settings, database=brace_settings.pricing_database
-    )
+    brace_odbc = build_odbc_connect_string(brace_settings, database=brace_settings.pricing_database)
     assert "PWD={sec}}ret};" in brace_odbc
 
 
@@ -127,6 +126,60 @@ def test_render_sql_schemas_rewrites_schema_tokens_without_touching_table_names(
     assert "python_pricing.PRICING_MODEL" in rendered
 
 
+def test_runtime_schema_rendering_only_rewrites_unquoted_schema_qualifiers():
+    rendered = schema.render_runtime_sql_schemas(
+        """
+        SELECT pricing.PRICING_MODEL,
+               pricing_stg . STG_RATE_CELL,
+               mlops\n. MODEL_RUN_METRIC,
+               'pricing.PRICING_MODEL',
+               'it''s still mlops.MODEL_RUN_METRIC',
+               [pricing].[PRICING_MODEL],
+               "mlops"."MODEL_RUN_METRIC"
+        FROM pricing.PRICING_MODEL
+        WHERE product_family = 'pricing';
+        -- pricing.COMMENTED_OUT
+        /* pricing_stg.COMMENTED_OUT
+           mlops.COMMENTED_OUT */
+        """,
+        SchemaNames(
+            pricing="python_pricing",
+            pricing_staging="python_pricing_stg",
+            mlops="python_mlops",
+        ),
+    )
+
+    assert "python_pricing.PRICING_MODEL" in rendered
+    assert "python_pricing_stg . STG_RATE_CELL" in rendered
+    assert "python_mlops\n. MODEL_RUN_METRIC" in rendered
+    assert "'pricing.PRICING_MODEL'" in rendered
+    assert "'it''s still mlops.MODEL_RUN_METRIC'" in rendered
+    assert "[pricing].[PRICING_MODEL]" in rendered
+    assert '"mlops"."MODEL_RUN_METRIC"' in rendered
+    assert "product_family = 'pricing'" in rendered
+    assert "-- pricing.COMMENTED_OUT" in rendered
+    assert "pricing_stg.COMMENTED_OUT" in rendered
+    assert "mlops.COMMENTED_OUT" in rendered
+
+
+def test_configured_engine_does_not_rewrite_sql_literals_at_execution_time():
+    engine = db.configure_engine(
+        db.create_engine("sqlite://"),
+        SchemaNames(
+            pricing="python_pricing",
+            pricing_staging="python_pricing_stg",
+            mlops="python_mlops",
+        ),
+    )
+
+    with engine.connect() as connection:
+        result = connection.execute(
+            db.text("SELECT 'pricing' AS schema_name /* mlops.MODEL_RUN_METRIC */")
+        )
+
+    assert result.scalar_one() == "pricing"
+
+
 def test_pymssql_sqlalchemy_url_uses_host_port_database_and_escaped_credentials():
     settings = Settings.from_env(
         {
@@ -140,9 +193,7 @@ def test_pymssql_sqlalchemy_url_uses_host_port_database_and_escaped_credentials(
 
     url = db.build_sqlalchemy_url(settings, database=settings.pricing_database)
 
-    assert url == (
-        "mssql+pymssql://pricing%20user:sec%2Fret%40word@localhost:1433/PricingLab"
-    )
+    assert url == ("mssql+pymssql://pricing%20user:sec%2Fret%40word@localhost:1433/PricingLab")
 
 
 def test_sqlalchemy_url_rejects_unknown_mssql_dialect():
@@ -276,9 +327,7 @@ def test_ensure_database_uses_autocommit_connection_when_creating(monkeypatch):
             self.connection = FakeConnection()
 
         def begin(self):
-            raise AssertionError(
-                "ensure_database must not create databases in a transaction"
-            )
+            raise AssertionError("ensure_database must not create databases in a transaction")
 
         def connect(self):
             return self.connection
@@ -288,9 +337,7 @@ def test_ensure_database_uses_autocommit_connection_when_creating(monkeypatch):
 
     db.ensure_database(Settings.from_env({}), "Pricing]Lab")
 
-    assert engine.connection.execution_options_calls == [
-        {"isolation_level": "AUTOCOMMIT"}
-    ]
+    assert engine.connection.execution_options_calls == [{"isolation_level": "AUTOCOMMIT"}]
     assert engine.connection.executed == [
         (
             "SELECT 1 FROM sys.databases WHERE name = :database",

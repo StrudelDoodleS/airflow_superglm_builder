@@ -12,6 +12,7 @@ from pricing_pipeline.infra.schema import render_sql_schemas, schema_names_from_
 
 FREMTPL_OPENML_ID = 41214
 FREMTPL_DATASET_NAME = "freMTPL2freq"
+FREMTPL_EXPECTED_ROW_COUNT = 678_013
 FREMTPL_COLUMNS = [
     "IDpol",
     "ClaimNb",
@@ -107,14 +108,19 @@ def bulk_insert_fremtpl_raw(
         f"INSERT INTO pricing.FREMTPL_RAW ({columns}) VALUES ({placeholders})",
         schemas,
     )
-    truncate_sql = render_sql_schemas(FREMTPL_TRUNCATE_SQL, schemas)
+    clear_sql = render_sql_schemas(
+        "DELETE FROM pricing.FREMTPL_RAW"
+        if engine.dialect.name == "sqlite"
+        else FREMTPL_TRUNCATE_SQL,
+        schemas,
+    )
 
     connection = engine.raw_connection()
     cursor = None
     try:
         cursor = connection.cursor()
         if replace:
-            cursor.execute(truncate_sql)
+            cursor.execute(clear_sql)
         if hasattr(cursor, "fast_executemany"):
             cursor.fast_executemany = True
         for chunk in _chunk_rows(rows, chunksize):
@@ -134,10 +140,20 @@ def bulk_insert_fremtpl_raw(
 def load_fremtpl_raw(engine: Engine, *, replace: bool = False) -> int:
     with engine.begin() as con:
         existing_count = int(
-            con.execute(text("SELECT COUNT_BIG(*) FROM pricing.FREMTPL_RAW")).scalar_one()
+            con.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
         )
-        if existing_count and not replace:
+        if existing_count == FREMTPL_EXPECTED_ROW_COUNT and not replace:
             return existing_count
 
     frame = prepare_fremtpl_raw_frame(fetch_fremtpl())
-    return bulk_insert_fremtpl_raw(engine, frame, replace=replace)
+    actual_count = len(frame)
+    if actual_count != FREMTPL_EXPECTED_ROW_COUNT:
+        raise ValueError(
+            "freMTPL OpenML data row count mismatch: "
+            f"expected {FREMTPL_EXPECTED_ROW_COUNT} rows, got {actual_count}"
+        )
+    return bulk_insert_fremtpl_raw(
+        engine,
+        frame,
+        replace=replace or existing_count > 0,
+    )

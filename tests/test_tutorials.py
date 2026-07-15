@@ -17,9 +17,7 @@ def _notebook_text() -> str:
 
 
 def test_tutorial_ddl_is_current_erd_reference_copy():
-    assert TUTORIAL_DDL.read_text(encoding="utf-8") == REFERENCE_DDL.read_text(
-        encoding="utf-8"
-    )
+    assert TUTORIAL_DDL.read_text(encoding="utf-8") == REFERENCE_DDL.read_text(encoding="utf-8")
 
 
 def test_basic_sql_etl_notebook_teaches_connection_transform_and_load_pattern():

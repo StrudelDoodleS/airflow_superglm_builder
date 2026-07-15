@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-import argparse
+import json
+from collections.abc import Callable, Mapping
 
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
+from pricing_pipeline.publishing.staging_lock import acquire_staging_export_lock
+
+
+_STAGED_IDENTITY_FIELDS = (
+    "export_id",
+    "model_id",
+    "model_name",
+    "model_version",
+    "effective_from_date",
+    "effective_to_date",
+    "source_file",
+    "publication_receipt_sha256",
+    "staging_content_sha256",
+)
 
 
 def _identity_text(value) -> str | None:
@@ -16,7 +32,13 @@ def _identity_text(value) -> str | None:
     return str(value)
 
 
-def _existing_export_conflicts(existing_package, meta) -> list[str]:
+def _existing_export_conflicts(
+    existing_package,
+    meta,
+    *,
+    parent_rate_package_id: int | None,
+    revision_metadata_json: str | None,
+) -> list[str]:
     conflicts: list[str] = []
     for field_name in (
         "model_version",
@@ -24,29 +46,111 @@ def _existing_export_conflicts(existing_package, meta) -> list[str]:
         "effective_to_date",
         "source_file",
         "publication_receipt_sha256",
+        "staging_content_sha256",
     ):
         existing_value = _identity_text(existing_package[field_name])
         staged_value = _identity_text(meta[field_name])
         if field_name == "source_file" and (existing_value is None or staged_value is None):
+            continue
+        if field_name == "staging_content_sha256" and existing_value is None:
+            # V028 intentionally left pre-migration packages without a digest.
+            # Their remaining immutable metadata and model-run lineage still
+            # provide the compatibility check available when they were written.
             continue
         if existing_value != staged_value:
             conflicts.append(
                 f"{field_name} existing={existing_package[field_name]!r} "
                 f"staged={meta[field_name]!r}"
             )
+    requested_identity = {
+        "parent_rate_package_id": parent_rate_package_id,
+        "revision_metadata_json": revision_metadata_json,
+    }
+    for field_name, requested_value in requested_identity.items():
+        existing_value = existing_package.get(field_name)
+        if _identity_text(existing_value) != _identity_text(requested_value):
+            conflicts.append(
+                f"{field_name} existing={existing_value!r} requested={requested_value!r}"
+            )
     return conflicts
 
 
-def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
-    if getattr(args, "set_pointer", None):
+def _staged_export_conflicts(
+    meta,
+    expected: Mapping[str, object] | None,
+) -> list[str]:
+    if expected is None:
+        return []
+    unknown_fields = set(expected) - set(_STAGED_IDENTITY_FIELDS)
+    if unknown_fields:
         raise ValueError(
-            "package publish no longer deploys rate packages; publish the package "
-            "first, then deploy it with ModelPublisher.deploy or the deploy DAG"
+            "expected_staged_metadata contains unsupported fields: "
+            + ", ".join(sorted(unknown_fields))
         )
 
+    conflicts: list[str] = []
+    for field_name in _STAGED_IDENTITY_FIELDS:
+        if field_name not in expected:
+            continue
+        staged_value = meta[field_name]
+        expected_value = expected[field_name]
+        if _identity_text(staged_value) != _identity_text(expected_value):
+            conflicts.append(f"{field_name} expected={expected_value!r} staged={staged_value!r}")
+    return conflicts
+
+
+def _canonical_revision_metadata(value: Mapping[str, object] | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("revision_metadata must be a mapping")
+
+    def normalise(item: object) -> object:
+        if isinstance(item, Mapping):
+            normalised: dict[str, object] = {}
+            for key, nested_value in item.items():
+                if not isinstance(key, str):
+                    raise ValueError("revision_metadata keys must be strings")
+                normalised[key] = normalise(nested_value)
+            return normalised
+        if isinstance(item, list | tuple):
+            return [normalise(nested_value) for nested_value in item]
+        return item
+
+    normalised_value = normalise(value)
+    try:
+        return json.dumps(
+            normalised_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        raise ValueError("revision_metadata must contain only finite numbers") from exc
+    except TypeError as exc:
+        raise ValueError("revision_metadata must contain only JSON-serializable values") from exc
+
+
+def publish_rating_package(
+    engine,
+    *,
+    export_id: str,
+    created_by: str = "python",
+    parent_rate_package_id: int | None = None,
+    revision_metadata: Mapping[str, object] | None = None,
+    draft_validator=None,
+    package_lineage_writer: Callable[[Connection, int], int | None] | None = None,
+    expected_staged_metadata: Mapping[str, object] | None = None,
+) -> PublishResult:
+    revision_metadata_json = _canonical_revision_metadata(revision_metadata)
+    if draft_validator is not None and not callable(draft_validator):
+        raise TypeError("draft_validator must be callable")
+    if package_lineage_writer is not None and not callable(package_lineage_writer):
+        raise TypeError("package_lineage_writer must be callable")
+    model_run_id: int | None = None
     with engine.begin() as con:
-        args.was_existing = False
-        requested_package_status = args.package_status
+        acquire_staging_export_lock(con, export_id)
         meta = (
             con.execute(
                 text("""
@@ -66,21 +170,32 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 offset_factor_name,
                 offset_source_name,
                 offset_label,
-                metadata_origin
+                metadata_origin,
+                staging_content_sha256
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """),
-                {"export_id": args.export_id},
+                {"export_id": export_id},
             )
             .mappings()
             .one()
         )
 
+        staged_conflicts = _staged_export_conflicts(
+            meta,
+            expected_staged_metadata,
+        )
+        if staged_conflicts:
+            raise ValueError(
+                f"staged export changed before package publication for "
+                f"export_id={export_id!r}: " + "; ".join(staged_conflicts)
+            )
+
         model_id = meta["model_id"]
         if model_id is None:
             raise ModelRegistryError(
                 "staged rating export is missing model_id; validate/register the "
-                f"model before staging export_id={args.export_id!r}"
+                f"model before staging export_id={export_id!r}"
             )
 
         existing_package = (
@@ -97,30 +212,128 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 package_status,
                 source_export_id,
                 source_file,
-                publication_receipt_sha256
+                publication_receipt_sha256,
+                staging_content_sha256,
+                parent_rate_package_id,
+                revision_metadata_json
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
         """),
                 {
                     "model_id": model_id,
-                    "export_id": args.export_id,
+                    "export_id": export_id,
                 },
             )
             .mappings()
             .one_or_none()
         )
         if existing_package is not None:
-            conflicts = _existing_export_conflicts(existing_package, meta)
+            conflicts = _existing_export_conflicts(
+                existing_package,
+                meta,
+                parent_rate_package_id=parent_rate_package_id,
+                revision_metadata_json=revision_metadata_json,
+            )
             if conflicts:
                 raise ValueError(
-                    f"export_id {args.export_id!r} is already published with "
+                    f"export_id {export_id!r} is already published with "
                     "incompatible metadata: " + "; ".join(conflicts)
                 )
-            args.package_version = int(existing_package["package_version"])
-            args.package_status = str(existing_package["package_status"])
-            args.was_existing = True
-            return int(existing_package["rate_package_id"])
+            return PublishResult(
+                mlflow_run_id="",
+                export_id=export_id,
+                rate_package_id=int(existing_package["rate_package_id"]),
+                package_version=int(existing_package["package_version"]),
+                rating_workbook_path="",
+                package_status=str(existing_package["package_status"]),
+                was_existing=True,
+            )
+
+        if parent_rate_package_id is not None:
+            parent = (
+                con.execute(
+                    text("""
+                    SELECT
+                        rate_package_id,
+                        model_id,
+                        model_version,
+                        effective_from_date,
+                        effective_to_date,
+                        package_status
+                    FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
+                    WHERE rate_package_id = :parent_rate_package_id
+                    """),
+                    {"parent_rate_package_id": parent_rate_package_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if parent is None:
+                raise ValueError(f"parent rate package {parent_rate_package_id} does not exist")
+            if int(parent["model_id"]) != int(model_id):
+                raise ValueError("parent rate package belongs to a different model")
+            if str(parent["package_status"]) != "PUBLISHED":
+                raise ValueError("parent rate package must have PUBLISHED status")
+            for field_name in (
+                "model_version",
+                "effective_from_date",
+                "effective_to_date",
+            ):
+                if _identity_text(parent[field_name]) != _identity_text(meta[field_name]):
+                    raise ValueError(
+                        f"parent {field_name}={parent[field_name]!r} does not match "
+                        f"staged {field_name}={meta[field_name]!r}"
+                    )
+
+        if parent_rate_package_id is None:
+            staged_version = _identity_text(meta["model_version"])
+            if staged_version is None:
+                raise ValueError("root package publication requires model_version")
+            reservation = (
+                con.execute(
+                    text("""
+                    SELECT
+                        model_id,
+                        export_id,
+                        model_version
+                    FROM pricing.PRICING_MODEL_VERSION_RESERVATION
+                        WITH (UPDLOCK, HOLDLOCK)
+                    WHERE model_id = :model_id
+                      AND export_id = :export_id
+                    """),
+                    {"model_id": model_id, "export_id": export_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if reservation is None:
+                con.execute(
+                    text("""
+                    INSERT INTO pricing.PRICING_MODEL_VERSION_RESERVATION (
+                        model_id,
+                        export_id,
+                        model_version
+                    ) VALUES (
+                        :model_id,
+                        :export_id,
+                        :model_version
+                    )
+                    """),
+                    {
+                        "model_id": model_id,
+                        "export_id": export_id,
+                        "model_version": staged_version,
+                    },
+                )
+            else:
+                reserved_version = _identity_text(reservation["model_version"])
+                if reserved_version != staged_version:
+                    raise ValueError(
+                        f"reserved model_version {reserved_version!r} does not match "
+                        f"staged model_version {staged_version!r} for "
+                        f"export_id={export_id!r}"
+                    )
 
         offset_handling = meta["offset_handling"] or "UNKNOWN"
         offset_factor_name = meta["offset_factor_name"]
@@ -139,7 +352,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   AND term_type = 'OFFSET_FACTOR'
             """),
                 {
-                    "export_id": args.export_id,
+                    "export_id": export_id,
                     "offset_factor_name": offset_factor_name,
                 },
             ).scalar_one_or_none()
@@ -156,7 +369,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 WHERE export_id = :export_id
                   AND term_type = 'OFFSET_FACTOR'
             """),
-                {"export_id": args.export_id},
+                {"export_id": export_id},
             ).scalar_one_or_none()
             if staged_offset_factor is not None:
                 raise ValueError(
@@ -189,6 +402,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 source_file,
                 publication_receipt_json,
                 publication_receipt_sha256,
+                staging_content_sha256,
                 package_metadata_json,
                 revision_metadata_json,
                 offset_handling,
@@ -200,7 +414,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             )
             OUTPUT INSERTED.rate_package_id
             VALUES (
-                NULL,
+                :parent_rate_package_id,
                 :model_id,
                 :model_name,
                 :model_version,
@@ -213,8 +427,9 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 :source_file,
                 :publication_receipt_json,
                 :publication_receipt_sha256,
+                :staging_content_sha256,
                 :package_metadata_json,
-                NULL,
+                :revision_metadata_json,
                 :offset_handling,
                 :offset_factor_name,
                 :offset_source_name,
@@ -225,6 +440,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         """),
             {
                 "model_id": model_id,
+                "parent_rate_package_id": parent_rate_package_id,
                 "model_name": meta["model_name"],
                 "model_version": meta["model_version"],
                 "package_version": package_version,
@@ -232,17 +448,19 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 "effective_from_date": meta["effective_from_date"],
                 "effective_to_date": meta["effective_to_date"],
                 "package_status": "DRAFT",
-                "source_export_id": args.export_id,
+                "source_export_id": export_id,
                 "source_file": meta["source_file"],
                 "publication_receipt_json": meta["publication_receipt_json"],
                 "publication_receipt_sha256": meta["publication_receipt_sha256"],
+                "staging_content_sha256": meta["staging_content_sha256"],
                 "package_metadata_json": meta["package_metadata_json"],
+                "revision_metadata_json": revision_metadata_json,
                 "offset_handling": offset_handling,
                 "offset_factor_name": offset_factor_name,
                 "offset_source_name": meta["offset_source_name"],
                 "offset_label": meta["offset_label"],
                 "metadata_origin": meta["metadata_origin"],
-                "created_by": args.created_by,
+                "created_by": created_by,
             },
         ).scalar_one()
 
@@ -266,7 +484,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   WHERE f.feature_name = s.feature_name
               );
         """),
-            {"export_id": args.export_id},
+            {"export_id": export_id},
         )
 
         # Level sets
@@ -303,7 +521,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     AND ls.level_set_name = s.level_set_name
               );
         """),
-            {"export_id": args.export_id, "model_id": model_id},
+            {"export_id": export_id, "model_id": model_id},
         )
 
         # Levels
@@ -351,7 +569,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 s.upper_bound,
                 s.level_code;
         """),
-            {"export_id": args.export_id, "model_id": model_id},
+            {"export_id": export_id, "model_id": model_id},
         )
 
         # Terms
@@ -376,7 +594,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
              AND tm.term_name = c.term_name
             WHERE c.export_id = :export_id;
         """),
-            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+            {"export_id": export_id, "rate_package_id": rate_package_id},
         )
 
         # Term features
@@ -411,7 +629,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             WHERE s.export_id = :export_id;
         """),
             {
-                "export_id": args.export_id,
+                "export_id": export_id,
                 "rate_package_id": rate_package_id,
                 "model_id": model_id,
             },
@@ -447,7 +665,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
              AND t.term_name = c.term_name
             WHERE c.export_id = :export_id;
         """),
-            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+            {"export_id": export_id, "rate_package_id": rate_package_id},
         )
 
         # Cell-level mapping
@@ -484,7 +702,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             WHERE s.export_id = :export_id;
         """),
             {
-                "export_id": args.export_id,
+                "export_id": export_id,
                 "rate_package_id": rate_package_id,
                 "model_id": model_id,
             },
@@ -557,7 +775,17 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 fl.level_code,
                 COALESCE(fl.order_index, 0),
                 fl.lower_bound,
-                fl.upper_bound,
+                CASE
+                    WHEN ROW_NUMBER() OVER (
+                        PARTITION BY t.term_id
+                        ORDER BY
+                            CASE WHEN fl.lower_bound IS NULL THEN 1 ELSE 0 END,
+                            fl.lower_bound DESC,
+                            COALESCE(fl.order_index, 0) DESC,
+                            fl.feature_level_id DESC
+                    ) = 1 THEN NULL
+                    ELSE fl.upper_bound
+                END,
                 fl.representative_value,
                 rc.multiplier,
                 rc.log_coefficient
@@ -574,7 +802,13 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_id = ls.feature_id
             WHERE t.rate_package_id = :rate_package_id
-              AND t.term_type IN ('DISCRETIZED_SPLINE_1D', 'NUMERIC_BANDED_1D')
+              AND (
+                  t.term_type IN ('DISCRETIZED_SPLINE_1D', 'NUMERIC_BANDED_1D')
+                  OR (
+                      t.term_type = 'OFFSET_FACTOR'
+                      AND ls.level_set_type IN ('NUMERIC_BAND', 'SPLINE_GRID_1D')
+                  )
+              )
               AND rc.is_deleted = 0
             ORDER BY
                 t.sequence_no,
@@ -586,6 +820,11 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             {"rate_package_id": rate_package_id},
         )
 
+        if draft_validator is not None:
+            draft_validator(con, int(rate_package_id))
+        if package_lineage_writer is not None:
+            model_run_id = package_lineage_writer(con, int(rate_package_id))
+
         con.execute(
             text("""
             UPDATE pricing.PRICING_RATE_PACKAGE
@@ -593,36 +832,18 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             WHERE rate_package_id = :rate_package_id;
         """),
             {
-                "package_status": requested_package_status,
+                "package_status": "PUBLISHED",
                 "rate_package_id": rate_package_id,
             },
         )
 
-        args.package_version = package_version
-
-    return int(rate_package_id)
-
-
-def publish_rating_package(
-    engine,
-    *,
-    export_id: str,
-    created_by: str = "python",
-    package_status: str = "PUBLISHED",
-) -> PublishResult:
-    args = argparse.Namespace(
-        export_id=export_id,
-        created_by=created_by,
-        package_status=package_status,
-        set_pointer=None,
-    )
-    rate_package_id = load_staging_to_rating_package(engine, args)
     return PublishResult(
         mlflow_run_id="",
         export_id=export_id,
         rate_package_id=int(rate_package_id),
-        package_version=int(args.package_version),
+        package_version=int(package_version),
         rating_workbook_path="",
-        package_status=str(args.package_status),
-        was_existing=bool(getattr(args, "was_existing", False)),
+        package_status="PUBLISHED",
+        was_existing=False,
+        model_run_id=model_run_id,
     )

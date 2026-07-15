@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from urllib.parse import unquote_plus
 
 import scripts.load_fremtpl_raw as load_fremtpl_raw_script
 import scripts.pricing_db as script_db
@@ -77,7 +76,9 @@ def test_script_get_engine_delegates_to_shared_pricing_db_helper(monkeypatch):
 def test_load_fremtpl_raw_script_uses_pricing_db_engine_loader(monkeypatch, capsys):
     sentinel_engine = object()
     calls = []
-    monkeypatch.setattr(load_fremtpl_raw_script, "parse_args", lambda: SimpleNamespace(replace=True))
+    monkeypatch.setattr(
+        load_fremtpl_raw_script, "parse_args", lambda: SimpleNamespace(replace=True)
+    )
     monkeypatch.setattr(load_fremtpl_raw_script, "get_engine", lambda: sentinel_engine)
     monkeypatch.setattr(
         load_fremtpl_raw_script,
@@ -89,15 +90,3 @@ def test_load_fremtpl_raw_script_uses_pricing_db_engine_loader(monkeypatch, caps
 
     assert calls == [(sentinel_engine, True)]
     assert "fremtpl_raw_rows=12" in capsys.readouterr().out
-
-
-def test_script_build_sqlalchemy_url_uses_shared_password_escaping(monkeypatch):
-    monkeypatch.setattr(script_db, "load_env", lambda: None)
-    monkeypatch.setenv("MSSQL_PASSWORD", "sec;Encrypt=yes}tail")
-
-    url = script_db.build_sqlalchemy_url()
-    odbc = unquote_plus(url.split("odbc_connect=", 1)[1])
-
-    assert "PWD={sec;Encrypt=yes}}tail};" in odbc
-    assert "PWD=sec;Encrypt=yes}tail;" not in odbc
-    assert ";Encrypt=yes;" not in odbc

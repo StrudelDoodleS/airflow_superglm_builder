@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine import URL
 
 from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.infra.schema import render_sql_schemas
+from pricing_pipeline.infra.schema import render_runtime_sql_schemas
 
 
 SQL_COPT_SS_ACCESS_TOKEN = 1256
@@ -73,15 +73,12 @@ def build_sqlalchemy_url(settings: Settings, *, database: str) -> str:
     auth_mode = settings.mssql_auth_mode.strip().lower()
     if auth_mode == "azure_token" and dialect != "mssql+pyodbc":
         raise ValueError(
-            "MSSQL_AUTH_MODE=azure_token requires "
-            "MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc"
+            "MSSQL_AUTH_MODE=azure_token requires MSSQL_SQLALCHEMY_DIALECT=mssql+pyodbc"
         )
     if dialect == "mssql+pymssql":
         return build_pymssql_url(settings, database=database)
     if dialect != "mssql+pyodbc":
-        raise ValueError(
-            "MSSQL_SQLALCHEMY_DIALECT must be one of: mssql+pyodbc, mssql+pymssql"
-        )
+        raise ValueError("MSSQL_SQLALCHEMY_DIALECT must be one of: mssql+pyodbc, mssql+pymssql")
     odbc = build_odbc_connect_string(settings, database=database)
     return URL.create(
         "mssql+pyodbc",
@@ -106,7 +103,7 @@ def _azure_sql_access_token_struct(settings: Settings) -> bytes:
 def _attach_schema_renderer(engine: Engine, schemas) -> None:
     @event.listens_for(engine, "before_cursor_execute", retval=True)
     def _render_schema_names(_conn, _cursor, statement, parameters, _context, _executemany):
-        return render_sql_schemas(statement, schemas), parameters
+        return render_runtime_sql_schemas(statement, schemas), parameters
 
 
 def configure_engine(engine: Engine, schemas) -> Engine:
@@ -134,9 +131,7 @@ def get_engine(settings: Settings, *, database: str | None = None) -> Engine:
         engine_kwargs["fast_executemany"] = True
     if auth_mode == "azure_token":
         engine_kwargs["connect_args"] = {
-            "attrs_before": {
-                SQL_COPT_SS_ACCESS_TOKEN: _azure_sql_access_token_struct(settings)
-            }
+            "attrs_before": {SQL_COPT_SS_ACCESS_TOKEN: _azure_sql_access_token_struct(settings)}
         }
 
     engine = create_engine(

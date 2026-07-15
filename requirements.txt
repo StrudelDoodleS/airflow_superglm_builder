@@ -1,7 +1,6 @@
-apache-airflow==3.2.1
-apache-airflow-providers-microsoft-mssql
 azure-identity
-superglm @ git+https://github.com/StrudelDoodleS/superglm.git@1072f7792cf255899fa6ba93579efd49a25ccdb4
+joblib
+superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@1072f7792cf255899fa6ba93579efd49a25ccdb4
 mlflow
 numpy
 openpyxl

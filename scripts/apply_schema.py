@@ -1,4 +1,5 @@
 """Apply versioned schema DDL files from db/migrations."""
+
 from __future__ import annotations
 
 import os
@@ -25,11 +26,6 @@ def _schema_dir() -> Path:
     return ROOT / path
 
 
-def _ensure_repo_root_on_path() -> None:
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -45,7 +41,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    _ensure_repo_root_on_path()
     from pricing_pipeline.infra.migrations import apply_migrations, migration_files
 
     load_env()

@@ -6,6 +6,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .ipynb_checkpoints/
+pricing_models/*/.local/
+*.sqlite
 .codex
 .dags_root_owned_backup_*/
 logs/
@@ -16,3 +18,6 @@ airflow/logs/
 airflow/config/
 airflow/plugins/
 .worktrees/
+docs/superpowers/plans/
+docs/superpowers/specs/
+builder_screenshot/

@@ -1,6 +1,10 @@
+import os
 from pathlib import Path
 
+import pytest
 import yaml
+
+from pricing_pipeline.infra.config import Settings
 
 
 MSSQL_PASSWORD_DEFAULT = "${MSSQL_PASSWORD:-YourStrong(!)Password123}"
@@ -12,6 +16,22 @@ STATE_PATHS = [
     "/sources/state/db_diagrams",
     "/sources/state/cloudbeaver/workspace",
 ]
+
+
+def test_notebook_runtime_does_not_depend_on_airflow():
+    production_sources = [
+        *Path("pricing_pipeline").rglob("*.py"),
+        *Path("dags").glob("*.py"),
+    ]
+
+    airflow_imports = []
+    for path in production_sources:
+        source = path.read_text(encoding="utf-8")
+        if "from airflow" in source or "import airflow" in source:
+            airflow_imports.append(path.as_posix())
+
+    assert airflow_imports == []
+    assert list(Path("dags").glob("*.py")) == []
 
 
 def test_compose_uses_airflow_321_services():
@@ -200,45 +220,6 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
     assert generator["depends_on"]["mssql"] == {"condition": "service_healthy"}
 
 
-def test_airflow_services_can_import_project_package_and_hide_examples():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    common_env = compose["x-airflow-common"]["environment"]
-    common_volumes = compose["x-airflow-common"]["volumes"]
-    run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
-    cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(encoding="utf-8")
-
-    assert common_env["PYTHONPATH"] == "/opt/airflow"
-    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline" in common_volumes
-    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models" in common_volumes
-    assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
-    assert common_env["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
-    assert "cleanup_airflow_examples.py" in run_script
-    assert "airflow dags list-import-errors" in run_script
-    assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script
-    assert 'airflow dags trigger "${DAG_ID}"' in run_script
-    assert "bundle_name" in cleanup_script
-    assert "example_dags" in cleanup_script
-
-
-def test_airflow_common_env_propagates_runtime_overrides():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    common_env = compose["x-airflow-common"]["environment"]
-
-    assert common_env["MLFLOW_TRACKING_URI"] == ("${MLFLOW_TRACKING_URI:-http://mlflow:5000}")
-    assert common_env["RATING_EXPORT_ROOT"] == (
-        "${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}"
-    )
-
-
-def test_readme_documents_db_diagram_commands():
-    readme = Path("README.md").read_text(encoding="utf-8")
-
-    assert "Database Diagrams" in readme
-    assert "docker compose --profile diagrams run --rm db-diagram-generator" in readme
-    assert "docker compose --profile diagrams up -d db-diagrams" in readme
-    assert "http://localhost:8088" in readme
-
-
 def test_airflow_image_uses_python_314_base():
     dockerfile = Path("airflow/Dockerfile").read_text(encoding="utf-8")
     assert "apache/airflow:3.2.1-python3.14" in dockerfile
@@ -246,12 +227,12 @@ def test_airflow_image_uses_python_314_base():
     assert '"apache-airflow==${AIRFLOW_VERSION}"' in dockerfile
 
 
-def test_host_python_dependencies_pin_airflow_321():
+def test_host_python_dependencies_do_not_install_airflow():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
 
-    assert '"apache-airflow==3.2.1"' in pyproject
-    assert "apache-airflow==3.2.1" in requirements
+    assert "apache-airflow" not in pyproject
+    assert "apache-airflow" not in requirements
 
 
 def test_compose_does_not_use_env_file_required_false():
@@ -271,7 +252,7 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     expected = (
-        "superglm @ git+https://github.com/StrudelDoodleS/superglm.git@"
+        "superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@"
         "1072f7792cf255899fa6ba93579efd49a25ccdb4"
     )
 
@@ -280,9 +261,135 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
 
 
+def test_workbench_artifact_dependency_is_direct():
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert "joblib" in requirements.splitlines()
+    assert '"joblib"' in pyproject
+
+
+def test_settings_resolves_relative_artifact_roots_from_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    project_root = tmp_path / "project"
+    launch_root = tmp_path / "launch"
+    project_root.mkdir()
+    launch_root.mkdir()
+    monkeypatch.chdir(launch_root)
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": str(project_root),
+            "RATING_EXPORT_ROOT": "state/rating_exports",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "state/validation_splits",
+            "WORKBENCH_ARTIFACT_ROOT": "state/workbench",
+        }
+    )
+
+    assert settings.rating_export_root == project_root / "state/rating_exports"
+    assert settings.validation_split_artifact_root == (project_root / "state/validation_splits")
+    assert settings.workbench_artifact_root == project_root / "state/workbench"
+
+
+def test_settings_resolves_relative_artifact_roots_from_cwd_without_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    launch_root = tmp_path / "launch"
+    launch_root.mkdir()
+    monkeypatch.chdir(launch_root)
+
+    settings = Settings.from_env(
+        {
+            "RATING_EXPORT_ROOT": "rating",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "splits",
+            "WORKBENCH_ARTIFACT_ROOT": "workbench",
+        }
+    )
+
+    assert settings.rating_export_root == launch_root / "rating"
+    assert settings.validation_split_artifact_root == launch_root / "splits"
+    assert settings.workbench_artifact_root == launch_root / "workbench"
+
+
+def test_settings_canonicalizes_absolute_artifact_roots(tmp_path):
+    project_root = tmp_path / "project"
+    absolute_roots = {
+        "RATING_EXPORT_ROOT": tmp_path / "external" / ".." / "external-rating",
+        "VALIDATION_SPLIT_ARTIFACT_ROOT": tmp_path / "external" / "../external-splits",
+        "WORKBENCH_ARTIFACT_ROOT": tmp_path / "external" / "../external-workbench",
+    }
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": str(project_root),
+            **{name: str(path) for name, path in absolute_roots.items()},
+        }
+    )
+
+    assert settings.rating_export_root == absolute_roots["RATING_EXPORT_ROOT"].resolve()
+    assert (
+        settings.validation_split_artifact_root
+        == absolute_roots["VALIDATION_SPLIT_ARTIFACT_ROOT"].resolve()
+    )
+    assert settings.workbench_artifact_root == absolute_roots["WORKBENCH_ARTIFACT_ROOT"].resolve()
+
+
+def test_settings_expands_user_for_project_and_artifact_roots(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    settings = Settings.from_env(
+        {
+            "PRICING_PROJECT_ROOT": "~/pricing/../project",
+            "RATING_EXPORT_ROOT": "~/artifacts/../rating",
+            "VALIDATION_SPLIT_ARTIFACT_ROOT": "state/../splits",
+            "WORKBENCH_ARTIFACT_ROOT": "work/../workbench",
+        }
+    )
+
+    assert settings.rating_export_root == home / "rating"
+    assert settings.validation_split_artifact_root == home / "project/splits"
+    assert settings.workbench_artifact_root == home / "project/workbench"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX/WSL-specific rejection")
+@pytest.mark.parametrize(
+    ("env_name", "windows_path"),
+    [
+        ("PRICING_PROJECT_ROOT", r"C:\pricing\project"),
+        ("WORKBENCH_ARTIFACT_ROOT", "D:/pricing/workbench"),
+        ("PRICING_PROJECT_ROOT", r"C:pricing\project"),
+        ("WORKBENCH_ARTIFACT_ROOT", "D:pricing/workbench"),
+    ],
+)
+def test_settings_rejects_windows_drive_paths_under_posix(
+    tmp_path,
+    env_name,
+    windows_path,
+):
+    env = {"PRICING_PROJECT_ROOT": str(tmp_path / "project")}
+    env[env_name] = windows_path
+
+    with pytest.raises(ValueError, match="Windows drive-qualified path.*POSIX/WSL"):
+        Settings.from_env(env)
+
+
+def test_settings_repr_hides_database_secret():
+    secrets = {
+        "MSSQL_PASSWORD": "sentinel-mssql-secret",
+    }
+
+    rendered = repr(Settings.from_env(secrets))
+
+    assert all(secret not in rendered for secret in secrets.values())
+
+
 def test_generated_runtime_files_use_portable_exception_tuple_syntax():
     for path in [
-        Path("pricing_models/mtpl_frequency/modeling.py"),
         Path("scripts/no_docker_services.py"),
     ]:
         source = path.read_text(encoding="utf-8")
@@ -312,15 +419,3 @@ def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
     assert "s.order_index" in loader
     assert "s.lower_bound" in loader
     assert "s.upper_bound" in loader
-
-
-def test_manual_revision_writer_creates_child_package_and_finalizes_published():
-    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(encoding="utf-8")
-
-    assert "parent_rate_package_id" in writer
-    assert "package_status" in writer
-    assert "PUBLISHED" in writer
-    assert "WITH (UPDLOCK, HOLDLOCK)" in writer
-    assert "PRICING_RATE_PACKAGE" in writer
-    assert "PRICING_RATE_CELL" in writer
-    assert "PRICING_COMPILED_RATE_CELL" in writer

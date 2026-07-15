@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS pricing.DATASET_MANIFEST (
     pk_columns_json TEXT NOT NULL,
     target_column TEXT,
     weight_column TEXT,
+    model_frame_sha256 TEXT NOT NULL,
+    frame_hash_metadata_json TEXT NOT NULL,
+    exposure_column TEXT,
+    data_as_of_column TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );
@@ -85,8 +89,18 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (
     UNIQUE (model_name)
 );
 
+CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL_VERSION_RESERVATION (
+    model_id INTEGER NOT NULL,
+    export_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    reserved_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (model_id, export_id),
+    UNIQUE (model_id, model_version)
+);
+
 CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     model_run_id TEXT PRIMARY KEY,
+    parent_model_run_id TEXT,
     model_id INTEGER NOT NULL,
     dag_id TEXT,
     airflow_run_id TEXT,
@@ -98,16 +112,28 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     rate_package_id INTEGER NOT NULL,
     model_name TEXT,
     rating_workbook_path TEXT NOT NULL,
+    rating_workbook_sha256 TEXT NOT NULL,
     publication_receipt_path TEXT,
     publication_receipt_sha256 TEXT,
     model_artifact_path TEXT,
-    effective_from TEXT NOT NULL,
+    candidate_artifact_path TEXT,
+    candidate_artifact_sha256 TEXT,
+    candidate_artifact_format TEXT,
+    candidate_artifact_size_bytes INTEGER,
+    candidate_python_version TEXT,
+    candidate_superglm_version TEXT,
+    model_source_sha256 TEXT,
+    effective_from TEXT,
     run_status TEXT NOT NULL DEFAULT 'SUCCEEDED',
     started_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_ts TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS pricing.UX_MODEL_RUN_RATE_PACKAGE
+ON MODEL_RUN(rate_package_id)
+WHERE rate_package_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
     rate_package_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,13 +143,14 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
     model_version TEXT,
     package_version INTEGER NOT NULL,
     base_rate REAL NOT NULL,
-    effective_from_date TEXT NOT NULL,
+    effective_from_date TEXT,
     effective_to_date TEXT,
     package_status TEXT NOT NULL,
     source_export_id TEXT,
     source_file TEXT,
     publication_receipt_json TEXT,
     publication_receipt_sha256 TEXT,
+    staging_content_sha256 TEXT,
     package_metadata_json TEXT,
     revision_metadata_json TEXT,
     offset_handling TEXT NOT NULL DEFAULT 'UNKNOWN',
