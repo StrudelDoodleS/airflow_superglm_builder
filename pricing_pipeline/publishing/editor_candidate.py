@@ -380,6 +380,13 @@ def load_parent_candidate(
     allowed_root: str | Path,
     model_config: ModelBuildConfig,
 ) -> ParentCandidate:
+    submitted_slot = str(submission.deployment_slot or "").strip().upper()
+    configured_slot = str(model_config.deployment_slot or "").strip().upper()
+    if not submitted_slot or submitted_slot != configured_slot:
+        raise EditorSubmissionError(
+            "explicit model config deployment_slot does not match the editor submission"
+        )
+
     schemas = schema_names_from_connectable(engine)
     query = text(
         f"""
@@ -484,7 +491,7 @@ def load_parent_candidate(
     champion = _load_champion_bundle(
         engine,
         model_id=int(row["model_id"]),
-        deployment_slot=config.deployment_slot,
+        deployment_slot=submitted_slot,
         allowed_root=allowed_root,
         parent_bundle=bundle,
     )

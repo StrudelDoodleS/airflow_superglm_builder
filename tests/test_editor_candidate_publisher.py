@@ -836,6 +836,31 @@ def test_editor_publication_lock_serializes_the_same_submission(tmp_path):
     assert second_acquired.is_set()
 
 
+def test_parent_candidate_rejects_submission_deployment_slot_mismatch_before_sql(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission = SimpleNamespace(
+        model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_PRODUCTION",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: pytest.fail("deployment-slot mismatch reached SQL"),
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="deployment_slot"):
+        editor_candidate.load_parent_candidate(
+            object(),
+            submission,
+            allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
+        )
+
+
 @pytest.mark.parametrize(
     "submission_relative_path",
     [
@@ -857,6 +882,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     submission = SimpleNamespace(
         path=str(configured_root / submission_relative_path),
         model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
         source_package_version=7,
         parent_rate_package_id=107,
         parent_model_run_id=907,
@@ -963,6 +989,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     assert load_calls[0][0] == str(candidate_path)
     assert load_calls[0][1]["allowed_root"] == configured_root
     assert champion_calls[0]["allowed_root"] == configured_root
+    assert champion_calls[0]["deployment_slot"] == submission.deployment_slot
     statement = engine.connection.statements[0][0]
     assert "split_link.manifest_id = mr.manifest_id" in statement
     assert "split_link.dataset_role = 'training'" in statement
