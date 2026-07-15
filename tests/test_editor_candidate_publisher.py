@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.lifecycle import PublishResult
 
 
@@ -16,6 +17,54 @@ EDITOR_CONFIG = SimpleNamespace(
     target_name="claim_count",
     model_type="superglm_poisson",
 )
+
+
+def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModelBuild:
+    workbook_path = workbook_path or tmp_path / "rating_tables.xlsx"
+    values = {
+        "model_id": 17,
+        "model_name": "HOME_FREQ",
+        "model_version": "v4",
+        "model_type": "superglm_poisson",
+        "target_name": "claim_count",
+        "deployment_slot": "HOME_FREQ_UAT",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "export_id": "editor__submission_1",
+        "rating_workbook_path": str(workbook_path),
+        "rating_workbook_sha256": "a" * 64,
+        "created_by": "analyst@example.test",
+        "publication_receipt_path": str(tmp_path / "publication_receipt.json"),
+        "publication_receipt_sha256": "c" * 64,
+        "candidate_artifact_path": str(tmp_path / "candidate_bundle.joblib"),
+        "candidate_artifact_sha256": "d" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+        "model_source_sha256": "b" * 64,
+        "model_frame_sha256": "f" * 64,
+        "metrics": {"editor_training_deviance_delta": 0.009},
+        "metric_scopes": {
+            "editor_training_deviance_delta": "editor_training_parent"
+        },
+    }
+    values.update(overrides)
+    return ApprovedModelBuild(**values)
+
+
+def test_editor_export_carries_only_completed_build_and_editor_publication_values():
+    from dataclasses import fields
+
+    from pricing_pipeline.publishing.editor_candidate import EditorExport
+
+    assert {field.name for field in fields(EditorExport)} == {
+        "completed_build",
+        "publication_receipt",
+        "revision_metadata_json",
+        "edited_model",
+        "bundle",
+    }
 
 
 def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
@@ -51,23 +100,19 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
             model_type="superglm_poisson",
         ),
     )
-    exported = SimpleNamespace(
-        export_id="editor__submission_1",
-        rating_workbook_path=str(workbook_path),
+    build = _editor_build(
+        tmp_path,
+        workbook_path=workbook_path,
         rating_workbook_sha256=editor_candidate.sha256_file(workbook_path),
-        publication_receipt_path=str(tmp_path / "publication_receipt.json"),
-        publication_receipt_sha256="c" * 64,
-        candidate_artifact_path=str(tmp_path / "candidate_bundle.joblib"),
-        candidate_artifact_sha256="d" * 64,
-        candidate_artifact_format="superglm-candidate-joblib-v1",
-        candidate_artifact_size_bytes=321,
-        candidate_python_version="3.14.4",
-        candidate_superglm_version="0.11.0",
+    )
+    exported = SimpleNamespace(
+        completed_build=build,
+        publication_receipt=object(),
         revision_metadata_json=(
             '{"claimed_identity":"prototype-local-not-authenticated","kind":"SUPERGLM_EDITOR"}'
         ),
-        metrics={"editor_training_deviance_delta": 0.009},
-        metric_scopes={"editor_training_deviance_delta": "editor_training_parent"},
+        edited_model=object(),
+        bundle=object(),
     )
     calls = []
     allowed_roots = []
@@ -94,11 +139,13 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         loaded_parent,
         loaded_submission,
         *,
+        created_by,
         allowed_root,
         write_dir,
         published_dir,
     ):
         allowed_roots.append(("edited", allowed_root))
+        assert created_by == "analyst@example.test"
         return exported
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", fake_load_parent_candidate)
@@ -120,16 +167,18 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         publication_is_active = True
         try:
             lineage_writer = kwargs.get("package_lineage_writer")
-            if lineage_writer is not None:
-                lineage_writer(publish_connection, 108)
+            model_run_id = (
+                None if lineage_writer is None else lineage_writer(publish_connection, 108)
+            )
         finally:
             publication_is_active = False
         return PublishResult(
             mlflow_run_id="",
-            export_id=exported.export_id,
+            export_id=build.export_id,
             rate_package_id=108,
             package_version=8,
-            rating_workbook_path=exported.rating_workbook_path,
+            rating_workbook_path=build.rating_workbook_path,
+            model_run_id=model_run_id,
         )
 
     def fake_record_model_run(engine, *, connection, **kwargs):
@@ -174,24 +223,24 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     )
     assert callable(publish_kwargs["package_lineage_writer"])
     assert publish_kwargs["expected_staged_metadata"] == {
-        "export_id": exported.export_id,
+        "export_id": build.export_id,
         "model_id": parent.model_id,
         "model_name": parent.model_name,
         "model_version": parent.model_version,
         "effective_from_date": None,
         "effective_to_date": None,
-        "source_file": str(Path(exported.rating_workbook_path).resolve()),
-        "publication_receipt_sha256": exported.publication_receipt_sha256,
+        "source_file": str(Path(build.rating_workbook_path).resolve()),
+        "publication_receipt_sha256": build.publication_receipt_sha256,
         "staging_content_sha256": "e" * 64,
     }
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id
     assert lineage_kwargs["parent_model_run_id"] == submission.parent_model_run_id
-    assert lineage_kwargs["manifest_id"] == submission.manifest_id
-    assert lineage_kwargs["split_set_id"] == submission.split_set_id
-    assert lineage_kwargs["rating_workbook_sha256"] == exported.rating_workbook_sha256
-    assert lineage_kwargs["mlflow_run_id"] == ""
-    assert lineage_kwargs["candidate_artifact_sha256"] == "d" * 64
+    assert lineage_kwargs["build"] is build
+    assert build.manifest_id == submission.manifest_id
+    assert build.split_set_id == submission.split_set_id
+    assert build.rating_workbook_sha256 == editor_candidate.sha256_file(workbook_path)
+    assert build.candidate_artifact_sha256 == "d" * 64
     assert allowed_roots == [("parent", tmp_path), ("edited", tmp_path)]
 
 
@@ -589,6 +638,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         loaded_parent,
         loaded_submission,
         *,
+        created_by,
         allowed_root,
         write_dir,
         published_dir,
@@ -600,21 +650,21 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         workbook_path = write_dir / "rating_tables.xlsx"
         workbook_path.write_bytes(b"rating workbook")
         attempt_paths.append((write_dir, published_dir))
-        return SimpleNamespace(
-            export_id="editor__submission_1",
-            rating_workbook_path=str(published_dir / "rating_tables.xlsx"),
+        build = _editor_build(
+            tmp_path,
+            workbook_path=published_dir / "rating_tables.xlsx",
             rating_workbook_sha256=editor_candidate.sha256_file(workbook_path),
+            created_by=created_by,
             publication_receipt_path=str(published_dir / "publication_receipt.json"),
-            publication_receipt_sha256="c" * 64,
             candidate_artifact_path=str(published_dir / "candidate_bundle.joblib"),
-            candidate_artifact_sha256="d" * 64,
-            candidate_artifact_format="superglm-candidate-joblib-v1",
             candidate_artifact_size_bytes=11,
-            candidate_python_version="3.14.4",
-            candidate_superglm_version="0.11.0",
-            revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
             metrics={},
             metric_scopes={},
+        )
+        return SimpleNamespace(
+            completed_build=build,
+            publication_receipt=object(),
+            revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
             edited_model=object(),
             bundle=object(),
         )
@@ -688,11 +738,12 @@ def test_editor_publication_rejects_workbook_mutated_during_staging(
         workbook = staging_dir / "rating_tables.xlsx"
         workbook.write_bytes(b"original")
         return SimpleNamespace(
-            export_id="editor__submission_1",
-            rating_workbook_path=str(final_dir / "rating_tables.xlsx"),
-            rating_workbook_sha256=editor_candidate.sha256_file(workbook),
-            publication_receipt_path=str(final_dir / "publication_receipt.json"),
-            publication_receipt_sha256="c" * 64,
+            completed_build=_editor_build(
+                tmp_path,
+                workbook_path=final_dir / "rating_tables.xlsx",
+                rating_workbook_sha256=editor_candidate.sha256_file(workbook),
+                created_by=kwargs["created_by"],
+            ),
         )
 
     def mutate_workbook(*args, **kwargs):
@@ -756,6 +807,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         pk_columns=("id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
+        model_frame_sha256="f" * 64,
         offset_contract=OffsetExportContract(
             handling="EXPORTED_FACTOR",
             source_factor_name="Exposure",
@@ -766,8 +818,14 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         export_weight_name="Exposure",
     )
     parent = SimpleNamespace(
+        model_id=17,
         model_name="HOME_FREQ",
         model_version="20260603",
+        effective_from=None,
+        config=SimpleNamespace(
+            model_type="superglm_poisson",
+            target_name="claim_count",
+        ),
         bundle=bundle,
         champion=editor_candidate.ChampionSnapshot(
             deployment_slot="HOME_FREQ_UAT",
@@ -778,6 +836,10 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     )
     submission = SimpleNamespace(
         submission_id="submission-1",
+        deployment_slot="HOME_FREQ_UAT",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
         reason="Market calibration",
         claimed_identity="analyst@example.test",
         parent_rate_package_id=107,
@@ -828,17 +890,24 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     exported = editor_candidate.export_edited_model(
         parent,
         submission,
+        created_by="publisher@example.test",
         allowed_root=tmp_path,
         write_dir=write_dir,
         published_dir=final_dir,
     )
 
-    assert Path(exported.rating_workbook_path) == final_dir / "rating_tables.xlsx"
-    assert exported.rating_workbook_sha256 == editor_candidate.sha256_file(
+    build = exported.completed_build
+    assert Path(build.rating_workbook_path) == final_dir / "rating_tables.xlsx"
+    assert build.rating_workbook_sha256 == editor_candidate.sha256_file(
         write_dir / "rating_tables.xlsx"
     )
-    assert Path(exported.publication_receipt_path) == final_dir / "publication_receipt.json"
-    assert Path(exported.candidate_artifact_path) == final_dir / "candidate_bundle.joblib"
+    assert Path(build.publication_receipt_path) == final_dir / "publication_receipt.json"
+    assert Path(build.candidate_artifact_path) == final_dir / "candidate_bundle.joblib"
+    assert build.created_by == "publisher@example.test"
+    assert build.manifest_id == submission.manifest_id
+    assert build.split_set_id == submission.split_set_id
+    assert build.model_source_sha256 == submission.model_source_sha256
+    assert build.model_frame_sha256 == bundle.model_frame_sha256
     assert (write_dir / "rating_tables.xlsx").read_bytes() == b"workbook"
     assert (write_dir / "candidate_bundle.joblib").is_file()
     assert not final_dir.exists()

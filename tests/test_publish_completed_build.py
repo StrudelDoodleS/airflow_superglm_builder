@@ -12,11 +12,10 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.models.spec import CompletedModelBuild, CompletedModelBuildError
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.orchestration.publish_completed_build import (
     CandidateSQLLineage,
-    CompletedModelBuild,
-    CompletedModelBuildError,
     CompletedModelPublishResult,
     publish_completed_model_build,
 )
@@ -231,7 +230,7 @@ def test_completed_build_publisher_rejects_untyped_payload(tmp_path, monkeypatch
         lambda engine, export, **kwargs: _completed_publish_result(export),
     )
 
-    with pytest.raises(TypeError, match="CompletedModelBuild"):
+    with pytest.raises(TypeError, match="ApprovedModelBuild"):
         publish_completed_model_build(
             _ValidationEngine(),
             settings=_settings(tmp_path),
@@ -259,7 +258,7 @@ def test_model_export_publisher_returns_typed_result(monkeypatch, tmp_path):
     )
 
     def publish_package(engine, *, package_lineage_writer, **kwargs):
-        package_lineage_writer(connection, 42)
+        model_run_id = package_lineage_writer(connection, 42)
         return PublishResult(
             mlflow_run_id="",
             export_id=export.export_id,
@@ -267,6 +266,7 @@ def test_model_export_publisher_returns_typed_result(monkeypatch, tmp_path):
             package_version=7,
             package_status="PUBLISHED",
             rating_workbook_path=export.rating_workbook_path,
+            model_run_id=model_run_id,
         )
 
     monkeypatch.setattr(pipeline, "publish_rating_package", publish_package)

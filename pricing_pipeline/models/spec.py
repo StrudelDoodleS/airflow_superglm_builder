@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 
-class CompletedModelBuildError(ValueError):
+class ApprovedModelBuildError(ValueError):
     """Raised when an approved notebook build is incomplete or invalid."""
 
 
@@ -54,7 +54,7 @@ class ApprovedModelBuild(BaseModel):
                 location = ".".join(str(item) for item in error.get("loc", ()))
                 message = error.get("msg", "invalid value")
                 details.append(f"{location}: {message}" if location else message)
-            raise CompletedModelBuildError(
+            raise ApprovedModelBuildError(
                 "invalid completed build payload: " + "; ".join(details)
             ) from exc
 
@@ -219,5 +219,6 @@ class ApprovedModelBuild(BaseModel):
 
 
 # Historical public names remain aliases; there is one record and one validator.
+CompletedModelBuildError = ApprovedModelBuildError
 CompletedModelBuild = ApprovedModelBuild
 ModelExportResult = ApprovedModelBuild

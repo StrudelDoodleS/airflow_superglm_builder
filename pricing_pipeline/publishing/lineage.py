@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from pricing_pipeline.models.spec import ApprovedModelBuild
 
 
 class ModelRunIdentityError(RuntimeError):
@@ -51,61 +52,44 @@ def _identity_value(value):
 def record_model_run(
     engine: Engine | None,
     *,
+    build: ApprovedModelBuild,
     dag_id: str,
     airflow_run_id: str,
-    mlflow_run_id: str,
-    manifest_id: str,
-    split_set_id: str | None = None,
-    export_id: str,
-    model_id: int,
-    model_name: str,
-    model_version: str,
     rate_package_id: int | None,
-    rating_workbook_path: str,
-    rating_workbook_sha256: str,
-    run_status: str,
-    created_by: str,
-    publication_receipt_path: str | None = None,
-    publication_receipt_sha256: str | None = None,
-    candidate_artifact_path: str | None = None,
-    candidate_artifact_sha256: str | None = None,
-    candidate_artifact_format: str | None = None,
-    candidate_artifact_size_bytes: int | None = None,
-    candidate_python_version: str | None = None,
-    candidate_superglm_version: str | None = None,
-    model_source_sha256: str | None = None,
-    metrics: Mapping[str, float] | None = None,
-    metric_scopes: Mapping[str, str] | None = None,
-    fold_metrics: Sequence[Mapping[str, int | str | float]] = (),
     parent_model_run_id: int | None = None,
     connection=None,
 ) -> int:
+    manifest_id = build.manifest_id
+    split_set_id = build.split_set_id
+    metrics = build.metrics
+    metric_scopes = build.metric_scopes
+    fold_metrics = build.fold_metrics
     if fold_metrics and split_set_id is None:
         raise ValueError("fold_metrics require split_set_id")
     params = {
         "dag_id": dag_id,
         "airflow_run_id": airflow_run_id,
-        "mlflow_run_id": mlflow_run_id,
+        "mlflow_run_id": build.mlflow_run_id,
         "manifest_id": manifest_id,
         "split_set_id": split_set_id,
-        "export_id": export_id,
-        "model_id": model_id,
-        "model_name": model_name,
-        "model_version": model_version,
+        "export_id": build.export_id,
+        "model_id": build.model_id,
+        "model_name": build.model_name,
+        "model_version": build.model_version,
         "rate_package_id": rate_package_id,
-        "rating_workbook_path": rating_workbook_path,
-        "rating_workbook_sha256": rating_workbook_sha256,
-        "run_status": run_status,
-        "created_by": created_by,
-        "publication_receipt_path": publication_receipt_path,
-        "publication_receipt_sha256": publication_receipt_sha256,
-        "candidate_artifact_path": candidate_artifact_path,
-        "candidate_artifact_sha256": candidate_artifact_sha256,
-        "candidate_artifact_format": candidate_artifact_format,
-        "candidate_artifact_size_bytes": candidate_artifact_size_bytes,
-        "candidate_python_version": candidate_python_version,
-        "candidate_superglm_version": candidate_superglm_version,
-        "model_source_sha256": model_source_sha256,
+        "rating_workbook_path": build.rating_workbook_path,
+        "rating_workbook_sha256": build.rating_workbook_sha256,
+        "run_status": "SUCCESS",
+        "created_by": build.created_by,
+        "publication_receipt_path": build.publication_receipt_path,
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+        "candidate_artifact_path": build.candidate_artifact_path,
+        "candidate_artifact_sha256": build.candidate_artifact_sha256,
+        "candidate_artifact_format": build.candidate_artifact_format,
+        "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
+        "candidate_python_version": build.candidate_python_version,
+        "candidate_superglm_version": build.candidate_superglm_version,
+        "model_source_sha256": build.model_source_sha256,
         "dataset_role": _DATASET_ROLE,
         "split_role": _SPLIT_ROLE,
         "parent_model_run_id": parent_model_run_id,

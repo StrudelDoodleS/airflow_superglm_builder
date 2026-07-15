@@ -22,6 +22,7 @@ def load_staging_to_rating_package(engine, args):
     args.package_version = result.package_version
     args.package_status = result.package_status
     args.was_existing = result.was_existing
+    args.model_run_id = result.model_run_id
     return result.rate_package_id
 
 
@@ -275,12 +276,15 @@ class _FakeNewPackageBegin:
     def __init__(self, connection):
         self.connection = connection
         self.exit_exception = None
+        self.active = False
 
     def __enter__(self):
+        self.active = True
         return self.connection
 
     def __exit__(self, exc_type, exc, tb):
         self.exit_exception = exc
+        self.active = False
         return False
 
 
@@ -350,6 +354,26 @@ def test_package_lineage_writer_runs_inside_transaction_before_final_status():
     }
 
 
+def test_package_lineage_writer_return_id_is_exposed_from_same_transaction():
+    engine = _FakeNewPackageEngine()
+
+    def write_lineage(connection, rate_package_id):
+        assert engine.transaction.active
+        assert connection is engine.connection
+        assert rate_package_id == 42
+        return 908
+
+    result = publish_rating_package(
+        engine,
+        export_id="export-1",
+        created_by="airflow",
+        package_lineage_writer=write_lineage,
+    )
+
+    assert engine.transaction.active is False
+    assert result.model_run_id == 908
+
+
 def test_package_lineage_failure_prevents_final_status_and_rolls_back_transaction():
     engine = _FakeNewPackageEngine()
     failure = RuntimeError("lineage write failed")
@@ -384,6 +408,7 @@ def test_existing_compatible_package_does_not_rewrite_lineage():
 
     assert calls == []
     assert args.was_existing is True
+    assert args.model_run_id is None
 
 
 def test_package_writer_rejects_replaced_staging_rate_content():

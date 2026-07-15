@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
@@ -122,7 +123,7 @@ def publish_rating_package(
     parent_rate_package_id: int | None = None,
     revision_metadata_json: str | None = None,
     draft_validator=None,
-    package_lineage_writer=None,
+    package_lineage_writer: Callable[[Connection, int], int | None] | None = None,
     expected_staged_metadata: Mapping[str, object] | None = None,
 ) -> PublishResult:
     revision_metadata_json = _canonical_revision_metadata(revision_metadata_json)
@@ -130,6 +131,7 @@ def publish_rating_package(
         raise TypeError("draft_validator must be callable")
     if package_lineage_writer is not None and not callable(package_lineage_writer):
         raise TypeError("package_lineage_writer must be callable")
+    model_run_id: int | None = None
     with engine.begin() as con:
         acquire_staging_export_lock(con, export_id)
         requested_package_status = package_status
@@ -807,7 +809,7 @@ def publish_rating_package(
                 raise TypeError("draft_validator must be callable")
             draft_validator(con, int(rate_package_id))
         if package_lineage_writer is not None:
-            package_lineage_writer(con, int(rate_package_id))
+            model_run_id = package_lineage_writer(con, int(rate_package_id))
 
         con.execute(
             text("""
@@ -829,4 +831,5 @@ def publish_rating_package(
         rating_workbook_path="",
         package_status=requested_package_status,
         was_existing=False,
+        model_run_id=model_run_id,
     )

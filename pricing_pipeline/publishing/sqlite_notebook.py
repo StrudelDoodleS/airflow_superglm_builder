@@ -11,9 +11,8 @@ from sqlalchemy import text
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.offline_sqlite import local_publish_lock
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import ApprovedModelBuild, ApprovedModelBuildError
 from pricing_pipeline.orchestration.publish_completed_build import (
-    CompletedModelBuild,
-    CompletedModelBuildError,
     CompletedModelPublishResult,
     _verify_candidate_artifact,
     load_candidate_sql_lineage,
@@ -162,7 +161,7 @@ def publish_sqlite_candidate(
     settings: Settings,
     model_id: int,
     model_config: ModelBuildConfig,
-    completed_build: CompletedModelBuild,
+    completed_build: ApprovedModelBuild,
     created_by: str,
 ) -> CompletedModelPublishResult:
     """Publish notebook audit evidence into the persistent local SQLite store."""
@@ -183,12 +182,12 @@ def _publish_sqlite_candidate_locked(
     *,
     model_id: int,
     model_config: ModelBuildConfig,
-    completed_build: CompletedModelBuild,
+    completed_build: ApprovedModelBuild,
     created_by: str,
     artifact_root: str | Path,
 ) -> CompletedModelPublishResult:
-    if not isinstance(completed_build, CompletedModelBuild):
-        raise TypeError("completed_build must be a CompletedModelBuild")
+    if not isinstance(completed_build, ApprovedModelBuild):
+        raise TypeError("completed_build must be an ApprovedModelBuild")
     build = completed_build
     mismatches = []
     for field_name, actual, expected in (
@@ -201,29 +200,29 @@ def _publish_sqlite_candidate_locked(
         if actual != expected:
             mismatches.append(f"{field_name} build={actual!r} registered={expected!r}")
     if mismatches:
-        raise CompletedModelBuildError(
+        raise ApprovedModelBuildError(
             "approved build does not match the registered model: " + "; ".join(mismatches)
         )
     workbook_path = Path(build.rating_workbook_path)
     if not workbook_path.is_file():
-        raise CompletedModelBuildError(
+        raise ApprovedModelBuildError(
             f"rating_workbook_path does not exist: {workbook_path.as_posix()}"
         )
     actual_workbook_sha256 = sha256_file(workbook_path)
     if actual_workbook_sha256 != build.rating_workbook_sha256:
-        raise CompletedModelBuildError(
+        raise ApprovedModelBuildError(
             "rating workbook SHA-256 does not match the completed build: "
             f"expected={build.rating_workbook_sha256!r}, actual={actual_workbook_sha256!r}"
         )
     manifest_id = str(build.manifest_id or "").strip()
     if not manifest_id:
-        raise CompletedModelBuildError(
+        raise ApprovedModelBuildError(
             "local notebook publication requires an existing manifest_id"
         )
     split_set_id = None if build.split_set_id is None else str(build.split_set_id).strip()
     export_id = str(build.export_id or "").strip()
     if not export_id:
-        raise CompletedModelBuildError("local notebook publication requires an export_id")
+        raise ApprovedModelBuildError("local notebook publication requires an export_id")
     if build.candidate_artifact_path is not None:
         sql_lineage = load_candidate_sql_lineage(
             engine,
@@ -232,11 +231,6 @@ def _publish_sqlite_candidate_locked(
         )
         _verify_candidate_artifact(
             build,
-            model_name=model_config.model_name,
-            model_version=build.model_version,
-            export_id=export_id,
-            manifest_id=manifest_id,
-            split_set_id=split_set_id,
             sql_lineage=sql_lineage,
             allowed_root=artifact_root,
         )
@@ -258,7 +252,7 @@ def _publish_sqlite_candidate_locked(
     )
     staged_workbook_sha256 = sha256_file(workbook_path)
     if staged_workbook_sha256 != build.rating_workbook_sha256:
-        raise CompletedModelBuildError(
+        raise ApprovedModelBuildError(
             "rating workbook changed during local staging: "
             f"expected={build.rating_workbook_sha256!r}, actual={staged_workbook_sha256!r}"
         )
@@ -340,12 +334,12 @@ def _publish_sqlite_candidate_locked(
             {"model_id": model_id, "export_id": export_id},
         ).scalar_one_or_none()
         if reserved_version is None:
-            raise CompletedModelBuildError(
+            raise ApprovedModelBuildError(
                 f"local export {export_id!r} has no reserved model version; "
                 "build it through build_candidate before publication"
             )
         if str(reserved_version) != build.model_version:
-            raise CompletedModelBuildError(
+            raise ApprovedModelBuildError(
                 f"local export {export_id!r} reserved model version "
                 f"{reserved_version!r}, not {build.model_version!r}"
             )
@@ -355,7 +349,9 @@ def _publish_sqlite_candidate_locked(
             {"manifest_id": manifest_id},
         ).scalar_one_or_none()
         if manifest_exists is None:
-            raise CompletedModelBuildError(f"local manifest_id {manifest_id!r} does not exist")
+            raise ApprovedModelBuildError(
+                f"local manifest_id {manifest_id!r} does not exist"
+            )
         if split_set_id is not None:
             split_exists = connection.execute(
                 text(
@@ -366,7 +362,7 @@ def _publish_sqlite_candidate_locked(
                 {"split_set_id": split_set_id, "manifest_id": manifest_id},
             ).scalar_one_or_none()
             if split_exists is None:
-                raise CompletedModelBuildError(
+                raise ApprovedModelBuildError(
                     f"local split_set_id {split_set_id!r} does not match the manifest"
                 )
 
@@ -608,7 +604,7 @@ def _publish_sqlite_candidate_locked(
                 },
             )
         if build.fold_metrics and split_set_id is None:
-            raise CompletedModelBuildError(
+            raise ApprovedModelBuildError(
                 "fold metrics require split_set_id in local notebook publication"
             )
         for metric in build.fold_metrics:
@@ -703,7 +699,7 @@ def _staged_export_conflicts(
     *,
     model_id: int,
     model_config: ModelBuildConfig,
-    build: CompletedModelBuild,
+    build: ApprovedModelBuild,
     export_id: str,
 ) -> list[str]:
     expected = {
@@ -727,7 +723,7 @@ def _staged_export_conflicts(
 def _local_publication_conflicts(
     existing,
     *,
-    build: CompletedModelBuild,
+    build: ApprovedModelBuild,
     manifest_id: str,
     split_set_id: str | None,
     staging_content_sha256: str | None,
@@ -764,7 +760,7 @@ def _model_run_evidence_conflicts(
     connection,
     existing,
     *,
-    build: CompletedModelBuild,
+    build: ApprovedModelBuild,
     export_id: str,
     manifest_id: str,
     split_set_id: str | None,

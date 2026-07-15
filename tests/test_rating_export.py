@@ -448,22 +448,23 @@ class _Engine:
         return _Begin(self.connection)
 
 
-def _model_run_kwargs():
-    return {
-        "dag_id": "pricing.model.build",
-        "airflow_run_id": "notebook__2026-07-12",
-        "mlflow_run_id": "",
-        "manifest_id": "manifest-1",
-        "split_set_id": "split-1",
-        "export_id": "export-1",
+def _model_run_build(**overrides):
+    values = {
         "model_id": 17,
         "model_name": "MTPL_FREQ",
         "model_version": "v1",
-        "rate_package_id": 42,
+        "model_type": "superglm_poisson",
+        "target_name": "ClaimNb",
+        "deployment_slot": "MTPL_FREQ_UAT",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "export_id": "export-1",
         "rating_workbook_path": "/tmp/rating.xlsx",
         "rating_workbook_sha256": "f" * 64,
-        "run_status": "SUCCESS",
         "created_by": "analyst@example.test",
+        "mlflow_run_id": None,
+        "publication_receipt_path": "/tmp/publication_receipt.json",
+        "publication_receipt_sha256": "c" * 64,
         "candidate_artifact_path": "/tmp/candidate.joblib",
         "candidate_artifact_sha256": "a" * 64,
         "candidate_artifact_format": "superglm-candidate-joblib-v1",
@@ -471,16 +472,47 @@ def _model_run_kwargs():
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
         "model_source_sha256": "b" * 64,
+        "model_frame_sha256": "d" * 64,
+    }
+    values.update(overrides)
+    return ModelExportResult(**values)
+
+
+def _model_run_kwargs():
+    return {
+        "build": _model_run_build(),
+        "dag_id": "pricing.model.build",
+        "airflow_run_id": "notebook__2026-07-12",
+        "rate_package_id": 42,
         "parent_model_run_id": 409,
     }
 
 
 def _model_run_row():
+    kwargs = _model_run_kwargs()
+    build = kwargs.pop("build")
     return {
         "model_run_id": 501,
-        **_model_run_kwargs(),
-        "publication_receipt_path": None,
-        "publication_receipt_sha256": None,
+        **kwargs,
+        "mlflow_run_id": build.mlflow_run_id,
+        "manifest_id": build.manifest_id,
+        "export_id": build.export_id,
+        "model_id": build.model_id,
+        "model_name": build.model_name,
+        "model_version": build.model_version,
+        "rating_workbook_path": build.rating_workbook_path,
+        "rating_workbook_sha256": build.rating_workbook_sha256,
+        "run_status": "SUCCESS",
+        "created_by": build.created_by,
+        "publication_receipt_path": build.publication_receipt_path,
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+        "candidate_artifact_path": build.candidate_artifact_path,
+        "candidate_artifact_sha256": build.candidate_artifact_sha256,
+        "candidate_artifact_format": build.candidate_artifact_format,
+        "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
+        "candidate_python_version": build.candidate_python_version,
+        "candidate_superglm_version": build.candidate_superglm_version,
+        "model_source_sha256": build.model_source_sha256,
     }
 
 
@@ -533,13 +565,18 @@ def _model_run_associations():
 
 def test_record_model_run_writes_identity_associations_parent_and_metrics():
     connection = _LineageConnection()
+    kwargs = _model_run_kwargs()
+    kwargs["build"] = _model_run_build(
+        metrics={"deviance": 0.42},
+        metric_scopes={"deviance": "cv"},
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        ),
+    )
 
     model_run_id = lineage.record_model_run(
         _Engine(connection),
-        **_model_run_kwargs(),
-        metrics={"deviance": 0.42},
-        metric_scopes={"deviance": "cv"},
-        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
+        **kwargs,
     )
 
     assert model_run_id == 501
@@ -592,7 +629,10 @@ def test_record_model_run_exact_retry_is_read_only():
 def test_record_model_run_rejects_changed_immutable_retry(field_name, changed_value):
     connection = _LineageConnection(existing=_model_run_row())
     kwargs = _model_run_kwargs()
-    kwargs[field_name] = changed_value
+    if field_name == "parent_model_run_id":
+        kwargs[field_name] = changed_value
+    else:
+        kwargs["build"] = kwargs["build"].model_copy(update={field_name: changed_value})
 
     with pytest.raises(lineage.ModelRunIdentityError, match=field_name):
         lineage.record_model_run(None, connection=connection, **kwargs)
@@ -885,7 +925,7 @@ def test_publish_model_export_stages_packages_and_records_lineage(
 
     def publish(engine, **kwargs):
         calls.append(("publish", engine, kwargs))
-        kwargs["package_lineage_writer"](connection, 42)
+        model_run_id = kwargs["package_lineage_writer"](connection, 42)
         return PublishResult(
             mlflow_run_id="",
             export_id="export-1",
@@ -893,6 +933,7 @@ def test_publish_model_export_stages_packages_and_records_lineage(
             package_version=3,
             rating_workbook_path="",
             package_status="PUBLISHED",
+            model_run_id=model_run_id,
         )
 
     monkeypatch.setattr(pipeline, "publish_rating_package", publish)
@@ -922,9 +963,8 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
     lineage_call = next(call for call in calls if call[0] == "lineage")
     assert lineage_call[1] is connection
-    assert lineage_call[2]["manifest_id"] == "manifest-1"
-    assert lineage_call[2]["split_set_id"] == "split-1"
-    assert lineage_call[2]["rating_workbook_sha256"] == export.rating_workbook_sha256
+    assert lineage_call[2]["build"] is export
+    assert lineage_call[2]["rate_package_id"] == 42
 
 
 def test_publish_model_export_returns_verified_existing_result_without_rewriting_lineage(

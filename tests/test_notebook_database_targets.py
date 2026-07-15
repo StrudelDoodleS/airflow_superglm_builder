@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import text
 
 from pricing_pipeline.infra.config import Settings
-from pricing_pipeline.orchestration.publish_completed_build import (
+from pricing_pipeline.models.spec import (
     CompletedModelBuild,
     CompletedModelBuildError,
 )
@@ -711,9 +711,6 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     tmp_path,
 ):
     from pricing_pipeline import notebook as api
-    from pricing_pipeline.orchestration.publish_completed_build import (
-        CompletedModelBuildError,
-    )
     from pricing_pipeline.publishing import sqlite_notebook
     from pricing_pipeline.workbench.artifacts import BUNDLE_FORMAT
 

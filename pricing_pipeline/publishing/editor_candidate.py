@@ -19,6 +19,7 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.rating_export import export_rating_tables
@@ -86,21 +87,9 @@ class ParentCandidate:
 
 @dataclass(frozen=True)
 class EditorExport:
-    export_id: str
-    rating_workbook_path: str
-    rating_workbook_sha256: str
-    publication_receipt_path: str
-    publication_receipt_sha256: str
+    completed_build: ApprovedModelBuild
     publication_receipt: SuperGLMPublicationReceipt
-    candidate_artifact_path: str
-    candidate_artifact_sha256: str
-    candidate_artifact_format: str
-    candidate_artifact_size_bytes: int
-    candidate_python_version: str
-    candidate_superglm_version: str
     revision_metadata_json: str
-    metrics: dict[str, float]
-    metric_scopes: dict[str, str]
     edited_model: Any
     bundle: CandidateBundle
 
@@ -134,6 +123,9 @@ def publish_editor_submission(
     created_by: str,
     model_config: ModelBuildConfig,
 ) -> EditorPublicationResult:
+    publisher_identity = str(created_by).strip()
+    if not publisher_identity:
+        raise EditorSubmissionError("publisher identity is required")
     submission = load_verified_submission(
         submission_path,
         submission_sha256,
@@ -168,7 +160,7 @@ def publish_editor_submission(
                 attempt=attempt,
                 dag_id=dag_id,
                 airflow_run_id=airflow_run_id,
-                created_by=created_by,
+                created_by=publisher_identity,
                 model_config=model_config,
             )
         finally:
@@ -849,6 +841,7 @@ def export_edited_model(
     parent: ParentCandidate,
     submission: EditorSubmission,
     *,
+    created_by: str,
     allowed_root: str | Path,
     write_dir: str | Path,
     published_dir: str | Path,
@@ -949,22 +942,37 @@ def export_edited_model(
         },
         "champion_comparison": champion_comparison,
     }
-    return EditorExport(
+    completed_build = ApprovedModelBuild(
+        model_id=parent.model_id,
+        model_name=parent.model_name,
+        model_version=parent.model_version,
+        model_type=parent.config.model_type,
+        target_name=parent.config.target_name,
+        deployment_slot=submission.deployment_slot,
+        manifest_id=submission.manifest_id,
+        split_set_id=submission.split_set_id,
         export_id=_editor_export_id(submission),
         rating_workbook_path=str(workbook_path),
         rating_workbook_sha256=workbook_sha256,
+        effective_from=parent.effective_from,
+        created_by=created_by,
         publication_receipt_path=str(receipt_path),
         publication_receipt_sha256=receipt_sha256,
-        publication_receipt=receipt,
         candidate_artifact_path=artifact.path,
         candidate_artifact_sha256=artifact.sha256,
         candidate_artifact_format=artifact.format,
         candidate_artifact_size_bytes=artifact.size_bytes,
         candidate_python_version=artifact.python_version,
         candidate_superglm_version=artifact.superglm_version,
-        revision_metadata_json=_canonical_json(revision_metadata),
+        model_source_sha256=submission.model_source_sha256,
+        model_frame_sha256=edited_bundle.model_frame_sha256,
         metrics=metrics,
         metric_scopes=metric_scopes,
+    )
+    return EditorExport(
+        completed_build=completed_build,
+        publication_receipt=receipt,
+        revision_metadata_json=_canonical_json(revision_metadata),
         edited_model=edited_model,
         bundle=edited_bundle,
     )
@@ -1096,31 +1104,33 @@ def _publish_new_editor_submission(
     exported = export_edited_model(
         parent,
         submission,
+        created_by=created_by,
         allowed_root=allowed_root,
         write_dir=attempt.staging_dir,
         published_dir=attempt.final_dir,
     )
+    build = exported.completed_build
     os.rename(attempt.staging_dir, attempt.final_dir)
     try:
-        if sha256_file(exported.rating_workbook_path) != exported.rating_workbook_sha256:
+        if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook SHA-256 changed before staging")
         content_sha256 = stage_rating_export(
             engine,
-            workbook_path=Path(exported.rating_workbook_path),
-            export_id=exported.export_id,
-            model_name=parent.model_name,
-            model_version=parent.model_version,
-            target_name=parent.config.target_name,
-            model_type=parent.config.model_type,
-            effective_from=parent.effective_from,
+            workbook_path=Path(build.rating_workbook_path),
+            export_id=build.export_id,
+            model_name=build.model_name,
+            model_version=build.model_version,
+            target_name=build.target_name,
+            model_type=build.model_type,
+            effective_from=build.effective_from,
             effective_to=parent.effective_to,
-            created_by=created_by,
+            created_by=build.created_by,
             replace=True,
-            model_id=parent.model_id,
-            publication_receipt_path=exported.publication_receipt_path,
-            publication_receipt_sha256=exported.publication_receipt_sha256,
+            model_id=build.model_id,
+            publication_receipt_path=build.publication_receipt_path,
+            publication_receipt_sha256=build.publication_receipt_sha256,
         )
-        if sha256_file(exported.rating_workbook_path) != exported.rating_workbook_sha256:
+        if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook changed during staging")
         revision_metadata_json = _revision_with_publisher_identity(
             exported.revision_metadata_json,
@@ -1136,59 +1146,35 @@ def _publish_new_editor_submission(
                 publication_receipt=exported.publication_receipt,
             )
 
-        model_run_id: int | None = None
-
-        def write_package_lineage(connection, rate_package_id: int) -> None:
-            nonlocal model_run_id
-            model_run_id = record_model_run(
+        def write_package_lineage(connection, rate_package_id: int) -> int:
+            return record_model_run(
                 None,
-                connection=connection,
+                build=build,
                 dag_id=dag_id,
                 airflow_run_id=airflow_run_id,
-                mlflow_run_id="",
-                manifest_id=submission.manifest_id,
-                split_set_id=submission.split_set_id,
-                export_id=exported.export_id,
-                model_id=parent.model_id,
-                model_name=parent.model_name,
-                model_version=parent.model_version,
                 rate_package_id=rate_package_id,
-                rating_workbook_path=exported.rating_workbook_path,
-                rating_workbook_sha256=exported.rating_workbook_sha256,
-                run_status="SUCCESS",
-                created_by=created_by,
-                publication_receipt_path=exported.publication_receipt_path,
-                publication_receipt_sha256=exported.publication_receipt_sha256,
-                candidate_artifact_path=exported.candidate_artifact_path,
-                candidate_artifact_sha256=exported.candidate_artifact_sha256,
-                candidate_artifact_format=exported.candidate_artifact_format,
-                candidate_artifact_size_bytes=exported.candidate_artifact_size_bytes,
-                candidate_python_version=exported.candidate_python_version,
-                candidate_superglm_version=exported.candidate_superglm_version,
-                model_source_sha256=submission.model_source_sha256,
-                metrics=exported.metrics,
-                metric_scopes=exported.metric_scopes,
                 parent_model_run_id=submission.parent_model_run_id,
+                connection=connection,
             )
 
         published = publish_rating_package(
             engine,
-            export_id=exported.export_id,
-            created_by=created_by,
+            export_id=build.export_id,
+            created_by=build.created_by,
             package_status="PUBLISHED",
             parent_rate_package_id=submission.parent_rate_package_id,
             revision_metadata_json=revision_metadata_json,
             draft_validator=validate_draft,
             package_lineage_writer=write_package_lineage,
             expected_staged_metadata={
-                "export_id": exported.export_id,
-                "model_id": parent.model_id,
-                "model_name": parent.model_name,
-                "model_version": parent.model_version,
-                "effective_from_date": parent.effective_from,
+                "export_id": build.export_id,
+                "model_id": build.model_id,
+                "model_name": build.model_name,
+                "model_version": build.model_version,
+                "effective_from_date": build.effective_from,
                 "effective_to_date": parent.effective_to,
-                "source_file": str(Path(exported.rating_workbook_path).resolve()),
-                "publication_receipt_sha256": exported.publication_receipt_sha256,
+                "source_file": str(Path(build.rating_workbook_path).resolve()),
+                "publication_receipt_sha256": build.publication_receipt_sha256,
                 "staging_content_sha256": content_sha256,
             },
         )
@@ -1207,15 +1193,15 @@ def _publish_new_editor_submission(
     except BaseException:
         _remove_path(attempt.final_dir)
         raise
-    if model_run_id is None:
+    if published.model_run_id is None:
         raise RuntimeError("package publication did not record editor lineage")
     return EditorPublicationResult(
         submission_id=submission.submission_id,
-        model_name=parent.model_name,
+        model_name=build.model_name,
         parent_rate_package_id=submission.parent_rate_package_id,
         rate_package_id=published.rate_package_id,
         package_version=published.package_version,
-        model_run_id=model_run_id,
+        model_run_id=published.model_run_id,
         package_status=published.package_status,
         was_existing=published.was_existing,
     )

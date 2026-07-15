@@ -12,6 +12,7 @@ class PublishResult:
     rating_workbook_path: str
     package_status: str = "PUBLISHED"
     was_existing: bool = False
+    model_run_id: int | None = None
 
 
 @dataclass(frozen=True)

@@ -9,10 +9,14 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ModelExportResult
-from pricing_pipeline.orchestration.publish_completed_build import (
+from pricing_pipeline.models.spec import (
+    ApprovedModelBuild,
+    ApprovedModelBuildError,
     CompletedModelBuild,
     CompletedModelBuildError,
+    ModelExportResult,
+)
+from pricing_pipeline.orchestration.publish_completed_build import (
     publish_completed_model_build,
 )
 from pricing_pipeline.publishing.lifecycle import CompletedModelPublishResult
@@ -88,7 +92,8 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
 
 
 def test_completed_build_and_export_are_one_record_type():
-    assert CompletedModelBuild is ModelExportResult
+    assert ApprovedModelBuild is CompletedModelBuild is ModelExportResult
+    assert ApprovedModelBuildError is CompletedModelBuildError
 
 
 @pytest.mark.parametrize(

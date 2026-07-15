@@ -7,10 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pricing_pipeline.models.spec import CompletedModelBuild, CompletedModelBuildError
 from pricing_pipeline.orchestration.publish_completed_build import (
     CandidateSQLLineage,
-    CompletedModelBuild,
-    CompletedModelBuildError,
     _verify_candidate_artifact,
 )
 from pricing_pipeline.models.config import ModelBuildConfig
@@ -84,19 +83,11 @@ def test_completed_build_rejects_candidate_model_identity_mismatch(
     published_value,
 ):
     _, build = _candidate(tmp_path)
-    published_identity = {
-        "model_name": "CLAIM_FREQ",
-        "model_version": "20260603",
-        "export_id": "export-1",
-    }
-    published_identity[identity_field] = published_value
+    build = build.model_copy(update={identity_field: published_value})
 
     with pytest.raises(CompletedModelBuildError, match=identity_field):
         _verify_candidate_artifact(
             build,
-            **published_identity,
-            manifest_id="manifest-1",
-            split_set_id="split-1",
             sql_lineage=CandidateSQLLineage(
                 manifest_id="manifest-1",
                 row_count=1,
@@ -114,11 +105,6 @@ def test_completed_build_accepts_matching_candidate_model_identity(tmp_path):
 
     _verify_candidate_artifact(
         build,
-        model_name=bundle.model_name,
-        model_version=bundle.model_version,
-        export_id=bundle.export_id,
-        manifest_id=bundle.manifest_id,
-        split_set_id=bundle.split_set_id,
         sql_lineage=CandidateSQLLineage(
             manifest_id=bundle.manifest_id,
             row_count=1,
@@ -161,11 +147,6 @@ def test_completed_build_rejects_model_frame_digest_mismatch(
     with pytest.raises(CompletedModelBuildError, match="model_frame_sha256"):
         _verify_candidate_artifact(
             build,
-            model_name=bundle.model_name,
-            model_version=bundle.model_version,
-            export_id=bundle.export_id,
-            manifest_id=bundle.manifest_id,
-            split_set_id=bundle.split_set_id,
             sql_lineage=CandidateSQLLineage(
                 manifest_id=bundle.manifest_id,
                 row_count=1,

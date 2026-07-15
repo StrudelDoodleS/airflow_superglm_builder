@@ -47,42 +47,14 @@ def publish_model_export(
     else:
         model_id = int(validated_model_id)
     _validate_export_matches_config(export, model_config, model_id=model_id)
-    lineage_kwargs = {
-        "dag_id": "notebook",
-        "airflow_run_id": export.export_id,
-        "mlflow_run_id": export.mlflow_run_id,
-        "manifest_id": export.manifest_id,
-        "split_set_id": export.split_set_id,
-        "export_id": export.export_id,
-        "model_id": export.model_id,
-        "model_name": export.model_name,
-        "model_version": export.model_version,
-        "rating_workbook_path": export.rating_workbook_path,
-        "rating_workbook_sha256": export.rating_workbook_sha256,
-        "run_status": "SUCCESS",
-        "created_by": export.created_by,
-        "publication_receipt_path": export.publication_receipt_path,
-        "publication_receipt_sha256": export.publication_receipt_sha256,
-        "metrics": export.metrics,
-        "metric_scopes": export.metric_scopes,
-        "fold_metrics": export.fold_metrics,
-        "candidate_artifact_path": export.candidate_artifact_path,
-        "candidate_artifact_sha256": export.candidate_artifact_sha256,
-        "candidate_artifact_format": export.candidate_artifact_format,
-        "candidate_artifact_size_bytes": export.candidate_artifact_size_bytes,
-        "candidate_python_version": export.candidate_python_version,
-        "candidate_superglm_version": export.candidate_superglm_version,
-        "model_source_sha256": export.model_source_sha256,
-    }
-    model_run_id: int | None = None
-
-    def write_package_lineage(connection, rate_package_id: int) -> None:
-        nonlocal model_run_id
-        model_run_id = record_model_run(
+    def write_package_lineage(connection, rate_package_id: int) -> int:
+        return record_model_run(
             None,
-            connection=connection,
-            **lineage_kwargs,
+            build=export,
+            dag_id="notebook",
+            airflow_run_id=export.export_id,
             rate_package_id=rate_package_id,
+            connection=connection,
         )
 
     staging_kwargs = {
@@ -140,7 +112,7 @@ def publish_model_export(
                 f"existing package identity changed for export_id {export.export_id!r}"
             )
         return existing
-    if model_run_id is None:
+    if publish_result.model_run_id is None:
         raise RuntimeError("package publication did not record scheduled model lineage")
 
     return CompletedModelPublishResult(
@@ -154,7 +126,7 @@ def publish_model_export(
         package_version=publish_result.package_version,
         package_status=publish_result.package_status,
         rating_workbook_path=export.rating_workbook_path,
-        model_run_id=model_run_id,
+        model_run_id=publish_result.model_run_id,
         mlflow_run_id=export.mlflow_run_id or None,
         publication_receipt_path=export.publication_receipt_path,
         publication_receipt_sha256=export.publication_receipt_sha256,
