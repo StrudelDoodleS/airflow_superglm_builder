@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
@@ -368,6 +369,56 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         model.config,
         "analyst@example.test",
     )
+
+
+def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+    from pricing_pipeline.modeling.standard_superglm import StandardSuperGLMError
+
+    context = replace(
+        _context(api, tmp_path),
+        mode="local",
+        destination="local SQLite database",
+    )
+    model = _registered_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10],
+            "claim_count": [0.0],
+            "exposure": [1.0],
+            "age": [25.0],
+            "region": ["N"],
+        }
+    )
+
+    monkeypatch.setattr(
+        api,
+        "resolve_sqlite_model_version",
+        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+    )
+    monkeypatch.setattr(
+        api,
+        "run_standard_superglm_build",
+        lambda *args, **kwargs: pytest.fail("candidate artifacts were built"),
+    )
+
+    with pytest.raises(
+        StandardSuperGLMError,
+        match="superglm_model must be an unfitted, copyable SuperGLM model",
+    ):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=SimpleNamespace(_result=object()),
+            data_as_of="2026-06-30",
+        )
+
+    assert not context.settings.workbench_artifact_root.exists()
+    assert not context.settings.validation_split_artifact_root.exists()
 
 
 @pytest.mark.parametrize(

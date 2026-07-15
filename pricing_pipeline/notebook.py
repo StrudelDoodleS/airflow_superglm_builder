@@ -27,6 +27,7 @@ from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
+    StandardSuperGLMError,
     canonical_row_identity_index,
     run_standard_superglm_build,
 )
@@ -408,6 +409,10 @@ def build_candidate(
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
     pricing.require_write("build_candidate")
+    if getattr(superglm_model, "_result", None) is not None:
+        raise StandardSuperGLMError(
+            "superglm_model must be an unfitted, copyable SuperGLM model"
+        )
     spec = model.spec
     required_columns = {
         *spec.features,

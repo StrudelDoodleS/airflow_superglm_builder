@@ -93,6 +93,10 @@ def run_standard_superglm_build(
         inputs,
         pk_columns=manifest_spec.pk_columns,
     )
+    if getattr(superglm_model, "_result", None) is not None:
+        raise StandardSuperGLMError(
+            "superglm_model must be an unfitted, copyable SuperGLM model"
+        )
     try:
         cv_model = deepcopy(superglm_model)
         final_model = deepcopy(superglm_model)

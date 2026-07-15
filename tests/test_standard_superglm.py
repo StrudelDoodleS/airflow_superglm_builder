@@ -301,6 +301,66 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
     assert not (tmp_path / "splits").exists()
 
 
+def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    from superglm import Numeric, SuperGLM
+
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": np.arange(20),
+            "target": np.resize([0.0, 1.0], 20),
+            "age": np.linspace(20.0, 60.0, 20),
+        }
+    )
+    superglm_model = SuperGLM(
+        features={"age": Numeric()},
+        selection_penalty=0.0,
+    ).fit(frame[["age"]], frame["target"])
+    assert superglm_model._result is not None
+
+    monkeypatch.setattr(
+        api,
+        "deepcopy",
+        lambda model: pytest.fail(f"fitted model was copied: {model!r}"),
+    )
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="superglm_model must be an unfitted, copyable SuperGLM model",
+    ):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=_identity_bound_inputs(api, frame),
+            superglm_model=superglm_model,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_id=17,
+            model_config=_model_config(),
+            model_version="v1",
+            export_id="export-1",
+            effective_from=None,
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+        )
+
+    assert not (tmp_path / "run").exists()
+    assert not (tmp_path / "splits").exists()
+
+
 def test_standard_runner_rejects_model_source_drift_during_training(
     tmp_path,
     monkeypatch,
