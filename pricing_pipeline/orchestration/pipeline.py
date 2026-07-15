@@ -82,7 +82,6 @@ def publish_model_export(
         engine,
         export_id=export.export_id,
         created_by=export.created_by,
-        package_status="PUBLISHED",
         package_lineage_writer=write_package_lineage,
         expected_staged_metadata={
             "export_id": export.export_id,

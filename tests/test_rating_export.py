@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -166,6 +166,30 @@ def _publication_receipt(
         term_metadata=term_metadata if term_metadata is not None else default_term_metadata,
         offset_contract=offset_contract,
     )
+
+
+def test_build_staging_frames_accepts_mapping_and_uses_standard_layout(tmp_path: Path):
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    args = staging.StagingExport(
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_version="v1",
+        effective_from=None,
+        effective_to=None,
+        interaction_features=MappingProxyType({}),
+        created_by="analyst@example.test",
+        replace=False,
+        model_id=17,
+    )
+
+    export, rates, _levels = staging.build_staging_frames(args)
+
+    assert export.iloc[0]["base_rate"] == pytest.approx(0.123)
+    assert export.iloc[0]["source_file"] == str(workbook_path.resolve())
+    assert rates.iloc[0]["term_name"] == "TermMonths"
 
 
 def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path: Path):
@@ -960,6 +984,7 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     assert stage_call[2]["workbook_path"] == Path(export.rating_workbook_path)
     assert stage_call[2]["publication_receipt_path"] == export.publication_receipt_path
     publish_call = next(call for call in calls if call[0] == "publish")
+    assert "package_status" not in publish_call[2]
     assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
     lineage_call = next(call for call in calls if call[0] == "lineage")
     assert lineage_call[1] is connection

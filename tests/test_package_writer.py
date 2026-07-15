@@ -1,4 +1,6 @@
+from inspect import signature
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -12,9 +14,8 @@ def load_staging_to_rating_package(engine, args):
         engine,
         export_id=args.export_id,
         created_by=args.created_by,
-        package_status=args.package_status,
         parent_rate_package_id=getattr(args, "parent_rate_package_id", None),
-        revision_metadata_json=getattr(args, "revision_metadata_json", None),
+        revision_metadata=getattr(args, "revision_metadata", None),
         draft_validator=getattr(args, "draft_validator", None),
         package_lineage_writer=getattr(args, "package_lineage_writer", None),
         expected_staged_metadata=getattr(args, "expected_staged_metadata", None),
@@ -31,6 +32,93 @@ def test_package_writer_does_not_write_deployment_tables_during_publish():
 
     assert "PRICING_MODEL_DEPLOYMENT" not in writer
     assert "PRICING_PACKAGE_POINTER" not in writer
+
+
+def test_publish_rating_package_accepts_revision_mapping_without_public_status():
+    parameters = signature(publish_rating_package).parameters
+
+    assert "package_status" not in parameters
+    assert "revision_metadata" in parameters
+    assert "revision_metadata_json" not in parameters
+
+
+def test_package_writer_canonicalises_revision_metadata_mapping_once():
+    engine = _FakeNewPackageEngine()
+    args = _new_package_args(
+        revision_metadata={"unicode": "München", "kind": "SUPERGLM_EDITOR"}
+    )
+
+    load_staging_to_rating_package(engine, args)
+
+    package_insert = next(
+        (sql, params)
+        for sql, params in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+    )
+    assert package_insert[1]["revision_metadata_json"] == (
+        '{"kind":"SUPERGLM_EDITOR","unicode":"München"}'
+    )
+
+
+def test_package_writer_accepts_non_dict_revision_metadata_mapping():
+    engine = _FakeNewPackageEngine()
+    args = _new_package_args(
+        revision_metadata=MappingProxyType({"kind": "SUPERGLM_EDITOR"})
+    )
+
+    load_staging_to_rating_package(engine, args)
+
+    package_insert = next(
+        (sql, params)
+        for sql, params in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+    )
+    assert package_insert[1]["revision_metadata_json"] == '{"kind":"SUPERGLM_EDITOR"}'
+
+
+def test_package_writer_rejects_non_mapping_revision_metadata():
+    with pytest.raises(ValueError, match="revision_metadata must be a mapping"):
+        publish_rating_package(
+            _FakeNewPackageEngine(),
+            export_id="export-1",
+            revision_metadata='{"kind":"SUPERGLM_EDITOR"}',
+        )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_package_writer_rejects_non_finite_revision_metadata(value):
+    with pytest.raises(ValueError, match="finite numbers"):
+        publish_rating_package(
+            _FakeNewPackageEngine(),
+            export_id="export-1",
+            revision_metadata={"metric": value},
+        )
+
+
+@pytest.mark.parametrize(
+    "revision_metadata",
+    [
+        {1: "value"},
+        {"nested": {1: "value"}},
+    ],
+    ids=["top-level", "nested"],
+)
+def test_package_writer_rejects_non_string_revision_metadata_keys(revision_metadata):
+    with pytest.raises(ValueError, match="keys must be strings"):
+        publish_rating_package(
+            _FakeNewPackageEngine(),
+            export_id="export-1",
+            revision_metadata=revision_metadata,
+        )
+
+
+def test_package_writer_rejects_non_json_serializable_revision_metadata():
+    with pytest.raises(ValueError, match="JSON-serializable values"):
+        publish_rating_package(
+            _FakeNewPackageEngine(),
+            export_id="export-1",
+            revision_metadata={"unsupported": object()},
+        )
 
 
 @pytest.fixture
@@ -301,7 +389,6 @@ def _new_package_args(**overrides):
     values = {
         "export_id": "export-1",
         "created_by": "airflow",
-        "package_status": "PUBLISHED",
         "set_pointer": None,
     }
     values.update(overrides)
@@ -497,31 +584,13 @@ def test_package_writer_rejects_root_package_with_different_reserved_version():
 
 
 def test_package_writer_rejects_staged_export_without_registered_model_id():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     with pytest.raises(ModelRegistryError, match="missing model_id"):
         load_staging_to_rating_package(_FakePublishEngine(), args)
 
 
 def test_package_writer_returns_existing_package_for_existing_source_export():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine()
 
     rate_package_id = load_staging_to_rating_package(engine, args)
@@ -542,16 +611,7 @@ def test_package_writer_returns_existing_package_for_existing_source_export():
 
 
 def test_package_writer_rejects_existing_source_export_with_different_model_version():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(model_version="20260603"),
         existing_package=_existing_package(model_version="20260529"),
@@ -567,16 +627,7 @@ def test_package_writer_rejects_existing_source_export_with_different_model_vers
 
 
 def test_package_writer_rejects_existing_source_export_with_different_effective_from():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(effective_from_date="2026-06-03"),
         existing_package=_existing_package(effective_from_date="2026-05-29"),
@@ -592,16 +643,7 @@ def test_package_writer_rejects_existing_source_export_with_different_effective_
 
 
 def test_package_writer_rejects_existing_source_export_with_different_source_file():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(source_file="/tmp/new/rating_tables.xlsx"),
         existing_package=_existing_package(source_file="/tmp/old/rating_tables.xlsx"),
@@ -617,16 +659,7 @@ def test_package_writer_rejects_existing_source_export_with_different_source_fil
 
 
 def test_package_writer_rejects_existing_source_export_with_different_receipt_hash():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(publication_receipt_sha256="a" * 64),
         existing_package=_existing_package(publication_receipt_sha256="b" * 64),
@@ -642,16 +675,7 @@ def test_package_writer_rejects_existing_source_export_with_different_receipt_ha
 
 
 def test_package_writer_allows_existing_source_export_when_old_source_file_is_unknown():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": None,
-        },
-    )()
+    args = _new_package_args()
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(source_file="/tmp/new/rating_tables.xlsx"),
         existing_package=_existing_package(source_file=None),

@@ -61,7 +61,7 @@ def test_editor_export_carries_only_completed_build_and_editor_publication_value
     assert {field.name for field in fields(EditorExport)} == {
         "completed_build",
         "publication_receipt",
-        "revision_metadata_json",
+        "revision_metadata",
         "edited_model",
         "bundle",
     }
@@ -108,9 +108,10 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     exported = SimpleNamespace(
         completed_build=build,
         publication_receipt=object(),
-        revision_metadata_json=(
-            '{"claimed_identity":"prototype-local-not-authenticated","kind":"SUPERGLM_EDITOR"}'
-        ),
+        revision_metadata={
+            "claimed_identity": "prototype-local-not-authenticated",
+            "kind": "SUPERGLM_EDITOR",
+        },
         edited_model=object(),
         bundle=object(),
     )
@@ -217,10 +218,12 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert [name for name, _value in calls] == ["stage", "publish", "lineage"]
     publish_kwargs = calls[1][1]
     assert publish_kwargs["parent_rate_package_id"] == submission.parent_rate_package_id
-    assert publish_kwargs["revision_metadata_json"] == (
-        '{"claimed_identity":"prototype-local-not-authenticated","kind":"SUPERGLM_EDITOR",'
-        '"published_by":"analyst@example.test"}'
-    )
+    assert publish_kwargs["revision_metadata"] == {
+        "claimed_identity": "prototype-local-not-authenticated",
+        "kind": "SUPERGLM_EDITOR",
+        "published_by": "analyst@example.test",
+    }
+    assert "package_status" not in publish_kwargs
     assert callable(publish_kwargs["package_lineage_writer"])
     assert publish_kwargs["expected_staged_metadata"] == {
         "export_id": build.export_id,
@@ -664,7 +667,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         return SimpleNamespace(
             completed_build=build,
             publication_receipt=object(),
-            revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
+            revision_metadata={"kind": "SUPERGLM_EDITOR"},
             edited_model=object(),
             bundle=object(),
         )
@@ -920,20 +923,8 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     pd.testing.assert_series_equal(captured_export["options"]["offset_source"], exposure)
     assert captured_export["options"]["offset_name"] == "Exposure"
     assert captured_export["options"]["offset_kind"] == "auto"
-
-
-def test_editor_revision_preserves_claimed_identity_and_records_publisher():
-    from pricing_pipeline.publishing.editor_candidate import _revision_with_publisher_identity
-
-    revised = json.loads(
-        _revision_with_publisher_identity(
-            '{"claimed_identity":"analyst@example.test","kind":"SUPERGLM_EDITOR"}',
-            "publisher@example.test",
-        )
-    )
-
-    assert revised["claimed_identity"] == "analyst@example.test"
-    assert revised["published_by"] == "publisher@example.test"
+    assert exported.revision_metadata["claimed_identity"] == "analyst@example.test"
+    assert "published_by" not in exported.revision_metadata
 
 
 def test_editor_publication_lock_serializes_the_same_submission(tmp_path):

@@ -89,7 +89,7 @@ class ParentCandidate:
 class EditorExport:
     completed_build: ApprovedModelBuild
     publication_receipt: SuperGLMPublicationReceipt
-    revision_metadata_json: str
+    revision_metadata: dict[str, Any]
     edited_model: Any
     bundle: CandidateBundle
 
@@ -826,17 +826,6 @@ def _canonical_json(payload: dict[str, Any]) -> str:
     )
 
 
-def _revision_with_publisher_identity(value: str, created_by: str) -> str:
-    payload = json.loads(value)
-    if not isinstance(payload, dict):
-        raise EditorSubmissionError("editor revision metadata must be a JSON object")
-    publisher_identity = str(created_by).strip()
-    if not publisher_identity:
-        raise EditorSubmissionError("publisher identity is required")
-    payload["published_by"] = publisher_identity
-    return _canonical_json(payload)
-
-
 def export_edited_model(
     parent: ParentCandidate,
     submission: EditorSubmission,
@@ -972,7 +961,7 @@ def export_edited_model(
     return EditorExport(
         completed_build=completed_build,
         publication_receipt=receipt,
-        revision_metadata_json=_canonical_json(revision_metadata),
+        revision_metadata=revision_metadata,
         edited_model=edited_model,
         bundle=edited_bundle,
     )
@@ -1132,10 +1121,10 @@ def _publish_new_editor_submission(
         )
         if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook changed during staging")
-        revision_metadata_json = _revision_with_publisher_identity(
-            exported.revision_metadata_json,
-            created_by,
-        )
+        revision_metadata = {
+            **exported.revision_metadata,
+            "published_by": created_by,
+        }
 
         def validate_draft(connection, rate_package_id: int) -> None:
             verify_package_sql_parity(
@@ -1161,9 +1150,8 @@ def _publish_new_editor_submission(
             engine,
             export_id=build.export_id,
             created_by=build.created_by,
-            package_status="PUBLISHED",
             parent_rate_package_id=submission.parent_rate_package_id,
-            revision_metadata_json=revision_metadata_json,
+            revision_metadata=revision_metadata,
             draft_validator=validate_draft,
             package_lineage_writer=write_package_lineage,
             expected_staged_metadata={

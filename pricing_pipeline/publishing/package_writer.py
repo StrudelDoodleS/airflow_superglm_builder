@@ -99,19 +99,37 @@ def _staged_export_conflicts(
     return conflicts
 
 
-def _canonical_revision_metadata(value: str | None) -> str | None:
+def _canonical_revision_metadata(value: Mapping[str, object] | None) -> str | None:
     if value is None:
         return None
+    if not isinstance(value, Mapping):
+        raise ValueError("revision_metadata must be a mapping")
+
+    def normalise(item: object) -> object:
+        if isinstance(item, Mapping):
+            normalised: dict[str, object] = {}
+            for key, nested_value in item.items():
+                if not isinstance(key, str):
+                    raise ValueError("revision_metadata keys must be strings")
+                normalised[key] = normalise(nested_value)
+            return normalised
+        if isinstance(item, list | tuple):
+            return [normalise(nested_value) for nested_value in item]
+        return item
+
+    normalised_value = normalise(value)
     try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("revision_metadata_json must be valid JSON") from exc
-    if not isinstance(decoded, dict):
-        raise ValueError("revision_metadata_json must be a JSON object")
-    canonical = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    if value != canonical:
-        raise ValueError("revision_metadata_json must use canonical JSON encoding")
-    return canonical
+        return json.dumps(
+            normalised_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        raise ValueError("revision_metadata must contain only finite numbers") from exc
+    except TypeError as exc:
+        raise ValueError("revision_metadata must contain only JSON-serializable values") from exc
 
 
 def publish_rating_package(
@@ -119,14 +137,13 @@ def publish_rating_package(
     *,
     export_id: str,
     created_by: str = "python",
-    package_status: str = "PUBLISHED",
     parent_rate_package_id: int | None = None,
-    revision_metadata_json: str | None = None,
+    revision_metadata: Mapping[str, object] | None = None,
     draft_validator=None,
     package_lineage_writer: Callable[[Connection, int], int | None] | None = None,
     expected_staged_metadata: Mapping[str, object] | None = None,
 ) -> PublishResult:
-    revision_metadata_json = _canonical_revision_metadata(revision_metadata_json)
+    revision_metadata_json = _canonical_revision_metadata(revision_metadata)
     if draft_validator is not None and not callable(draft_validator):
         raise TypeError("draft_validator must be callable")
     if package_lineage_writer is not None and not callable(package_lineage_writer):
@@ -134,7 +151,6 @@ def publish_rating_package(
     model_run_id: int | None = None
     with engine.begin() as con:
         acquire_staging_export_lock(con, export_id)
-        requested_package_status = package_status
         meta = (
             con.execute(
                 text("""
@@ -805,8 +821,6 @@ def publish_rating_package(
         )
 
         if draft_validator is not None:
-            if not callable(draft_validator):
-                raise TypeError("draft_validator must be callable")
             draft_validator(con, int(rate_package_id))
         if package_lineage_writer is not None:
             model_run_id = package_lineage_writer(con, int(rate_package_id))
@@ -818,7 +832,7 @@ def publish_rating_package(
             WHERE rate_package_id = :rate_package_id;
         """),
             {
-                "package_status": requested_package_status,
+                "package_status": "PUBLISHED",
                 "rate_package_id": rate_package_id,
             },
         )
@@ -829,7 +843,7 @@ def publish_rating_package(
         rate_package_id=int(rate_package_id),
         package_version=int(package_version),
         rating_workbook_path="",
-        package_status=requested_package_status,
+        package_status="PUBLISHED",
         was_existing=False,
         model_run_id=model_run_id,
     )

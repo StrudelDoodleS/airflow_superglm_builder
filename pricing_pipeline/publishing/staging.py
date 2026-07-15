@@ -26,12 +26,16 @@ INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
 )
 RANGE_RE = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*[-:]\s*([-+]?\d*\.?\d+)\s*$")
+RATING_SHEET = "Rating Tables"
+BASE_RATE_CELL = "C2"
+TERM_ROW = 5
+HEADER_ROW = 7
+DATA_START_ROW = 8
 
 
 @dataclass(frozen=True)
 class StagingExport:
-    xlsx: Path
-    sheet: str
+    workbook_path: Path
     export_id: str
     model_name: str
     target_name: str
@@ -39,13 +43,7 @@ class StagingExport:
     model_version: str | None
     effective_from: str | None
     effective_to: str | None
-    base_rate: float | None
-    base_rate_cell: str
-    term_row: int
-    header_row: int
-    data_start_row: int
-    term_type_map_json: str
-    interaction_features_json: str
+    interaction_features: Mapping[str, Any]
     created_by: str
     replace: bool
     model_id: int | None
@@ -111,10 +109,7 @@ def find_blocks(raw: pd.DataFrame, term_row: int, header_row: int) -> list[dict[
     return blocks
 
 
-def infer_term_type(term_name: str, levels: pd.Series, term_type_map: dict[str, str]) -> str:
-    if term_name in term_type_map:
-        return term_type_map[term_name]
-
+def infer_term_type(term_name: str, levels: pd.Series) -> str:
     non_null = levels.dropna().astype(str)
     if len(non_null) and non_null.map(lambda x: parse_interval(x)[0] is not None).mean() > 0.8:
         return "DISCRETIZED_SPLINE_1D"
@@ -138,13 +133,13 @@ def split_interaction_level(level_code: str, features: list[str]) -> list[tuple[
 
 
 def _normalise_interaction_specs(value: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise ValueError("interaction feature metadata must be a JSON object")
     specs: dict[str, dict[str, Any]] = {}
     for term_name, metadata in value.items():
         if isinstance(metadata, list):
             continue
-        if not isinstance(metadata, dict):
+        if not isinstance(metadata, Mapping):
             raise ValueError(f"interaction metadata for {term_name!r} must be an object")
         source_term_name = str(metadata.get("source_term_name") or "").strip()
         parent_names = metadata.get("parent_names")
@@ -355,16 +350,17 @@ def _append_interaction_matrix_rows(
 def build_staging_frames(
     args: StagingExport,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    raw = pd.read_excel(args.xlsx, sheet_name=args.sheet, header=None, engine="openpyxl")
+    raw = pd.read_excel(
+        args.workbook_path,
+        sheet_name=RATING_SHEET,
+        header=None,
+        engine="openpyxl",
+    )
 
-    if args.base_rate is not None:
-        base_rate = args.base_rate
-    else:
-        r, c = cell_to_zero_index(args.base_rate_cell)
-        base_rate = float(raw.iat[r, c])
+    r, c = cell_to_zero_index(BASE_RATE_CELL)
+    base_rate = float(raw.iat[r, c])
 
-    term_type_map = json.loads(args.term_type_map_json)
-    interaction_features = json.loads(args.interaction_features_json)
+    interaction_features = args.interaction_features
     interaction_specs = _normalise_interaction_specs(interaction_features)
     interaction_titles = _interaction_title_positions(raw, interaction_specs)
     main_effect_stop = (
@@ -373,9 +369,9 @@ def build_staging_frames(
         else raw.shape[0]
     )
 
-    blocks = find_blocks(raw, args.term_row, args.header_row)
+    blocks = find_blocks(raw, TERM_ROW, HEADER_ROW)
     if not blocks:
-        raise RuntimeError("No rating table blocks found. Check --term-row/--header-row/--sheet.")
+        raise RuntimeError("No rating table blocks found in the standard rating-table layout.")
 
     export_df = pd.DataFrame(
         [
@@ -386,7 +382,7 @@ def build_staging_frames(
                 "base_rate": base_rate,
                 "effective_from_date": args.effective_from,
                 "effective_to_date": args.effective_to,
-                "source_file": str(Path(args.xlsx).resolve()),
+                "source_file": str(Path(args.workbook_path).resolve()),
                 "created_by": args.created_by,
             }
         ]
@@ -396,7 +392,7 @@ def build_staging_frames(
     level_rows: list[dict[str, Any]] = []
     row_id = 0
     sequence_no = 0
-    start = args.data_start_row - 1
+    start = DATA_START_ROW - 1
 
     for block in blocks:
         sequence_no += 1
@@ -411,7 +407,7 @@ def build_staging_frames(
         if block_df.empty:
             continue
 
-        term_type = infer_term_type(term_name, block_df["level_code"], term_type_map)
+        term_type = infer_term_type(term_name, block_df["level_code"])
         is_band = term_type in {
             "DISCRETIZED_SPLINE_1D",
             "NUMERIC_BANDED_1D",
@@ -420,7 +416,7 @@ def build_staging_frames(
 
         features = interaction_features.get(term_name)
         if features:
-            term_type = term_type_map.get(term_name, "CATEGORICAL_INTERACTION")
+            term_type = "CATEGORICAL_INTERACTION"
 
         for order_index, rec in enumerate(block_df.to_dict("records"), start=1):
             row_id += 1
@@ -904,8 +900,7 @@ def stage_rating_export(
     )
 
     args = StagingExport(
-        xlsx=workbook_path,
-        sheet="Rating Tables",
+        workbook_path=workbook_path,
         export_id=export_id,
         model_name=model_name,
         target_name=target_name,
@@ -913,13 +908,7 @@ def stage_rating_export(
         model_version=model_version,
         effective_from=effective_from,
         effective_to=effective_to,
-        base_rate=None,
-        base_rate_cell="C2",
-        term_row=5,
-        header_row=7,
-        data_start_row=8,
-        term_type_map_json="{}",
-        interaction_features_json=_deterministic_json(_receipt_interaction_features(receipt)),
+        interaction_features=_receipt_interaction_features(receipt),
         created_by=created_by,
         replace=replace,
         model_id=model_id,

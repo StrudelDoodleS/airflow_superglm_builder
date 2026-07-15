@@ -817,11 +817,11 @@ def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages()
 def test_rating_package_loader_builds_package_as_draft_before_final_status():
     loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
-    assert "requested_package_status = package_status" in loader
+    assert "requested_package_status" not in loader
     assert '"package_status": "DRAFT"' in loader
     assert "UPDATE pricing.PRICING_RATE_PACKAGE" in loader
     assert "SET package_status = :package_status" in loader
-    assert "requested_package_status" in loader
+    assert '"package_status": "PUBLISHED"' in loader
 
 
 def test_clean_pricing_schema_migration_moves_staging_and_drops_obsolete_tables():
