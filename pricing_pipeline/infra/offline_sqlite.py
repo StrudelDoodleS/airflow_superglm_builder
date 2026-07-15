@@ -22,6 +22,22 @@ SCHEMA_DB_FILES = {
     "mlops": "mlops.sqlite",
 }
 _OFFLINE_COLUMN_UPGRADES = (
+    ("pricing", "DATASET_MANIFEST", "model_frame_sha256", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "frame_hash_metadata_json", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "exposure_column", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "data_as_of_column", "TEXT"),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "parent_model_run_id",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "rating_workbook_sha256",
+        "TEXT",
+    ),
     (
         "pricing",
         "MODEL_RUN",
@@ -145,9 +161,7 @@ def _relax_offline_column_nullability(
     table: str,
     column: str,
 ) -> bool:
-    columns = list(
-        connection.execute(f"PRAGMA {schema}.table_info('{table}')").fetchall()
-    )
+    columns = list(connection.execute(f"PRAGMA {schema}.table_info('{table}')").fetchall())
     target = next((row for row in columns if str(row[1]) == column), None)
     if target is None or int(target[3]) == 0:
         return False
@@ -206,14 +220,32 @@ def apply_offline_ddl(engine: Engine) -> None:
         for schema, table, column, column_type in _OFFLINE_COLUMN_UPGRADES:
             existing_columns = {
                 str(row[1])
-                for row in connection.execute(
-                    f"PRAGMA {schema}.table_info('{table}')"
-                ).fetchall()
+                for row in connection.execute(f"PRAGMA {schema}.table_info('{table}')").fetchall()
             }
             if column not in existing_columns:
                 connection.execute(
                     f"ALTER TABLE {schema}.{table} ADD COLUMN {column} {column_type}"
                 )
+        connection.execute(
+            """
+            UPDATE pricing.MODEL_RUN AS child_run
+            SET parent_model_run_id = (
+                SELECT parent_run.model_run_id
+                FROM pricing.PRICING_RATE_PACKAGE AS child_package
+                JOIN pricing.MODEL_RUN AS parent_run
+                  ON parent_run.rate_package_id = child_package.parent_rate_package_id
+                WHERE child_package.rate_package_id = child_run.rate_package_id
+            )
+            WHERE child_run.parent_model_run_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM pricing.PRICING_RATE_PACKAGE AS child_package
+                  JOIN pricing.MODEL_RUN AS parent_run
+                    ON parent_run.rate_package_id = child_package.parent_rate_package_id
+                  WHERE child_package.rate_package_id = child_run.rate_package_id
+              )
+            """
+        )
         connection.commit()
         try:
             connection.execute("BEGIN IMMEDIATE")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,12 @@ from pricing_pipeline.orchestration.publish_completed_build import (
     _verify_candidate_artifact,
     load_candidate_sql_lineage,
 )
+from pricing_pipeline.publishing.model_registry import (
+    PricingModelRecord,
+    validate_registered_model,
+)
 from pricing_pipeline.publishing.staging import stage_rating_export
+from pricing_pipeline.workbench.submission import sha256_file
 
 
 _VERSION_PATTERN = re.compile(r"^v([0-9]+)$")
@@ -30,8 +34,8 @@ def register_sqlite_model(
     config: ModelBuildConfig,
     *,
     created_by: str,
-) -> int:
-    """Insert the stable model identity once and return its generated ID."""
+) -> PricingModelRecord:
+    """Insert once and validate the complete stable model identity."""
     params = {
         "model_name": config.model_name,
         "model_label": config.model_label,
@@ -62,18 +66,7 @@ def register_sqlite_model(
             ),
             params,
         )
-        return int(
-            connection.execute(
-                text(
-                    """
-                    SELECT model_id
-                    FROM pricing.PRICING_MODEL
-                    WHERE model_name = :model_name
-                    """
-                ),
-                {"model_name": config.model_name},
-            ).scalar_one()
-        )
+        return validate_registered_model(connection, config)
 
 
 def resolve_sqlite_model_version(
@@ -163,333 +156,13 @@ def resolve_sqlite_model_version(
             raise
 
 
-def _existing_local_publication(
-    connection,
-    *,
-    model_id: int,
-    export_id: str,
-):
-    return (
-        connection.execute(
-            text(
-                """
-                SELECT
-                    rp.rate_package_id,
-                    rp.package_version,
-                    rp.package_status,
-                    rp.model_version,
-                    rp.manifest_id,
-                    rp.split_set_id,
-                    rp.rating_workbook_path,
-                    rp.publication_receipt_sha256,
-                    rp.staging_content_sha256,
-                    rp.source_export_id,
-                    mr.model_run_id,
-                    mr.run_status,
-                    mr.airflow_run_id,
-                    mr.mlflow_run_id,
-                    mr.publication_receipt_path,
-                    mr.model_artifact_path,
-                    mr.candidate_artifact_path,
-                    mr.candidate_artifact_sha256,
-                    mr.candidate_artifact_format,
-                    mr.candidate_artifact_size_bytes,
-                    mr.candidate_python_version,
-                    mr.candidate_superglm_version,
-                    mr.model_source_sha256,
-                    mr.effective_from
-                FROM pricing.PRICING_RATE_PACKAGE AS rp
-                LEFT JOIN pricing.MODEL_RUN AS mr
-                  ON mr.rate_package_id = rp.rate_package_id
-                WHERE rp.model_id = :model_id
-                  AND rp.source_export_id = :export_id
-                """
-            ),
-            {"model_id": model_id, "export_id": export_id},
-        )
-        .mappings()
-        .one_or_none()
-    )
-
-
-def _local_publish_result(
-    *,
-    model_id: int,
-    model_config: ModelBuildConfig,
-    package_row,
-    was_existing: bool,
-) -> CompletedModelPublishResult:
-    model_run_id = package_row["model_run_id"]
-    if model_run_id is None:
-        raise RuntimeError(
-            f"Local export {package_row['source_export_id']!r} has a package "
-            "without model-run audit rows"
-        )
-    return CompletedModelPublishResult(
-        model_id=model_id,
-        model_name=model_config.model_name,
-        model_version=str(package_row["model_version"]),
-        manifest_id=str(package_row["manifest_id"]),
-        split_set_id=(
-            None
-            if package_row["split_set_id"] is None
-            else str(package_row["split_set_id"])
-        ),
-        export_id=str(package_row["source_export_id"]),
-        rate_package_id=int(package_row["rate_package_id"]),
-        package_version=int(package_row["package_version"]),
-        package_status=str(package_row["package_status"]),
-        rating_workbook_path=str(package_row["rating_workbook_path"]),
-        model_run_id=int(model_run_id),
-        mlflow_run_id=(
-            None
-            if package_row["mlflow_run_id"] is None
-            else str(package_row["mlflow_run_id"])
-        ),
-        publication_receipt_path=(
-            None
-            if package_row["publication_receipt_path"] is None
-            else str(package_row["publication_receipt_path"])
-        ),
-        publication_receipt_sha256=(
-            None
-            if package_row["publication_receipt_sha256"] is None
-            else str(package_row["publication_receipt_sha256"])
-        ),
-        was_existing=was_existing,
-    )
-
-
-def _local_publication_conflicts(
-    existing,
-    *,
-    build: CompletedModelBuild,
-    manifest_id: str,
-    split_set_id: str | None,
-    staging_content_sha256: str | None,
-) -> list[str]:
-    expected = {
-        "model_version": build.model_version,
-        "manifest_id": manifest_id,
-        "split_set_id": split_set_id,
-        "rating_workbook_path": build.rating_workbook_path,
-        "publication_receipt_sha256": build.publication_receipt_sha256,
-    }
-    conflicts = []
-    for field_name, expected_value in expected.items():
-        existing_value = existing[field_name]
-        if (None if existing_value is None else str(existing_value)) != (
-            None if expected_value is None else str(expected_value)
-        ):
-            conflicts.append(
-                f"{field_name} existing={existing_value!r} requested={expected_value!r}"
-            )
-    existing_staging_digest = _identity(existing["staging_content_sha256"])
-    requested_staging_digest = _identity(staging_content_sha256)
-    if (
-        existing_staging_digest is not None
-        and existing_staging_digest != requested_staging_digest
-    ):
-        conflicts.append(
-            "staging_content_sha256 "
-            f"existing={existing_staging_digest!r} "
-            f"requested={requested_staging_digest!r}"
-        )
-    return conflicts
-
-
-def _identity(value: Any) -> str | None:
-    if value is None:
-        return None
-    cleaned = str(value)
-    return cleaned or None
-
-
-def _validate_existing_lineage_links(
-    connection,
-    *,
-    model_run_id: Any,
-    manifest_id: str,
-    split_set_id: str | None,
-) -> None:
-    dataset_links = set(
-        connection.execute(
-            text(
-                """
-                SELECT manifest_id, dataset_role
-                FROM mlops.MODEL_RUN_DATASET
-                WHERE model_run_id = :model_run_id
-                """
-            ),
-            {"model_run_id": model_run_id},
-        ).all()
-    )
-    expected_dataset_links = {(manifest_id, "training")}
-    split_links = set(
-        connection.execute(
-            text(
-                """
-                SELECT manifest_id, split_set_id, dataset_role, split_role
-                FROM mlops.MODEL_RUN_SPLIT_SET
-                WHERE model_run_id = :model_run_id
-                """
-            ),
-            {"model_run_id": model_run_id},
-        ).all()
-    )
-    expected_split_links = (
-        set()
-        if split_set_id is None
-        else {(manifest_id, split_set_id, "training", "validation")}
-    )
-    if (
-        dataset_links != expected_dataset_links
-        or split_links != expected_split_links
-    ):
-        raise RuntimeError(
-            "incomplete local publication lineage: dataset/split links do not "
-            "match the immutable model run"
-        )
-
-
-def _model_run_evidence_conflicts(
-    connection,
-    existing,
-    *,
-    build: CompletedModelBuild,
-    export_id: str,
-    manifest_id: str,
-    split_set_id: str | None,
-) -> list[str]:
-    model_run_id = existing["model_run_id"]
-    if model_run_id is None:
-        raise RuntimeError(
-            f"incomplete local publication lineage: export {export_id!r} "
-            "has no model run"
-        )
-    if str(existing["run_status"] or "").upper() != "SUCCESS":
-        raise RuntimeError(
-            f"incomplete local publication lineage: export {export_id!r} "
-            "has no successful model run"
-        )
-    _validate_existing_lineage_links(
-        connection,
-        model_run_id=model_run_id,
-        manifest_id=manifest_id,
-        split_set_id=split_set_id,
-    )
-
-    expected_scalars = {
-        "airflow_run_id": build.airflow_run_id or export_id,
-        "mlflow_run_id": build.mlflow_run_id,
-        "publication_receipt_path": build.publication_receipt_path,
-        "publication_receipt_sha256": build.publication_receipt_sha256,
-        "model_artifact_path": build.model_artifact_path,
-        "candidate_artifact_path": build.candidate_artifact_path,
-        "candidate_artifact_sha256": build.candidate_artifact_sha256,
-        "candidate_artifact_format": build.candidate_artifact_format,
-        "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
-        "candidate_python_version": build.candidate_python_version,
-        "candidate_superglm_version": build.candidate_superglm_version,
-        "model_source_sha256": build.model_source_sha256,
-        "effective_from": build.effective_from,
-    }
-    conflicts = []
-    for field_name, expected_value in expected_scalars.items():
-        if _identity(existing[field_name]) != _identity(expected_value):
-            conflicts.append(
-                f"{field_name} existing={existing[field_name]!r} "
-                f"requested={expected_value!r}"
-            )
-
-    stored_metrics = {
-        str(row[0]): (float(row[1]), _identity(row[2]))
-        for row in connection.execute(
-            text(
-                """
-                SELECT metric_name, metric_value, metric_scope
-                FROM mlops.MODEL_RUN_METRIC
-                WHERE model_run_id = :model_run_id
-                """
-            ),
-            {"model_run_id": model_run_id},
-        ).all()
-    }
-    expected_metrics = {
-        str(name): (
-            float(value),
-            _identity(build.metric_scopes.get(name, "model_run")),
-        )
-        for name, value in build.metrics.items()
-    }
-    if stored_metrics != expected_metrics:
-        conflicts.append(
-            f"metrics existing={stored_metrics!r} requested={expected_metrics!r}"
-        )
-
-    stored_fold_metrics = {
-        (int(row[0]), str(row[1]), float(row[2]))
-        for row in connection.execute(
-            text(
-                """
-                SELECT fold_no, metric_name, metric_value
-                FROM pricing.CV_FOLD_METRIC
-                WHERE model_run_id = :model_run_id
-                """
-            ),
-            {"model_run_id": model_run_id},
-        ).all()
-    }
-    expected_fold_metrics = {
-        (
-            int(metric["fold_no"]),
-            str(metric["metric_name"]),
-            float(metric["metric_value"]),
-        )
-        for metric in build.fold_metrics
-    }
-    if stored_fold_metrics != expected_fold_metrics:
-        conflicts.append(
-            "fold_metrics "
-            f"existing={stored_fold_metrics!r} requested={expected_fold_metrics!r}"
-        )
-    return conflicts
-
-
-def _staged_export_conflicts(
-    staged,
-    *,
-    model_id: int,
-    model_config: ModelBuildConfig,
-    build: CompletedModelBuild,
-    export_id: str,
-) -> list[str]:
-    expected = {
-        "export_id": export_id,
-        "model_id": model_id,
-        "model_name": model_config.model_name,
-        "model_version": build.model_version,
-        "effective_from_date": build.effective_from,
-        "source_file": str(Path(build.rating_workbook_path).resolve()),
-        "publication_receipt_sha256": build.publication_receipt_sha256,
-    }
-    conflicts = []
-    for field_name, expected_value in expected.items():
-        if _identity(staged[field_name]) != _identity(expected_value):
-            conflicts.append(
-                f"{field_name} staged={staged[field_name]!r} "
-                f"requested={expected_value!r}"
-            )
-    return conflicts
-
-
 def publish_sqlite_candidate(
     engine,
     *,
     settings: Settings,
     model_id: int,
     model_config: ModelBuildConfig,
-    completed_build: Mapping[str, Any],
+    completed_build: CompletedModelBuild,
     created_by: str,
 ) -> CompletedModelPublishResult:
     """Publish notebook audit evidence into the persistent local SQLite store."""
@@ -510,11 +183,38 @@ def _publish_sqlite_candidate_locked(
     *,
     model_id: int,
     model_config: ModelBuildConfig,
-    completed_build: Mapping[str, Any],
+    completed_build: CompletedModelBuild,
     created_by: str,
     artifact_root: str | Path,
 ) -> CompletedModelPublishResult:
-    build = CompletedModelBuild.from_mapping(completed_build)
+    if not isinstance(completed_build, CompletedModelBuild):
+        raise TypeError("completed_build must be a CompletedModelBuild")
+    build = completed_build
+    mismatches = []
+    for field_name, actual, expected in (
+        ("model_id", build.model_id, model_id),
+        ("model_name", build.model_name, model_config.model_name),
+        ("model_type", build.model_type, model_config.model_type),
+        ("target_name", build.target_name, model_config.target_name),
+        ("deployment_slot", build.deployment_slot, model_config.deployment_slot),
+    ):
+        if actual != expected:
+            mismatches.append(f"{field_name} build={actual!r} registered={expected!r}")
+    if mismatches:
+        raise CompletedModelBuildError(
+            "approved build does not match the registered model: " + "; ".join(mismatches)
+        )
+    workbook_path = Path(build.rating_workbook_path)
+    if not workbook_path.is_file():
+        raise CompletedModelBuildError(
+            f"rating_workbook_path does not exist: {workbook_path.as_posix()}"
+        )
+    actual_workbook_sha256 = sha256_file(workbook_path)
+    if actual_workbook_sha256 != build.rating_workbook_sha256:
+        raise CompletedModelBuildError(
+            "rating workbook SHA-256 does not match the completed build: "
+            f"expected={build.rating_workbook_sha256!r}, actual={actual_workbook_sha256!r}"
+        )
     manifest_id = str(build.manifest_id or "").strip()
     if not manifest_id:
         raise CompletedModelBuildError(
@@ -532,6 +232,9 @@ def _publish_sqlite_candidate_locked(
         )
         _verify_candidate_artifact(
             build,
+            model_name=model_config.model_name,
+            model_version=build.model_version,
+            export_id=export_id,
             manifest_id=manifest_id,
             split_set_id=split_set_id,
             sql_lineage=sql_lineage,
@@ -552,8 +255,13 @@ def _publish_sqlite_candidate_locked(
         model_id=model_id,
         publication_receipt_path=build.publication_receipt_path,
         publication_receipt_sha256=build.publication_receipt_sha256,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
     )
+    staged_workbook_sha256 = sha256_file(workbook_path)
+    if staged_workbook_sha256 != build.rating_workbook_sha256:
+        raise CompletedModelBuildError(
+            "rating workbook changed during local staging: "
+            f"expected={build.rating_workbook_sha256!r}, actual={staged_workbook_sha256!r}"
+        )
 
     with engine.begin() as connection:
         staged = (
@@ -740,7 +448,7 @@ def _publish_sqlite_candidate_locked(
                 "base_rate": staged["base_rate"],
                 "effective_from_date": staged["effective_from_date"],
                 "effective_to_date": staged["effective_to_date"],
-                "package_status": model_config.default_package_status,
+                "package_status": "LOCAL_AUDIT",
                 "source_export_id": export_id,
                 "source_file": staged["source_file"],
                 "publication_receipt_json": staged["publication_receipt_json"],
@@ -755,7 +463,7 @@ def _publish_sqlite_candidate_locked(
                 "manifest_id": manifest_id,
                 "split_set_id": split_set_id,
                 "rating_workbook_path": build.rating_workbook_path,
-                "model_artifact_path": build.model_artifact_path,
+                "model_artifact_path": None,
                 "created_by": created_by,
             },
         )
@@ -777,6 +485,7 @@ def _publish_sqlite_candidate_locked(
                     rate_package_id,
                     model_name,
                     rating_workbook_path,
+                    rating_workbook_sha256,
                     publication_receipt_path,
                     publication_receipt_sha256,
                     model_artifact_path,
@@ -804,6 +513,7 @@ def _publish_sqlite_candidate_locked(
                     :rate_package_id,
                     :model_name,
                     :rating_workbook_path,
+                    :rating_workbook_sha256,
                     :publication_receipt_path,
                     :publication_receipt_sha256,
                     :model_artifact_path,
@@ -824,7 +534,7 @@ def _publish_sqlite_candidate_locked(
             {
                 "model_run_id": model_run_id,
                 "model_id": model_id,
-                "airflow_run_id": build.airflow_run_id or export_id,
+                "airflow_run_id": export_id,
                 "mlflow_run_id": build.mlflow_run_id,
                 "model_version": build.model_version,
                 "export_id": export_id,
@@ -833,9 +543,10 @@ def _publish_sqlite_candidate_locked(
                 "rate_package_id": rate_package_id,
                 "model_name": model_config.model_name,
                 "rating_workbook_path": build.rating_workbook_path,
+                "rating_workbook_sha256": build.rating_workbook_sha256,
                 "publication_receipt_path": build.publication_receipt_path,
                 "publication_receipt_sha256": build.publication_receipt_sha256,
-                "model_artifact_path": build.model_artifact_path,
+                "model_artifact_path": None,
                 "candidate_artifact_path": build.candidate_artifact_path,
                 "candidate_artifact_sha256": build.candidate_artifact_sha256,
                 "candidate_artifact_format": build.candidate_artifact_format,
@@ -935,3 +646,307 @@ def _publish_sqlite_candidate_locked(
             package_row=created,
             was_existing=False,
         )
+
+
+def _existing_local_publication(
+    connection,
+    *,
+    model_id: int,
+    export_id: str,
+):
+    return (
+        connection.execute(
+            text(
+                """
+                SELECT
+                    rp.rate_package_id,
+                    rp.package_version,
+                    rp.package_status,
+                    rp.model_version,
+                    rp.manifest_id,
+                    rp.split_set_id,
+                    rp.rating_workbook_path,
+                    rp.publication_receipt_sha256,
+                    rp.staging_content_sha256,
+                    rp.source_export_id,
+                    mr.model_run_id,
+                    mr.run_status,
+                    mr.rating_workbook_sha256,
+                    mr.airflow_run_id,
+                    mr.mlflow_run_id,
+                    mr.publication_receipt_path,
+                    mr.model_artifact_path,
+                    mr.candidate_artifact_path,
+                    mr.candidate_artifact_sha256,
+                    mr.candidate_artifact_format,
+                    mr.candidate_artifact_size_bytes,
+                    mr.candidate_python_version,
+                    mr.candidate_superglm_version,
+                    mr.model_source_sha256,
+                    mr.effective_from
+                FROM pricing.PRICING_RATE_PACKAGE AS rp
+                LEFT JOIN pricing.MODEL_RUN AS mr
+                  ON mr.rate_package_id = rp.rate_package_id
+                WHERE rp.model_id = :model_id
+                  AND rp.source_export_id = :export_id
+                """
+            ),
+            {"model_id": model_id, "export_id": export_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+
+
+def _staged_export_conflicts(
+    staged,
+    *,
+    model_id: int,
+    model_config: ModelBuildConfig,
+    build: CompletedModelBuild,
+    export_id: str,
+) -> list[str]:
+    expected = {
+        "export_id": export_id,
+        "model_id": model_id,
+        "model_name": model_config.model_name,
+        "model_version": build.model_version,
+        "effective_from_date": build.effective_from,
+        "source_file": str(Path(build.rating_workbook_path).resolve()),
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+    }
+    conflicts = []
+    for field_name, expected_value in expected.items():
+        if _identity(staged[field_name]) != _identity(expected_value):
+            conflicts.append(
+                f"{field_name} staged={staged[field_name]!r} requested={expected_value!r}"
+            )
+    return conflicts
+
+
+def _local_publication_conflicts(
+    existing,
+    *,
+    build: CompletedModelBuild,
+    manifest_id: str,
+    split_set_id: str | None,
+    staging_content_sha256: str | None,
+) -> list[str]:
+    expected = {
+        "model_version": build.model_version,
+        "manifest_id": manifest_id,
+        "split_set_id": split_set_id,
+        "rating_workbook_path": build.rating_workbook_path,
+        "rating_workbook_sha256": build.rating_workbook_sha256,
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+    }
+    conflicts = []
+    for field_name, expected_value in expected.items():
+        existing_value = existing[field_name]
+        if (None if existing_value is None else str(existing_value)) != (
+            None if expected_value is None else str(expected_value)
+        ):
+            conflicts.append(
+                f"{field_name} existing={existing_value!r} requested={expected_value!r}"
+            )
+    existing_staging_digest = _identity(existing["staging_content_sha256"])
+    requested_staging_digest = _identity(staging_content_sha256)
+    if existing_staging_digest is not None and existing_staging_digest != requested_staging_digest:
+        conflicts.append(
+            "staging_content_sha256 "
+            f"existing={existing_staging_digest!r} "
+            f"requested={requested_staging_digest!r}"
+        )
+    return conflicts
+
+
+def _model_run_evidence_conflicts(
+    connection,
+    existing,
+    *,
+    build: CompletedModelBuild,
+    export_id: str,
+    manifest_id: str,
+    split_set_id: str | None,
+) -> list[str]:
+    model_run_id = existing["model_run_id"]
+    if model_run_id is None:
+        raise RuntimeError(
+            f"incomplete local publication lineage: export {export_id!r} has no model run"
+        )
+    if str(existing["run_status"] or "").upper() != "SUCCESS":
+        raise RuntimeError(
+            f"incomplete local publication lineage: export {export_id!r} "
+            "has no successful model run"
+        )
+    _validate_existing_lineage_links(
+        connection,
+        model_run_id=model_run_id,
+        manifest_id=manifest_id,
+        split_set_id=split_set_id,
+    )
+
+    expected_scalars = {
+        "airflow_run_id": export_id,
+        "mlflow_run_id": build.mlflow_run_id,
+        "publication_receipt_path": build.publication_receipt_path,
+        "publication_receipt_sha256": build.publication_receipt_sha256,
+        "model_artifact_path": None,
+        "candidate_artifact_path": build.candidate_artifact_path,
+        "candidate_artifact_sha256": build.candidate_artifact_sha256,
+        "candidate_artifact_format": build.candidate_artifact_format,
+        "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
+        "candidate_python_version": build.candidate_python_version,
+        "candidate_superglm_version": build.candidate_superglm_version,
+        "model_source_sha256": build.model_source_sha256,
+        "effective_from": build.effective_from,
+    }
+    conflicts = []
+    for field_name, expected_value in expected_scalars.items():
+        if _identity(existing[field_name]) != _identity(expected_value):
+            conflicts.append(
+                f"{field_name} existing={existing[field_name]!r} requested={expected_value!r}"
+            )
+
+    stored_metrics = {
+        str(row[0]): (float(row[1]), _identity(row[2]))
+        for row in connection.execute(
+            text(
+                """
+                SELECT metric_name, metric_value, metric_scope
+                FROM mlops.MODEL_RUN_METRIC
+                WHERE model_run_id = :model_run_id
+                """
+            ),
+            {"model_run_id": model_run_id},
+        ).all()
+    }
+    expected_metrics = {
+        str(name): (
+            float(value),
+            _identity(build.metric_scopes.get(name, "model_run")),
+        )
+        for name, value in build.metrics.items()
+    }
+    if stored_metrics != expected_metrics:
+        conflicts.append(f"metrics existing={stored_metrics!r} requested={expected_metrics!r}")
+
+    stored_fold_metrics = {
+        (int(row[0]), str(row[1]), float(row[2]))
+        for row in connection.execute(
+            text(
+                """
+                SELECT fold_no, metric_name, metric_value
+                FROM pricing.CV_FOLD_METRIC
+                WHERE model_run_id = :model_run_id
+                """
+            ),
+            {"model_run_id": model_run_id},
+        ).all()
+    }
+    expected_fold_metrics = {
+        (
+            int(metric["fold_no"]),
+            str(metric["metric_name"]),
+            float(metric["metric_value"]),
+        )
+        for metric in build.fold_metrics
+    }
+    if stored_fold_metrics != expected_fold_metrics:
+        conflicts.append(
+            f"fold_metrics existing={stored_fold_metrics!r} requested={expected_fold_metrics!r}"
+        )
+    return conflicts
+
+
+def _validate_existing_lineage_links(
+    connection,
+    *,
+    model_run_id: Any,
+    manifest_id: str,
+    split_set_id: str | None,
+) -> None:
+    dataset_links = set(
+        connection.execute(
+            text(
+                """
+                SELECT manifest_id, dataset_role
+                FROM mlops.MODEL_RUN_DATASET
+                WHERE model_run_id = :model_run_id
+                """
+            ),
+            {"model_run_id": model_run_id},
+        ).all()
+    )
+    expected_dataset_links = {(manifest_id, "training")}
+    split_links = set(
+        connection.execute(
+            text(
+                """
+                SELECT manifest_id, split_set_id, dataset_role, split_role
+                FROM mlops.MODEL_RUN_SPLIT_SET
+                WHERE model_run_id = :model_run_id
+                """
+            ),
+            {"model_run_id": model_run_id},
+        ).all()
+    )
+    expected_split_links = (
+        set() if split_set_id is None else {(manifest_id, split_set_id, "training", "validation")}
+    )
+    if dataset_links != expected_dataset_links or split_links != expected_split_links:
+        raise RuntimeError(
+            "incomplete local publication lineage: dataset/split links do not "
+            "match the immutable model run"
+        )
+
+
+def _local_publish_result(
+    *,
+    model_id: int,
+    model_config: ModelBuildConfig,
+    package_row,
+    was_existing: bool,
+) -> CompletedModelPublishResult:
+    model_run_id = package_row["model_run_id"]
+    if model_run_id is None:
+        raise RuntimeError(
+            f"Local export {package_row['source_export_id']!r} has a package "
+            "without model-run audit rows"
+        )
+    return CompletedModelPublishResult(
+        model_id=model_id,
+        model_name=model_config.model_name,
+        model_version=str(package_row["model_version"]),
+        manifest_id=str(package_row["manifest_id"]),
+        split_set_id=(
+            None if package_row["split_set_id"] is None else str(package_row["split_set_id"])
+        ),
+        export_id=str(package_row["source_export_id"]),
+        rate_package_id=int(package_row["rate_package_id"]),
+        package_version=int(package_row["package_version"]),
+        package_status=str(package_row["package_status"]),
+        rating_workbook_path=str(package_row["rating_workbook_path"]),
+        model_run_id=int(model_run_id),
+        mlflow_run_id=(
+            None if package_row["mlflow_run_id"] is None else str(package_row["mlflow_run_id"])
+        ),
+        publication_receipt_path=(
+            None
+            if package_row["publication_receipt_path"] is None
+            else str(package_row["publication_receipt_path"])
+        ),
+        publication_receipt_sha256=(
+            None
+            if package_row["publication_receipt_sha256"] is None
+            else str(package_row["publication_receipt_sha256"])
+        ),
+        was_existing=was_existing,
+    )
+
+
+def _identity(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value)
+    return cleaned or None

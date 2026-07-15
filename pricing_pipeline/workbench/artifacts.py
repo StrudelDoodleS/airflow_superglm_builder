@@ -5,7 +5,7 @@ import io
 import os
 import platform
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,8 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+
+from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
 BUNDLE_FORMAT = "superglm-candidate-joblib-v1"
@@ -31,18 +33,61 @@ class CandidateBundle:
     offset: pd.Series | np.ndarray | None
     export_weight: pd.Series | np.ndarray | None
     cv_report: dict[str, Any]
+    model_name: str
+    model_version: str
+    export_id: str
     manifest_id: str
     split_set_id: str | None
     pk_columns: tuple[str, ...]
     row_order_sha256: str
     model_source_sha256: str
-    offset_contract: dict[str, Any]
-    review_artifact: dict[str, Any] | None = None
+    offset_contract: OffsetExportContract
     fit_sample_weight_name: str | None = None
     export_weight_name: str | None = None
-    offset_export_options: dict[str, Any] | None = None
-    review_hook_module: str | None = None
-    review_hook_name: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            contract = OffsetExportContract.model_validate(self.offset_contract)
+        except ValueError as exc:
+            raise CandidateArtifactError(f"invalid offset_contract: {exc}") from exc
+        object.__setattr__(self, "offset_contract", contract)
+
+        if self.export_weight is None:
+            if contract.handling == "EXPORTED_FACTOR":
+                raise CandidateArtifactError("EXPORTED_FACTOR requires export_weight")
+            if self.export_weight_name is not None:
+                raise CandidateArtifactError(
+                    "export_weight_name was supplied without export_weight"
+                )
+            return
+
+        if not isinstance(self.export_weight, pd.Series | np.ndarray):
+            raise CandidateArtifactError("export_weight must be a pandas Series or numpy array")
+        if isinstance(self.export_weight, np.ndarray) and self.export_weight.ndim != 1:
+            raise CandidateArtifactError("export_weight must be one-dimensional")
+        values = pd.Series(self.export_weight).reset_index(drop=True)
+        if len(values) != len(self.X):
+            raise CandidateArtifactError(
+                f"export_weight length {len(values)} does not match X row count {len(self.X)}"
+            )
+        if values.isna().any():
+            raise CandidateArtifactError("export_weight contains missing values")
+        numeric_values = [
+            value
+            for value in values
+            if not isinstance(value, (bool, np.bool_)) and pd.api.types.is_number(value)
+        ]
+        if any(not np.isfinite(value) for value in numeric_values):
+            raise CandidateArtifactError("export_weight contains non-finite numeric values")
+
+        if contract.handling != "EXPORTED_FACTOR":
+            return
+        if not self.export_weight_name:
+            raise CandidateArtifactError("EXPORTED_FACTOR requires export_weight_name")
+        if self.export_weight_name != contract.source_name:
+            raise CandidateArtifactError(
+                "export_weight_name must match offset_contract source_name"
+            )
 
 
 @dataclass(frozen=True)
@@ -101,6 +146,12 @@ def save_candidate_bundle(
     bundle: CandidateBundle,
     path: str | Path,
 ) -> CandidateArtifactMetadata:
+    for field_name in ("model_name", "model_version", "export_id"):
+        value = getattr(bundle, field_name, None)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise CandidateArtifactError(
+                f"candidate {field_name} must be a non-empty trimmed string"
+            )
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     python_version = platform.python_version()
@@ -152,9 +203,7 @@ def load_candidate_bundle(
             f"candidate artifact is outside configured artifact root {root}: {artifact_path}"
         )
     if expected_format != BUNDLE_FORMAT:
-        raise CandidateArtifactError(
-            f"unsupported candidate artifact format {expected_format!r}"
-        )
+        raise CandidateArtifactError(f"unsupported candidate artifact format {expected_format!r}")
 
     _validate_runtime_versions(
         expected_python_version=expected_python_version,
@@ -192,4 +241,9 @@ def load_candidate_bundle(
     bundle = envelope.get("bundle")
     if not isinstance(bundle, CandidateBundle):
         raise CandidateArtifactError("candidate artifact envelope does not contain a bundle")
+    bundle = replace(bundle)
+    for field_name in ("model_name", "model_version", "export_id"):
+        value = getattr(bundle, field_name, None)
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise CandidateArtifactError(f"candidate artifact has no valid {field_name} identity")
     return bundle

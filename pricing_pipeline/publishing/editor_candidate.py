@@ -1,31 +1,25 @@
 from __future__ import annotations
 
-import importlib
 import json
 import math
 import os
-import platform
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_poisson_deviance
 from sqlalchemy import text
 
-from pricing_models.registry import get_model_config
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.modeling.standard_superglm import ModelInputs, call_review_hook
-from pricing_pipeline.publishing.lineage import record_model_run_on_connection
+from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.staging import stage_rating_export
@@ -43,7 +37,6 @@ from pricing_pipeline.workbench.artifacts import (
     save_candidate_bundle,
 )
 from pricing_pipeline.workbench.submission import (
-    EDITED_MODEL_FORMAT,
     EditorSubmission,
     EditorSubmissionError,
     load_verified_submission,
@@ -95,6 +88,7 @@ class ParentCandidate:
 class EditorExport:
     export_id: str
     rating_workbook_path: str
+    rating_workbook_sha256: str
     publication_receipt_path: str
     publication_receipt_sha256: str
     publication_receipt: SuperGLMPublicationReceipt
@@ -129,6 +123,51 @@ class EditorPublicationAttempt:
     final_dir: Path
 
 
+def publish_editor_submission(
+    engine,
+    *,
+    settings: Settings,
+    submission_path: str,
+    submission_sha256: str,
+    dag_id: str,
+    airflow_run_id: str,
+    created_by: str,
+    model_config: ModelBuildConfig,
+) -> EditorPublicationResult:
+    submission = load_verified_submission(
+        submission_path,
+        submission_sha256,
+        allowed_root=settings.workbench_artifact_root,
+    )
+    submission_dir = _submission_directory(
+        submission,
+        allowed_root=settings.workbench_artifact_root,
+    )
+    with _editor_publication_lock(submission_dir):
+        existing = _resolve_existing_editor_publication(
+            engine,
+            submission,
+            allowed_root=settings.workbench_artifact_root,
+        )
+        if existing is not None:
+            return existing
+        _remove_unpublished_editor_attempts(submission_dir)
+        attempt = _new_editor_publication_attempt(submission_dir)
+        try:
+            return _publish_new_editor_submission(
+                engine,
+                submission=submission,
+                allowed_root=settings.workbench_artifact_root,
+                attempt=attempt,
+                dag_id=dag_id,
+                airflow_run_id=airflow_run_id,
+                created_by=created_by,
+                model_config=model_config,
+            )
+        finally:
+            _remove_path(attempt.staging_dir)
+
+
 def _editor_export_id(submission: EditorSubmission) -> str:
     return f"editor__{submission.submission_id.replace('-', '_')}"
 
@@ -154,36 +193,6 @@ def _editor_publication_lock(submission_dir: Path) -> Iterator[None]:
         yield
 
 
-def _new_editor_publication_attempt(submission_dir: Path) -> EditorPublicationAttempt:
-    attempt_id = uuid4().hex
-    published_root = submission_dir / "published"
-    staging_root = published_root / ".staging"
-    attempts_root = published_root / "attempts"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    attempts_root.mkdir(parents=True, exist_ok=True)
-    staging_dir = staging_root / attempt_id
-    final_dir = attempts_root / attempt_id
-    staging_dir.mkdir()
-    return EditorPublicationAttempt(staging_dir=staging_dir, final_dir=final_dir)
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
-def _remove_unpublished_editor_attempts(submission_dir: Path) -> None:
-    published_root = submission_dir / "published"
-    for root_name in (".staging", "attempts"):
-        root = published_root / root_name
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            _remove_path(child)
-
-
 def _resolve_existing_editor_publication(
     engine,
     submission: EditorSubmission,
@@ -201,7 +210,11 @@ def _resolve_existing_editor_publication(
             rp.parent_rate_package_id,
             mr.model_run_id,
             mr.run_status,
+            mr.model_version,
+            mr.export_id,
             mr.manifest_id,
+            mr.rating_workbook_path,
+            mr.rating_workbook_sha256,
             split_link.split_set_id,
             mr.model_source_sha256,
             mr.candidate_artifact_path,
@@ -254,6 +267,17 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             "editor publication requires lineage repair: package/run is incomplete"
         )
+    workbook_path = Path(str(row.get("rating_workbook_path") or "")).expanduser().resolve()
+    root = Path(allowed_root).expanduser().resolve()
+    if not workbook_path.is_relative_to(root) or not workbook_path.is_file():
+        raise EditorSubmissionError(
+            "existing editor publication rating workbook is missing or outside the artifact root"
+        )
+    expected_workbook_sha256 = str(row.get("rating_workbook_sha256") or "")
+    if sha256_file(workbook_path) != expected_workbook_sha256:
+        raise EditorSubmissionError(
+            "existing editor publication rating workbook SHA-256 verification failed"
+        )
     artifact_fields = (
         "candidate_artifact_path",
         "candidate_artifact_sha256",
@@ -267,14 +291,14 @@ def _resolve_existing_editor_publication(
             "editor publication requires lineage repair: candidate artifact metadata is incomplete"
         )
     expected_lineage = {
+        "model_name": submission.model_name,
+        "export_id": _editor_export_id(submission),
         "manifest_id": submission.manifest_id,
         "split_set_id": submission.split_set_id,
         "model_source_sha256": submission.model_source_sha256,
     }
     sql_mismatches = [
-        field
-        for field, expected in expected_lineage.items()
-        if row.get(field) != expected
+        field for field, expected in expected_lineage.items() if row.get(field) != expected
     ]
     if sql_mismatches:
         raise EditorSubmissionError(
@@ -295,10 +319,12 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             f"existing editor publication candidate artifact failed verification: {exc}"
         ) from exc
+    expected_bundle = {
+        **expected_lineage,
+        "model_version": row.get("model_version"),
+    }
     bundle_mismatches = [
-        field
-        for field, expected in expected_lineage.items()
-        if getattr(bundle, field) != expected
+        field for field, expected in expected_bundle.items() if getattr(bundle, field) != expected
     ]
     if bundle_mismatches:
         raise EditorSubmissionError(
@@ -317,12 +343,42 @@ def _resolve_existing_editor_publication(
     )
 
 
+def _remove_unpublished_editor_attempts(submission_dir: Path) -> None:
+    published_root = submission_dir / "published"
+    for root_name in (".staging", "attempts"):
+        root = published_root / root_name
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            _remove_path(child)
+
+
+def _new_editor_publication_attempt(submission_dir: Path) -> EditorPublicationAttempt:
+    attempt_id = uuid4().hex
+    published_root = submission_dir / "published"
+    staging_root = published_root / ".staging"
+    attempts_root = published_root / "attempts"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    attempts_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = staging_root / attempt_id
+    final_dir = attempts_root / attempt_id
+    staging_dir.mkdir()
+    return EditorPublicationAttempt(staging_dir=staging_dir, final_dir=final_dir)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def load_parent_candidate(
     engine,
     submission: EditorSubmission,
     *,
     allowed_root: str | Path,
-    model_config: ModelBuildConfig | None = None,
+    model_config: ModelBuildConfig,
 ) -> ParentCandidate:
     schemas = schema_names_from_connectable(engine)
     query = text(
@@ -337,6 +393,8 @@ def load_parent_candidate(
             rp.effective_to_date,
             mr.model_run_id,
             mr.run_status,
+            mr.model_version AS run_model_version,
+            mr.export_id,
             mr.manifest_id,
             split_link.split_set_id,
             mr.candidate_artifact_path,
@@ -374,26 +432,21 @@ def load_parent_candidate(
         )
     if len(rows) != 1:
         raise EditorSubmissionError(
-            "parent package must resolve exactly one successful model run; "
-            f"found {len(rows)}"
+            f"parent package must resolve exactly one successful model run; found {len(rows)}"
         )
     row = dict(rows[0])
     expected = {
         "model_name": submission.model_name,
+        "run_model_version": row["model_version"],
         "package_version": submission.source_package_version,
         "rate_package_id": submission.parent_rate_package_id,
         "model_run_id": submission.parent_model_run_id,
         "manifest_id": submission.manifest_id,
         "split_set_id": submission.split_set_id,
-        "candidate_artifact_path": submission.baseline_candidate_path,
         "candidate_artifact_sha256": submission.baseline_candidate_sha256,
         "model_source_sha256": submission.model_source_sha256,
     }
-    mismatches = [
-        name
-        for name, value in expected.items()
-        if str(row.get(name)) != str(value)
-    ]
+    mismatches = [name for name, value in expected.items() if str(row.get(name)) != str(value)]
     if str(row.get("run_status") or "").upper() != "SUCCESS":
         mismatches.append("run_status")
     if mismatches:
@@ -410,12 +463,20 @@ def load_parent_candidate(
         expected_superglm_version=row["candidate_superglm_version"],
         allowed_root=allowed_root,
     )
-    if bundle.manifest_id != submission.manifest_id:
-        raise EditorSubmissionError("parent bundle manifest does not match the submission")
-    if bundle.split_set_id != submission.split_set_id:
-        raise EditorSubmissionError("parent bundle split set does not match the submission")
-    config = model_config or get_model_config(submission.model_name)
-    configured_name = getattr(config, "model_name", submission.model_name)
+    for field_name, expected_value in (
+        ("model_name", row["model_name"]),
+        ("model_version", row["run_model_version"]),
+        ("export_id", row["export_id"]),
+        ("manifest_id", submission.manifest_id),
+        ("split_set_id", submission.split_set_id),
+        ("model_source_sha256", submission.model_source_sha256),
+    ):
+        if getattr(bundle, field_name) != expected_value:
+            raise EditorSubmissionError(
+                f"parent bundle {field_name} does not match SQL/submission lineage"
+            )
+    config = model_config
+    configured_name = config.model_name
     if str(configured_name) != submission.model_name:
         raise EditorSubmissionError(
             "explicit model config does not match the editor submission model_name"
@@ -435,9 +496,7 @@ def load_parent_candidate(
         rate_package_id=int(row["rate_package_id"]),
         model_run_id=int(row["model_run_id"]),
         effective_from=(
-            None
-            if row.get("effective_from_date") is None
-            else str(row["effective_from_date"])
+            None if row.get("effective_from_date") is None else str(row["effective_from_date"])
         ),
         effective_to=(
             None if row.get("effective_to_date") is None else str(row["effective_to_date"])
@@ -546,9 +605,8 @@ def _load_champion_bundle(
             unavailable_reason="the deployed champion uses a different prepared feature frame",
         )
     try:
-        champion_offset_contract = OffsetExportContract.model_validate(
-            champion.offset_contract
-        ).model_dump(mode="json")
+        champion_contract = OffsetExportContract.model_validate(champion.offset_contract)
+        parent_contract = OffsetExportContract.model_validate(parent_bundle.offset_contract)
     except ValueError:
         return ChampionSnapshot(
             deployment_slot=deployment_slot,
@@ -556,10 +614,7 @@ def _load_champion_bundle(
             bundle=None,
             unavailable_reason="the deployed champion has an invalid offset contract",
         )
-    parent_offset_contract = OffsetExportContract.model_validate(
-        parent_bundle.offset_contract
-    ).model_dump(mode="json")
-    if champion_offset_contract != parent_offset_contract:
+    if champion_contract != parent_contract:
         return ChampionSnapshot(
             deployment_slot=deployment_slot,
             rate_package_id=rate_package_id,
@@ -574,44 +629,28 @@ def _load_champion_bundle(
 
 
 def _load_edited_model(
+    parent: ParentCandidate,
     submission: EditorSubmission,
     *,
     allowed_root: str | Path,
 ) -> Any:
-    path = Path(submission.edited_model_path).expanduser().resolve()
+    path = Path(submission.editor_session_path).expanduser().resolve()
     root = Path(allowed_root).expanduser().resolve()
     if not path.is_relative_to(root):
-        raise EditorSubmissionError(f"edited model is outside artifact root {root}: {path}")
-    if submission.edited_model_format != EDITED_MODEL_FORMAT:
-        raise EditorSubmissionError(
-            f"unsupported edited model format {submission.edited_model_format!r}"
-        )
-    if path.stat().st_size != int(submission.edited_model_size_bytes):
-        raise EditorSubmissionError("edited model byte-size verification failed")
-    if sha256_file(path) != submission.edited_model_sha256:
-        raise EditorSubmissionError("edited model SHA-256 verification failed")
-    if submission.edited_model_python_version.split(".")[:2] != platform.python_version().split(
-        "."
-    )[:2]:
-        raise EditorSubmissionError("edited model Python version is incompatible")
-    try:
-        runtime_superglm_version = version("superglm")
-    except PackageNotFoundError:
-        runtime_superglm_version = "unknown"
-    if submission.edited_model_superglm_version != runtime_superglm_version:
-        raise EditorSubmissionError(
-            "edited model SuperGLM version is incompatible: "
-            f"artifact={submission.edited_model_superglm_version!r}, "
-            f"runtime={runtime_superglm_version!r}"
-        )
-    envelope = joblib.load(path)
-    if not isinstance(envelope, dict) or envelope.get("format") != EDITED_MODEL_FORMAT:
-        raise EditorSubmissionError("edited model envelope has an invalid format")
-    if envelope.get("python_version") != submission.edited_model_python_version:
-        raise EditorSubmissionError("edited model Python metadata is inconsistent")
-    if envelope.get("superglm_version") != submission.edited_model_superglm_version:
-        raise EditorSubmissionError("edited model SuperGLM metadata is inconsistent")
-    return envelope["model"]
+        raise EditorSubmissionError(f"editor session is outside artifact root {root}: {path}")
+    if path.stat().st_size != int(submission.editor_session_size_bytes):
+        raise EditorSubmissionError("editor session byte-size verification failed")
+    if sha256_file(path) != submission.editor_session_sha256:
+        raise EditorSubmissionError("editor session SHA-256 verification failed")
+    from superglm.editor import EditorSession
+
+    session = EditorSession.load(path, model=parent.bundle.fitted_model)
+    return session.to_model(
+        X=parent.bundle.X,
+        y=parent.bundle.y,
+        sample_weight=parent.bundle.sample_weight,
+        offset=parent.bundle.offset,
+    )
 
 
 def _predict(model: Any, bundle: CandidateBundle) -> np.ndarray:
@@ -695,9 +734,7 @@ def training_comparison_metrics(
         metrics[f"{prefix}_baseline_deviance"] = baseline_deviance
         metrics[f"{prefix}_edited_deviance"] = edited_deviance
         delta_name = (
-            "editor_training_deviance_delta"
-            if name == "parent"
-            else f"{prefix}_deviance_delta"
+            "editor_training_deviance_delta" if name == "parent" else f"{prefix}_deviance_delta"
         )
         metrics[delta_name] = edited_deviance - baseline_deviance
     scope = f"editor_training_{name}"
@@ -747,7 +784,6 @@ def _revision_with_publisher_identity(value: str, created_by: str) -> str:
     publisher_identity = str(created_by).strip()
     if not publisher_identity:
         raise EditorSubmissionError("publisher identity is required")
-    payload["claimed_identity"] = publisher_identity
     payload["published_by"] = publisher_identity
     return _canonical_json(payload)
 
@@ -760,7 +796,7 @@ def export_edited_model(
     write_dir: str | Path,
     published_dir: str | Path,
 ) -> EditorExport:
-    edited_model = _load_edited_model(submission, allowed_root=allowed_root)
+    edited_model = _load_edited_model(parent, submission, allowed_root=allowed_root)
     root = Path(allowed_root).expanduser().resolve()
     output_dir = Path(write_dir).expanduser().resolve()
     final_dir = Path(published_dir).expanduser().resolve()
@@ -770,21 +806,28 @@ def export_edited_model(
         raise EditorSubmissionError("editor publication staging directory does not exist")
     workbook_write_path = output_dir / "rating_tables.xlsx"
     workbook_path = final_dir / "rating_tables.xlsx"
-    export_options = dict(parent.bundle.offset_export_options or {})
+    contract = parent.bundle.offset_contract
+    export_options: dict[str, Any] = {}
     if parent.bundle.offset is not None:
         export_options["offset"] = parent.bundle.offset
+    if contract.handling == "EXPORTED_FACTOR":
+        export_options.update(
+            offset_source=parent.bundle.export_weight,
+            offset_name=contract.source_factor_name,
+            offset_kind="auto",
+        )
     export_rating_tables(
         edited_model,
         parent.bundle.X,
         parent.bundle.y,
         parent.bundle.export_weight,
         output_path=workbook_write_path,
-        mlflow_client=None,
         **export_options,
     )
+    workbook_sha256 = sha256_file(workbook_write_path)
     receipt = build_superglm_publication_receipt(
         edited_model,
-        offset_contract=OffsetExportContract.model_validate(parent.bundle.offset_contract),
+        offset_contract=contract,
         fit_sample_weight_name=parent.bundle.fit_sample_weight_name,
         export_weight_name=parent.bundle.export_weight_name,
     )
@@ -812,47 +855,12 @@ def export_edited_model(
         metrics.update(champion_metrics)
         metric_scopes.update(champion_scopes)
     champion_comparison = parent.champion.revision_metadata()
-    review_hook = None
-    if parent.bundle.review_hook_module and parent.bundle.review_hook_name:
-        review_module = importlib.import_module(parent.bundle.review_hook_module)
-        review_hook = getattr(review_module, parent.bundle.review_hook_name, None)
-        if not callable(review_hook):
-            raise EditorSubmissionError(
-                "model-local review hook can no longer be imported: "
-                f"{parent.bundle.review_hook_module}.{parent.bundle.review_hook_name}"
-            )
-    review_artifact = call_review_hook(
-        review_hook,
-        fitted_model=edited_model,
-        inputs=ModelInputs(
-            X=parent.bundle.X,
-            y=parent.bundle.y,
-            sample_weight=parent.bundle.sample_weight,
-            sample_weight_name=parent.bundle.fit_sample_weight_name,
-            offset=parent.bundle.offset,
-            export_weight=parent.bundle.export_weight,
-            export_weight_name=parent.bundle.export_weight_name,
-        ),
-        output_path=output_dir / "rating_tables_review.xlsx",
-        allowed_root=output_dir,
-    )
-    review_relative_path = (
-        None
-        if review_artifact is None
-        else Path(review_artifact.path).resolve().relative_to(output_dir)
-    )
     edited_bundle = replace(
         parent.bundle,
         fitted_model=edited_model,
-        review_artifact=(
-            None
-            if review_artifact is None
-            else {
-                "path": str(final_dir / review_relative_path),
-                "sha256": review_artifact.sha256,
-                "size_bytes": review_artifact.size_bytes,
-            }
-        ),
+        model_name=parent.model_name,
+        model_version=parent.model_version,
+        export_id=_editor_export_id(submission),
     )
     artifact: CandidateArtifactMetadata = save_candidate_bundle(
         edited_bundle,
@@ -875,24 +883,19 @@ def export_edited_model(
         "editor_session_path": submission.editor_session_path,
         "editor_session_sha256": submission.editor_session_sha256,
         "editor_session_size_bytes": submission.editor_session_size_bytes,
-        "edited_model_path": submission.edited_model_path,
-        "edited_model_sha256": submission.edited_model_sha256,
-        "edited_model_size_bytes": submission.edited_model_size_bytes,
-        "edited_model_format": submission.edited_model_format,
         "baseline_candidate_sha256": submission.baseline_candidate_sha256,
         "baseline_cv_metrics": {
             name: value for name, value in metrics.items() if name.startswith("cv_")
         },
         "comparison_metrics": {
-            name: value
-            for name, value in metrics.items()
-            if name.startswith("editor_training_")
+            name: value for name, value in metrics.items() if name.startswith("editor_training_")
         },
         "champion_comparison": champion_comparison,
     }
     return EditorExport(
         export_id=_editor_export_id(submission),
         rating_workbook_path=str(workbook_path),
+        rating_workbook_sha256=workbook_sha256,
         publication_receipt_path=str(receipt_path),
         publication_receipt_sha256=receipt_sha256,
         publication_receipt=receipt,
@@ -910,31 +913,6 @@ def export_edited_model(
     )
 
 
-def stage_editor_export(
-    engine,
-    parent: ParentCandidate,
-    export: EditorExport,
-    created_by: str,
-) -> str:
-    return stage_rating_export(
-        engine,
-        workbook_path=Path(export.rating_workbook_path),
-        export_id=export.export_id,
-        model_name=parent.model_name,
-        model_version=parent.model_version,
-        target_name=parent.config.target_name,
-        model_type=parent.config.model_type,
-        effective_from=parent.effective_from,
-        effective_to=parent.effective_to,
-        created_by=created_by,
-        replace=True,
-        model_id=parent.model_id,
-        publication_receipt_path=export.publication_receipt_path,
-        publication_receipt_sha256=export.publication_receipt_sha256,
-        metadata_mode="REQUIRE_SUPERGLM_RECEIPT",
-    )
-
-
 def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, str | bool | int):
         return value
@@ -947,60 +925,6 @@ def _json_value(value: Any) -> Any:
     if pd.isna(value):
         return None
     return str(value)
-
-
-def _published_offset_source(bundle: CandidateBundle) -> pd.Series:
-    options = bundle.offset_export_options or {}
-    if "offset_source" not in options or options["offset_source"] is None:
-        raise EditorSubmissionError(
-            "EXPORTED_FACTOR SQL parity requires "
-            "bundle.offset_export_options['offset_source']"
-        )
-
-    raw_source = options["offset_source"]
-    if isinstance(raw_source, str):
-        if raw_source not in bundle.X.columns:
-            raise EditorSubmissionError(
-                f"EXPORTED_FACTOR offset_source column {raw_source!r} is missing "
-                "from bundle.X"
-            )
-        raw_source = bundle.X[raw_source]
-
-    if isinstance(raw_source, pd.Series):
-        values = raw_source.reset_index(drop=True)
-    else:
-        try:
-            values = pd.Series(raw_source).reset_index(drop=True)
-        except (TypeError, ValueError) as exc:
-            shape = getattr(raw_source, "shape", None)
-            if shape is not None and len(shape) > 1:
-                raise EditorSubmissionError(
-                    "EXPORTED_FACTOR offset_source must be one-dimensional; "
-                    f"received shape {shape}"
-                ) from exc
-            raise EditorSubmissionError(
-                "EXPORTED_FACTOR offset_source must be a one-dimensional array-like"
-            ) from exc
-
-    if len(values) != len(bundle.X):
-        raise EditorSubmissionError(
-            f"EXPORTED_FACTOR offset_source length {len(values)} does not match "
-            f"candidate row count {len(bundle.X)}"
-        )
-    if values.isna().any():
-        raise EditorSubmissionError("EXPORTED_FACTOR offset_source contains missing values")
-    for value in values:
-        if isinstance(value, (bool, np.bool_)) or not pd.api.types.is_number(value):
-            continue
-        try:
-            is_finite = bool(np.isfinite(value))
-        except TypeError:
-            is_finite = math.isfinite(value)
-        if not is_finite:
-            raise EditorSubmissionError(
-                "EXPORTED_FACTOR offset_source contains non-finite numeric values"
-            )
-    return values
 
 
 def verify_package_sql_parity(
@@ -1026,9 +950,9 @@ def verify_package_sql_parity(
         expected = np.asarray(edited_model.predict(sample), dtype=float)
     else:
         expected = np.asarray(edited_model.predict(sample, offset=sample_offset), dtype=float)
-    contract = OffsetExportContract.model_validate(bundle.offset_contract)
+    contract = bundle.offset_contract
     sample_published_offset_source = (
-        _published_offset_source(bundle).iloc[:count]
+        pd.Series(bundle.export_weight).reset_index(drop=True).iloc[:count]
         if contract.handling == "EXPORTED_FACTOR"
         else None
     )
@@ -1095,10 +1019,6 @@ def verify_package_sql_parity(
             )
 
 
-def record_derived_model_run(connection, **kwargs) -> int:
-    return record_model_run_on_connection(connection, **kwargs)
-
-
 def _publish_new_editor_submission(
     engine,
     *,
@@ -1108,12 +1028,14 @@ def _publish_new_editor_submission(
     dag_id: str,
     airflow_run_id: str,
     created_by: str,
-    model_config: ModelBuildConfig | None = None,
+    model_config: ModelBuildConfig,
 ) -> EditorPublicationResult:
-    parent_kwargs: dict[str, Any] = {"allowed_root": allowed_root}
-    if model_config is not None:
-        parent_kwargs["model_config"] = model_config
-    parent = load_parent_candidate(engine, submission, **parent_kwargs)
+    parent = load_parent_candidate(
+        engine,
+        submission,
+        allowed_root=allowed_root,
+        model_config=model_config,
+    )
     exported = export_edited_model(
         parent,
         submission,
@@ -1123,7 +1045,26 @@ def _publish_new_editor_submission(
     )
     os.rename(attempt.staging_dir, attempt.final_dir)
     try:
-        content_sha256 = stage_editor_export(engine, parent, exported, created_by)
+        if sha256_file(exported.rating_workbook_path) != exported.rating_workbook_sha256:
+            raise EditorSubmissionError("edited rating workbook SHA-256 changed before staging")
+        content_sha256 = stage_rating_export(
+            engine,
+            workbook_path=Path(exported.rating_workbook_path),
+            export_id=exported.export_id,
+            model_name=parent.model_name,
+            model_version=parent.model_version,
+            target_name=parent.config.target_name,
+            model_type=parent.config.model_type,
+            effective_from=parent.effective_from,
+            effective_to=parent.effective_to,
+            created_by=created_by,
+            replace=True,
+            model_id=parent.model_id,
+            publication_receipt_path=exported.publication_receipt_path,
+            publication_receipt_sha256=exported.publication_receipt_sha256,
+        )
+        if sha256_file(exported.rating_workbook_path) != exported.rating_workbook_sha256:
+            raise EditorSubmissionError("edited rating workbook changed during staging")
         revision_metadata_json = _revision_with_publisher_identity(
             exported.revision_metadata_json,
             created_by,
@@ -1142,11 +1083,12 @@ def _publish_new_editor_submission(
 
         def write_package_lineage(connection, rate_package_id: int) -> None:
             nonlocal model_run_id
-            model_run_id = record_derived_model_run(
-                connection,
+            model_run_id = record_model_run(
+                None,
+                connection=connection,
                 dag_id=dag_id,
                 airflow_run_id=airflow_run_id,
-                mlflow_run_id=f"editor::{submission.submission_id}",
+                mlflow_run_id="",
                 manifest_id=submission.manifest_id,
                 split_set_id=submission.split_set_id,
                 export_id=exported.export_id,
@@ -1155,6 +1097,7 @@ def _publish_new_editor_submission(
                 model_version=parent.model_version,
                 rate_package_id=rate_package_id,
                 rating_workbook_path=exported.rating_workbook_path,
+                rating_workbook_sha256=exported.rating_workbook_sha256,
                 run_status="SUCCESS",
                 created_by=created_by,
                 publication_receipt_path=exported.publication_receipt_path,
@@ -1175,7 +1118,7 @@ def _publish_new_editor_submission(
             engine,
             export_id=exported.export_id,
             created_by=created_by,
-            package_status=parent.config.default_package_status,
+            package_status="PUBLISHED",
             parent_rate_package_id=submission.parent_rate_package_id,
             revision_metadata_json=revision_metadata_json,
             draft_validator=validate_draft,
@@ -1219,49 +1162,3 @@ def _publish_new_editor_submission(
         package_status=published.package_status,
         was_existing=published.was_existing,
     )
-
-
-def publish_editor_submission(
-    engine,
-    *,
-    settings: Settings,
-    submission_path: str,
-    submission_sha256: str,
-    dag_id: str,
-    airflow_run_id: str,
-    created_by: str,
-    model_config: ModelBuildConfig | None = None,
-) -> EditorPublicationResult:
-    submission = load_verified_submission(
-        submission_path,
-        submission_sha256,
-        allowed_root=settings.workbench_artifact_root,
-    )
-    submission_dir = _submission_directory(
-        submission,
-        allowed_root=settings.workbench_artifact_root,
-    )
-    with _editor_publication_lock(submission_dir):
-        existing = _resolve_existing_editor_publication(
-            engine,
-            submission,
-            allowed_root=settings.workbench_artifact_root,
-        )
-        if existing is not None:
-            return existing
-        _remove_unpublished_editor_attempts(submission_dir)
-        attempt = _new_editor_publication_attempt(submission_dir)
-        try:
-            publish_kwargs: dict[str, Any] = {
-                "submission": submission,
-                "allowed_root": settings.workbench_artifact_root,
-                "attempt": attempt,
-                "dag_id": dag_id,
-                "airflow_run_id": airflow_run_id,
-                "created_by": created_by,
-            }
-            if model_config is not None:
-                publish_kwargs["model_config"] = model_config
-            return _publish_new_editor_submission(engine, **publish_kwargs)
-        finally:
-            _remove_path(attempt.staging_dir)

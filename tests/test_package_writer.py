@@ -2,27 +2,27 @@ from pathlib import Path
 
 import pytest
 
-from pricing_pipeline.publishing.lifecycle import PublishResult
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
-from pricing_pipeline.publishing import package_writer
-from pricing_pipeline.publishing.package_writer import load_staging_to_rating_package
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 
 
-def test_package_writer_rejects_legacy_pointer_deployment():
-    args = type(
-        "Args",
-        (),
-        {
-            "export_id": "export-1",
-            "created_by": "airflow",
-            "package_status": "PUBLISHED",
-            "set_pointer": "MTPL_FREQ_UAT",
-        },
-    )()
-
-    with pytest.raises(ValueError, match="deploy"):
-        load_staging_to_rating_package(object(), args)
+def load_staging_to_rating_package(engine, args):
+    """Adapt old test fixtures to the explicit production API."""
+    result = publish_rating_package(
+        engine,
+        export_id=args.export_id,
+        created_by=args.created_by,
+        package_status=args.package_status,
+        parent_rate_package_id=getattr(args, "parent_rate_package_id", None),
+        revision_metadata_json=getattr(args, "revision_metadata_json", None),
+        draft_validator=getattr(args, "draft_validator", None),
+        package_lineage_writer=getattr(args, "package_lineage_writer", None),
+        expected_staged_metadata=getattr(args, "expected_staged_metadata", None),
+    )
+    args.package_version = result.package_version
+    args.package_status = result.package_status
+    args.was_existing = result.was_existing
+    return result.rate_package_id
 
 
 def test_package_writer_does_not_write_deployment_tables_during_publish():
@@ -30,82 +30,6 @@ def test_package_writer_does_not_write_deployment_tables_during_publish():
 
     assert "PRICING_MODEL_DEPLOYMENT" not in writer
     assert "PRICING_PACKAGE_POINTER" not in writer
-
-
-def test_publish_rating_package_builds_args_without_deployment_pointer(monkeypatch):
-    captured = []
-
-    def fake_load(engine, args):
-        captured.append((engine, args))
-        args.package_version = 3
-        return 42
-
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
-        fake_load,
-    )
-    engine = object()
-
-    result = publish_rating_package(
-        engine,
-        export_id="export-1",
-        created_by="airflow",
-        package_status="PUBLISHED",
-    )
-
-    assert result == PublishResult(
-        mlflow_run_id="",
-        export_id="export-1",
-        rate_package_id=42,
-        package_version=3,
-        rating_workbook_path="",
-    )
-    args = captured[0][1]
-    assert args.export_id == "export-1"
-    assert args.created_by == "airflow"
-    assert args.package_status == "PUBLISHED"
-    assert args.set_pointer is None
-
-
-def test_publish_rating_package_passes_child_revision_contract(monkeypatch):
-    captured = []
-
-    def fake_load(engine, args):
-        captured.append(args)
-        args.package_version = 8
-        return 108
-
-    monkeypatch.setattr(package_writer, "load_staging_to_rating_package", fake_load)
-
-    def validator(connection, rate_package_id):
-        return None
-
-    def write_lineage(connection, rate_package_id):
-        return None
-
-    expected_staged_metadata = {
-        "export_id": "editor__submission_1",
-        "model_id": 17,
-        "staging_content_sha256": "a" * 64,
-    }
-
-    publish_rating_package(
-        object(),
-        export_id="editor__submission_1",
-        created_by="analyst@example.test",
-        parent_rate_package_id=107,
-        revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
-        draft_validator=validator,
-        package_lineage_writer=write_lineage,
-        expected_staged_metadata=expected_staged_metadata,
-    )
-
-    args = captured[0]
-    assert args.parent_rate_package_id == 107
-    assert args.revision_metadata_json == '{"kind":"SUPERGLM_EDITOR"}'
-    assert args.draft_validator is validator
-    assert args.package_lineage_writer is write_lineage
-    assert args.expected_staged_metadata is expected_staged_metadata
 
 
 def test_package_writer_rejects_replaced_staging_before_lineage_write():
@@ -135,29 +59,6 @@ def test_package_writer_rejects_replaced_staging_before_lineage_write():
     assert not any(
         "source_export_id = :export_id" in sql for sql, _params in engine.connection.statements
     )
-
-
-def test_publish_rating_package_reports_existing_source_export(monkeypatch):
-    def fake_load(engine, args):
-        args.package_version = 3
-        args.package_status = "DRAFT"
-        args.was_existing = True
-        return 42
-
-    monkeypatch.setattr(
-        "pricing_pipeline.publishing.package_writer.load_staging_to_rating_package",
-        fake_load,
-    )
-
-    result = publish_rating_package(
-        object(),
-        export_id="export-1",
-        created_by="airflow",
-        package_status="PUBLISHED",
-    )
-
-    assert result.was_existing is True
-    assert result.package_status == "DRAFT"
 
 
 class _FakeMetaResult:
@@ -386,8 +287,7 @@ def test_package_lineage_writer_runs_inside_transaction_before_final_status():
         assert connection is engine.connection
         assert rate_package_id == 42
         assert not any(
-            "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
-            for sql, _params in connection.statements
+            "UPDATE pricing.PRICING_RATE_PACKAGE" in sql for sql, _params in connection.statements
         )
         events.append("lineage")
 
@@ -538,7 +438,7 @@ def test_package_writer_rejects_root_package_with_different_reserved_version():
     )
 
 
-def test_package_writer_rejects_staged_export_without_registered_model_id(monkeypatch):
+def test_package_writer_rejects_staged_export_without_registered_model_id():
     args = type(
         "Args",
         (),
@@ -549,15 +449,6 @@ def test_package_writer_rejects_staged_export_without_registered_model_id(monkey
             "set_pointer": None,
         },
     )()
-    monkeypatch.setattr(
-        package_writer,
-        "ensure_pricing_model",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("publish must not create model registry rows")
-        ),
-        raising=False,
-    )
-
     with pytest.raises(ModelRegistryError, match="missing model_id"):
         load_staging_to_rating_package(_FakePublishEngine(), args)
 

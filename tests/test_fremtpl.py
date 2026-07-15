@@ -87,9 +87,7 @@ def test_ensure_local_fremtpl_demo_seeds_an_empty_sqlite_store_once(tmp_path):
     assert ensure_local_fremtpl_demo(engine, row_count=12) == 12
     assert ensure_local_fremtpl_demo(engine, row_count=99) == 12
     with engine.connect() as connection:
-        count = connection.execute(
-            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
-        ).scalar_one()
+        count = connection.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
 
     assert count == 12
 
@@ -102,13 +100,9 @@ def test_open_offline_sqlite_adds_digest_columns_to_existing_store(tmp_path):
     engine, paths = open_offline_sqlite(tmp_path)
     engine.dispose()
     with sqlite3.connect(paths["pricing"]) as connection:
-        connection.execute(
-            "ALTER TABLE PRICING_RATE_PACKAGE DROP COLUMN staging_content_sha256"
-        )
+        connection.execute("ALTER TABLE PRICING_RATE_PACKAGE DROP COLUMN staging_content_sha256")
     with sqlite3.connect(paths["pricing_stg"]) as connection:
-        connection.execute(
-            "ALTER TABLE STG_RATING_EXPORT DROP COLUMN staging_content_sha256"
-        )
+        connection.execute("ALTER TABLE STG_RATING_EXPORT DROP COLUMN staging_content_sha256")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)
     with upgraded.connect() as connection:
@@ -154,13 +148,92 @@ def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
     upgraded, _paths = open_offline_sqlite(tmp_path)
     with upgraded.connect() as connection:
         model_run_columns = {
-            row[1]
-            for row in connection.exec_driver_sql(
-                "PRAGMA pricing.table_info('MODEL_RUN')"
-            )
+            row[1] for row in connection.exec_driver_sql("PRAGMA pricing.table_info('MODEL_RUN')")
         }
 
     assert candidate_columns <= model_run_columns
+
+
+def test_open_offline_sqlite_adds_parent_model_run_id_to_existing_store(tmp_path):
+    import sqlite3
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, paths = open_offline_sqlite(tmp_path)
+    engine.dispose()
+    with sqlite3.connect(paths["pricing"]) as connection:
+        existing_columns = {row[1] for row in connection.execute("PRAGMA table_info('MODEL_RUN')")}
+        if "parent_model_run_id" in existing_columns:
+            connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
+
+    upgraded, _paths = open_offline_sqlite(tmp_path)
+    with upgraded.connect() as connection:
+        model_run_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA pricing.table_info('MODEL_RUN')")
+        }
+
+    assert "parent_model_run_id" in model_run_columns
+
+
+def test_open_offline_sqlite_backfills_parent_model_run_id_from_package_lineage(
+    tmp_path,
+):
+    import sqlite3
+
+    from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
+
+    engine, paths = open_offline_sqlite(tmp_path)
+    engine.dispose()
+    with sqlite3.connect(paths["pricing"]) as connection:
+        connection.executemany(
+            """
+            INSERT INTO PRICING_RATE_PACKAGE (
+                rate_package_id,
+                parent_rate_package_id,
+                model_id,
+                model_name,
+                package_version,
+                base_rate,
+                package_status,
+                created_by
+            ) VALUES (?, ?, 17, 'HOME_FREQ', ?, 1.0, 'PUBLISHED', 'test')
+            """,
+            [(41, None, 1), (42, 41, 2)],
+        )
+        connection.executemany(
+            """
+            INSERT INTO MODEL_RUN (
+                model_run_id,
+                model_id,
+                model_version,
+                export_id,
+                manifest_id,
+                rate_package_id,
+                rating_workbook_path,
+                rating_workbook_sha256,
+                run_status,
+                created_by
+            ) VALUES (?, 17, 'v1', ?, 'manifest-1', ?, '/tmp/rating.xlsx',
+                      ?, 'SUCCESS', 'test')
+            """,
+            [
+                (501, "export-parent", 41, "a" * 64),
+                (502, "export-child", 42, "b" * 64),
+            ],
+        )
+        connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
+
+    upgraded, _paths = open_offline_sqlite(tmp_path)
+    with upgraded.connect() as connection:
+        parent_model_run_id = connection.exec_driver_sql(
+            """
+            SELECT parent_model_run_id
+            FROM pricing.MODEL_RUN
+            WHERE model_run_id = '502'
+            """
+        ).scalar_one()
+
+    assert parent_model_run_id == "501"
 
 
 def _create_legacy_effective_date_store(offline_sqlite, tmp_path):
@@ -202,13 +275,15 @@ def _create_legacy_effective_date_store(offline_sqlite, tmp_path):
                 manifest_id,
                 rate_package_id,
                 rating_workbook_path,
+                rating_workbook_sha256,
                 effective_from,
                 created_by
             ) VALUES (
                 'legacy-run', 1, 'v1', 'legacy-export', 'manifest-1', 7,
-                'rating_tables.xlsx', '2026-01-01', 'test'
+                'rating_tables.xlsx', :workbook_sha256, '2026-01-01', 'test'
             )
-            """
+            """,
+            {"workbook_sha256": "a" * 64},
         )
         connection.commit()
     finally:
@@ -226,9 +301,7 @@ def test_open_offline_sqlite_relaxes_legacy_effective_date_constraints(tmp_path)
     with upgraded.begin() as connection:
         model_run_columns = {
             row[1]: row
-            for row in connection.exec_driver_sql(
-                "PRAGMA pricing.table_info('MODEL_RUN')"
-            )
+            for row in connection.exec_driver_sql("PRAGMA pricing.table_info('MODEL_RUN')")
         }
         package_columns = {
             row[1]: row
@@ -238,16 +311,22 @@ def test_open_offline_sqlite_relaxes_legacy_effective_date_constraints(tmp_path)
         }
         assert model_run_columns["effective_from"][3] == 0
         assert package_columns["effective_from_date"][3] == 0
-        assert connection.exec_driver_sql(
-            "SELECT effective_from FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'"
-        ).scalar_one() == "2026-01-01"
-        assert connection.exec_driver_sql(
-            """
+        assert (
+            connection.exec_driver_sql(
+                "SELECT effective_from FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'"
+            ).scalar_one()
+            == "2026-01-01"
+        )
+        assert (
+            connection.exec_driver_sql(
+                """
             SELECT effective_from_date
             FROM pricing.PRICING_RATE_PACKAGE
             WHERE rate_package_id = 7
             """
-        ).scalar_one() == "2026-01-01"
+            ).scalar_one()
+            == "2026-01-01"
+        )
         connection.exec_driver_sql(
             """
             INSERT INTO pricing.PRICING_RATE_PACKAGE (
@@ -270,14 +349,17 @@ def test_open_offline_sqlite_relaxes_legacy_effective_date_constraints(tmp_path)
                 model_version,
                 export_id,
                 manifest_id,
-                rate_package_id,
-                rating_workbook_path,
-                effective_from,
-                created_by
-            ) VALUES (
-                'nullable-run', 1, 'v2', 'nullable-export', 'manifest-2', 8,
-                'rating_tables.xlsx', NULL, 'test'
-            )
+                    rate_package_id,
+                    rating_workbook_path,
+                    rating_workbook_sha256,
+                    effective_from,
+                    created_by
+                ) VALUES (
+                    'nullable-run', 1, 'v2', 'nullable-export', 'manifest-2', 8,
+                    'rating_tables.xlsx',
+                    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                    NULL, 'test'
+                )
             """
         )
 
@@ -310,9 +392,7 @@ def test_offline_nullability_rebuild_rolls_back_on_copy_failure(tmp_path):
     with sqlite3.connect(paths["pricing"]) as connection:
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert "MODEL_RUN" in tables
         assert "__offline_upgrade_model_run" not in tables
@@ -339,9 +419,7 @@ def test_fremtpl_insert_rows_preserves_order_and_converts_missing_to_none():
 
     rows = fremtpl_insert_rows(prepare_fremtpl_raw_frame(frame))
 
-    assert rows == [
-        (1, 0, 0.5, None, 6, 3, 45, 50, "B1", "Regular", None, None)
-    ]
+    assert rows == [(1, 0, 0.5, None, 6, 3, 45, 50, "B1", "Regular", None, None)]
 
 
 class ScalarResult:
@@ -485,8 +563,9 @@ def test_bulk_insert_fremtpl_raw_uses_format_placeholders_for_pymssql():
 
     bulk_insert_fremtpl_raw(engine, fremtpl_frame())
 
-    assert "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" in (
-        cursor.executemany_calls[0][0]
+    assert (
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        in (cursor.executemany_calls[0][0])
     )
 
 
@@ -505,9 +584,7 @@ def test_bulk_insert_fremtpl_raw_uses_configured_schema_for_raw_cursor_sql():
     bulk_insert_fremtpl_raw(engine, fremtpl_frame(), replace=True)
 
     assert cursor.execute_calls == ["TRUNCATE TABLE python_pricing.FREMTPL_RAW"]
-    assert cursor.executemany_calls[0][0].startswith(
-        "INSERT INTO python_pricing.FREMTPL_RAW"
-    )
+    assert cursor.executemany_calls[0][0].startswith("INSERT INTO python_pricing.FREMTPL_RAW")
 
 
 def test_bulk_insert_fremtpl_raw_replace_truncates_and_inserts_in_one_transaction():

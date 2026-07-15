@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from collections.abc import Mapping
 
@@ -95,9 +94,7 @@ def _staged_export_conflicts(
         staged_value = meta[field_name]
         expected_value = expected[field_name]
         if _identity_text(staged_value) != _identity_text(expected_value):
-            conflicts.append(
-                f"{field_name} expected={expected_value!r} staged={staged_value!r}"
-            )
+            conflicts.append(f"{field_name} expected={expected_value!r} staged={staged_value!r}")
     return conflicts
 
 
@@ -116,25 +113,26 @@ def _canonical_revision_metadata(value: str | None) -> str | None:
     return canonical
 
 
-def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
-    if getattr(args, "set_pointer", None):
-        raise ValueError(
-            "package publish no longer deploys rate packages; publish the package "
-            "first, then deploy it with ModelPublisher.deploy or the deploy DAG"
-        )
-
+def publish_rating_package(
+    engine,
+    *,
+    export_id: str,
+    created_by: str = "python",
+    package_status: str = "PUBLISHED",
+    parent_rate_package_id: int | None = None,
+    revision_metadata_json: str | None = None,
+    draft_validator=None,
+    package_lineage_writer=None,
+    expected_staged_metadata: Mapping[str, object] | None = None,
+) -> PublishResult:
+    revision_metadata_json = _canonical_revision_metadata(revision_metadata_json)
+    if draft_validator is not None and not callable(draft_validator):
+        raise TypeError("draft_validator must be callable")
+    if package_lineage_writer is not None and not callable(package_lineage_writer):
+        raise TypeError("package_lineage_writer must be callable")
     with engine.begin() as con:
-        acquire_staging_export_lock(con, args.export_id)
-        args.was_existing = False
-        requested_package_status = args.package_status
-        parent_rate_package_id = getattr(args, "parent_rate_package_id", None)
-        revision_metadata_json = _canonical_revision_metadata(
-            getattr(args, "revision_metadata_json", None)
-        )
-        draft_validator = getattr(args, "draft_validator", None)
-        package_lineage_writer = getattr(args, "package_lineage_writer", None)
-        if package_lineage_writer is not None and not callable(package_lineage_writer):
-            raise TypeError("package_lineage_writer must be callable")
+        acquire_staging_export_lock(con, export_id)
+        requested_package_status = package_status
         meta = (
             con.execute(
                 text("""
@@ -159,7 +157,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """),
-                {"export_id": args.export_id},
+                {"export_id": export_id},
             )
             .mappings()
             .one()
@@ -167,19 +165,19 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
 
         staged_conflicts = _staged_export_conflicts(
             meta,
-            getattr(args, "expected_staged_metadata", None),
+            expected_staged_metadata,
         )
         if staged_conflicts:
             raise ValueError(
                 f"staged export changed before package publication for "
-                f"export_id={args.export_id!r}: " + "; ".join(staged_conflicts)
+                f"export_id={export_id!r}: " + "; ".join(staged_conflicts)
             )
 
         model_id = meta["model_id"]
         if model_id is None:
             raise ModelRegistryError(
                 "staged rating export is missing model_id; validate/register the "
-                f"model before staging export_id={args.export_id!r}"
+                f"model before staging export_id={export_id!r}"
             )
 
         existing_package = (
@@ -206,7 +204,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
         """),
                 {
                     "model_id": model_id,
-                    "export_id": args.export_id,
+                    "export_id": export_id,
                 },
             )
             .mappings()
@@ -221,14 +219,18 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             )
             if conflicts:
                 raise ValueError(
-                    f"export_id {args.export_id!r} is already published with "
+                    f"export_id {export_id!r} is already published with "
                     "incompatible metadata: " + "; ".join(conflicts)
                 )
-            args.package_version = int(existing_package["package_version"])
-            args.package_status = str(existing_package["package_status"])
-            args.was_existing = True
-            rate_package_id = int(existing_package["rate_package_id"])
-            return rate_package_id
+            return PublishResult(
+                mlflow_run_id="",
+                export_id=export_id,
+                rate_package_id=int(existing_package["rate_package_id"]),
+                package_version=int(existing_package["package_version"]),
+                rating_workbook_path="",
+                package_status=str(existing_package["package_status"]),
+                was_existing=True,
+            )
 
         if parent_rate_package_id is not None:
             parent = (
@@ -250,9 +252,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 .one_or_none()
             )
             if parent is None:
-                raise ValueError(
-                    f"parent rate package {parent_rate_package_id} does not exist"
-                )
+                raise ValueError(f"parent rate package {parent_rate_package_id} does not exist")
             if int(parent["model_id"]) != int(model_id):
                 raise ValueError("parent rate package belongs to a different model")
             if str(parent["package_status"]) != "PUBLISHED":
@@ -284,7 +284,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     WHERE model_id = :model_id
                       AND export_id = :export_id
                     """),
-                    {"model_id": model_id, "export_id": args.export_id},
+                    {"model_id": model_id, "export_id": export_id},
                 )
                 .mappings()
                 .one_or_none()
@@ -304,7 +304,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     """),
                     {
                         "model_id": model_id,
-                        "export_id": args.export_id,
+                        "export_id": export_id,
                         "model_version": staged_version,
                     },
                 )
@@ -314,7 +314,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     raise ValueError(
                         f"reserved model_version {reserved_version!r} does not match "
                         f"staged model_version {staged_version!r} for "
-                        f"export_id={args.export_id!r}"
+                        f"export_id={export_id!r}"
                     )
 
         offset_handling = meta["offset_handling"] or "UNKNOWN"
@@ -334,7 +334,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   AND term_type = 'OFFSET_FACTOR'
             """),
                 {
-                    "export_id": args.export_id,
+                    "export_id": export_id,
                     "offset_factor_name": offset_factor_name,
                 },
             ).scalar_one_or_none()
@@ -351,7 +351,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 WHERE export_id = :export_id
                   AND term_type = 'OFFSET_FACTOR'
             """),
-                {"export_id": args.export_id},
+                {"export_id": export_id},
             ).scalar_one_or_none()
             if staged_offset_factor is not None:
                 raise ValueError(
@@ -430,7 +430,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 "effective_from_date": meta["effective_from_date"],
                 "effective_to_date": meta["effective_to_date"],
                 "package_status": "DRAFT",
-                "source_export_id": args.export_id,
+                "source_export_id": export_id,
                 "source_file": meta["source_file"],
                 "publication_receipt_json": meta["publication_receipt_json"],
                 "publication_receipt_sha256": meta["publication_receipt_sha256"],
@@ -442,7 +442,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 "offset_source_name": meta["offset_source_name"],
                 "offset_label": meta["offset_label"],
                 "metadata_origin": meta["metadata_origin"],
-                "created_by": args.created_by,
+                "created_by": created_by,
             },
         ).scalar_one()
 
@@ -466,7 +466,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                   WHERE f.feature_name = s.feature_name
               );
         """),
-            {"export_id": args.export_id},
+            {"export_id": export_id},
         )
 
         # Level sets
@@ -503,7 +503,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                     AND ls.level_set_name = s.level_set_name
               );
         """),
-            {"export_id": args.export_id, "model_id": model_id},
+            {"export_id": export_id, "model_id": model_id},
         )
 
         # Levels
@@ -551,7 +551,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
                 s.upper_bound,
                 s.level_code;
         """),
-            {"export_id": args.export_id, "model_id": model_id},
+            {"export_id": export_id, "model_id": model_id},
         )
 
         # Terms
@@ -576,7 +576,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
              AND tm.term_name = c.term_name
             WHERE c.export_id = :export_id;
         """),
-            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+            {"export_id": export_id, "rate_package_id": rate_package_id},
         )
 
         # Term features
@@ -611,7 +611,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             WHERE s.export_id = :export_id;
         """),
             {
-                "export_id": args.export_id,
+                "export_id": export_id,
                 "rate_package_id": rate_package_id,
                 "model_id": model_id,
             },
@@ -647,7 +647,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
              AND t.term_name = c.term_name
             WHERE c.export_id = :export_id;
         """),
-            {"export_id": args.export_id, "rate_package_id": rate_package_id},
+            {"export_id": export_id, "rate_package_id": rate_package_id},
         )
 
         # Cell-level mapping
@@ -684,7 +684,7 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             WHERE s.export_id = :export_id;
         """),
             {
-                "export_id": args.export_id,
+                "export_id": export_id,
                 "rate_package_id": rate_package_id,
                 "model_id": model_id,
             },
@@ -805,41 +805,12 @@ def load_staging_to_rating_package(engine, args: argparse.Namespace) -> int:
             },
         )
 
-        args.package_version = package_version
-
-    return int(rate_package_id)
-
-
-def publish_rating_package(
-    engine,
-    *,
-    export_id: str,
-    created_by: str = "python",
-    package_status: str = "PUBLISHED",
-    parent_rate_package_id: int | None = None,
-    revision_metadata_json: str | None = None,
-    draft_validator=None,
-    package_lineage_writer=None,
-    expected_staged_metadata: Mapping[str, object] | None = None,
-) -> PublishResult:
-    args = argparse.Namespace(
-        export_id=export_id,
-        created_by=created_by,
-        package_status=package_status,
-        parent_rate_package_id=parent_rate_package_id,
-        revision_metadata_json=revision_metadata_json,
-        draft_validator=draft_validator,
-        package_lineage_writer=package_lineage_writer,
-        expected_staged_metadata=expected_staged_metadata,
-        set_pointer=None,
-    )
-    rate_package_id = load_staging_to_rating_package(engine, args)
     return PublishResult(
         mlflow_run_id="",
         export_id=export_id,
         rate_package_id=int(rate_package_id),
-        package_version=int(args.package_version),
+        package_version=int(package_version),
         rating_workbook_path="",
-        package_status=str(args.package_status),
-        was_existing=bool(getattr(args, "was_existing", False)),
+        package_status=requested_package_status,
+        was_existing=False,
     )

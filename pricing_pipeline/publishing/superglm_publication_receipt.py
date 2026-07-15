@@ -254,10 +254,6 @@ def canonical_receipt_bytes(receipt: SuperGLMPublicationReceipt) -> bytes:
     ).encode("utf-8")
 
 
-def publication_receipt_sha256(receipt: SuperGLMPublicationReceipt) -> str:
-    return hashlib.sha256(canonical_receipt_bytes(receipt)).hexdigest()
-
-
 def write_publication_receipt(receipt: SuperGLMPublicationReceipt, path: str | Path) -> str:
     canonical = canonical_receipt_bytes(receipt)
     digest = hashlib.sha256(canonical).hexdigest()

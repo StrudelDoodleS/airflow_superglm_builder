@@ -63,9 +63,22 @@ def test_staging_content_digest_collation_upgrade_recreates_constraints():
     ):
         assert f"DROP CONSTRAINT {constraint}" in sql
         assert f"ADD CONSTRAINT {constraint}" in sql
-    assert sql.count(
-        "staging_content_sha256 COLLATE Latin1_General_BIN2"
-    ) == 2
+    assert sql.count("staging_content_sha256 COLLATE Latin1_General_BIN2") == 2
+
+
+def test_dataset_manifest_frame_evidence_migration_adds_auditable_columns():
+    path = Path("db/migrations/V033__dataset_manifest_frame_evidence.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "ADD model_frame_sha256 CHAR(64) NULL" in sql
+    assert "ADD frame_hash_metadata_json NVARCHAR(MAX) NULL" in sql
+    assert "ADD exposure_column NVARCHAR(128) NULL" in sql
+    assert "ADD data_as_of_column NVARCHAR(128) NULL" in sql
+    assert "CK_DATASET_MANIFEST_MODEL_FRAME_SHA256" in sql
+    assert "model_frame_sha256 COLLATE Latin1_General_BIN2" in sql
+    assert "CK_DATASET_MANIFEST_FRAME_HASH_METADATA_JSON" in sql
+    assert "ISJSON(frame_hash_metadata_json) = 1" in sql
 
 
 def test_current_scorer_upgrade_matches_package_term_semantics():
@@ -227,9 +240,7 @@ def test_publication_receipt_migration_enforces_hash_shape():
 
 
 def test_candidate_artifact_migration_extends_model_run_and_guards_package_identity():
-    source = Path("db/migrations/V024__candidate_model_artifacts.sql").read_text(
-        encoding="utf-8"
-    )
+    source = Path("db/migrations/V024__candidate_model_artifacts.sql").read_text(encoding="utf-8")
 
     for column in (
         "candidate_artifact_path",
@@ -249,10 +260,35 @@ def test_candidate_artifact_migration_extends_model_run_and_guards_package_ident
     assert "THROW" in source
 
 
+def test_model_run_parent_lineage_migration_persists_self_reference():
+    path = Path("db/migrations/V031__model_run_parent_lineage.sql")
+
+    assert path.exists()
+    source = path.read_text(encoding="utf-8")
+    assert "COL_LENGTH('pricing.MODEL_RUN', 'parent_model_run_id')" in source
+    assert "ADD parent_model_run_id BIGINT NULL" in source
+    assert "FK_MODEL_RUN_PARENT" in source
+    assert "FOREIGN KEY (parent_model_run_id)" in source
+    assert "REFERENCES pricing.MODEL_RUN(model_run_id)" in source
+    assert "child_package.parent_rate_package_id" in source
+    assert "parent_run.rate_package_id" in source
+    assert "UPDATE child_run" in source
+
+
+def test_rating_workbook_digest_migration_binds_model_run_evidence():
+    path = Path("db/migrations/V032__model_run_rating_workbook_digest.sql")
+
+    assert path.exists()
+    source = path.read_text(encoding="utf-8")
+    assert "COL_LENGTH('pricing.MODEL_RUN', 'rating_workbook_sha256')" in source
+    assert "rating_workbook_sha256 CHAR(64) NULL" in source
+    assert "CK_MODEL_RUN_RATING_WORKBOOK_SHA256" in source
+    assert "LEN(rating_workbook_sha256) = 64" in source
+    assert "rating_workbook_sha256 COLLATE Latin1_General_BIN2" in source
+
+
 def test_package_specific_scorer_does_not_resolve_live_pointer():
-    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
-        encoding="utf-8"
-    )
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(encoding="utf-8")
 
     assert "CREATE OR ALTER PROCEDURE pricing.PREDICT_RATE_PACKAGE" in sql
     assert "@rate_package_id BIGINT" in sql
@@ -264,9 +300,7 @@ def test_package_specific_scorer_does_not_resolve_live_pointer():
 
 
 def test_package_specific_scorer_applies_numeric_coefficients_to_input_values():
-    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
-        encoding="utf-8"
-    )
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(encoding="utf-8")
 
     assert "cell.term_type = 'NUMERIC_MAIN'" in sql
     assert "pricing.PRICING_TERM_FEATURE AS term_feature" in sql
@@ -277,9 +311,7 @@ def test_package_specific_scorer_applies_numeric_coefficients_to_input_values():
 
 
 def test_package_specific_scorer_matches_interactions_by_ordered_components():
-    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(
-        encoding="utf-8"
-    )
+    sql = Path("db/migrations/V025__package_specific_scoring.sql").read_text(encoding="utf-8")
 
     assert "cell.term_type = 'CATEGORICAL_INTERACTION'" in sql
     assert "pricing.PRICING_RATE_CELL_LEVEL AS cell_level" in sql
@@ -302,6 +334,20 @@ def test_offline_model_run_mirrors_candidate_artifact_columns():
         "model_source_sha256",
     ):
         assert column in source
+
+
+def test_offline_model_run_mirrors_parent_lineage_column():
+    source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
+
+    assert "parent_model_run_id" in source
+
+
+def test_offline_model_run_mirrors_rating_workbook_digest_column():
+    source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
+    upgrader = Path("pricing_pipeline/infra/offline_sqlite.py").read_text(encoding="utf-8")
+
+    assert "rating_workbook_sha256 TEXT NOT NULL" in source
+    assert '"rating_workbook_sha256"' in upgrader
 
 
 def test_migration_recorder_insert_is_idempotent_when_row_appears_after_precheck(
@@ -771,7 +817,7 @@ def test_package_immutability_migration_blocks_direct_edits_to_frozen_packages()
 def test_rating_package_loader_builds_package_as_draft_before_final_status():
     loader = Path("pricing_pipeline/publishing/package_writer.py").read_text(encoding="utf-8")
 
-    assert "requested_package_status = args.package_status" in loader
+    assert "requested_package_status = package_status" in loader
     assert '"package_status": "DRAFT"' in loader
     assert "UPDATE pricing.PRICING_RATE_PACKAGE" in loader
     assert "SET package_status = :package_status" in loader

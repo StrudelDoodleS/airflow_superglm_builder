@@ -67,9 +67,7 @@ def _cv_result(*, converged=(True, True), oof_predictions=None):
         fold_indices=_folds(),
         curve_similarity=None,
         oof_predictions=(
-            np.array([0.25, np.nan, 0.75])
-            if oof_predictions is None
-            else oof_predictions
+            np.array([0.25, np.nan, 0.75]) if oof_predictions is None else oof_predictions
         ),
         estimators=None,
     )
@@ -174,9 +172,7 @@ def test_run_cross_validation_rejects_non_converged_fold():
             split_indices=_folds(),
             fit_mode="fit",
             scoring=("deviance",),
-            cross_validate_fn=lambda *args, **kwargs: _cv_result(
-                converged=(True, False)
-            ),
+            cross_validate_fn=lambda *args, **kwargs: _cv_result(converged=(True, False)),
         )
 
 
@@ -203,8 +199,12 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
+            model_id=17,
             model_name="HOME_FREQ",
             model_version="v1",
+            model_type="superglm_poisson",
+            target_name="target",
+            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -214,13 +214,80 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
                 pk_columns=("policy_id",),
                 target_column="target",
             ),
-            validation_split=ValidationSplitConfig.custom(materialize=True),
+            validation_split=ValidationSplitConfig(
+                method="custom",
+                n_splits=None,
+                random_state=None,
+                shuffle=False,
+                materialize=True,
+            ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
             cross_validate_fn=lambda *args, **kwargs: pytest.fail(
                 "CV must not run before canonical-row validation"
             ),
+        )
+
+
+def test_standard_runner_rejects_model_source_drift_during_training(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    source_hashes = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(api, "hash_model_source", lambda root: next(source_hashes))
+    monkeypatch.setattr(
+        api,
+        "create_model_frame_manifest_with_split",
+        lambda *args, **kwargs: pytest.fail(
+            "source drift must fail before audit evidence is persisted"
+        ),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="model source changed"):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=_identity_bound_inputs(api, frame),
+            model_factory=_FakeModel,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_id=17,
+            model_name="HOME_FREQ",
+            model_version="v1",
+            model_type="superglm_poisson",
+            target_name="target",
+            deployment_slot="HOME_FREQ_CURRENT",
+            export_id="export-1",
+            effective_from=None,
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            validation_split=ValidationSplitConfig(
+                method="custom",
+                n_splits=None,
+                random_state=None,
+                shuffle=False,
+                materialize=True,
+            ),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+            cross_validate_fn=lambda *args, **kwargs: _cv_result(),
         )
 
 
@@ -294,8 +361,12 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
+            model_id=17,
             model_name="HOME_FREQ",
             model_version="v1",
+            model_type="superglm_poisson",
+            target_name="target",
+            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -305,7 +376,13 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
                 pk_columns=("policy_id",),
                 target_column="target",
             ),
-            validation_split=ValidationSplitConfig.custom(materialize=True),
+            validation_split=ValidationSplitConfig(
+                method="custom",
+                n_splits=None,
+                random_state=None,
+                shuffle=False,
+                materialize=True,
+            ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
@@ -346,8 +423,12 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
+            model_id=17,
             model_name="HOME_FREQ",
             model_version="v1",
+            model_type="superglm_poisson",
+            target_name="target",
+            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -357,7 +438,13 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
                 pk_columns=("policy_id",),
                 target_column="target",
             ),
-            validation_split=ValidationSplitConfig.custom(materialize=True),
+            validation_split=ValidationSplitConfig(
+                method="custom",
+                n_splits=None,
+                random_state=None,
+                shuffle=False,
+                materialize=True,
+            ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
@@ -442,66 +529,6 @@ def test_canonical_validation_rejects_reordered_optional_row_inputs(field_name):
         api._validate_canonical_row_ids(frame, inputs, pk_columns=("policy_id",))
 
 
-def test_model_local_log_density_review_is_separate_from_canonical_export(tmp_path):
-    api = _api()
-    canonical = pd.DataFrame(
-        {
-            "log_lower": [0.0, 1.0],
-            "log_upper": [1.0, 2.0],
-            "log_representative": [0.5, 1.5],
-            "relativity": [0.8, 1.2],
-        }
-    )
-
-    def write_review_workbook(*, fitted_model, inputs, output_path):
-        del fitted_model, inputs
-        review = canonical.assign(
-            density_lower=np.exp(canonical["log_lower"]),
-            density_upper=np.exp(canonical["log_upper"]),
-            density_representative=np.exp(canonical["log_representative"]),
-        )
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            review.to_excel(writer, sheet_name="PRESENTATION ONLY", index=False)
-        return output_path
-
-    result = api.call_review_hook(
-        write_review_workbook,
-        fitted_model=object(),
-        inputs=api.ModelInputs(
-            X=pd.DataFrame({"LogDensity": [0.5, 1.5]}),
-            y=np.array([0.0, 1.0]),
-        ),
-        output_path=tmp_path / "run" / "rating_tables_review.xlsx",
-        allowed_root=tmp_path / "run",
-    )
-
-    assert result is not None
-    review = pd.read_excel(result.path, sheet_name="PRESENTATION ONLY")
-    assert review["density_lower"].tolist() == pytest.approx([1.0, np.e])
-    assert result.sha256
-    assert result.size_bytes > 0
-    assert canonical["log_lower"].tolist() == [0.0, 1.0]
-
-
-def test_review_hook_rejects_artifact_outside_run_directory(tmp_path):
-    api = _api()
-
-    def unsafe_hook(*, fitted_model, inputs, output_path):
-        del fitted_model, inputs, output_path
-        outside = tmp_path / "outside.xlsx"
-        outside.write_bytes(b"not allowed")
-        return outside
-
-    with pytest.raises(api.StandardSuperGLMError, match="outside run output"):
-        api.call_review_hook(
-            unsafe_hook,
-            fitted_model=object(),
-            inputs=api.ModelInputs(X=pd.DataFrame({"x": [1.0]}), y=np.array([1.0])),
-            output_path=tmp_path / "run" / "review.xlsx",
-            allowed_root=tmp_path / "run",
-        )
-
-
 @pytest.mark.parametrize(
     "manifest_id",
     ("../escape", "nested/manifest", "manifest id", ".", ""),
@@ -529,6 +556,9 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
         }
     )
     split_evidence = tmp_path / "splits" / "manifest-failure-split.npz"
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text("MODEL = 'HOME_FREQ'\n", encoding="utf-8")
 
     def fake_manifest(engine, **kwargs):
         del engine, kwargs
@@ -559,8 +589,12 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             scoring=("deviance",),
             cross_validate_fn=lambda *args, **kwargs: _cv_result(),
             output_dir=tmp_path / "run",
+            model_id=17,
             model_name="HOME_FREQ",
             model_version="v1",
+            model_type="superglm_poisson",
+            target_name="target",
+            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -570,9 +604,15 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
                 pk_columns=("policy_id",),
                 target_column="target",
             ),
-            validation_split=ValidationSplitConfig.custom(materialize=True),
+            validation_split=ValidationSplitConfig(
+                method="custom",
+                n_splits=None,
+                random_state=None,
+                shuffle=False,
+                materialize=True,
+            ),
             split_artifact_root=tmp_path / "splits",
-            model_source_root=tmp_path / "source",
+            model_source_root=source_root,
             created_by="pytest",
         )
 
@@ -590,6 +630,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
             "policy_id": [1, 2, 3],
             "target": [0.0, 1.0, 0.0],
             "age": [20.0, 30.0, 40.0],
+            "Exposure": [2.0, 4.0, 3.0],
         }
     )
     source_root = tmp_path / "pricing_models" / "home_freq"
@@ -607,6 +648,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
 
     def fake_export(model, X, y, exposure, output_path, **kwargs):
         captured["export_weight"] = exposure
+        captured["export_options"] = kwargs
         Path(output_path).write_bytes(b"canonical workbook")
         return Path(output_path)
 
@@ -630,12 +672,23 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
     monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
 
-    def write_review_workbook(*, fitted_model, inputs, output_path):
-        del fitted_model, inputs
-        Path(output_path).write_bytes(b"presentation only")
-        return output_path
+    base_inputs = _identity_bound_inputs(api, frame)
+    exposure = pd.Series(
+        frame["Exposure"].to_numpy(copy=True),
+        index=base_inputs.X.index,
+        name="Exposure",
+    )
+    inputs = _identity_bound_inputs(
+        api,
+        frame,
+        offset=np.log(exposure),
+        export_weight=exposure,
+        export_weight_name="Exposure",
+    )
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
 
-    inputs = _identity_bound_inputs(api, frame)
     build_kwargs = {
         "frame": frame,
         "inputs": inputs,
@@ -645,8 +698,12 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         "scoring": ("deviance",),
         "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
         "output_dir": tmp_path / "run",
+        "model_id": 17,
         "model_name": "HOME_FREQ",
         "model_version": "v1",
+        "model_type": "superglm_poisson",
+        "target_name": "target",
+        "deployment_slot": "HOME_FREQ_CURRENT",
         "export_id": "export-1",
         "effective_from": "2026-07-12",
         "manifest_spec": ModelFrameManifestSpec(
@@ -656,31 +713,46 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
             pk_columns=("policy_id",),
             target_column="target",
         ),
-        "validation_split": ValidationSplitConfig.custom(materialize=True),
+        "validation_split": ValidationSplitConfig(
+            method="custom",
+            n_splits=None,
+            random_state=None,
+            shuffle=False,
+            materialize=True,
+        ),
         "split_artifact_root": tmp_path / "splits",
         "model_source_root": source_root,
         "created_by": "pytest",
-        "review_workbook_hook": write_review_workbook,
+        "offset_contract": OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name="Exposure",
+            published_factor_name="Exposure",
+            source_name="Exposure",
+            label="log(Exposure)",
+        ),
     }
     result = api.run_standard_superglm_build(object(), **build_kwargs)
 
+    from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
     from pricing_pipeline.workbench.artifacts import load_candidate_bundle
 
+    assert isinstance(result.completed_build, CompletedModelBuild)
     bundle = load_candidate_bundle(
-        result.completed_build["candidate_artifact_path"],
-        expected_sha256=result.completed_build["candidate_artifact_sha256"],
-        expected_size_bytes=result.completed_build["candidate_artifact_size_bytes"],
-        expected_format=result.completed_build["candidate_artifact_format"],
-        expected_python_version=result.completed_build["candidate_python_version"],
-        expected_superglm_version=result.completed_build["candidate_superglm_version"],
+        result.completed_build.candidate_artifact_path,
+        expected_sha256=result.completed_build.candidate_artifact_sha256,
+        expected_size_bytes=result.completed_build.candidate_artifact_size_bytes,
+        expected_format=result.completed_build.candidate_artifact_format,
+        expected_python_version=result.completed_build.candidate_python_version,
+        expected_superglm_version=result.completed_build.candidate_superglm_version,
         allowed_root=tmp_path / "run",
     )
-    assert bundle.review_artifact is not None
+    assert bundle.model_name == "HOME_FREQ"
+    assert bundle.model_version == "v1"
+    assert bundle.export_id == "export-1"
     first_paths = {
-        "workbook": Path(result.completed_build["rating_workbook_path"]),
-        "receipt": Path(result.completed_build["publication_receipt_path"]),
-        "candidate": Path(result.completed_build["candidate_artifact_path"]),
-        "review": Path(bundle.review_artifact["path"]),
+        "workbook": Path(result.completed_build.rating_workbook_path),
+        "receipt": Path(result.completed_build.publication_receipt_path),
+        "candidate": Path(result.completed_build.candidate_artifact_path),
     }
     first_bytes = {name: path.read_bytes() for name, path in first_paths.items()}
     second_result = api.run_standard_superglm_build(object(), **build_kwargs)
@@ -690,25 +762,18 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         [0],
     ]
     assert models[1].fit_X.equals(inputs.X)
-    assert captured["export_weight"] is None
-    assert result.completed_build["manifest_id"] == "manifest-1"
-    assert result.completed_build["split_set_id"] == "manifest-1-split"
-    assert second_result.completed_build["manifest_id"] == "manifest-2"
-    second_bundle = load_candidate_bundle(
-        second_result.completed_build["candidate_artifact_path"],
-        expected_sha256=second_result.completed_build["candidate_artifact_sha256"],
-        expected_size_bytes=second_result.completed_build["candidate_artifact_size_bytes"],
-        expected_format=second_result.completed_build["candidate_artifact_format"],
-        expected_python_version=second_result.completed_build["candidate_python_version"],
-        expected_superglm_version=second_result.completed_build["candidate_superglm_version"],
-        allowed_root=tmp_path / "run",
-    )
-    assert second_bundle.review_artifact is not None
+    np.testing.assert_allclose(captured["export_weight"], exposure)
+    np.testing.assert_allclose(captured["export_options"]["offset"], np.log(exposure))
+    np.testing.assert_allclose(captured["export_options"]["offset_source"], exposure)
+    assert captured["export_options"]["offset_name"] == "Exposure"
+    assert captured["export_options"]["offset_kind"] == "auto"
+    assert result.completed_build.manifest_id == "manifest-1"
+    assert result.completed_build.split_set_id == "manifest-1-split"
+    assert second_result.completed_build.manifest_id == "manifest-2"
     second_paths = {
-        "workbook": Path(second_result.completed_build["rating_workbook_path"]),
-        "receipt": Path(second_result.completed_build["publication_receipt_path"]),
-        "candidate": Path(second_result.completed_build["candidate_artifact_path"]),
-        "review": Path(second_bundle.review_artifact["path"]),
+        "workbook": Path(second_result.completed_build.rating_workbook_path),
+        "receipt": Path(second_result.completed_build.publication_receipt_path),
+        "candidate": Path(second_result.completed_build.candidate_artifact_path),
     }
     assert {path.parent for path in first_paths.values()} == {
         (tmp_path / "run" / "manifest-1").resolve()
@@ -718,19 +783,13 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     }
     assert set(first_paths.values()).isdisjoint(second_paths.values())
     assert {name: path.read_bytes() for name, path in first_paths.items()} == first_bytes
-    assert Path(result.completed_build["candidate_artifact_path"]).exists()
-    assert result.completed_build["candidate_artifact_sha256"]
-    assert result.completed_build["model_source_sha256"]
+    assert Path(result.completed_build.candidate_artifact_path).exists()
+    assert result.completed_build.candidate_artifact_sha256
+    assert result.completed_build.model_source_sha256
+    assert result.completed_build.rating_workbook_sha256 == api.hash_file_sha256(
+        first_paths["workbook"]
+    )
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
-    assert bundle.review_artifact == {
-        "path": str(
-            (tmp_path / "run" / "manifest-1" / "rating_tables_review.xlsx").resolve()
-        ),
-        "sha256": api.hash_file_sha256(
-            tmp_path / "run" / "manifest-1" / "rating_tables_review.xlsx"
-        ),
-        "size_bytes": len(b"presentation only"),
-    }
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]

@@ -34,9 +34,7 @@ def canonicalize_path(
 
 
 def resolve_project_path(value: str | Path, env: Mapping[str, str]) -> Path:
-    project_root = canonicalize_path(
-        env.get("PRICING_PROJECT_ROOT") or Path.cwd()
-    )
+    project_root = canonicalize_path(env.get("PRICING_PROJECT_ROOT") or Path.cwd())
     return canonicalize_path(value, relative_to=project_root)
 
 
@@ -58,10 +56,6 @@ class Settings:
     rating_export_root: Path = Path("/opt/pricing/state/rating_exports")
     validation_split_artifact_root: Path = Path("/opt/pricing/state/validation_splits")
     workbench_artifact_root: Path = Path("state/workbench_artifacts")
-    airflow_api_url: str = "http://127.0.0.1:8080/api/v2"
-    airflow_api_token: str | None = field(default=None, repr=False)
-    airflow_api_username: str | None = None
-    airflow_api_password: str | None = field(default=None, repr=False)
     skip_database_create: bool = False
     pricing_schema: str = "pricing"
     pricing_staging_schema: str = "pricing_stg"
@@ -91,9 +85,7 @@ class Settings:
             mssql_password=env.get("MSSQL_PASSWORD", cls.mssql_password),
             mssql_driver=env.get("MSSQL_DRIVER", cls.mssql_driver),
             mssql_encrypt=env.get("MSSQL_ENCRYPT", cls.mssql_encrypt),
-            mssql_trust_server_cert=env.get(
-                "MSSQL_TRUST_SERVER_CERT", cls.mssql_trust_server_cert
-            ),
+            mssql_trust_server_cert=env.get("MSSQL_TRUST_SERVER_CERT", cls.mssql_trust_server_cert),
             mlflow_tracking_uri=env.get("MLFLOW_TRACKING_URI", cls.mlflow_tracking_uri),
             mlflow_enabled=_env_bool(env, "PRICING_ENABLE_MLFLOW", cls.mlflow_enabled),
             rating_export_root=resolve_project_path(
@@ -113,14 +105,6 @@ class Settings:
                     str(cls.workbench_artifact_root),
                 ),
                 env,
-            ),
-            airflow_api_url=env.get("AIRFLOW_API_URL", cls.airflow_api_url).rstrip("/"),
-            airflow_api_token=(env.get("AIRFLOW_API_TOKEN") or None),
-            airflow_api_username=(env.get("AIRFLOW_API_USERNAME") or None),
-            airflow_api_password=(
-                env.get("AIRFLOW_API_PASSWORD")
-                or env.get("AIRFLOW_LOCAL_PASSWORD")
-                or None
             ),
             skip_database_create=_env_bool(
                 env,

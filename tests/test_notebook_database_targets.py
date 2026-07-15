@@ -11,6 +11,10 @@ import pytest
 from sqlalchemy import text
 
 from pricing_pipeline.infra.config import Settings
+from pricing_pipeline.orchestration.publish_completed_build import (
+    CompletedModelBuild,
+    CompletedModelBuildError,
+)
 
 
 class _ScalarResult:
@@ -54,6 +58,20 @@ def _install_runtime(monkeypatch, api, *, database_name: str = "PricingAudit"):
         lambda runtime_module=None: calls.append(runtime_module) or runtime,
     )
     return engine, calls
+
+
+def _model_spec(api):
+    return api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="CLAIM_FREQUENCY_UAT",
+        features=("age",),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+    )
 
 
 def test_connect_local_creates_persistent_attached_schema_databases(tmp_path):
@@ -158,6 +176,13 @@ def test_connect_remote_requires_expected_database_before_loading_runtime(monkey
     assert calls == []
 
 
+def test_connect_requires_an_explicit_local_or_remote_mode():
+    from pricing_pipeline import notebook as api
+
+    with pytest.raises(TypeError, match="mode"):
+        api.connect()
+
+
 def test_connect_remote_rejects_the_wrong_database(monkeypatch):
     from pricing_pipeline import notebook as api
 
@@ -187,8 +212,8 @@ def test_connect_remote_verifies_database_and_exposes_safe_destination(
     engine, calls = _install_runtime(monkeypatch, api)
 
     result = api.connect(
-        "work_runtime.database",
         mode="remote",
+        runtime_module="work_runtime.database",
         expected_remote_database="pricingaudit",
         allow_remote_writes=allow_writes,
     )
@@ -217,11 +242,17 @@ def test_connect_rejects_unknown_explicit_mode():
             "register_model",
             lambda api, context, root: api.register_model(
                 context,
-                name="BLOCKED",
-                label="Blocked",
-                target="target",
-                model_type="poisson",
-                deployment_slot="UAT",
+                api.PricingModelSpec(
+                    name="BLOCKED",
+                    label="Blocked",
+                    target="target",
+                    model_type="poisson",
+                    deployment_slot="UAT",
+                    features=("feature",),
+                    dataset_name="blocked_frame",
+                    source_system="pytest",
+                    pk_columns=("row_id",),
+                ),
                 source_root=root,
             ),
         ),
@@ -242,7 +273,6 @@ def test_connect_rejects_unknown_explicit_mode():
             "publish_edits",
             lambda api, context, root: api.publish_edits(
                 context,
-                model=object(),
                 candidate=object(),
                 reason="blocked",
             ),
@@ -251,7 +281,6 @@ def test_connect_rejects_unknown_explicit_mode():
             "deploy_package",
             lambda api, context, root: api.deploy_package(
                 context,
-                model=object(),
                 package=object(),
                 reason="blocked",
             ),
@@ -284,11 +313,7 @@ def test_local_register_model_is_idempotent(tmp_path):
     model_root.mkdir(parents=True)
     context = api.connect(mode="local", local_root=model_root / ".local")
     kwargs = {
-        "name": "CLAIM_FREQUENCY",
-        "label": "Claim frequency",
-        "target": "claim_count",
-        "model_type": "superglm_poisson",
-        "deployment_slot": "CLAIM_FREQUENCY_UAT",
+        "spec": _model_spec(api),
         "source_root": model_root,
         "created_by": "analyst@example.test",
     }
@@ -315,11 +340,7 @@ def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_pat
     context = api.connect(mode="local", local_root=model_root / ".local")
     model = api.register_model(
         context,
-        name="CLAIM_FREQUENCY",
-        label="Claim frequency",
-        target="claim_count",
-        model_type="superglm_poisson",
-        deployment_slot="CLAIM_FREQUENCY_UAT",
+        _model_spec(api),
         source_root=model_root,
         created_by="analyst@example.test",
     )
@@ -384,14 +405,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
 
     model_root = tmp_path / "pricing_models" / "claim_frequency"
     model_root.mkdir(parents=True)
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_bytes(b"local workbook")
     context = api.connect(mode="local", local_root=model_root / ".local")
     model = api.register_model(
         context,
-        name="CLAIM_FREQUENCY",
-        label="Claim frequency",
-        target="claim_count",
-        model_type="superglm_poisson",
-        deployment_slot="CLAIM_FREQUENCY_UAT",
+        _model_spec(api),
         source_root=model_root,
         created_by="analyst@example.test",
     )
@@ -402,13 +421,15 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                 INSERT INTO pricing.DATASET_MANIFEST (
                     manifest_id, dataset_name, source_system, data_as_of_date,
                     row_count, pk_columns_json, target_column, weight_column,
-                    created_by
+                    model_frame_sha256, frame_hash_metadata_json, created_by
                 ) VALUES (
                     'manifest-1', 'claim_frame', 'work_sql', '2026-06-30',
-                    20, '["policy_id"]', 'claim_count', 'exposure', 'test'
+                    20, '["policy_id"]', 'claim_count', 'exposure',
+                    :frame_sha, '{}', 'test'
                 )
                 """
-            )
+            ),
+            {"frame_sha": "f" * 64},
         )
         connection.execute(
             text(
@@ -450,14 +471,14 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                     )
                     """
                 ),
-                    {
-                        "export_id": kwargs["export_id"],
-                        "model_id": kwargs["model_id"],
-                        "model_name": (
-                            "WRONG_MODEL"
-                            if kwargs["export_id"].endswith("__mismatch")
-                            else kwargs["model_name"]
-                        ),
+                {
+                    "export_id": kwargs["export_id"],
+                    "model_id": kwargs["model_id"],
+                    "model_name": (
+                        "WRONG_MODEL"
+                        if kwargs["export_id"].endswith("__mismatch")
+                        else kwargs["model_name"]
+                    ),
                     "model_version": kwargs["model_version"],
                     "source_file": str(kwargs["workbook_path"]),
                     "receipt_sha": kwargs["publication_receipt_sha256"],
@@ -466,31 +487,50 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             )
 
     monkeypatch.setattr(sqlite_notebook, "stage_rating_export", stage)
-    completed_build = {
-        "rating_workbook_path": str(tmp_path / "rating_tables.xlsx"),
-        "model_version": "v1",
-        "effective_from": None,
-        "export_id": "claim-frequency__run-1",
-        "manifest_id": "manifest-1",
-        "split_set_id": "split-1",
-        "mlflow_run_id": "mlflow-old",
-        "publication_receipt_path": str(tmp_path / "receipt.json"),
-        "publication_receipt_sha256": "b" * 64,
-        "metrics": {"cv_mean_deviance": 1.25},
-        "metric_scopes": {"cv_mean_deviance": "cv"},
-        "fold_metrics": (
+    monkeypatch.setattr(
+        sqlite_notebook,
+        "_verify_candidate_artifact",
+        lambda *args, **kwargs: None,
+    )
+    completed_build = CompletedModelBuild(
+        model_id=model.model_id,
+        model_name=model.name,
+        rating_workbook_path=str(workbook),
+        rating_workbook_sha256=sqlite_notebook.sha256_file(workbook),
+        model_version="v1",
+        model_type=model.config.model_type,
+        target_name=model.config.target_name,
+        deployment_slot=model.config.deployment_slot,
+        effective_from=None,
+        export_id="claim-frequency__run-1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        created_by="analyst@example.test",
+        mlflow_run_id="mlflow-old",
+        publication_receipt_path=str(tmp_path / "receipt.json"),
+        publication_receipt_sha256="b" * 64,
+        candidate_artifact_path=str(tmp_path / "candidate.joblib"),
+        candidate_artifact_sha256="c" * 64,
+        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_size_bytes=123,
+        candidate_python_version=python_version(),
+        candidate_superglm_version=version("superglm"),
+        model_source_sha256="e" * 64,
+        metrics={"cv_mean_deviance": 1.25},
+        metric_scopes={"cv_mean_deviance": "cv"},
+        fold_metrics=(
             {
                 "fold_no": 1,
                 "metric_name": "deviance",
                 "metric_value": 1.1,
             },
         ),
-    }
+    )
     assert (
         sqlite_notebook.resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id=completed_build["export_id"],
+            export_id=completed_build.export_id,
         )
         == "v1"
     )
@@ -502,12 +542,10 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     first = api.publish_candidate(
         context,
         candidate,
-        created_by="analyst@example.test",
     )
     second = api.publish_candidate(
         context,
         candidate,
-        created_by="analyst@example.test",
     )
 
     assert first.model_id == model.model_id
@@ -515,6 +553,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     assert first.manifest_id == "manifest-1"
     assert first.split_set_id == "split-1"
     assert first.package_version == 1
+    assert first.package_status == "LOCAL_AUDIT"
     assert first.model_run_id is not None
     assert first.was_existing is False
     assert second.rate_package_id == first.rate_package_id
@@ -523,20 +562,28 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     assert second.was_existing is True
     assert staged_digests == ["d" * 64, "d" * 64]
 
+    workbook.write_bytes(b"mutated local workbook")
+    with pytest.raises(CompletedModelBuildError, match="rating workbook SHA-256"):
+        api.publish_candidate(
+            context,
+            candidate,
+        )
+    workbook.write_bytes(b"local workbook")
+
     staging_digest["value"] = "e" * 64
     with pytest.raises(ValueError, match="staging_content_sha256"):
         api.publish_candidate(
             context,
             candidate,
-            created_by="analyst@example.test",
         )
     staging_digest["value"] = "d" * 64
 
-    changed_run_evidence = {
-        **completed_build,
-        "mlflow_run_id": "mlflow-new",
-        "metrics": {"cv_mean_deviance": 99.0},
-    }
+    changed_run_evidence = completed_build.model_copy(
+        update={
+            "mlflow_run_id": "mlflow-new",
+            "metrics": {"cv_mean_deviance": 99.0},
+        }
+    )
     changed_run_candidate = api.BuiltCandidate(
         model=model,
         standard_build=SimpleNamespace(
@@ -548,14 +595,14 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         api.publish_candidate(
             context,
             changed_run_candidate,
-            created_by="analyst@example.test",
         )
 
-    conflicting_build = {
-        **completed_build,
-        "publication_receipt_path": str(tmp_path / "different-receipt.json"),
-        "publication_receipt_sha256": "c" * 64,
-    }
+    conflicting_build = completed_build.model_copy(
+        update={
+            "publication_receipt_path": str(tmp_path / "different-receipt.json"),
+            "publication_receipt_sha256": "c" * 64,
+        }
+    )
     conflicting_candidate = api.BuiltCandidate(
         model=model,
         standard_build=SimpleNamespace(
@@ -567,12 +614,10 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         api.publish_candidate(
             context,
             conflicting_candidate,
-            created_by="analyst@example.test",
         )
     recovered = api.publish_candidate(
         context,
         candidate,
-        created_by="analyst@example.test",
     )
     assert recovered.was_existing is True
 
@@ -595,6 +640,20 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                 "WHERE export_id = 'claim-frequency__run-1'"
             )
         ).scalar_one()
+        stored_workbook_sha256 = connection.execute(
+            text(
+                "SELECT rating_workbook_sha256 "
+                "FROM pricing.MODEL_RUN "
+                "WHERE export_id = 'claim-frequency__run-1'"
+            )
+        ).scalar_one()
+        stored_package_status = connection.execute(
+            text(
+                "SELECT package_status "
+                "FROM pricing.PRICING_RATE_PACKAGE "
+                "WHERE source_export_id = 'claim-frequency__run-1'"
+            )
+        ).scalar_one()
     assert counts == {
         "pricing.PRICING_RATE_PACKAGE": 1,
         "pricing.MODEL_RUN": 1,
@@ -604,6 +663,8 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         "pricing.CV_FOLD_METRIC": 1,
     }
     assert staged_receipt_sha256 == "b" * 64
+    assert stored_workbook_sha256 == completed_build.rating_workbook_sha256
+    assert stored_package_status == "LOCAL_AUDIT"
 
     mismatch_export_id = "claim-frequency__mismatch"
     mismatch_version = sqlite_notebook.resolve_sqlite_model_version(
@@ -614,11 +675,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     mismatch_candidate = api.BuiltCandidate(
         model=model,
         standard_build=SimpleNamespace(
-            completed_build={
-                **completed_build,
-                "export_id": mismatch_export_id,
-                "model_version": mismatch_version,
-            },
+            completed_build=completed_build.model_copy(
+                update={
+                    "export_id": mismatch_export_id,
+                    "model_version": mismatch_version,
+                }
+            ),
             metrics={},
         ),
     )
@@ -626,17 +688,17 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         api.publish_candidate(
             context,
             mismatch_candidate,
-            created_by="analyst@example.test",
         )
 
     unreserved_candidate = api.BuiltCandidate(
         model=model,
         standard_build=SimpleNamespace(
-            completed_build={
-                **completed_build,
-                "export_id": "claim-frequency__unreserved",
-                "model_version": "v3",
-            },
+            completed_build=completed_build.model_copy(
+                update={
+                    "export_id": "claim-frequency__unreserved",
+                    "model_version": "v3",
+                }
+            ),
             metrics={},
         ),
     )
@@ -644,7 +706,6 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         api.publish_candidate(
             context,
             unreserved_candidate,
-            created_by="analyst@example.test",
         )
 
     with context.engine.begin() as connection:
@@ -653,7 +714,6 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         api.publish_candidate(
             context,
             candidate,
-            created_by="analyst@example.test",
         )
 
 
@@ -673,11 +733,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     context = api.connect(mode="local", local_root=model_root / ".local")
     model = api.register_model(
         context,
-        name="CLAIM_FREQUENCY",
-        label="Claim frequency",
-        target="claim_count",
-        model_type="superglm_poisson",
-        deployment_slot="CLAIM_FREQUENCY_UAT",
+        _model_spec(api),
         source_root=model_root,
         created_by="analyst@example.test",
     )
@@ -687,13 +743,15 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
                 """
                 INSERT INTO pricing.DATASET_MANIFEST (
                     manifest_id, dataset_name, source_system, data_as_of_date,
-                    row_count, pk_columns_json, target_column, created_by
+                    row_count, pk_columns_json, target_column,
+                    model_frame_sha256, frame_hash_metadata_json, created_by
                 ) VALUES (
                     'manifest-verify', 'claim_frame', 'work_sql', '2026-06-30',
-                    20, '["policy_id"]', 'claim_count', 'test'
+                    20, '["policy_id"]', 'claim_count', :frame_sha, '{}', 'test'
                 )
                 """
-            )
+            ),
+            {"frame_sha": "f" * 64},
         )
     monkeypatch.setattr(
         sqlite_notebook,
@@ -701,23 +759,32 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
         lambda *args, **kwargs: pytest.fail("staging ran before artifact verification"),
     )
     missing_artifact = (
-        context.settings.workbench_artifact_root
-        / "CLAIM_FREQUENCY"
-        / "missing.joblib"
+        context.settings.workbench_artifact_root / "CLAIM_FREQUENCY" / "missing.joblib"
     )
-    completed_build = {
-        "rating_workbook_path": str(tmp_path / "rating_tables.xlsx"),
-        "model_version": "v1",
-        "export_id": "claim-frequency__verify",
-        "manifest_id": "manifest-verify",
-        "candidate_artifact_path": str(missing_artifact),
-        "candidate_artifact_sha256": "a" * 64,
-        "candidate_artifact_format": BUNDLE_FORMAT,
-        "candidate_artifact_size_bytes": 10,
-        "candidate_python_version": python_version(),
-        "candidate_superglm_version": version("superglm"),
-        "model_source_sha256": "b" * 64,
-    }
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_bytes(b"rating workbook")
+    completed_build = CompletedModelBuild(
+        model_id=model.model_id,
+        model_name=model.name,
+        rating_workbook_path=str(workbook),
+        rating_workbook_sha256=sqlite_notebook.sha256_file(workbook),
+        model_version="v1",
+        model_type=model.config.model_type,
+        target_name=model.config.target_name,
+        deployment_slot=model.config.deployment_slot,
+        export_id="claim-frequency__verify",
+        manifest_id="manifest-verify",
+        created_by="analyst@example.test",
+        publication_receipt_path=str(tmp_path / "receipt.json"),
+        publication_receipt_sha256="c" * 64,
+        candidate_artifact_path=str(missing_artifact),
+        candidate_artifact_sha256="a" * 64,
+        candidate_artifact_format=BUNDLE_FORMAT,
+        candidate_artifact_size_bytes=10,
+        candidate_python_version=python_version(),
+        candidate_superglm_version=version("superglm"),
+        model_source_sha256="b" * 64,
+    )
     candidate = api.BuiltCandidate(
         model=model,
         standard_build=SimpleNamespace(completed_build=completed_build, metrics={}),
@@ -727,7 +794,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
         CompletedModelBuildError,
         match="candidate artifact verification failed",
     ):
-        api.publish_candidate(context, candidate, created_by="analyst@example.test")
+        api.publish_candidate(context, candidate)
 
 
 def test_local_context_refuses_real_deployment(tmp_path):
@@ -738,7 +805,6 @@ def test_local_context_refuses_real_deployment(tmp_path):
     with pytest.raises(RuntimeError, match="Remote mode is required for deployment"):
         api.deploy_package(
             context,
-            model=object(),
             package=object(),
             reason="blocked locally",
         )
@@ -758,7 +824,6 @@ def test_local_context_explains_that_editor_publication_requires_remote(tmp_path
     with pytest.raises(RuntimeError, match="Remote mode is required for the editor"):
         api.publish_edits(
             context,
-            model=object(),
             candidate=object(),
             reason="blocked locally",
         )

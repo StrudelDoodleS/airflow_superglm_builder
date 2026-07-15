@@ -32,6 +32,9 @@ def _minimal_bundle():
         offset=None,
         export_weight=None,
         cv_report={"scope": "cv", "pooled_scores": {"deviance": 0.4}},
+        model_name="HOME_FREQ",
+        model_version="v1",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id="split-1",
         pk_columns=("policy_id",),
@@ -55,6 +58,10 @@ def _load(path: Path, metadata, *, allowed_root: Path):
 
 
 def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
+
     _, _, _, save_candidate_bundle = _artifact_api()
     bundle = _minimal_bundle()
 
@@ -62,11 +69,86 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     loaded = _load(Path(metadata.path), metadata, allowed_root=tmp_path)
 
     assert metadata.format == "superglm-candidate-joblib-v1"
+    assert loaded.model_name == "HOME_FREQ"
+    assert loaded.model_version == "v1"
+    assert loaded.export_id == "export-1"
     assert loaded.manifest_id == "manifest-1"
     assert loaded.split_set_id == "split-1"
     assert loaded.pk_columns == ("policy_id",)
     assert loaded.X.equals(bundle.X)
     assert np.array_equal(loaded.y, bundle.y)
+    assert loaded.offset_contract == OffsetExportContract(handling="NONE")
+    assert not hasattr(loaded, "offset_export_options")
+
+
+@pytest.mark.parametrize(
+    ("export_weight", "export_weight_name", "message"),
+    [
+        (None, "Exposure", "EXPORTED_FACTOR requires export_weight"),
+        (np.array([2.0, 4.0]), None, "EXPORTED_FACTOR requires export_weight_name"),
+        (np.array([2.0]), "Exposure", "export_weight length 1 does not match X row count 2"),
+        (
+            np.array([2.0, float("inf")]),
+            "Exposure",
+            "export_weight contains non-finite numeric values",
+        ),
+    ],
+)
+def test_exported_offset_bundle_rejects_missing_or_invalid_bound_weight(
+    export_weight,
+    export_weight_name,
+    message,
+):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
+
+    with pytest.raises(CandidateArtifactError, match=message):
+        replace(
+            _minimal_bundle(),
+            offset=np.log(np.array([2.0, 4.0])),
+            export_weight=export_weight,
+            export_weight_name=export_weight_name,
+            offset_contract=OffsetExportContract(
+                handling="EXPORTED_FACTOR",
+                source_factor_name="Exposure",
+                published_factor_name="Exposure",
+                source_name="Exposure",
+                label="log(Exposure)",
+            ),
+        )
+
+
+def test_exported_offset_bundle_rejects_weight_name_that_conflicts_with_contract():
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
+
+    with pytest.raises(CandidateArtifactError, match="export_weight_name.*source_name"):
+        replace(
+            _minimal_bundle(),
+            offset=np.log(np.array([2.0, 4.0])),
+            export_weight=np.array([2.0, 4.0]),
+            export_weight_name="OtherExposure",
+            offset_contract=OffsetExportContract(
+                handling="EXPORTED_FACTOR",
+                source_factor_name="Exposure",
+                published_factor_name="Exposure",
+                source_name="Exposure",
+                label="log(Exposure)",
+            ),
+        )
+
+
+@pytest.mark.parametrize("field_name", ["model_name", "model_version", "export_id"])
+def test_candidate_bundle_rejects_missing_model_identity(tmp_path, field_name):
+    CandidateArtifactError, _, _, save_candidate_bundle = _artifact_api()
+    bundle = replace(_minimal_bundle(), **{field_name: " "})
+
+    with pytest.raises(CandidateArtifactError, match=field_name):
+        save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
 
 
 def test_candidate_bundle_rejects_same_size_tampering(tmp_path):

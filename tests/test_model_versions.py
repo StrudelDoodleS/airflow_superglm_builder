@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pricing_pipeline.publishing.model_versions import (
-    existing_model_version_for_export,
-    next_trained_model_version,
-    resolve_model_version_for_export,
-)
+from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
 
 
 class FakeScalarResult:
@@ -83,48 +79,19 @@ class FakeEngine:
         return FakeBegin(self.connection)
 
 
-def test_existing_model_version_for_export_returns_stored_version_exactly():
-    engine = FakeEngine(existing_version="20260605")
-
-    assert (
-        existing_model_version_for_export(
-            engine,
-            model_name="MY_MODEL",
-            export_id="my_model__run_1",
-        )
-        == "20260605"
-    )
-
-
 def test_model_version_queries_respect_configured_pricing_schema():
     engine = FakeEngine(existing_version="v3", pricing_schema="python_pricing")
 
-    existing_model_version_for_export(
+    resolve_model_version_for_export(
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_1",
     )
 
     sql, params = engine.connection.calls[0]
-    assert "FROM python_pricing.PRICING_RATE_PACKAGE AS rp" in sql
-    assert "JOIN python_pricing.PRICING_MODEL AS pm" in sql
-    assert params == {"model_name": "MY_MODEL", "export_id": "my_model__run_1"}
-
-
-def test_next_trained_model_version_ignores_non_vn_history_and_child_packages():
-    engine = FakeEngine(versions=["v2", "20260605", "v10", "manual"])
-
-    assert next_trained_model_version(engine, model_name="MY_MODEL") == "v11"
-
-    sql, params = engine.connection.calls[0]
-    assert "rp.parent_rate_package_id IS NULL" in sql
+    assert "FROM python_pricing.PRICING_MODEL AS pm" in sql
+    assert "WITH (UPDLOCK, HOLDLOCK)" in sql
     assert params == {"model_name": "MY_MODEL"}
-
-
-def test_next_trained_model_version_defaults_to_v1_when_no_vn_history():
-    engine = FakeEngine(versions=["20260605", "manual"])
-
-    assert next_trained_model_version(engine, model_name="MY_MODEL") == "v1"
 
 
 def test_resolve_model_version_for_export_reuses_existing_export_version():
@@ -191,6 +158,6 @@ def test_resolve_model_version_reserves_distinct_versions_before_publication():
         ({"model_name": "MY_MODEL", "export_id": None}, "export_id"),
     ],
 )
-def test_existing_model_version_for_export_rejects_blank_identity(kwargs, message):
+def test_resolve_model_version_for_export_rejects_blank_identity(kwargs, message):
     with pytest.raises(ValueError, match=message):
-        existing_model_version_for_export(FakeEngine(), **kwargs)
+        resolve_model_version_for_export(FakeEngine(), **kwargs)

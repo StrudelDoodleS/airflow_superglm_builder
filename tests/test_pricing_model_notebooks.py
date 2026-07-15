@@ -11,9 +11,7 @@ NOTEBOOK_PATH = Path("pricing_models/mtpl_frequency/pricing_model.ipynb")
 
 
 def _source(notebook: dict) -> str:
-    return "\n".join(
-        "".join(cell.get("source", [])) for cell in notebook.get("cells", [])
-    )
+    return "\n".join("".join(cell.get("source", [])) for cell in notebook.get("cells", []))
 
 
 def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
@@ -34,8 +32,8 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "open_candidate(" in source
     assert "publish_edits(" in source
     assert "deploy_package(" in source
-    assert "published.model_run_id" in source
-    assert "published.rate_package_id" in source
+    assert "published.model_run_id" not in source
+    assert "published.rate_package_id" not in source
     assert "published.package_version" in source
     assert 'DATABASE_MODE = "local"' in source
     assert 'EXPECTED_REMOTE_DATABASE = ""' in source
@@ -46,7 +44,9 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in source
     assert "pricing.destination" in source
 
-    source_cell = next(cell for cell in notebook["cells"] if "SOURCE_SQL" in "".join(cell.get("source", [])))
+    source_cell = next(
+        cell for cell in notebook["cells"] if "SOURCE_SQL" in "".join(cell.get("source", []))
+    )
     source_code = "".join(source_cell["source"])
     assert 'if pricing.mode == "local":' in source_code
     assert "ensure_local_fremtpl_demo(pricing.engine" in source_code
@@ -93,9 +93,7 @@ def test_all_pricing_model_notebooks_compile_and_have_no_saved_output():
 def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
     notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     code_cells = [
-        "".join(cell.get("source", []))
-        for cell in notebook["cells"]
-        if cell["cell_type"] == "code"
+        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
     ]
 
     result = subprocess.run(
@@ -113,13 +111,12 @@ def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
 def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     code_cells = [
-        "".join(cell.get("source", []))
-        for cell in notebook["cells"]
-        if cell["cell_type"] == "code"
+        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
     ]
     source = "\n".join(code_cells)
 
     assert 'DATABASE_MODE = "local"' in code_cells[0]
+    assert "RUNTIME_MODULE = None" in code_cells[0]
     assert 'EXPECTED_REMOTE_DATABASE = ""' in code_cells[0]
     assert "ALLOW_REMOTE_WRITES = False" in code_cells[0]
     assert "PricingModelSpec" in source
@@ -134,6 +131,7 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "FEATURE_COLUMNS" in model_cell
     connect_cell = next(cell for cell in code_cells if "pricing = connect(" in cell)
     assert "mode=DATABASE_MODE" in connect_cell
+    assert "runtime_module=RUNTIME_MODULE" in connect_cell
     assert 'local_root=MODEL_DIR / ".local"' in connect_cell
     assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in connect_cell
     assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in connect_cell

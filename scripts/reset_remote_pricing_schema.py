@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
 from pricing_pipeline.infra.reset_schema import (  # noqa: E402
     CONFIRMATION_FLAG,
     reset_and_reseed_schema,
-    schema_names_from_execution_options,
 )
 from scripts.pricing_db import get_runtime, load_env  # noqa: E402
 
@@ -67,15 +66,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"Refusing to execute destructive reset without {CONFIRMATION_FLAG}")
 
 
-def _resolve_schema_dir(path: Path) -> Path:
-    return path if path.is_absolute() else ROOT / path
-
-
 def schema_names_from_runtime(
     runtime, requested: tuple[str, ...] | list[str] | None
 ) -> tuple[str, ...]:
-    configured = schema_names_from_execution_options(
-        runtime.settings.schema_names.as_execution_options()
+    configured = (
+        runtime.settings.pricing_schema,
+        runtime.settings.pricing_staging_schema,
+        runtime.settings.mlops_schema,
     )
     if not requested:
         return configured
@@ -97,7 +94,9 @@ def main() -> None:
     engine = runtime.get_engine()
     result = reset_and_reseed_schema(
         engine,
-        migrations_dir=_resolve_schema_dir(args.schema_dir),
+        migrations_dir=(
+            args.schema_dir if args.schema_dir.is_absolute() else ROOT / args.schema_dir
+        ),
         expected_database=args.expected_database,
         schema_names=schema_names,
         allowed_schema_names=schema_names,

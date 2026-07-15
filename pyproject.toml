@@ -3,10 +3,7 @@ name = "airflow-superglm-builder"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-  "apache-airflow==3.2.1",
-  "apache-airflow-providers-microsoft-mssql",
   "azure-identity",
-  "httpx",
   "joblib",
   "numpy",
   "openpyxl",

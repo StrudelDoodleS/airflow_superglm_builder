@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 mkdir -p \
-  state/no_docker/airflow \
   state/no_docker/mlflow/artifacts \
   state/no_docker/rating_exports \
   state/cv_splits \
@@ -29,6 +28,5 @@ else
 fi
 
 echo
-echo "Edit .env for local runtime paths and create src/work_runtime/database.py, then start MLflow and Airflow with:"
+echo "Edit .env for local runtime paths and create src/work_runtime/database.py, then start MLflow with:"
 echo "  uv run python scripts/start_mlflow_local.py"
-echo "  uv run python scripts/start_airflow_local.py"

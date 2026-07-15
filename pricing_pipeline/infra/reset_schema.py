@@ -15,11 +15,6 @@ from pricing_pipeline.infra.schema import SchemaNames, validate_schema_name
 
 
 DEFAULT_RESET_SCHEMAS = ("pricing", "pricing_stg", "mlops")
-SCHEMA_CONFIG_KEYS = (
-    "pricing_schema",
-    "pricing_staging_schema",
-    "mlops_schema",
-)
 CONFIRMATION_FLAG = "--i-understand-this-drops-pricing-objects"
 
 
@@ -57,10 +52,6 @@ def normalize_schema_names(
     return result
 
 
-def schema_names_from_execution_options(options: dict[str, str]) -> tuple[str, ...]:
-    return tuple(str(options[key]) for key in SCHEMA_CONFIG_KEYS)
-
-
 def schema_config_from_reset_schemas(schema_names: tuple[str, ...]) -> SchemaNames:
     if len(schema_names) != 3:
         raise ValueError(
@@ -73,17 +64,9 @@ def schema_config_from_reset_schemas(schema_names: tuple[str, ...]) -> SchemaNam
     )
 
 
-def _sql_string(value: str) -> str:
-    return "N'" + value.replace("'", "''") + "'"
-
-
-def _schema_filter(schema_names: tuple[str, ...]) -> str:
-    return ", ".join(_sql_string(name) for name in schema_names)
-
-
 def build_drop_batches(schema_names: tuple[str, ...] | list[str]) -> list[str]:
     schemas = normalize_schema_names(tuple(schema_names))
-    schema_filter = _schema_filter(schemas)
+    schema_filter = ", ".join("N'" + schema.replace("'", "''") + "'" for schema in schemas)
     return [
         f"""
 DECLARE @sql NVARCHAR(MAX) = N'';

@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS pricing.DATASET_MANIFEST (
     pk_columns_json TEXT NOT NULL,
     target_column TEXT,
     weight_column TEXT,
+    model_frame_sha256 TEXT NOT NULL,
+    frame_hash_metadata_json TEXT NOT NULL,
+    exposure_column TEXT,
+    data_as_of_column TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );
@@ -96,6 +100,7 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL_VERSION_RESERVATION (
 
 CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     model_run_id TEXT PRIMARY KEY,
+    parent_model_run_id TEXT,
     model_id INTEGER NOT NULL,
     dag_id TEXT,
     airflow_run_id TEXT,
@@ -107,6 +112,7 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     rate_package_id INTEGER NOT NULL,
     model_name TEXT,
     rating_workbook_path TEXT NOT NULL,
+    rating_workbook_sha256 TEXT NOT NULL,
     publication_receipt_path TEXT,
     publication_receipt_sha256 TEXT,
     model_artifact_path TEXT,

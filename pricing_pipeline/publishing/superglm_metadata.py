@@ -3,13 +3,14 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from superglm import SuperGLM
 from superglm.features.categorical import Categorical
+from superglm.features.grouping import LevelGrouping
 from superglm.features.interaction import CategoricalInteraction
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -22,6 +23,7 @@ from superglm.features.spline import (
     PSpline,
     _SplineBase,
 )
+from superglm.types import LambdaPolicy
 
 from pricing_pipeline.publishing.naming import clean_identifier
 from pricing_pipeline.publishing.superglm_publication_receipt import (
@@ -29,8 +31,9 @@ from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
 )
 
-EXTRACTOR_VERSION = "2"
+EXTRACTOR_VERSION = "3"
 
+_SUPERGLM_VERSION = package_version("superglm")
 _SPLINE_KIND_BY_CLASS = {
     PSpline: "ps",
     BSplineSmooth: "bs",
@@ -42,6 +45,7 @@ _KNOT_ALPHA_STRATEGIES = {"quantile_tempered"}
 
 
 def _json_value(value: Any) -> Any:
+    """Convert the concrete metadata values emitted by pinned SuperGLM to JSON."""
     if value is None or isinstance(value, (str, bool)):
         return value
     if type(value) is int:
@@ -50,6 +54,10 @@ def _json_value(value: Any) -> Any:
         if not math.isfinite(value):
             raise ValueError("non-finite value in SuperGLM metadata")
         return value
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, np.bool_):
+        return bool(value)
     if isinstance(value, np.integer):
         return int(value)
     if isinstance(value, np.floating):
@@ -57,18 +65,14 @@ def _json_value(value: Any) -> Any:
         if not math.isfinite(numeric):
             raise ValueError("non-finite value in SuperGLM metadata")
         return numeric
-    if isinstance(value, np.bool_):
-        return bool(value)
-    if isinstance(value, np.ndarray):
-        return [_json_value(item) for item in value.tolist()]
-    if isinstance(value, pd.Series | pd.Index):
-        return [_json_value(item) for item in value.tolist()]
     if isinstance(value, pd.Timestamp):
         return None if pd.isna(value) else value.isoformat()
     if isinstance(value, pd.Timedelta):
         return None if pd.isna(value) else str(value)
-    if value is pd.NA or value is pd.NaT:
-        return None
+    if isinstance(value, np.ndarray):
+        return _json_value(value.tolist())
+    if isinstance(value, pd.Series | pd.Index):
+        return _json_value(value.tolist())
     if isinstance(value, Mapping):
         normalized: dict[str, Any] = {}
         for key, item in value.items():
@@ -78,88 +82,49 @@ def _json_value(value: Any) -> Any:
         return normalized
     if isinstance(value, list | tuple):
         return [_json_value(item) for item in value]
-    if isinstance(value, set | frozenset):
-        return [_json_value(item) for item in sorted(value, key=repr)]
-
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            return _json_value(item())
-        except TypeError:
-            pass
-
-    try:
-        if pd.isna(value):
-            return None
-    except TypeError, ValueError:
-        pass
-
     raise ValueError(f"unsupported SuperGLM metadata value: {type(value).__name__}")
 
 
-def _spline_kind(spec: Any) -> str:
+def _spline_kind(spec: _SplineBase) -> str:
     for klass, kind in _SPLINE_KIND_BY_CLASS.items():
         if isinstance(spec, klass):
             return kind
-    return type(spec).__name__
+    raise ValueError(f"unsupported SuperGLM spline type: {type(spec).__name__}")
 
 
-def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
-    try:
-        return getattr(obj, name, default)
-    except Exception:
-        return default
-
-
-def _shape_width(value: Any) -> int | None:
-    shape = getattr(value, "shape", None)
-    if shape is None or len(shape) < 2:
-        return None
-    return int(shape[1])
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    return int(value)
-
-
-def _grouping_metadata(grouping: Any) -> Any:
+def _grouping_metadata(grouping: LevelGrouping | None) -> dict[str, Any] | None:
     if grouping is None:
         return None
-    if isinstance(grouping, Mapping):
-        return _json_value(grouping)
+    if not isinstance(grouping, LevelGrouping):
+        raise ValueError("SuperGLM categorical grouping must be a LevelGrouping")
+    return {
+        "class_name": "LevelGrouping",
+        "original_to_group": grouping.original_to_group,
+        "group_to_originals": grouping.group_to_originals,
+        "all_original_levels": grouping.all_original_levels,
+        "grouped_levels": grouping.grouped_levels,
+    }
 
-    level_grouping_attrs = (
-        "original_to_group",
-        "group_to_originals",
-        "all_original_levels",
-        "grouped_levels",
-    )
-    level_grouping_metadata = {"class_name": type(grouping).__name__}
-    for attr_name in level_grouping_attrs:
-        candidate = _safe_getattr(grouping, attr_name)
-        if candidate is not None:
-            level_grouping_metadata[attr_name] = _json_value(candidate)
-    if len(level_grouping_metadata) > 1:
-        return level_grouping_metadata
 
-    for attr_name in ("mapping", "groups", "grouping", "_mapping", "_groups"):
-        candidate = _safe_getattr(grouping, attr_name)
-        if isinstance(candidate, Mapping):
-            return _json_value(candidate)
+def _lambda_policy_metadata(
+    policy: LambdaPolicy | Mapping[str, LambdaPolicy] | None,
+) -> dict[str, Any] | None:
+    if policy is None:
+        return None
+    if isinstance(policy, LambdaPolicy):
+        return {"mode": policy.mode, "value": policy.value}
+    if not isinstance(policy, Mapping):
+        raise ValueError("SuperGLM spline lambda_policy has an unsupported shape")
 
-    for method_name in ("to_dict", "as_dict"):
-        method = _safe_getattr(grouping, method_name)
-        if callable(method):
-            try:
-                candidate = method()
-            except Exception:
-                continue
-            if isinstance(candidate, Mapping):
-                return _json_value(candidate)
-
-    return {"class_name": type(grouping).__name__}
+    policies: dict[str, Any] = {}
+    for component_name, component_policy in policy.items():
+        if not isinstance(component_name, str) or not isinstance(component_policy, LambdaPolicy):
+            raise ValueError("SuperGLM spline lambda_policy must map names to LambdaPolicy")
+        policies[component_name] = {
+            "mode": component_policy.mode,
+            "value": component_policy.value,
+        }
+    return policies
 
 
 def _base_feature_metadata(name: str, spec: Any, feature_kind: str) -> dict[str, Any]:
@@ -176,14 +141,14 @@ def _categorical_metadata(name: str, spec: Categorical) -> dict[str, Any]:
     metadata.update(
         {
             "declared": {
-                "base": _safe_getattr(spec, "base"),
-                "grouping": _grouping_metadata(_safe_getattr(spec, "_grouping")),
+                "base": spec.base,
+                "grouping": _grouping_metadata(spec._grouping),
             },
             "effective": {},
             "fitted": {
-                "levels": _safe_getattr(spec, "_levels"),
-                "base_level": _safe_getattr(spec, "_base_level"),
-                "non_base_levels": _safe_getattr(spec, "_non_base"),
+                "levels": spec._levels,
+                "base_level": spec._base_level,
+                "non_base_levels": spec._non_base,
             },
         }
     )
@@ -191,127 +156,119 @@ def _categorical_metadata(name: str, spec: Categorical) -> dict[str, Any]:
 
 
 def _spline_metadata(name: str, spec: _SplineBase) -> dict[str, Any]:
-    r_inv = _safe_getattr(spec, "_R_inv")
-    constraint_kind = _safe_getattr(spec, "constraint_kind")
-    knot_strategy = _safe_getattr(spec, "knot_strategy")
+    kind = _spline_kind(spec)
+    if spec._R_inv is not None and (
+        not isinstance(spec._R_inv, np.ndarray) or spec._R_inv.ndim != 2
+    ):
+        raise ValueError(f"SuperGLM term {name!r} has malformed fitted coefficients")
+    coefficient_width = None if spec._R_inv is None else int(spec._R_inv.shape[1])
     declared = {
-        "kind": _spline_kind(spec),
-        "n_knots": _safe_getattr(spec, "n_knots"),
-        "spline_degree": _safe_getattr(spec, "degree"),
-        "knot_strategy": knot_strategy,
-        "penalty": _safe_getattr(spec, "penalty"),
-        "select": _safe_getattr(spec, "select"),
-        "extrapolation": _safe_getattr(spec, "extrapolation"),
-        "constraint_kind": constraint_kind,
-        "constraint_mode": _safe_getattr(spec, "constraint_mode") if constraint_kind else None,
-        "m": _safe_getattr(spec, "_m_orders"),
-        "knots": _safe_getattr(spec, "_explicit_knots"),
-        "boundary": _safe_getattr(spec, "_explicit_boundary"),
-        "lambda_policy": _safe_getattr(spec, "_lambda_policy"),
+        "kind": kind,
+        "n_knots": spec.n_knots,
+        "spline_degree": spec.degree,
+        "knot_strategy": spec.knot_strategy,
+        "penalty": spec.penalty,
+        "select": spec.select,
+        "extrapolation": spec.extrapolation,
+        "constraint_kind": spec.constraint_kind,
+        "constraint_mode": spec.constraint_mode if spec.constraint_kind else None,
+        "m": spec._m_orders,
+        "knots": spec._explicit_knots,
+        "boundary": spec._explicit_boundary,
+        "lambda_policy": _lambda_policy_metadata(spec._lambda_policy),
     }
-    if knot_strategy in _KNOT_ALPHA_STRATEGIES:
-        declared["knot_alpha"] = _safe_getattr(spec, "knot_alpha")
+    if spec.knot_strategy in _KNOT_ALPHA_STRATEGIES:
+        declared["knot_alpha"] = spec.knot_alpha
 
     metadata = _base_feature_metadata(name, spec, "spline")
     metadata.update(
         {
             "declared": declared,
             "effective": {
-                "kind": _spline_kind(spec),
+                "kind": kind,
                 "class_name": type(spec).__name__,
-                "n_knots": _safe_getattr(spec, "n_knots"),
-                "knot_strategy_actual": _safe_getattr(spec, "_knot_strategy_actual"),
+                "n_knots": spec.n_knots,
+                "knot_strategy_actual": spec._knot_strategy_actual,
             },
             "fitted": {
                 "class_name": type(spec).__name__,
-                "boundary": _safe_getattr(spec, "fitted_boundary"),
-                "knots": _safe_getattr(spec, "fitted_knots"),
-                "raw_basis_count": _optional_int(_safe_getattr(spec, "_n_basis")),
-                "coefficient_width": _shape_width(r_inv),
-                "lower_bound": _safe_getattr(spec, "_lo"),
-                "upper_bound": _safe_getattr(spec, "_hi"),
+                "boundary": spec.fitted_boundary,
+                "knots": spec.fitted_knots,
+                "raw_basis_count": int(spec._n_basis),
+                "coefficient_width": coefficient_width,
+                "lower_bound": spec._lo,
+                "upper_bound": spec._hi,
             },
         }
     )
     return metadata
 
 
-def _ordered_basis_value(spec: OrderedCategorical) -> Any:
-    basis = _safe_getattr(spec, "basis")
-    if isinstance(basis, _SplineBase):
-        return _spline_kind(basis)
-    return basis
-
-
-def _ordered_spline(spec: OrderedCategorical) -> _SplineBase | None:
-    for attr_name in ("_spline", "_spline_obj"):
-        candidate = _safe_getattr(spec, attr_name)
-        if isinstance(candidate, _SplineBase):
-            return candidate
-    basis = _safe_getattr(spec, "basis")
-    if isinstance(basis, _SplineBase):
-        return basis
-    return None
-
-
 def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[str, Any]:
-    spline = _ordered_spline(spec)
-    r_inv = _safe_getattr(spec, "_R_inv")
+    spline = spec._spline
+    configured_spline = spec._spline_obj
+    if configured_spline is not None and not isinstance(configured_spline, _SplineBase):
+        raise ValueError(f"SuperGLM ordered categorical {name!r} has malformed spline metadata")
+    if spec.basis == "spline" and not isinstance(spline, _SplineBase):
+        raise ValueError(f"SuperGLM ordered categorical {name!r} has no fitted spline")
+    if spec.basis == "step" and spline is not None:
+        raise ValueError(f"SuperGLM ordered categorical {name!r} has malformed step metadata")
+    if spec._R_inv is not None and (
+        not isinstance(spec._R_inv, np.ndarray) or spec._R_inv.ndim != 2
+    ):
+        raise ValueError(f"SuperGLM term {name!r} has malformed fitted coefficients")
+    coefficient_width = None if spec._R_inv is None else int(spec._R_inv.shape[1])
+    declared_kind = _spline_kind(configured_spline) if configured_spline is not None else spec.kind
+    declared_n_knots = configured_spline.n_knots if configured_spline is not None else spec.n_knots
+    declared_degree = configured_spline.degree if configured_spline is not None else spec.degree
+    declared_penalty = configured_spline.penalty if configured_spline is not None else spec.penalty
+    declared_select = configured_spline.select if configured_spline is not None else spec.select
+
     metadata = _base_feature_metadata(name, spec, "ordered_categorical")
     metadata.update(
         {
             "declared": {
-                "basis": _ordered_basis_value(spec),
-                "kind": _safe_getattr(spec, "kind"),
-                "base": _safe_getattr(spec, "base"),
-                "ordered_levels": _safe_getattr(spec, "_ordered_levels"),
-                "level_values": _safe_getattr(
-                    spec,
-                    "_original_level_to_value",
-                    _safe_getattr(spec, "_level_to_value"),
-                ),
-                "n_knots_requested": _safe_getattr(spec, "n_knots"),
-                "degree": _safe_getattr(spec, "degree"),
-                "penalty": _safe_getattr(spec, "penalty"),
-                "select": _safe_getattr(spec, "select"),
-                "grouping": _grouping_metadata(_safe_getattr(spec, "_grouping")),
+                "basis": spec.basis,
+                "kind": declared_kind,
+                "base": spec.base,
+                "ordered_levels": spec._ordered_levels,
+                "level_values": spec._original_level_to_value or spec._level_to_value,
+                "n_knots_requested": declared_n_knots,
+                "degree": declared_degree,
+                "penalty": declared_penalty,
+                "select": declared_select,
+                "grouping": _grouping_metadata(spec._grouping),
             },
             "effective": {
-                "basis": _ordered_basis_value(spec),
-                "kind": _spline_kind(spline) if spline is not None else _safe_getattr(spec, "kind"),
-                "n_knots_effective": _safe_getattr(spline, "n_knots")
-                if spline is not None
-                else None,
-                "n_levels": _safe_getattr(spec, "_n_levels"),
-                "ordered_levels": _safe_getattr(spec, "_ordered_levels"),
-                "level_values": _safe_getattr(spec, "_level_to_value"),
-                "base_level": _safe_getattr(spec, "_base_level"),
-                "non_base_levels": _safe_getattr(spec, "_non_base"),
+                "basis": spec.basis,
+                "kind": _spline_kind(spline) if spline is not None else "step",
+                "n_knots_effective": spline.n_knots if spline is not None else None,
+                "n_levels": spec._n_levels,
+                "ordered_levels": spec._ordered_levels,
+                "level_values": spec._level_to_value,
+                "base_level": spec._base_level,
+                "non_base_levels": spec._non_base,
             },
             "fitted": {
-                "levels": _safe_getattr(spec, "_ordered_levels"),
-                "base_level": _safe_getattr(spec, "_base_level"),
-                "non_base_levels": _safe_getattr(spec, "_non_base"),
-                "coefficient_width": _shape_width(r_inv),
+                "levels": spec._ordered_levels,
+                "base_level": spec._base_level,
+                "non_base_levels": spec._non_base,
+                "coefficient_width": coefficient_width,
             },
         }
     )
-    if spline is not None and _ordered_basis_value(spec) != "step":
+    if spline is not None:
         metadata["spline"] = _spline_metadata(name, spline)
     return metadata
 
 
 def _polynomial_metadata(name: str, spec: Polynomial) -> dict[str, Any]:
-    degree = _safe_getattr(spec, "degree")
     metadata = _base_feature_metadata(name, spec, "polynomial")
     metadata.update(
         {
-            "declared": {"degree": degree},
-            "effective": {"encoding": "polynomial", "degree": degree},
-            "fitted": {
-                "lower_bound": _safe_getattr(spec, "_lo"),
-                "upper_bound": _safe_getattr(spec, "_hi"),
-            },
+            "declared": {"degree": spec.degree},
+            "effective": {"encoding": "polynomial", "degree": spec.degree},
+            "fitted": {"lower_bound": spec._lo, "upper_bound": spec._hi},
         }
     )
     return metadata
@@ -329,10 +286,55 @@ def _numeric_metadata(name: str, spec: Numeric) -> dict[str, Any]:
     return metadata
 
 
-def _unknown_metadata(name: str, spec: Any) -> dict[str, Any]:
-    metadata = _base_feature_metadata(name, spec, "unknown")
-    metadata.update({"declared": {}, "effective": {}, "fitted": {}})
-    return metadata
+def _feature_metadata(name: str, spec: Any) -> dict[str, Any]:
+    if isinstance(spec, OrderedCategorical):
+        return _ordered_categorical_metadata(name, spec)
+    if isinstance(spec, Categorical):
+        return _categorical_metadata(name, spec)
+    if isinstance(spec, _SplineBase):
+        return _spline_metadata(name, spec)
+    if isinstance(spec, Polynomial):
+        return _polynomial_metadata(name, spec)
+    if isinstance(spec, Numeric):
+        return _numeric_metadata(name, spec)
+    raise ValueError(f"unsupported feature {name!r}: {type(spec).__name__}")
+
+
+def _categorical_interaction_metadata(
+    name: str,
+    spec: Any,
+    *,
+    published_name: str,
+    published_by_source: Mapping[str, str],
+) -> dict[str, Any]:
+    if not isinstance(spec, CategoricalInteraction):
+        raise ValueError(
+            f"interaction {name!r} uses unsupported {type(spec).__name__}; "
+            "only two-way categorical interactions can be published"
+        )
+    parent_names = tuple(spec.parent_names)
+    if len(parent_names) != 2 or any(
+        not isinstance(parent, str) or not parent for parent in parent_names
+    ):
+        raise ValueError(f"interaction {name!r} must have exactly two categorical parent features")
+    missing_parents = [parent for parent in parent_names if parent not in published_by_source]
+    if missing_parents:
+        raise ValueError(
+            f"interaction {name!r} references unpublished parent feature(s): "
+            + ", ".join(missing_parents)
+        )
+    return {
+        "feature_kind": "categorical_interaction",
+        "superglm_class": type(spec).__name__,
+        "source_term_name": name,
+        "published_term_name": published_name,
+        "parent_names": list(parent_names),
+        "input_column_names": [published_by_source[parent] for parent in parent_names],
+        "interaction_order": 2,
+        "declared": {},
+        "effective": {"encoding": "categorical_cross_product"},
+        "fitted": {},
+    }
 
 
 def _offset_metadata(offset_contract: OffsetExportContract) -> dict[str, Any]:
@@ -359,149 +361,29 @@ def _offset_metadata(offset_contract: OffsetExportContract) -> dict[str, Any]:
             "source_name": offset_contract.source_name,
             "label": offset_contract.label,
         },
-        "effective": {
-            "encoding": "fixed_log_coefficient",
-            "coefficient": 1.0,
-        },
+        "effective": {"encoding": "fixed_log_coefficient", "coefficient": 1.0},
         "fitted": {},
     }
 
 
-def _superglm_version() -> str:
-    try:
-        return package_version("superglm")
-    except PackageNotFoundError:
-        return "unknown"
-
-
-def _iter_model_specs(model: Any) -> list[tuple[str, Any]]:
-    for specs_attr, order_attr in (
-        ("_specs", "_feature_order"),
-        ("specs", "feature_order"),
-        ("features", "feature_order"),
-    ):
-        specs = _safe_getattr(model, specs_attr)
-        if not isinstance(specs, Mapping):
-            continue
-
-        order = _safe_getattr(model, order_attr)
-        if order is None:
-            return [(str(name), spec) for name, spec in specs.items()]
-
-        ordered: list[tuple[str, Any]] = []
-        seen: set[str] = set()
-        for name in order:
-            if name in specs:
-                ordered.append((str(name), specs[name]))
-                seen.add(str(name))
-        ordered.extend((str(name), spec) for name, spec in specs.items() if str(name) not in seen)
-        return ordered
-
-    return []
-
-
-def _iter_interaction_specs(model: Any) -> list[tuple[str, Any]]:
-    for specs_attr, order_attr in (
-        ("_interaction_specs", "_interaction_order"),
-        ("interaction_specs", "interaction_order"),
-    ):
-        specs = _safe_getattr(model, specs_attr)
-        if not isinstance(specs, Mapping):
-            continue
-        order = _safe_getattr(model, order_attr)
-        if order is None:
-            return [(str(name), spec) for name, spec in specs.items()]
-        ordered: list[tuple[str, Any]] = []
-        seen: set[str] = set()
-        for name in order:
-            if name in specs:
-                ordered.append((str(name), specs[name]))
-                seen.add(str(name))
-        ordered.extend((str(name), spec) for name, spec in specs.items() if str(name) not in seen)
-        return ordered
-    return []
-
-
-def _categorical_interaction_metadata(
-    name: str,
-    spec: Any,
+def _ordered_items(
+    specs: Any,
+    order: Any,
     *,
-    published_name: str,
-    published_by_source: Mapping[str, str],
-) -> dict[str, Any]:
-    if not isinstance(spec, CategoricalInteraction):
-        raise ValueError(
-            f"interaction {name!r} uses unsupported {type(spec).__name__}; "
-            "only two-way categorical interactions can be published"
-        )
-    parent_names = tuple(str(parent).strip() for parent in spec.parent_names)
-    if len(parent_names) != 2 or any(not parent for parent in parent_names):
-        raise ValueError(
-            f"interaction {name!r} must have exactly two categorical parent features"
-        )
-    missing_parents = [parent for parent in parent_names if parent not in published_by_source]
-    if missing_parents:
-        raise ValueError(
-            f"interaction {name!r} references unpublished parent feature(s): "
-            + ", ".join(missing_parents)
-        )
-    return {
-        "feature_kind": "categorical_interaction",
-        "superglm_class": type(spec).__name__,
-        "source_term_name": name,
-        "published_term_name": published_name,
-        "parent_names": list(parent_names),
-        "input_column_names": [published_by_source[parent] for parent in parent_names],
-        "interaction_order": 2,
-        "declared": {},
-        "effective": {"encoding": "categorical_cross_product"},
-        "fitted": {},
-    }
-
-
-def _feature_metadata(name: str, spec: Any) -> dict[str, Any]:
-    if isinstance(spec, OrderedCategorical):
-        return _ordered_categorical_metadata(name, spec)
-    if isinstance(spec, Categorical):
-        return _categorical_metadata(name, spec)
-    if isinstance(spec, _SplineBase):
-        return _spline_metadata(name, spec)
-    if isinstance(spec, Polynomial):
-        return _polynomial_metadata(name, spec)
-    if isinstance(spec, Numeric):
-        return _numeric_metadata(name, spec)
-    return _unknown_metadata(name, spec)
-
-
-def _model_link_name(model: Any) -> str | None:
-    link = _safe_getattr(model, "link")
-    if isinstance(link, str) and link:
-        return link
-
-    fitted_link = _safe_getattr(model, "_link")
-    if fitted_link is not None:
-        return type(fitted_link).__name__
-    if link is not None:
-        return type(link).__name__
-    return None
+    label: str,
+) -> list[tuple[str, Any]]:
+    if not isinstance(specs, dict) or not isinstance(order, list):
+        raise ValueError(f"SuperGLM {label} metadata has an invalid fitted shape")
+    if any(not isinstance(name, str) or not name.strip() for name in order):
+        raise ValueError(f"SuperGLM {label} order must contain non-empty strings")
+    if len(order) != len(specs) or len(set(order)) != len(order) or set(order) != set(specs):
+        raise ValueError(f"SuperGLM {label} order does not match its fitted specs")
+    return [(name, specs[name]) for name in order]
 
 
 def _snake_case_name(value: str) -> str:
     step_one = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
     return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step_one).lower()
-
-
-def _model_family_metadata(model: Any) -> tuple[str | None, dict[str, Any]]:
-    family = _safe_getattr(model, "family")
-    if family is None:
-        return None, {}
-    if isinstance(family, str):
-        return family, {}
-
-    params = {
-        str(name): value for name, value in vars(family).items() if not str(name).startswith("_")
-    }
-    return _snake_case_name(type(family).__name__), _json_value(params)
 
 
 def _validate_offset_contract(fit_used_offset: bool, offset_contract: OffsetExportContract) -> None:
@@ -517,29 +399,37 @@ def _validate_offset_contract(fit_used_offset: bool, offset_contract: OffsetExpo
 
 
 def build_superglm_publication_receipt(
-    model: Any,
+    model: SuperGLM,
     *,
     offset_contract: OffsetExportContract,
-    source_to_published_names: Mapping[str, str] | None = None,
     fit_sample_weight_name: str | None = None,
     export_weight_name: str | None = None,
 ) -> SuperGLMPublicationReceipt:
-    overrides = source_to_published_names or {}
+    if not isinstance(model, SuperGLM):
+        raise TypeError("publication metadata requires a SuperGLM model")
+    if model._result is None:
+        raise ValueError("SuperGLM model must be fitted before publication")
+    if type(model._fit_used_offset) is not bool:
+        raise ValueError("SuperGLM model has malformed fitted offset metadata")
+
+    model_specs = _ordered_items(model._specs, model._feature_order, label="feature")
+    if not model_specs:
+        raise ValueError("SuperGLM model has no feature specs to publish")
+    interaction_specs = _ordered_items(
+        model._interaction_specs,
+        model._interaction_order,
+        label="interaction",
+    )
+
+    fit_used_offset = model._fit_used_offset
+    _validate_offset_contract(fit_used_offset, offset_contract)
+
     term_metadata: dict[str, dict[str, Any]] = {}
     published_sources: dict[str, str] = {}
     published_by_source: dict[str, str] = {}
-    fit_used_offset = bool(_safe_getattr(model, "_fit_used_offset", False))
-    _validate_offset_contract(fit_used_offset, offset_contract)
-
-    model_specs = _iter_model_specs(model)
-    if not model_specs:
-        raise ValueError("SuperGLM model has no feature specs to publish")
-
     for source_name, spec in model_specs:
         metadata = _feature_metadata(source_name, spec)
-        published_name = overrides.get(source_name, metadata["published_term_name"])
-        metadata["published_term_name"] = published_name
-
+        published_name = metadata["published_term_name"]
         if published_name in published_sources:
             first_source = published_sources[published_name]
             raise ValueError(
@@ -550,8 +440,8 @@ def build_superglm_publication_receipt(
         published_by_source[source_name] = published_name
         term_metadata[published_name] = _json_value(metadata)
 
-    for source_name, spec in _iter_interaction_specs(model):
-        published_name = overrides.get(source_name, clean_identifier(source_name))
+    for source_name, spec in interaction_specs:
+        published_name = clean_identifier(source_name)
         if published_name in published_sources:
             first_source = published_sources[published_name]
             raise ValueError(
@@ -578,12 +468,26 @@ def build_superglm_publication_receipt(
             )
         term_metadata[offset_published_name] = _json_value(_offset_metadata(offset_contract))
 
-    family_name, family_params = _model_family_metadata(model)
+    distribution = model._distribution
+    link = model._link
+    if distribution is None or link is None:
+        raise ValueError("SuperGLM model has incomplete fitted family metadata")
+    family_name = _snake_case_name(type(distribution).__name__)
+    family_params = {
+        str(name): value
+        for name, value in vars(distribution).items()
+        if not str(name).startswith("_")
+    }
+    link_class_name = type(link).__name__
+    link_name = _snake_case_name(link_class_name.removesuffix("Link"))
+    if not family_name or not link_name:
+        raise ValueError("SuperGLM model has malformed fitted family metadata")
+
     package_metadata = {
         "model": {
             "family": family_name,
             "family_params": family_params,
-            "link": _model_link_name(model),
+            "link": link_name,
             "fit_used_offset": fit_used_offset,
             "fit_sample_weight_used": fit_sample_weight_name is not None,
             "fit_sample_weight_name": fit_sample_weight_name,
@@ -596,7 +500,7 @@ def build_superglm_publication_receipt(
         schema_name="superglm_publication_receipt",
         schema_version=1,
         metadata_origin="SUPERGLM_FITTED_MODEL",
-        superglm_version=_superglm_version(),
+        superglm_version=_SUPERGLM_VERSION,
         extractor_version=EXTRACTOR_VERSION,
         package_metadata=_json_value(package_metadata),
         term_metadata=term_metadata,

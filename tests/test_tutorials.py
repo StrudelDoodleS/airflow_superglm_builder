@@ -5,7 +5,6 @@ from pathlib import Path
 TUTORIAL_NOTEBOOK = Path("tutorials/basic_sql_etl_and_schema_walkthrough.ipynb")
 TUTORIAL_DDL = Path("tutorials/schema/pricing_useful_tables_ddl.sql")
 REFERENCE_DDL = Path("docs/pricing_useful_tables_ddl.sql")
-CANDIDATE_WORKBENCH_NOTEBOOK = Path("tutorials/scaffolded_candidate_workbench.ipynb")
 
 
 def _notebook_text() -> str:
@@ -18,9 +17,7 @@ def _notebook_text() -> str:
 
 
 def test_tutorial_ddl_is_current_erd_reference_copy():
-    assert TUTORIAL_DDL.read_text(encoding="utf-8") == REFERENCE_DDL.read_text(
-        encoding="utf-8"
-    )
+    assert TUTORIAL_DDL.read_text(encoding="utf-8") == REFERENCE_DDL.read_text(encoding="utf-8")
 
 
 def test_basic_sql_etl_notebook_teaches_connection_transform_and_load_pattern():
@@ -108,60 +105,3 @@ def test_basic_sql_etl_notebook_explains_model_revision_and_deployment_rules():
         "historical packages remain",
     ]:
         assert expected in text
-
-
-def test_candidate_workbench_notebook_uses_runtime_facade_and_no_sql_ids():
-    notebook = json.loads(CANDIDATE_WORKBENCH_NOTEBOOK.read_text(encoding="utf-8"))
-    source = "\n".join(
-        "".join(cell.get("source", []))
-        for cell in notebook["cells"]
-        if cell.get("cell_type") in {"markdown", "code"}
-    )
-
-    assert "Workbench.from_runtime()" in source
-    assert "workbench.models()" in source
-    assert "workbench.candidates(MODEL_NAME)" in source
-    assert "candidate.editor()" in source
-    assert "candidate.submit_edits(" in source
-    assert "submission.status()" in source
-    assert "submission.request_deployment(" in source
-    assert "candidate.close_editor()" in source
-    for sql_identifier in [
-        "rate_package_id",
-        "model_run_id",
-        "manifest_id",
-        "split_set_id",
-    ]:
-        assert sql_identifier not in source
-    assert "create_engine(" not in source
-    assert "AIRFLOW_API_TOKEN" not in source
-
-
-def test_candidate_workbench_notebook_requires_safe_explicit_analyst_inputs():
-    notebook = json.loads(CANDIDATE_WORKBENCH_NOTEBOOK.read_text(encoding="utf-8"))
-    source = "\n".join(
-        "".join(cell.get("source", []))
-        for cell in notebook["cells"]
-        if cell.get("cell_type") in {"markdown", "code"}
-    )
-
-    assert 'MODEL_NAME = ""' in source
-    assert "if not MODEL_NAME.strip():" in source
-    assert source.index("if not MODEL_NAME.strip():") < source.index(
-        "workbench.candidates(MODEL_NAME)"
-    )
-    assert "history.empty" in source
-    assert "No candidate history" in source
-    assert 'history["Editor"].eq("Ready")' in source
-    assert "editor_ready.empty" in source
-    assert "PACKAGE_VERSION = None" in source
-    assert "history.iloc[0]" not in source
-    assert source.index("if PACKAGE_VERSION is None:") < source.index("workbench.open(")
-    assert 'EDIT_REASON = ""' in source
-    assert "if not EDIT_REASON.strip():" in source
-    assert "reason=EDIT_REASON" in source
-    assert source.index("if not EDIT_REASON.strip():") < source.index(
-        "candidate.submit_edits("
-    )
-    assert "Explain the market" not in source
-    assert "close_editor" in source

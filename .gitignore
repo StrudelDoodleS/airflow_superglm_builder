@@ -20,3 +20,4 @@ airflow/plugins/
 .worktrees/
 docs/superpowers/plans/
 docs/superpowers/specs/
+builder_screenshot/

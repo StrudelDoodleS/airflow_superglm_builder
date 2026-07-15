@@ -18,6 +18,22 @@ STATE_PATHS = [
 ]
 
 
+def test_notebook_runtime_does_not_depend_on_airflow():
+    production_sources = [
+        *Path("pricing_pipeline").rglob("*.py"),
+        *Path("dags").glob("*.py"),
+    ]
+
+    airflow_imports = []
+    for path in production_sources:
+        source = path.read_text(encoding="utf-8")
+        if "from airflow" in source or "import airflow" in source:
+            airflow_imports.append(path.as_posix())
+
+    assert airflow_imports == []
+    assert list(Path("dags").glob("*.py")) == []
+
+
 def test_compose_uses_airflow_321_services():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
@@ -204,45 +220,6 @@ def test_db_diagram_profile_generates_and_serves_static_erds():
     assert generator["depends_on"]["mssql"] == {"condition": "service_healthy"}
 
 
-def test_airflow_services_can_import_project_package_and_hide_examples():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    common_env = compose["x-airflow-common"]["environment"]
-    common_volumes = compose["x-airflow-common"]["volumes"]
-    run_script = Path("scripts/run_local_pipeline.sh").read_text(encoding="utf-8")
-    cleanup_script = Path("scripts/cleanup_airflow_examples.py").read_text(encoding="utf-8")
-
-    assert common_env["PYTHONPATH"] == "/opt/airflow"
-    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_pipeline:/opt/airflow/pricing_pipeline" in common_volumes
-    assert "${AIRFLOW_PROJ_DIR:-.}/pricing_models:/opt/airflow/pricing_models" in common_volumes
-    assert common_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
-    assert common_env["AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE"] == "false"
-    assert "cleanup_airflow_examples.py" in run_script
-    assert "airflow dags list-import-errors" in run_script
-    assert 'DAG_ID="${DAG_ID:-pricing_mtpl_frequency}"' in run_script
-    assert 'airflow dags trigger "${DAG_ID}"' in run_script
-    assert "bundle_name" in cleanup_script
-    assert "example_dags" in cleanup_script
-
-
-def test_airflow_common_env_propagates_runtime_overrides():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    common_env = compose["x-airflow-common"]["environment"]
-
-    assert common_env["MLFLOW_TRACKING_URI"] == ("${MLFLOW_TRACKING_URI:-http://mlflow:5000}")
-    assert common_env["RATING_EXPORT_ROOT"] == (
-        "${RATING_EXPORT_ROOT:-/opt/pricing/state/rating_exports}"
-    )
-
-
-def test_readme_documents_db_diagram_commands():
-    readme = Path("README.md").read_text(encoding="utf-8")
-
-    assert "Database Diagrams" in readme
-    assert "docker compose --profile diagrams run --rm db-diagram-generator" in readme
-    assert "docker compose --profile diagrams up -d db-diagrams" in readme
-    assert "http://localhost:8088" in readme
-
-
 def test_airflow_image_uses_python_314_base():
     dockerfile = Path("airflow/Dockerfile").read_text(encoding="utf-8")
     assert "apache/airflow:3.2.1-python3.14" in dockerfile
@@ -250,12 +227,12 @@ def test_airflow_image_uses_python_314_base():
     assert '"apache-airflow==${AIRFLOW_VERSION}"' in dockerfile
 
 
-def test_host_python_dependencies_pin_airflow_321():
+def test_host_python_dependencies_do_not_install_airflow():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
 
-    assert '"apache-airflow==3.2.1"' in pyproject
-    assert "apache-airflow==3.2.1" in requirements
+    assert "apache-airflow" not in pyproject
+    assert "apache-airflow" not in requirements
 
 
 def test_compose_does_not_use_env_file_required_false():
@@ -284,31 +261,12 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
 
 
-def test_workbench_runtime_dependencies_are_direct():
+def test_workbench_artifact_dependency_is_direct():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
 
-    for dependency in ("httpx", "joblib"):
-        assert dependency in requirements.splitlines()
-        assert f'"{dependency}"' in pyproject
-
-
-def test_settings_load_workbench_and_airflow_api_values(tmp_path):
-    settings = Settings.from_env(
-        {
-            "WORKBENCH_ARTIFACT_ROOT": str(tmp_path / "candidates"),
-            "AIRFLOW_API_URL": "http://127.0.0.1:8080/api/v2",
-            "AIRFLOW_API_TOKEN": "unit-token",
-            "AIRFLOW_API_USERNAME": "analyst",
-            "AIRFLOW_API_PASSWORD": "local-secret",
-        }
-    )
-
-    assert settings.workbench_artifact_root == tmp_path / "candidates"
-    assert settings.airflow_api_url == "http://127.0.0.1:8080/api/v2"
-    assert settings.airflow_api_token == "unit-token"
-    assert settings.airflow_api_username == "analyst"
-    assert settings.airflow_api_password == "local-secret"
+    assert "joblib" in requirements.splitlines()
+    assert '"joblib"' in pyproject
 
 
 def test_settings_resolves_relative_artifact_roots_from_project_root(
@@ -331,9 +289,7 @@ def test_settings_resolves_relative_artifact_roots_from_project_root(
     )
 
     assert settings.rating_export_root == project_root / "state/rating_exports"
-    assert settings.validation_split_artifact_root == (
-        project_root / "state/validation_splits"
-    )
+    assert settings.validation_split_artifact_root == (project_root / "state/validation_splits")
     assert settings.workbench_artifact_root == project_root / "state/workbench"
 
 
@@ -374,12 +330,11 @@ def test_settings_canonicalizes_absolute_artifact_roots(tmp_path):
     )
 
     assert settings.rating_export_root == absolute_roots["RATING_EXPORT_ROOT"].resolve()
-    assert settings.validation_split_artifact_root == absolute_roots[
-        "VALIDATION_SPLIT_ARTIFACT_ROOT"
-    ].resolve()
-    assert settings.workbench_artifact_root == absolute_roots[
-        "WORKBENCH_ARTIFACT_ROOT"
-    ].resolve()
+    assert (
+        settings.validation_split_artifact_root
+        == absolute_roots["VALIDATION_SPLIT_ARTIFACT_ROOT"].resolve()
+    )
+    assert settings.workbench_artifact_root == absolute_roots["WORKBENCH_ARTIFACT_ROOT"].resolve()
 
 
 def test_settings_expands_user_for_project_and_artifact_roots(monkeypatch, tmp_path):
@@ -423,11 +378,9 @@ def test_settings_rejects_windows_drive_paths_under_posix(
         Settings.from_env(env)
 
 
-def test_settings_repr_hides_database_and_airflow_secrets():
+def test_settings_repr_hides_database_secret():
     secrets = {
         "MSSQL_PASSWORD": "sentinel-mssql-secret",
-        "AIRFLOW_API_TOKEN": "sentinel-airflow-token",
-        "AIRFLOW_API_PASSWORD": "sentinel-airflow-password",
     }
 
     rendered = repr(Settings.from_env(secrets))
@@ -435,21 +388,8 @@ def test_settings_repr_hides_database_and_airflow_secrets():
     assert all(secret not in rendered for secret in secrets.values())
 
 
-def test_settings_reuses_local_airflow_password_for_internal_api_login():
-    settings = Settings.from_env(
-        {
-            "AIRFLOW_API_USERNAME": "admin",
-            "AIRFLOW_LOCAL_PASSWORD": "changed-local-password",
-        }
-    )
-
-    assert settings.airflow_api_username == "admin"
-    assert settings.airflow_api_password == "changed-local-password"
-
-
 def test_generated_runtime_files_use_portable_exception_tuple_syntax():
     for path in [
-        Path("pricing_models/mtpl_frequency/modeling.py"),
         Path("scripts/no_docker_services.py"),
     ]:
         source = path.read_text(encoding="utf-8")
@@ -479,15 +419,3 @@ def test_rating_package_loader_assigns_feature_level_ids_in_numeric_order():
     assert "s.order_index" in loader
     assert "s.lower_bound" in loader
     assert "s.upper_bound" in loader
-
-
-def test_manual_revision_writer_creates_child_package_and_finalizes_published():
-    writer = Path("pricing_pipeline/publishing/manual_revision.py").read_text(encoding="utf-8")
-
-    assert "parent_rate_package_id" in writer
-    assert "package_status" in writer
-    assert "PUBLISHED" in writer
-    assert "WITH (UPDLOCK, HOLDLOCK)" in writer
-    assert "PRICING_RATE_PACKAGE" in writer
-    assert "PRICING_RATE_CELL" in writer
-    assert "PRICING_COMPILED_RATE_CELL" in writer

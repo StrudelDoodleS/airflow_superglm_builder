@@ -1,126 +1,73 @@
 from pathlib import Path
 
 
-README_CONTRACT_STRINGS = [
-    "state/",
-    "docker compose down -v",
-    "building, validating, publishing",
-    "freMTPL motor pricing model as a runnable",
-    "Seed Database Schema",
-    "scripts/render_schema_sql.py",
-    "create_engine(",
-    "URL.create(",
-    'query={"odbc_connect": odbc_connect}',
-    "split_sql_server_batches",
-    "conn.exec_driver_sql(batch)",
-    "No-Docker Work Quickstart",
-    "Airflow 3.2.1",
-    "## Contents",
-    "[No-Docker Work Quickstart](#no-docker-work-quickstart)",
-    "[Rate Package Lifecycle](#rate-package-lifecycle)",
-    "MLflow",
-    "PRICING_ENABLE_MLFLOW=false",
-    "PRICING_RUNTIME_MODULE=work_runtime.database",
-    "src/work_runtime/database.py",
-    'runtime_module="work_runtime.database"',
-    "VALIDATION_SPLIT_ARTIFACT_ROOT=state/no_docker/validation_splits",
-    "PRICING_SCHEMA_DIR=db/migrations",
-    "scripts/apply_schema.py",
-    "scripts/reset_remote_pricing_schema.py",
-    "runtime module's configured",
-    "--i-understand-this-drops-pricing-objects",
-    "scripts/run_local_pipeline.sh",
-    "scripts/no_docker_services.py",
-    "scripts/start_no_docker_stack.sh",
-    "scripts/start_airflow_local.py",
-    "scripts/start_mlflow_local.py",
-    "Adding Models",
-    "DatasetSpec",
-    "pricing_models/<model_name>/",
-    "create_model_frame_manifest_with_split",
-    "pricing.V_MODEL_RELATIVITY",
-    "pricing_mtpl_frequency",
-    "scripts/run_mtpl_frequency_custom.py",
-    "SQL Prediction Validation",
-    "scripts/validate_sql_prediction_against_superglm.py",
-    "pricing.PREDICT_CURRENT_RATE",
-    "predict(X, offset=np.log(exposure))",
-]
-
-RATE_PACKAGE_LIFECYCLE_STRINGS = [
-    "model.toml",
-    "ModelPublisher",
-    "pricing_deploy_rate_package",
-    "model_name",
-    "rate_package_id",
-    "package_version",
-    "deployment_slot",
-    "deployment_reason",
-    "deployed_by",
-    "parent_rate_package_id",
-    "PUBLISHED",
-]
-
-RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS = [
-    "The deploy run requires `model_name`, exactly one",
-    "`rate_package_id` or `package_version`",
-    "`deployed_by`, and `deployment_reason`",
-    "`deployment_slot` is optional",
-    "defaults to the model config deployment slot",
-]
+def _readme() -> str:
+    return Path("README.md").read_text(encoding="utf-8")
 
 
-def _readme_section(readme: str, heading: str) -> str:
-    start_marker = f"## {heading}"
-    start = readme.index(start_marker)
-    next_heading = readme.find("\n## ", start + len(start_marker))
-    if next_heading == -1:
-        return readme[start:]
-    return readme[start:next_heading]
+def test_readme_documents_the_notebook_first_contract():
+    readme = _readme()
 
-
-def test_readme_documents_local_pipeline_contract():
-    readme = Path("README.md").read_text(encoding="utf-8")
-
-    for expected in README_CONTRACT_STRINGS:
+    for expected in (
+        "notebook-first workflow",
+        "scripts/scaffold_pricing_model.py",
+        "pricing_model.ipynb",
+        "PricingModelSpec",
+        "register_model",
+        "build_candidate",
+        "publish_candidate",
+        "open_candidate",
+        "publish_edits",
+        "deploy_package",
+        "no generated training module",
+        "Analysts never type a model or",
+    ):
         assert expected in readme
 
-    assert "add a pyodbc token connection path" not in readme
-    assert "freMTPL pricing experiments" not in readme
-    assert "pipeline stores raw freMTPL rows" not in readme
-    assert "add an explicit auth mode to the SQL connection helper" not in readme
-    assert "New freMTPL manifests" not in readme
+    for retired_workflow in (
+        "build_pricing_model_dag",
+        "ModelPublisher",
+        "manual revision",
+        "run_local_pipeline.sh",
+        "run_mtpl_frequency_custom.py",
+    ):
+        assert retired_workflow not in readme
 
 
-def test_readme_documents_rate_package_lifecycle_contract():
-    readme = Path("README.md").read_text(encoding="utf-8")
-    lifecycle_section = _readme_section(readme, "Rate Package Lifecycle")
+def test_readme_documents_local_and_guarded_remote_writes():
+    readme = _readme()
 
-    for expected in RATE_PACKAGE_LIFECYCLE_STRINGS:
-        assert expected in lifecycle_section
-    for expected in RATE_PACKAGE_DEPLOY_CONTRACT_STRINGS:
-        assert expected in lifecycle_section
-    assert "manual revision" in lifecycle_section.lower()
-
-
-def test_readme_documents_completed_build_publish_task():
-    readme = Path("README.md").read_text(encoding="utf-8")
-
-    assert "publish_completed_model_build_task" in readme
-    assert "custom DAG" in readme
-    assert "prepare_source_data_task" in readme
-    assert "train_validate_export_task" in readme
-    assert "train_and_export_rates(prepared)" not in readme
-    assert "pricing_motor_frequency = build_pricing_model_dag" not in readme
-    assert "pricing_superglm_pipeline" not in readme
-    assert "does not deploy" in readme
+    for expected in (
+        'DATABASE_MODE = "local"',
+        'DATABASE_MODE = "remote"',
+        'RUNTIME_MODULE = "work_runtime.database"',
+        "EXPECTED_REMOTE_DATABASE",
+        "ALLOW_REMOTE_WRITES",
+        "SELECT DB_NAME()",
+        "persistent SQLite databases",
+        "does not deploy a live package",
+        "Do not commit\nserver names, tokens, passwords",
+    ):
+        assert expected in readme
 
 
-def test_readme_documents_source_column_and_custom_validation_split_paths():
-    readme = Path("README.md").read_text(encoding="utf-8")
-    adding_models = _readme_section(readme, "Adding Models")
+def test_readme_documents_automatic_audit_evidence_and_lineage():
+    readme = _readme()
 
-    assert 'method = "custom"' in adding_models
-    assert "validation_split_indices_for_model" in adding_models
-    assert 'method = "column_kfold"' in adding_models
-    assert 'method = "column_holdout"' in adding_models
+    for expected in (
+        "data-as-of date",
+        "primary-key columns",
+        "validation method",
+        "model source checksum",
+        "candidate bundle",
+        "model-run and fold metrics",
+        "edited package parent",
+        "champion snapshot",
+        "SQL database is the audit source of truth",
+        "current notebook workflow does not create or log MLflow",
+    ):
+        assert expected in readme
+
+
+def test_readme_is_concise_enough_to_be_an_entry_point():
+    assert len(_readme().splitlines()) < 300

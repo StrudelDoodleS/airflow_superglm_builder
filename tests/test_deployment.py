@@ -1,3 +1,5 @@
+from inspect import signature
+
 import pytest
 
 from pricing_pipeline.models.config import ModelBuildConfig
@@ -76,6 +78,8 @@ class StatefulConnection:
     def __init__(self, *, packages, current_rate_package_id):
         self.packages = {int(row["rate_package_id"]): row for row in packages}
         self.current_rate_package_id = current_rate_package_id
+        self.current_deployed_by = "previous deployer"
+        self.current_deployment_note = "previous deployment"
         self.events = []
 
     def execute(self, statement, params=None):
@@ -93,8 +97,7 @@ class StatefulConnection:
                         row
                         for row in self.packages.values()
                         if int(row["model_id"]) == int(params["model_id"])
-                        and int(row["package_version"])
-                        == int(params["package_version"])
+                        and int(row["package_version"]) == int(params["package_version"])
                     ),
                     None,
                 )
@@ -103,11 +106,17 @@ class StatefulConnection:
             current = (
                 None
                 if self.current_rate_package_id is None
-                else {"rate_package_id": self.current_rate_package_id}
+                else {
+                    "rate_package_id": self.current_rate_package_id,
+                    "deployed_by": self.current_deployed_by,
+                    "deployment_note": self.current_deployment_note,
+                }
             )
             return FakeResult(current)
         if "INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT" in sql:
             self.current_rate_package_id = int(params["rate_package_id"])
+            self.current_deployed_by = params["deployed_by"]
+            self.current_deployment_note = params["deployment_note"]
         return FakeResult()
 
 
@@ -129,7 +138,6 @@ def config() -> ModelBuildConfig:
         target_name="ClaimNb",
         model_type="superglm_poisson",
         deployment_slot="MTPL_FREQ_UAT",
-        default_package_status="PUBLISHED",
     )
 
 
@@ -140,7 +148,6 @@ def config_with_slot(deployment_slot: str) -> ModelBuildConfig:
         target_name="ClaimNb",
         model_type="superglm_poisson",
         deployment_slot=deployment_slot,
-        default_package_status="PUBLISHED",
     )
 
 
@@ -167,10 +174,9 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
 
     result = deploy_rate_package(
         engine,
-        config(),
+        config_with_slot("MTPL_FREQ_PROD"),
         rate_package_id=101,
         expected_current_rate_package_id=99,
-        deployment_slot="MTPL_FREQ_PROD",
         deployment_reason=" approved for launch ",
         deployed_by=" airflow ",
         model_id=17,
@@ -213,6 +219,9 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
     assert "deployment_note" in sql[insert_index]
     assert "MERGE pricing.PRICING_PACKAGE_POINTER WITH (HOLDLOCK) AS tgt" in sql[merge_index]
 
+    package_params = engine.connection.events[package_select_index][1]
+    assert package_params == {"rate_package_id": 101}
+
     lock_params = engine.connection.events[lock_index][1]
     assert lock_params == {
         "lock_resource": "pricing_model_deployment:17:MTPL_FREQ_PROD",
@@ -230,41 +239,14 @@ def test_deploy_rate_package_by_id_closes_current_row_inserts_deployment_and_upd
     assert merge_params["rate_package_id"] == 101
 
 
-def test_deploy_rate_package_resolves_by_model_and_package_version_using_default_slot():
-    engine = FakeEngine(package_row=published_package(rate_package_id=202, package_version=4))
-
-    result = deploy_rate_package(
-        engine,
-        config(),
-        package_version=4,
-        expected_current_rate_package_id=None,
-        deployment_reason="UAT signoff",
-        deployed_by="airflow",
-        model_id=17,
-    )
-
-    package_select, package_params = next(
-        (statement, params)
-        for statement, params in engine.connection.events
-        if "FROM pricing.PRICING_RATE_PACKAGE" in statement
-    )
-    assert "package_version = :package_version" in package_select
-    assert package_params == {"model_id": 17, "package_version": 4}
-    assert result.previous_rate_package_id is None
-    assert result.rate_package_id == 202
-    assert result.package_version == 4
-    assert result.deployment_slot == "MTPL_FREQ_UAT"
-
-
-def test_deploy_rate_package_canonicalizes_deployment_slot_before_lock_and_writes():
+def test_deploy_rate_package_canonicalizes_configured_slot_before_lock_and_writes():
     engine = FakeEngine(package_row=published_package())
 
     result = deploy_rate_package(
         engine,
-        config(),
+        config_with_slot("  mtpl_FREQ_prod  "),
         rate_package_id=101,
         expected_current_rate_package_id=None,
-        deployment_slot="  mtpl_FREQ_prod  ",
         deployment_reason="approved",
         deployed_by="airflow",
         model_id=17,
@@ -306,25 +288,6 @@ def test_deploy_rate_package_rejects_blank_default_deployment_slot():
     assert engine.connection.events == []
 
 
-@pytest.mark.parametrize("deployment_slot", ["", "   "])
-def test_deploy_rate_package_rejects_blank_deployment_slot_override(deployment_slot):
-    engine = FakeEngine(package_row=published_package())
-
-    with pytest.raises(DeploymentError, match="deployment_slot"):
-        deploy_rate_package(
-            engine,
-            config(),
-            rate_package_id=101,
-            expected_current_rate_package_id=None,
-            deployment_slot=deployment_slot,
-            deployment_reason="approved",
-            deployed_by="airflow",
-            model_id=17,
-        )
-
-    assert engine.connection.events == []
-
-
 def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
     engine = FakeEngine(package_row=published_package(), lock_result=-1)
 
@@ -349,25 +312,17 @@ def test_deploy_rate_package_rejects_negative_app_lock_result_before_writes():
     assert write_sql == []
 
 
-@pytest.mark.parametrize(
-    ("rate_package_id", "package_version"),
-    [
-        (None, None),
-        (101, 3),
-    ],
-)
-def test_deploy_rate_package_requires_exactly_one_package_selector(
-    rate_package_id,
-    package_version,
-):
-    engine = FakeEngine(package_row=published_package())
+def test_deploy_rate_package_exposes_only_the_exact_package_id_selector():
+    parameters = signature(deploy_rate_package).parameters
+    assert "package_version" not in parameters
+    assert "deployment_slot" not in parameters
+    assert parameters["rate_package_id"].default is parameters["rate_package_id"].empty
 
-    with pytest.raises(DeploymentError, match="exactly one"):
+    engine = FakeEngine(package_row=published_package())
+    with pytest.raises(TypeError, match="rate_package_id"):
         deploy_rate_package(
             engine,
             config(),
-            rate_package_id=rate_package_id,
-            package_version=package_version,
             expected_current_rate_package_id=None,
             deployment_reason="approved",
             deployed_by="airflow",
@@ -433,21 +388,22 @@ def test_deploy_rate_package_rejects_package_model_mismatch():
         )
 
 
-def test_deploy_rate_package_reuses_already_current_package_without_writes():
+def test_deploy_rate_package_rejects_already_current_package_when_snapshot_is_stale():
     engine = FakeEngine(
         package_row=published_package(),
         current_row={"rate_package_id": 101},
     )
 
-    result = deploy_rate_package(
-        engine,
-        config(),
-        rate_package_id=101,
-        expected_current_rate_package_id=99,
-        deployment_reason="approved",
-        deployed_by="airflow",
-        model_id=17,
-    )
+    with pytest.raises(StaleChampionError) as exc_info:
+        deploy_rate_package(
+            engine,
+            config(),
+            rate_package_id=101,
+            expected_current_rate_package_id=99,
+            deployment_reason="approved",
+            deployed_by="airflow",
+            model_id=17,
+        )
 
     write_sql = [
         statement
@@ -455,8 +411,43 @@ def test_deploy_rate_package_reuses_already_current_package_without_writes():
         if statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
     ]
     assert write_sql == []
-    assert result.previous_rate_package_id == 99
-    assert result.rate_package_id == 101
+    assert "expected current rate_package_id=99" in str(exc_info.value)
+    assert "found 101" in str(exc_info.value)
+
+
+def test_deploy_rate_package_noop_returns_existing_deployment_evidence():
+    engine = FakeEngine(
+        package_row=published_package(),
+        current_row={
+            "rate_package_id": 101,
+            "deployed_by": "original analyst",
+            "deployment_note": "original approval",
+        },
+    )
+
+    result = deploy_rate_package(
+        engine,
+        config(),
+        rate_package_id=101,
+        expected_current_rate_package_id=101,
+        deployment_reason="retry must not replace the audit reason",
+        deployed_by="retrying caller",
+        model_id=17,
+    )
+
+    assert result == DeploymentResult(
+        model_id=17,
+        deployment_slot="MTPL_FREQ_UAT",
+        previous_rate_package_id=101,
+        rate_package_id=101,
+        package_version=3,
+        deployed_by="original analyst",
+        deployment_reason="original approval",
+    )
+    assert not any(
+        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+        for statement in executed_sql(engine)
+    )
 
 
 def test_stale_review_cannot_replace_a_newer_champion():
@@ -496,8 +487,7 @@ def test_stale_review_cannot_replace_a_newer_champion():
     assert engine.connection.current_rate_package_id == 202
     stale_sql = executed_sql(engine)[events_before_stale_attempt:]
     assert not any(
-        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
-        for statement in stale_sql
+        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE")) for statement in stale_sql
     )
 
 
@@ -521,7 +511,7 @@ def test_deploy_rate_package_handles_no_current_champion():
     assert engine.connection.current_rate_package_id == 202
 
 
-def test_deploy_rate_package_retry_is_idempotent_with_original_expectation():
+def test_deploy_rate_package_retry_requires_refreshed_champion_snapshot():
     engine = StatefulEngine(
         packages=[published_package(rate_package_id=202, package_version=2)],
         current_rate_package_id=101,
@@ -541,19 +531,42 @@ def test_deploy_rate_package_retry_is_idempotent_with_original_expectation():
         for statement in executed_sql(engine)
     )
 
-    retried = deploy_rate_package(
+    with pytest.raises(StaleChampionError, match="found 202"):
+        deploy_rate_package(
+            engine,
+            config(),
+            rate_package_id=202,
+            expected_current_rate_package_id=101,
+            deployment_reason="approved",
+            deployed_by="airflow",
+            model_id=17,
+        )
+
+    refreshed_retry = deploy_rate_package(
         engine,
         config(),
         rate_package_id=202,
-        expected_current_rate_package_id=101,
-        deployment_reason="approved",
-        deployed_by="airflow",
+        expected_current_rate_package_id=202,
+        deployment_reason="retry must not replace the audit reason",
+        deployed_by="retrying caller",
         model_id=17,
     )
 
-    assert retried == first
+    assert refreshed_retry == DeploymentResult(
+        model_id=17,
+        deployment_slot="MTPL_FREQ_UAT",
+        previous_rate_package_id=202,
+        rate_package_id=202,
+        package_version=2,
+        deployed_by="airflow",
+        deployment_reason="approved",
+    )
+    assert first.previous_rate_package_id == 101
     assert engine.connection.current_rate_package_id == 202
-    assert sum(
-        statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
-        for statement in executed_sql(engine)
-    ) == write_count
+    assert (
+        sum(
+            statement.lstrip().startswith(("UPDATE", "INSERT", "MERGE"))
+            for statement in executed_sql(engine)
+        )
+        == write_count
+    )

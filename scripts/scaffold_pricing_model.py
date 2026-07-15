@@ -4,19 +4,13 @@ import argparse
 import json
 import keyword
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
 
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-
 _PYTHON_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MODEL_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_MODEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -27,9 +21,6 @@ class ScaffoldOptions:
     model_type: str = "superglm_poisson"
     deployment_slot: str | None = None
     package_name: str | None = None
-    dag_id: str | None = None
-    experiment_name: str | None = None
-    template: str = "custom"
     root: Path = Path(".")
     force: bool = False
 
@@ -37,655 +28,33 @@ class ScaffoldOptions:
 @dataclass(frozen=True)
 class ScaffoldResult:
     package_name: str
-    dag_id: str
     created_files: tuple[Path, ...]
 
 
-def _toml_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _required_text(value: str | None, field_name: str) -> str:
-    if value is None:
-        raise ValueError(f"{field_name} is required")
-    cleaned = value.strip()
+def _required(value: str | None, name: str) -> str:
+    cleaned = str(value or "").strip()
     if not cleaned:
-        raise ValueError(f"{field_name} is required")
+        raise ValueError(f"{name} is required")
     return cleaned
 
 
-def _validate_model_name(model_name: str) -> str:
-    cleaned = _required_text(model_name, "model_name")
-    if not _MODEL_KEY.match(cleaned):
+def _model_name(value: str) -> str:
+    cleaned = _required(value, "model_name")
+    if not _MODEL_NAME.fullmatch(cleaned):
         raise ValueError(
             "model_name must start with a letter and contain only letters, numbers, and underscores"
         )
     return cleaned
 
 
-def _module_name_from_model_name(model_name: str) -> str:
-    value = re.sub(r"[^A-Za-z0-9_]+", "_", model_name).strip("_").lower()
-    value = re.sub(r"_+", "_", value)
-    if not value:
-        raise ValueError("model_name must produce a non-empty package name")
-    return value
-
-
-def _validate_python_identifier(value: str, field_name: str) -> str:
-    cleaned = _required_text(value, field_name)
-    if not _PYTHON_IDENTIFIER.match(cleaned) or keyword.iskeyword(cleaned):
-        raise ValueError(f"{field_name} must be a valid Python identifier")
+def _package_name(value: str) -> str:
+    cleaned = _required(value, "package_name")
+    if not _PYTHON_IDENTIFIER.fullmatch(cleaned) or keyword.iskeyword(cleaned):
+        raise ValueError("package_name must be a valid Python identifier")
     return cleaned
 
 
-def _default_label(model_name: str) -> str:
-    return model_name.replace("_", " ").title()
-
-
-def _model_toml_template(
-    *,
-    model_name: str,
-    model_label: str,
-    target_name: str,
-    model_type: str,
-    deployment_slot: str,
-) -> str:
-    return dedent(
-        f"""\
-        # Model housekeeping config. Keep model identity, deployment lane, and
-        # validation split settings here; keep source SQL and Python model code
-        # in the neighboring package files.
-        model_name = {_toml_string(model_name)}
-        model_label = {_toml_string(model_label)}
-        target_name = {_toml_string(target_name)}
-        model_type = {_toml_string(model_type)}
-        deployment_slot = {_toml_string(deployment_slot)}
-        default_package_status = "PUBLISHED"
-
-        [validation_split]
-        method = "train_test_split"
-        test_size = 0.20
-        random_state = 42
-        shuffle = true
-        materialize = true
-        """
-    )
-
-
-def _package_init_template(*, package_name: str) -> str:
-    return f'"""Pricing model package for {package_name}."""\n'
-
-
-def _training_template(*, target_name: str) -> str:
-    return dedent(
-        f"""\
-        from __future__ import annotations
-
-        import numpy as np
-        import pandas as pd
-
-        from pricing_pipeline.models.spec import TrainingFrame
-
-
-        TRAINING_SQL = \"\"\"
-        SELECT *
-        FROM your_schema.your_training_view
-        \"\"\"
-
-        FEATURE_COLUMNS: list[str] = [
-            # "rating_factor",
-        ]
-
-
-        def build_training_frame(raw: pd.DataFrame) -> TrainingFrame:
-            df = raw.copy()
-
-            # Create derived targets here when the source SQL/view is read-only.
-            # df[{_toml_string(target_name)}] = df["numerator"] / df["denominator"]
-
-            missing = [
-                column
-                for column in [*FEATURE_COLUMNS, {_toml_string(target_name)}]
-                if column not in df.columns
-            ]
-            if missing:
-                raise ValueError(f"missing columns: {{', '.join(missing)}}")
-
-            X = df.loc[:, FEATURE_COLUMNS].copy()
-            y = df[{_toml_string(target_name)}].to_numpy(dtype=float)
-            exposure = np.ones(len(df), dtype=float)
-            offset = np.zeros(len(df), dtype=float)
-            return TrainingFrame(X=X, y=y, exposure=exposure, offset=offset)
-
-
-        def build_model():
-            # Example:
-            # from superglm import Categorical, SuperGLM
-            #
-            # return SuperGLM(
-            #     family="poisson",
-            #     discrete=True,
-            #     features={{"rating_factor": Categorical()}},
-            # )
-            raise NotImplementedError("Configure and return a SuperGLM model")
-        """
-    )
-
-
-def _custom_spec_template() -> str:
-    return dedent(
-        """\
-        \"\"\"Load the TOML model configuration for this pricing model.\"\"\"
-
-        from __future__ import annotations
-
-        from pathlib import Path
-
-        from pricing_pipeline.models.config import load_model_build_config
-
-
-        MODEL_CONFIG = load_model_build_config(Path(__file__).with_name("model.toml"))
-        """
-    )
-
-
-def _custom_source_sql_template(*, model_name: str) -> str:
-    return dedent(
-        f"""\
-        -- Source-data query placeholder for {model_name}.
-        --
-        -- Put model-local source SQL here when that is convenient, then read it
-        -- from data.py. You can also ignore this file and call your team's
-        -- existing Python data-access helper from data.py instead.
-        --
-        -- Keep this query focused on source/prepared data. Target construction,
-        -- feature engineering, filtering, and final feature selection can still
-        -- happen in modeling.py.
-        --
-        -- Example:
-        -- SELECT *
-        -- FROM some_schema.some_source_view;
-        """
-    )
-
-
-def _custom_data_template(*, package_name: str) -> str:
-    return dedent(
-        f"""\
-        \"\"\"Read or stage source data for this pricing model.
-
-        This file is model-owned. Define how the DAG obtains source data here:
-        read SQL from sql/source_data.sql, call your team's existing connection
-        helper, copy a run-scoped extract, or delegate to another local module.
-        Return only small run metadata for downstream modeling tasks.
-        \"\"\"
-
-        from __future__ import annotations
-
-        from pathlib import Path
-        from typing import Any
-
-        DATASET_NAME = "{package_name}_model_frame"
-        SOURCE_SYSTEM = "sql_server"
-        PK_COLUMNS = ("REPLACE_ME_ID",)
-        WEIGHT_COLUMN: str | None = None
-        DEFAULT_OUTPUT_ROOT = Path("state/{package_name}")
-        SQL_DIR = Path(__file__).with_name("sql")
-        SOURCE_DATA_SQL = SQL_DIR / "source_data.sql"
-
-
-        def prepare_source_data(
-            engine,
-            *,
-            run_key: str,
-            output_dir: str | Path,
-        ) -> dict[str, Any]:
-            output_path = Path(output_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
-
-            raise NotImplementedError(
-                "Read or stage source data for this run, write any temporary "
-                f"artifacts under {{output_path}}, then return output_dir, "
-                "effective_from, data_as_of_date, and any paths/IDs needed by "
-                "modeling.py."
-            )
-        """
-    )
-
-
-def _custom_modeling_template(*, package_name: str) -> str:
-    return dedent(
-        f"""\
-        \"\"\"Model-owned build logic for this pricing model.
-
-        Edit the functions in the first section. The final recipe function wires
-        those pieces into the shared manifest/publish contract.
-        \"\"\"
-
-        from __future__ import annotations
-
-        from pathlib import Path
-        from typing import Any, Mapping
-
-        import numpy as np
-        import pandas as pd
-
-        # Model-local config/constants.
-        from pricing_models.{package_name}.data import (
-            DATASET_NAME,
-            PK_COLUMNS,
-            SOURCE_SYSTEM,
-            WEIGHT_COLUMN,
-        )
-        from pricing_models.{package_name}.spec import MODEL_CONFIG
-
-        # Shared lifecycle helpers. Most model authors do not need to edit these imports.
-        from pricing_pipeline.data.manifest import (
-            ModelFrameManifestSpec,
-            validation_split_indices,
-        )
-        from pricing_pipeline.modeling.standard_superglm import (
-            ModelInputs,
-            canonical_row_identity_index,
-            run_standard_superglm_build,
-        )
-        from pricing_pipeline.orchestration.completed_build_helpers import (
-            effective_from_for_run,
-            required_payload_text,
-        )
-        from pricing_pipeline.publishing.model_versions import (
-            resolve_model_version_for_export,
-        )
-        from pricing_pipeline.publishing.rating_export import build_export_id
-
-
-        # ---------------------------------------------------------------------------
-        # Edit These Model-Specific Functions
-        # ---------------------------------------------------------------------------
-
-        FIT_MODE = "fit_reml"
-        CV_SCORING = ("deviance",)
-        FEATURE_COLUMNS: tuple[str, ...] = ()
-
-        def read_prepared_source(prepared: Mapping[str, Any]) -> pd.DataFrame:
-            \"\"\"Load the prepared source frame for this run.
-
-            data.py decides the handoff shape. For example, if prepare_source_data(...)
-            returned {{"source_data_path": ".../source.parquet"}}, read that file here.
-            Do not pass large DataFrames through Airflow/XCom.
-            \"\"\"
-            raise NotImplementedError(
-                "Read the source artifact/table identified by prepared and return a "
-                "pandas DataFrame."
-            )
-
-
-        def build_final_model_frame(raw: pd.DataFrame) -> pd.DataFrame:
-            \"\"\"Create the final frame used for validation, training, export, and manifesting.\"\"\"
-            # Add target construction, pd.cut/binning, feature engineering, filtering,
-            # and final feature selection here.
-            return raw.copy()
-
-
-        def build_training_inputs(frame: pd.DataFrame) -> ModelInputs:
-            \"\"\"Select model features, target, weights, and any fit offset.\"\"\"
-            if not FEATURE_COLUMNS:
-                raise ValueError("Set FEATURE_COLUMNS before running this model")
-            required = [*FEATURE_COLUMNS, MODEL_CONFIG.target_name, *PK_COLUMNS]
-            if WEIGHT_COLUMN is not None:
-                required.append(WEIGHT_COLUMN)
-            missing = [column for column in required if column not in frame.columns]
-            if missing:
-                raise ValueError("missing final model frame columns: " + ", ".join(missing))
-            row_ids = frame.loc[:, list(PK_COLUMNS)].copy()
-            identity_index = canonical_row_identity_index(row_ids)
-            X = frame.loc[:, list(FEATURE_COLUMNS)].copy()
-            X.index = identity_index
-            target = pd.Series(
-                frame[MODEL_CONFIG.target_name].to_numpy(dtype=float),
-                index=identity_index,
-                name=MODEL_CONFIG.target_name,
-            )
-            weight = (
-                None
-                if WEIGHT_COLUMN is None
-                else pd.Series(
-                    frame[WEIGHT_COLUMN].to_numpy(dtype=float),
-                    index=identity_index,
-                    name=WEIGHT_COLUMN,
-                )
-            )
-            return ModelInputs(
-                X=X,
-                y=target,
-                sample_weight=weight,
-                offset=None,
-                export_weight=weight,
-                row_ids=row_ids,
-            )
-
-
-        def build_model():
-            \"\"\"Configure and return an unfitted SuperGLM model.\"\"\"
-            raise NotImplementedError(
-                "Configure SuperGLM family, features, penalties, and constraints"
-            )
-
-
-        def validation_splitter(frame: pd.DataFrame):
-            \"\"\"Return the configured folds or a model-owned splitter.
-
-            Built-in model.toml methods delegate to pricing_pipeline. If model.toml
-            uses method = "custom", replace this function body with model-specific
-            positional row indices, for example from a SQL lookup, external mapping,
-            grouping rule, or temporal rule.
-            \"\"\"
-            if MODEL_CONFIG.validation_split.method == "custom":
-                raise NotImplementedError(
-                    "Return custom validation folds as "
-                    "[(train_idx, test_idx), ...] using zero-based row positions."
-                )
-            return validation_split_indices(frame, MODEL_CONFIG.validation_split)
-
-
-        def write_review_workbook(*, fitted_model, inputs, output_path):
-            \"\"\"Optionally write a presentation-only analyst workbook.\"\"\"
-            del fitted_model, inputs, output_path
-            return None
-
-
-        def _split_indices_for_model(frame: pd.DataFrame) -> list[tuple[Any, Any]]:
-            configured = validation_splitter(frame)
-            if hasattr(configured, "split") and callable(configured.split):
-                configured = configured.split(frame)
-            return [
-                (np.asarray(train_idx), np.asarray(test_idx))
-                for train_idx, test_idx in configured
-            ]
-
-
-        # ---------------------------------------------------------------------------
-        # Standard Build Recipe - Usually Leave This Alone
-        # ---------------------------------------------------------------------------
-
-        def train_validate_export_model(
-            prepared: Mapping[str, Any],
-            *,
-            engine,
-            settings,
-            created_by: str = "airflow",
-        ) -> dict[str, Any]:
-            \"\"\"Standard custom-model lifecycle recipe.
-
-            Start by customizing the functions above. Edit this recipe only when your
-            model needs a different build flow. The recipe resolves stable publish
-            metadata, calls the model-owned functions, creates the frame-backed
-            manifest, candidate artifact, and CompletedModelBuild payload consumed
-            by the publish task.
-            \"\"\"
-            run_key = str(prepared.get("run_key") or "manual")
-            export_id = build_export_id(MODEL_CONFIG.model_name, run_key)
-            model_version = resolve_model_version_for_export(
-                engine,
-                model_name=MODEL_CONFIG.model_name,
-                export_id=export_id,
-            )
-            effective_from = effective_from_for_run(
-                required_payload_text(prepared, "effective_from")
-            )
-            data_as_of_date = required_payload_text(prepared, "data_as_of_date")
-
-            raw = read_prepared_source(prepared)
-            frame = build_final_model_frame(raw)
-            # The manifest and split artifacts use this frame order, so keep ordering
-            # deterministic and aligned with PK_COLUMNS unless the model deliberately needs
-            # a different order.
-            frame = frame.sort_values(list(PK_COLUMNS)).reset_index(drop=True)
-            inputs = build_training_inputs(frame)
-            split_indices = _split_indices_for_model(frame)
-            # If validation_split uses a source split column, do not include that
-            # column as a rating feature unless this is an intentional model decision.
-            result = run_standard_superglm_build(
-                engine,
-                frame=frame,
-                inputs=inputs,
-                model_factory=build_model,
-                split_indices=split_indices,
-                fit_mode=FIT_MODE,
-                scoring=CV_SCORING,
-                output_dir=(
-                    Path(settings.workbench_artifact_root)
-                    / MODEL_CONFIG.model_name
-                    / export_id
-                ),
-                model_name=MODEL_CONFIG.model_name,
-                model_version=model_version,
-                export_id=export_id,
-                effective_from=effective_from,
-                manifest_spec=ModelFrameManifestSpec(
-                    dataset_name=DATASET_NAME,
-                    source_system=SOURCE_SYSTEM,
-                    data_as_of_date=data_as_of_date,
-                    pk_columns=PK_COLUMNS,
-                    target_column=MODEL_CONFIG.target_name,
-                    weight_column=WEIGHT_COLUMN,
-                ),
-                validation_split=MODEL_CONFIG.validation_split,
-                split_artifact_root=settings.validation_split_artifact_root,
-                model_source_root=Path(__file__).resolve().parent,
-                created_by=created_by,
-                review_workbook_hook=write_review_workbook,
-            )
-            return result.completed_build
-        """
-    )
-
-
-def _custom_airflow_tasks_template(*, package_name: str) -> str:
-    return dedent(
-        f"""\
-        \"\"\"Airflow TaskFlow wrappers for this model package.
-
-        Keep business logic in data.py and modeling.py. This file should stay
-        thin: load runtime config, attach @task decorators, and pass small
-        dictionaries between Airflow tasks.
-        \"\"\"
-
-        from __future__ import annotations
-
-        from pathlib import Path
-        from typing import Any, Mapping
-
-        from pricing_models.{package_name}.data import (
-            DEFAULT_OUTPUT_ROOT,
-            prepare_source_data,
-        )
-        from pricing_models.{package_name}.modeling import (
-            train_validate_export_model,
-        )
-        from pricing_pipeline.orchestration.airflow_run_metadata import (
-            merge_prepared_payload_metadata,
-            task_run_metadata,
-        )
-
-
-        def prepare_source_data_task(
-            *,
-            output_root: str | Path = DEFAULT_OUTPUT_ROOT,
-            runtime_module: str | None = None,
-            task_id: str = "prepare_source_data",
-        ):
-            from airflow.sdk import get_current_context, task
-            from pricing_pipeline.infra.runtime import runtime_from_env_or_module
-
-            @task(task_id=task_id)
-            def _prepare_source_data() -> dict[str, Any]:
-                runtime = runtime_from_env_or_module(runtime_module)
-                metadata = task_run_metadata(
-                    get_current_context(),
-                    output_root=output_root,
-                )
-                payload = prepare_source_data(
-                    runtime.get_engine(),
-                    run_key=metadata["run_key"],
-                    output_dir=Path(metadata["output_dir"]),
-                )
-                return merge_prepared_payload_metadata(metadata, payload)
-
-            return _prepare_source_data
-
-
-        def train_validate_export_task(
-            *,
-            runtime_module: str | None = None,
-            created_by: str = "airflow",
-            task_id: str = "train_validate_export",
-        ):
-            from airflow.sdk import task
-            from pricing_pipeline.infra.runtime import runtime_from_env_or_module
-
-            @task(task_id=task_id)
-            def _train_validate_export(prepared: Mapping[str, Any]) -> dict[str, Any]:
-                runtime = runtime_from_env_or_module(runtime_module)
-                payload = train_validate_export_model(
-                    dict(prepared),
-                    engine=runtime.get_engine(),
-                    settings=runtime.settings,
-                    created_by=created_by,
-                )
-                return payload
-
-            return _train_validate_export
-
-        """
-    )
-
-
-def _custom_dag_template(*, package_name: str, dag_id: str, model_name: str) -> str:
-    tag = package_name.replace("_", "-")
-    return dedent(
-        f"""\
-        \"\"\"Airflow DAG for the {model_name} pricing model build.\"\"\"
-
-        from __future__ import annotations
-
-        from datetime import datetime
-
-        from airflow.sdk import dag
-
-        from pricing_models.{package_name}.airflow_tasks import (
-            prepare_source_data_task,
-            train_validate_export_task,
-        )
-        from pricing_models.{package_name}.spec import MODEL_CONFIG
-        from pricing_pipeline.orchestration.model_registry_tasks import (
-            register_pricing_model_task,
-        )
-        from pricing_pipeline.orchestration.publish_completed_build import (
-            publish_completed_model_build_task,
-        )
-
-
-        # Set a cron expression or timedelta when this model is ready for scheduled builds.
-        MODEL_BUILD_SCHEDULE = None
-
-
-        @dag(
-            dag_id="{dag_id}",
-            start_date=datetime(2026, 1, 1),
-            schedule=MODEL_BUILD_SCHEDULE,
-            catchup=False,
-            tags=["pricing", "{tag}"],
-        )
-        def {dag_id}():
-            registered = register_pricing_model_task(model_config=MODEL_CONFIG)()
-            prepared = prepare_source_data_task()()
-            completed = train_validate_export_task()(prepared)
-            published = publish_completed_model_build_task(
-                model_config=MODEL_CONFIG,
-            )(completed)
-
-            registered >> prepared >> completed >> published
-
-
-        {dag_id}()
-        """
-    )
-
-
-def _factory_spec_template(
-    *,
-    package_name: str,
-    experiment_name: str,
-) -> str:
-    return dedent(
-        f"""\
-        from __future__ import annotations
-
-        from pathlib import Path
-
-        from pricing_pipeline.models.config import load_model_build_config
-        from pricing_pipeline.models.spec import DatasetSpec, ModelSpec
-        from pricing_models.{package_name}.training import (
-            FEATURE_COLUMNS,
-            TRAINING_SQL,
-            build_model,
-            build_training_frame,
-        )
-
-
-        MODEL_CONFIG = load_model_build_config(Path(__file__).with_name("model.toml"))
-
-        DATASET_SPEC = DatasetSpec(
-            dataset_name="{package_name}_training",
-            source_system="sql_server",
-            manifest_sql=TRAINING_SQL,
-            pk_columns=("REPLACE_ME_ID",),
-            target_column=MODEL_CONFIG.target_name,
-            weight_column=None,
-            raw_loader=None,
-        )
-
-        MODEL_SPEC = ModelSpec(
-            model_name=MODEL_CONFIG.model_name,
-            model_label=MODEL_CONFIG.model_label,
-            target_name=MODEL_CONFIG.target_name,
-            model_type=MODEL_CONFIG.model_type,
-            experiment_name="{experiment_name}",
-            deployment_slot=MODEL_CONFIG.deployment_slot,
-            dataset=DATASET_SPEC,
-            training_sql=TRAINING_SQL,
-            feature_columns=tuple(FEATURE_COLUMNS),
-            build_model=build_model,
-            build_training_frame=build_training_frame,
-            package_status=MODEL_CONFIG.default_package_status,
-        )
-        """
-    )
-
-
-def _factory_dag_template(*, package_name: str, dag_id: str) -> str:
-    tag = package_name.replace("_", "-")
-    return dedent(
-        f"""\
-        from __future__ import annotations
-
-        from pricing_models.{package_name}.spec import MODEL_CONFIG, MODEL_SPEC
-        from pricing_pipeline.orchestration.dag_factory import build_pricing_model_dag
-
-
-        {dag_id} = build_pricing_model_dag(
-            dag_id="{dag_id}",
-            spec=MODEL_SPEC,
-            model_config=MODEL_CONFIG,
-            tags=["pricing", "{tag}"],
-        )
-        """
-    )
-
-
-def _notebook_code_cell(source: str) -> dict[str, object]:
+def _code(source: str) -> dict[str, object]:
     return {
         "cell_type": "code",
         "execution_count": None,
@@ -695,7 +64,7 @@ def _notebook_code_cell(source: str) -> dict[str, object]:
     }
 
 
-def _notebook_markdown_cell(source: str) -> dict[str, object]:
+def _markdown(source: str) -> dict[str, object]:
     return {
         "cell_type": "markdown",
         "metadata": {},
@@ -703,7 +72,7 @@ def _notebook_markdown_cell(source: str) -> dict[str, object]:
     }
 
 
-def _pricing_notebook_template(
+def _notebook(
     *,
     package_name: str,
     model_name: str,
@@ -712,72 +81,62 @@ def _pricing_notebook_template(
     model_type: str,
     deployment_slot: str,
 ) -> str:
-    feature_name = "feature_1" if target_name != "feature_1" else "feature_2"
-    pk_name = "row_id" if target_name != "row_id" else "record_id"
-    exposure_name = "exposure" if target_name != "exposure" else "earned_exposure"
+    feature = "feature_1" if target_name != "feature_1" else "feature_2"
+    primary_key = "row_id" if target_name != "row_id" else "record_id"
+    exposure = "exposure" if target_name != "exposure" else "earned_exposure"
+    q = json.dumps
     cells = [
-        _notebook_markdown_cell(
+        _markdown(
             f"""
             # {model_label}
 
-            This notebook owns the model and data decisions. The helper functions
-            derive and persist model IDs, versions, dataset fingerprints, validation
-            evidence, artifact hashes, and publication audit rows.
+            The visible cells own the data, features, transforms, validation choice,
+            model, review, and deployment decision. The imported helpers record model
+            identity, versions, dataset and split evidence, artifact hashes, lineage,
+            and rating-package rows.
             """
         ),
-        _notebook_markdown_cell(
+        _code(
             """
-            ## Analyst controls
-
-            Local mode creates and reuses `.local/*.sqlite`. At work, set
-            `PRICING_RUNTIME_MODULE` outside this notebook, choose remote mode, enter
-            the expected database name, and enable writes only after checking the
-            displayed destination.
-            """
-        ),
-        _notebook_code_cell(
-            """
-            # Remote mode loads your private module from PRICING_RUNTIME_MODULE.
             DATABASE_MODE = "local"  # "local" or "remote"
+            RUNTIME_MODULE = None  # e.g. "work_runtime.database"; never put secrets here
             EXPECTED_REMOTE_DATABASE = ""
             ALLOW_REMOTE_WRITES = False
 
-            DATA_AS_OF = None  # Or derive it from MODEL.data_as_of_column below.
+            DATA_AS_OF = None  # Or use MODEL.data_as_of_column below.
             RUN_EDITOR = False
             EDIT_REASON = ""
             DEPLOY = False
             DEPLOYMENT_REASON = ""
             """
         ),
-        _notebook_code_cell(
+        _code(
             f"""
             from datetime import date
             from pathlib import Path
             import sys
 
-            _search_root = Path.cwd().resolve()
+            search_root = Path.cwd().resolve()
             PROJECT_ROOT = next(
                 (
                     root
-                    for root in (_search_root, *_search_root.parents)
+                    for root in (search_root, *search_root.parents)
                     if (root / "pricing_pipeline").is_dir()
                     and (root / "pricing_models").is_dir()
                 ),
                 None,
             )
             if PROJECT_ROOT is None:
-                raise RuntimeError(
-                    "Open this notebook from inside the pricing repository."
-                )
+                raise RuntimeError("Open this notebook from inside the pricing repository.")
             if str(PROJECT_ROOT) not in sys.path:
                 sys.path.insert(0, str(PROJECT_ROOT))
 
-            import numpy as np
-            import pandas as pd
-            from superglm import Numeric, SuperGLM
+            import numpy as np  # noqa: E402
+            import pandas as pd  # noqa: E402
+            from superglm import Numeric, SuperGLM  # noqa: E402
 
-            from pricing_pipeline.models.config import ValidationSplitConfig
-            from pricing_pipeline.notebook import (
+            from pricing_pipeline.models.config import ValidationSplitConfig  # noqa: E402
+            from pricing_pipeline.notebook import (  # noqa: E402
                 PricingModelSpec,
                 build_candidate,
                 connect,
@@ -791,11 +150,20 @@ def _pricing_notebook_template(
             MODEL_DIR = PROJECT_ROOT / "pricing_models/{package_name}"
             """
         ),
-        _notebook_markdown_cell("## Connect and verify the destination"),
-        _notebook_code_cell(
+        _markdown(
+            """
+            ## Connect and verify the destination
+
+            Local mode creates persistent SQLite files under `.local`. Remote mode
+            obtains its private connection from the work runtime configured outside
+            this repository and refuses writes until the expected database matches.
+            """
+        ),
+        _code(
             """
             pricing = connect(
                 mode=DATABASE_MODE,
+                runtime_module=RUNTIME_MODULE,
                 local_root=MODEL_DIR / ".local",
                 expected_remote_database=EXPECTED_REMOTE_DATABASE,
                 allow_remote_writes=ALLOW_REMOTE_WRITES,
@@ -803,69 +171,67 @@ def _pricing_notebook_template(
             display(pricing.destination)
             """
         ),
-        _notebook_markdown_cell(
+        _markdown(
             """
-            ## Load the model frame
+            ## Load and transform the model frame
 
-            Replace this cell with the normal work SQL helper or another source.
-            Keep the primary key, target, features, exposure/weights, optional split
-            column, and data-as-of column in the final frame.
+            Replace the demo with the normal work query. Keep feature transforms as
+            ordinary visible Python and retain the primary key, target, exposure or
+            weights, optional split column, and data-as-of column in the final frame.
             """
         ),
-        _notebook_code_cell(
+        _code(
             f"""
             rng = np.random.default_rng(42)
             frame = pd.DataFrame({{
-                {pk_name!r}: np.arange(1, 101),
-                {feature_name!r}: rng.normal(size=100),
-                {exposure_name!r}: rng.uniform(0.25, 1.0, size=100),
+                {q(primary_key)}: np.arange(1, 101),
+                {q(feature)}: rng.normal(size=100),
+                {q(exposure)}: rng.uniform(0.25, 1.0, size=100),
                 "data_as_of": [date.today()] * 100,
             }})
-            frame[{target_name!r}] = rng.poisson(
-                frame[{exposure_name!r}]
-                * np.exp(-2.5 + 0.25 * frame[{feature_name!r}])
+            frame[{q(target_name)}] = rng.poisson(
+                frame[{q(exposure)}] * np.exp(-2.5 + 0.25 * frame[{q(feature)}])
             )
-            display({{"Rows loaded": len(frame), "Columns loaded": len(frame.columns)}})
+            display({{"Rows": len(frame), "Columns": len(frame.columns)}})
             """
         ),
-        _notebook_markdown_cell("## Define and register the model"),
-        _notebook_code_cell(
+        _markdown("## Define the model and validation decision"),
+        _code(
             f"""
             MODEL = PricingModelSpec(
-                name={model_name!r},
-                label={model_label!r},
-                target={target_name!r},
-                model_type={model_type!r},
-                deployment_slot={deployment_slot!r},
-                features=({feature_name!r},),
-                dataset_name={f"{package_name}_model_frame"!r},
-                source_system="scaffold_demo",
-                pk_columns=({pk_name!r},),
-                exposure_column={exposure_name!r},
+                name={q(model_name)},
+                label={q(model_label)},
+                target={q(target_name)},
+                model_type={q(model_type)},
+                deployment_slot={q(deployment_slot)},
+                features=({q(feature)},),
+                dataset_name={q(package_name + "_model_frame")},
+                source_system="replace_with_source_name",
+                pk_columns=({q(primary_key)},),
+                exposure_column={q(exposure)},
                 data_as_of_column="data_as_of",
                 validation=ValidationSplitConfig.kfold(
                     n_splits=5,
                     random_state=42,
                     shuffle=True,
-                    materialize=True,
                 ),
             )
-            model = register_model(pricing, MODEL, source_root=MODEL_DIR)
-            display({{"Model": model.name, "SQL model ID": model.model_id}})
-            """
-        ),
-        _notebook_markdown_cell("## Define and fit the model"),
-        _notebook_code_cell(
-            f"""
+
             def make_model():
                 return SuperGLM(
                     family="poisson",
                     selection_penalty=0.0,
                     discrete=True,
                     n_bins=64,
-                    features={{{feature_name!r}: Numeric()}},
+                    features={{{q(feature)}: Numeric()}},
                 )
 
+            model = register_model(pricing, MODEL, source_root=MODEL_DIR)
+            """
+        ),
+        _markdown("## Fit and inspect the candidate"),
+        _code(
+            """
             candidate = build_candidate(
                 pricing,
                 model=model,
@@ -876,146 +242,112 @@ def _pricing_notebook_template(
             candidate.metrics
             """
         ),
-        _notebook_markdown_cell(
+        _markdown(
             """
             ## Publish the immutable candidate
 
-            This records the audit trail and rating package. It does not deploy it.
+            Publication records the audit trail and creates a candidate package. It
+            does not change the live deployment.
             """
         ),
-        _notebook_code_cell(
+        _code(
             """
             published = publish_candidate(pricing, candidate)
             display({
-                "Model run": published.model_run_id,
-                "Dataset manifest": published.manifest_id,
-                "Validation split": published.split_set_id,
-                "Rate package": published.rate_package_id,
-                "Package version": published.package_version,
+                "Model": published.model_name,
+                "Package": published.package_version,
                 "State": published.package_status,
             })
             """
         ),
-        _notebook_markdown_cell("## Optional market edit (remote mode only)"),
-        _notebook_code_cell(
+        _markdown("## Optional market edit and explicit review (remote mode only)"),
+        _code(
             """
-            edited = None
+            reviewed = None
             if RUN_EDITOR:
-                editable = open_candidate(
+                reviewed = open_candidate(
                     pricing,
                     model=model,
                     package_version=published.package_version,
                 )
-                display(editable.editor())
+                display(reviewed.editor())
                 if not EDIT_REASON.strip():
                     raise ValueError("Describe the market or underwriting edit.")
                 edited = publish_edits(
                     pricing,
-                    model=model,
-                    candidate=editable,
+                    candidate=reviewed,
                     reason=EDIT_REASON,
                 )
-                display(edited)
+                reviewed = open_candidate(
+                    pricing,
+                    model=model,
+                    package_version=edited.package_version,
+                )
+                display({"Edited package": edited.package_version, "State": edited.package_status})
             """
         ),
-        _notebook_markdown_cell("## Optional deployment (remote mode only)"),
-        _notebook_code_cell(
+        _markdown("## Optional deployment of the reviewed package (remote mode only)"),
+        _code(
             """
             if DEPLOY:
+                if reviewed is None:
+                    reviewed = open_candidate(
+                        pricing,
+                        model=model,
+                        package_version=published.package_version,
+                    )
                 if not DEPLOYMENT_REASON.strip():
                     raise ValueError("Describe the approval for changing the live package.")
                 deployment = deploy_package(
                     pricing,
-                    model=model,
-                    package=edited if edited is not None else published,
+                    package=reviewed,
                     reason=DEPLOYMENT_REASON,
                 )
                 display(deployment)
             """
         ),
     ]
-    notebook = {
-        "cells": cells,
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3",
-                "language": "python",
-                "name": "python3",
+    return (
+        json.dumps(
+            {
+                "cells": cells,
+                "metadata": {
+                    "kernelspec": {
+                        "display_name": "Python 3",
+                        "language": "python",
+                        "name": "python3",
+                    },
+                    "language_info": {"name": "python", "version": "3"},
+                },
+                "nbformat": 4,
+                "nbformat_minor": 5,
             },
-            "language_info": {"name": "python", "version": "3"},
-        },
-        "nbformat": 4,
-        "nbformat_minor": 5,
-    }
-    return json.dumps(notebook, indent=1, ensure_ascii=False) + "\n"
+            indent=1,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
 
 
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
-    model_name = _validate_model_name(options.model_name)
-    template = _required_text(options.template, "template")
-    if template not in {"custom", "factory"}:
-        raise ValueError("template must be one of: custom, factory")
-    package_name = _validate_python_identifier(
-        options.package_name or _module_name_from_model_name(model_name),
-        "package_name",
+    model_name = _model_name(options.model_name)
+    package_name = _package_name(
+        options.package_name or re.sub(r"_+", "_", model_name.lower()).strip("_")
     )
-    dag_id = _validate_python_identifier(
-        options.dag_id or f"pricing_{package_name}",
-        "dag_id",
+    target_name = _required(options.target_name, "target_name")
+    model_label = _required(
+        options.model_label or model_name.replace("_", " ").title(), "model_label"
     )
-    target_name = _required_text(options.target_name, "target_name")
-    model_label = _required_text(
-        options.model_label or _default_label(model_name),
-        "model_label",
-    )
-    model_type = _required_text(options.model_type, "model_type")
-    deployment_slot = _required_text(
+    model_type = _required(options.model_type, "model_type")
+    deployment_slot = _required(
         options.deployment_slot or f"{model_name}_UAT",
         "deployment_slot",
     )
-    experiment_name = _required_text(
-        options.experiment_name or f"pricing-{package_name.replace('_', '-')}",
-        "experiment_name",
-    )
 
-    root = options.root
-    package_dir = root / "pricing_models" / package_name
-    dag_path = root / "dags" / f"{dag_id}.py"
-    if template == "factory":
-        files = (
-            package_dir / "__init__.py",
-            package_dir / "model.toml",
-            package_dir / "pricing_model.ipynb",
-            package_dir / "training.py",
-            package_dir / "spec.py",
-            dag_path,
-        )
-    else:
-        files = (
-            package_dir / "__init__.py",
-            package_dir / "model.toml",
-            package_dir / "pricing_model.ipynb",
-            package_dir / "sql" / "source_data.sql",
-            package_dir / "spec.py",
-            package_dir / "data.py",
-            package_dir / "modeling.py",
-            package_dir / "airflow_tasks.py",
-            dag_path,
-        )
-
-    package_dir.mkdir(parents=True, exist_ok=True)
-    dag_path.parent.mkdir(parents=True, exist_ok=True)
-
-    content_by_path = {
-        package_dir / "__init__.py": _package_init_template(package_name=package_name),
-        package_dir / "model.toml": _model_toml_template(
-            model_name=model_name,
-            model_label=model_label,
-            target_name=target_name,
-            model_type=model_type,
-            deployment_slot=deployment_slot,
-        ),
-        package_dir / "pricing_model.ipynb": _pricing_notebook_template(
+    package_dir = options.root / "pricing_models" / package_name
+    content = {
+        package_dir / "__init__.py": f'"""Pricing notebook package for {model_name}."""\n',
+        package_dir / "pricing_model.ipynb": _notebook(
             package_name=package_name,
             model_name=model_name,
             model_label=model_label,
@@ -1024,87 +356,34 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
             deployment_slot=deployment_slot,
         ),
     }
-    if template == "factory":
-        content_by_path.update(
-            {
-                package_dir / "training.py": _training_template(target_name=target_name),
-                package_dir / "spec.py": _factory_spec_template(
-                    package_name=package_name,
-                    experiment_name=experiment_name,
-                ),
-                dag_path: _factory_dag_template(package_name=package_name, dag_id=dag_id),
-            }
-        )
-    else:
-        content_by_path.update(
-            {
-                package_dir / "sql" / "source_data.sql": _custom_source_sql_template(
-                    model_name=model_name
-                ),
-                package_dir / "spec.py": _custom_spec_template(),
-                package_dir / "data.py": _custom_data_template(package_name=package_name),
-                package_dir / "modeling.py": _custom_modeling_template(
-                    package_name=package_name,
-                ),
-                package_dir / "airflow_tasks.py": _custom_airflow_tasks_template(
-                    package_name=package_name,
-                ),
-                dag_path: _custom_dag_template(
-                    package_name=package_name,
-                    dag_id=dag_id,
-                    model_name=model_name,
-                ),
-            }
-        )
-    created_files: list[Path] = []
-    for path in files:
+    created = []
+    for path, source in content.items():
         if path.exists() and not options.force:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content_by_path[path], encoding="utf-8")
-        created_files.append(path)
-
-    return ScaffoldResult(
-        package_name=package_name,
-        dag_id=dag_id,
-        created_files=tuple(created_files),
-    )
+        path.write_text(source, encoding="utf-8")
+        created.append(path)
+    return ScaffoldResult(package_name=package_name, created_files=tuple(created))
 
 
 def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
-    parser = argparse.ArgumentParser(
-        description="Create a pricing model package and Airflow DAG scaffold.",
-    )
+    parser = argparse.ArgumentParser(description="Create one pricing-model notebook.")
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--target-name", required=True)
     parser.add_argument("--model-label")
     parser.add_argument("--model-type", default="superglm_poisson")
     parser.add_argument("--deployment-slot")
     parser.add_argument("--package-name")
-    parser.add_argument("--dag-id")
-    parser.add_argument("--experiment-name")
-    parser.add_argument(
-        "--template",
-        choices=("custom", "factory"),
-        default="custom",
-        help=(
-            "custom creates the user-owned TaskFlow DAG scaffold; factory creates "
-            "the older build_pricing_model_dag scaffold"
-        ),
-    )
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     return ScaffoldOptions(
         model_name=args.model_name,
-        model_label=args.model_label,
         target_name=args.target_name,
+        model_label=args.model_label,
         model_type=args.model_type,
         deployment_slot=args.deployment_slot,
         package_name=args.package_name,
-        dag_id=args.dag_id,
-        experiment_name=args.experiment_name,
-        template=args.template,
         root=args.root,
         force=args.force,
     )
@@ -1112,12 +391,8 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
 
 def main(argv: list[str] | None = None) -> None:
     result = scaffold_pricing_model(parse_args(argv))
-
-    print("created pricing model scaffold:")
     for path in result.created_files:
-        print(f"  {path.as_posix()}")
-    print()
-    print(f"model is auto-discovered from pricing_models/{result.package_name}/model.toml")
+        print(path.as_posix())
 
 
 if __name__ == "__main__":

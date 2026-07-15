@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,29 @@ INTERVAL_RE = re.compile(
     r"^\s*[\[\(]\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+|inf|Inf|INF)\s*[\]\)]\s*$"
 )
 RANGE_RE = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*[-:]\s*([-+]?\d*\.?\d+)\s*$")
+
+
+@dataclass(frozen=True)
+class StagingExport:
+    xlsx: Path
+    sheet: str
+    export_id: str
+    model_name: str
+    target_name: str
+    model_type: str
+    model_version: str | None
+    effective_from: str | None
+    effective_to: str | None
+    base_rate: float | None
+    base_rate_cell: str
+    term_row: int
+    header_row: int
+    data_start_row: int
+    term_type_map_json: str
+    interaction_features_json: str
+    created_by: str
+    replace: bool
+    model_id: int | None
 
 
 def cell_to_zero_index(cell: str) -> tuple[int, int]:
@@ -277,8 +300,7 @@ def _append_interaction_matrix_rows(
                 row_id += 1
                 matrix_cell_count += 1
                 cell_key = (
-                    f"{term_name}="
-                    f"{input_columns[0]}={left_level}|{input_columns[1]}={top_level}"
+                    f"{term_name}={input_columns[0]}={left_level}|{input_columns[1]}={top_level}"
                 )
                 rate_rows.append(
                     {
@@ -331,7 +353,7 @@ def _append_interaction_matrix_rows(
 
 
 def build_staging_frames(
-    args: argparse.Namespace,
+    args: StagingExport,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     raw = pd.read_excel(args.xlsx, sheet_name=args.sheet, header=None, engine="openpyxl")
 
@@ -480,8 +502,8 @@ def build_staging_frames(
     return export_df, rate_df, level_df
 
 
-def _resolve_registered_model_id(con, args: argparse.Namespace) -> int:
-    model_id = getattr(args, "model_id", None)
+def _resolve_registered_model_id(con, args: StagingExport) -> int:
+    model_id = args.model_id
     if model_id is not None:
         return int(model_id)
 
@@ -493,8 +515,6 @@ def _resolve_registered_model_id(con, args: argparse.Namespace) -> int:
         )
 
     mismatches: list[str] = []
-    if getattr(args, "model_label", None) is not None and record.model_label != args.model_label:
-        mismatches.append(f"model_label db={record.model_label!r} staging={args.model_label!r}")
     if record.target_name != args.target_name:
         mismatches.append(f"target_name db={record.target_name!r} staging={args.target_name!r}")
     if record.model_type != args.model_type:
@@ -564,9 +584,7 @@ def staging_content_sha256(
 ) -> str:
     """Return a canonical digest binding every row staged for one export."""
 
-    term_frame = (
-        _empty_term_metadata_frame() if term_metadata_df is None else term_metadata_df
-    )
+    term_frame = _empty_term_metadata_frame() if term_metadata_df is None else term_metadata_df
     payload = [
         _canonical_staging_frame("rating_export", export_df),
         _canonical_staging_frame("rate_cell", rate_df),
@@ -685,8 +703,7 @@ def _validate_numeric_main_staging(
     )
     for term_name in numeric_terms:
         term_rows = rate_df[
-            (rate_df["term_name"] == term_name)
-            & (rate_df["term_type"] == "NUMERIC_MAIN")
+            (rate_df["term_name"] == term_name) & (rate_df["term_type"] == "NUMERIC_MAIN")
         ]
         if len(term_rows) != 1:
             raise ValueError(
@@ -695,14 +712,10 @@ def _validate_numeric_main_staging(
         term_row = term_rows.iloc[0]
         log_coefficient = float(term_row["log_coefficient"])
         if not math.isfinite(log_coefficient):
-            raise ValueError(
-                f"numeric main term {term_name!r} has a non-finite log coefficient"
-            )
+            raise ValueError(f"numeric main term {term_name!r} has a non-finite log coefficient")
         matching_levels = level_df[level_df["row_id"] == term_row["row_id"]]
         if len(matching_levels) != 1:
-            raise ValueError(
-                f"numeric main term {term_name!r} must map exactly one feature level"
-            )
+            raise ValueError(f"numeric main term {term_name!r} must map exactly one feature level")
         level_index = matching_levels.index[0]
         level = matching_levels.iloc[0]
         if int(level["position_no"]) != 1 or str(level["level_code"]).lower() != "per_unit":
@@ -714,7 +727,7 @@ def _validate_numeric_main_staging(
 
 def _apply_publication_receipt_metadata(
     *,
-    args: argparse.Namespace,
+    args: StagingExport,
     export_df: pd.DataFrame,
     rate_df: pd.DataFrame,
     level_df: pd.DataFrame,
@@ -786,16 +799,17 @@ def _apply_publication_receipt_metadata(
 
 def insert_staging_frames(
     engine,
-    args: argparse.Namespace,
+    args: StagingExport,
     export_df: pd.DataFrame,
     rate_df: pd.DataFrame,
     level_df: pd.DataFrame,
     term_metadata_df: pd.DataFrame | None = None,
     staging_content_sha256: str | None = None,
 ) -> None:
-    if staging_content_sha256 is not None and re.fullmatch(
-        r"[0-9a-f]{64}", staging_content_sha256
-    ) is None:
+    if (
+        staging_content_sha256 is not None
+        and re.fullmatch(r"[0-9a-f]{64}", staging_content_sha256) is None
+    ):
         raise ValueError("staging_content_sha256 must be a lowercase SHA-256 digest")
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
@@ -881,42 +895,21 @@ def stage_rating_export(
     created_by: str = "python",
     replace: bool = False,
     model_id: int | None = None,
-    publication_receipt_path: str | Path | None = None,
-    publication_receipt_sha256: str | None = None,
-    metadata_mode: Literal[
-        "REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"
-    ] = "REQUIRE_SUPERGLM_RECEIPT",
+    publication_receipt_path: str | Path,
+    publication_receipt_sha256: str,
 ) -> str:
-    if metadata_mode not in {"REQUIRE_SUPERGLM_RECEIPT", "ALLOW_WORKBOOK_ONLY"}:
-        raise ValueError(f"unknown metadata_mode: {metadata_mode}")
+    receipt = load_publication_receipt(
+        publication_receipt_path,
+        expected_sha256=publication_receipt_sha256,
+    )
 
-    receipt: SuperGLMPublicationReceipt | None = None
-    if publication_receipt_path is not None:
-        if publication_receipt_sha256 is None:
-            raise ValueError(
-                "publication_receipt_sha256 is required when publication_receipt_path is supplied"
-            )
-        receipt = load_publication_receipt(
-            publication_receipt_path,
-            expected_sha256=publication_receipt_sha256,
-        )
-    elif publication_receipt_sha256 is not None:
-        raise ValueError(
-            "publication_receipt_path is required when publication_receipt_sha256 is supplied"
-        )
-
-    if metadata_mode == "REQUIRE_SUPERGLM_RECEIPT" and receipt is None:
-        raise ValueError("publication receipt is required")
-
-    args = argparse.Namespace(
+    args = StagingExport(
         xlsx=workbook_path,
         sheet="Rating Tables",
         export_id=export_id,
         model_name=model_name,
-        model_label=None,
         target_name=target_name,
         model_type=model_type,
-        model_status="ACTIVE",
         model_version=model_version,
         effective_from=effective_from,
         effective_to=effective_to,
@@ -926,9 +919,7 @@ def stage_rating_export(
         header_row=7,
         data_start_row=8,
         term_type_map_json="{}",
-        interaction_features_json=_deterministic_json(
-            _receipt_interaction_features(receipt)
-        ),
+        interaction_features_json=_deterministic_json(_receipt_interaction_features(receipt)),
         created_by=created_by,
         replace=replace,
         model_id=model_id,

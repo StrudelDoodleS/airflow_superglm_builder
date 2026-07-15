@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,10 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
-from pricing_pipeline.orchestration.publish_completed_build import CompletedModelPublishResult
+from pricing_pipeline.orchestration.publish_completed_build import (
+    CompletedModelBuild,
+    CompletedModelPublishResult,
+)
 from pricing_pipeline.publishing.model_registry import PricingModelRecord
 
 
@@ -21,6 +25,9 @@ def _context(api, tmp_path: Path):
             workbench_artifact_root=tmp_path / "workbench",
             validation_split_artifact_root=tmp_path / "splits",
         ),
+        mode="remote",
+        write_allowed=True,
+        destination="remote SQL database: PricingAudit",
     )
 
 
@@ -28,17 +35,31 @@ def _registered_model(api, tmp_path: Path):
     source_root = tmp_path / "pricing_models" / "claim_frequency"
     source_root.mkdir(parents=True)
     (source_root / "model.py").write_text("MODEL = 'claim_frequency'\n", encoding="utf-8")
+    spec = api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="PRODUCTION",
+        features=("age", "region"),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+        exposure_column="exposure",
+        validation=ValidationSplitConfig.kfold(n_splits=2, random_state=7),
+    )
     return api.RegisteredModel(
         model_id=17,
         config=ModelBuildConfig(
-            model_name="CLAIM_FREQUENCY",
-            model_label="Claim frequency",
-            target_name="claim_count",
-            model_type="Poisson",
-            deployment_slot="PRODUCTION",
-            validation_split=ValidationSplitConfig.kfold(n_splits=2, random_state=7),
+            model_name=spec.name,
+            model_label=spec.label,
+            target_name=spec.target,
+            model_type=spec.model_type,
+            deployment_slot=spec.deployment_slot,
+            validation_split=spec.validation,
         ),
         source_root=source_root.resolve(),
+        spec=spec,
     )
 
 
@@ -73,6 +94,35 @@ def _registered_spec_model(api, tmp_path: Path, **spec_overrides):
         source_root=source_root.resolve(),
         spec=spec,
     )
+
+
+def _approved_build(tmp_path: Path, **overrides) -> CompletedModelBuild:
+    values = {
+        "model_id": 17,
+        "model_name": "CLAIM_FREQUENCY",
+        "model_version": "v7",
+        "model_type": "superglm_poisson",
+        "target_name": "claim_count",
+        "deployment_slot": "PRODUCTION",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "export_id": "claim-frequency__test",
+        "rating_workbook_path": str(tmp_path / "rating.xlsx"),
+        "rating_workbook_sha256": "a" * 64,
+        "effective_from": None,
+        "created_by": "analyst@example.test",
+        "publication_receipt_path": str(tmp_path / "publication_receipt.json"),
+        "publication_receipt_sha256": "b" * 64,
+        "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
+        "candidate_artifact_sha256": "c" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_size_bytes": 123,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.11.0",
+        "model_source_sha256": "d" * 64,
+    }
+    values.update(overrides)
+    return CompletedModelBuild(**values)
 
 
 def test_pricing_model_spec_holds_analyst_decisions():
@@ -113,6 +163,62 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.fit_mode == "fit_reml"
 
 
+def test_pricing_model_spec_materializes_split_evidence_automatically():
+    from pricing_pipeline import notebook as api
+
+    spec = api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="PRODUCTION",
+        features=("age", "region"),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+        validation=ValidationSplitConfig.kfold(n_splits=2),
+    )
+
+    assert spec.validation.materialize is True
+
+
+def test_notebook_build_api_only_accepts_declared_model_inputs():
+    from pricing_pipeline import notebook as api
+
+    assert tuple(signature(api.register_model).parameters) == (
+        "pricing",
+        "spec",
+        "source_root",
+        "created_by",
+    )
+    assert tuple(signature(api.build_candidate).parameters) == (
+        "pricing",
+        "model",
+        "frame",
+        "model_factory",
+        "data_as_of",
+        "created_by",
+    )
+    assert tuple(signature(api.publish_edits).parameters) == (
+        "pricing",
+        "candidate",
+        "reason",
+        "created_by",
+    )
+    assert tuple(signature(api.publish_candidate).parameters) == (
+        "pricing",
+        "candidate",
+    )
+    assert tuple(signature(api.deploy_package).parameters) == (
+        "pricing",
+        "package",
+        "reason",
+        "deployed_by",
+    )
+    assert not hasattr(ValidationSplitConfig, "none")
+    assert not hasattr(ValidationSplitConfig, "custom")
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -149,86 +255,42 @@ def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
         api.PricingModelSpec(**values)
 
 
-def test_connect_uses_runtime_module_without_airflow(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "validation",
+    [
+        ValidationSplitConfig(
+            method="none",
+            n_splits=None,
+            random_state=None,
+            shuffle=False,
+        ),
+        ValidationSplitConfig(
+            method="custom",
+            n_splits=None,
+            random_state=None,
+            shuffle=False,
+            materialize=True,
+        ),
+    ],
+)
+def test_pricing_model_spec_rejects_validation_modes_the_notebook_cannot_build(
+    validation,
+):
     from pricing_pipeline import notebook as api
 
-    engine = object()
-    settings = Settings(workbench_artifact_root=tmp_path / "artifacts")
-    runtime = SimpleNamespace(settings=settings, get_engine=lambda: engine)
-    calls = []
-    monkeypatch.setattr(
-        api,
-        "runtime_from_env_or_module",
-        lambda runtime_module=None: calls.append(runtime_module) or runtime,
-    )
-
-    result = api.connect("work_runtime.database")
-
-    assert result.engine is engine
-    assert result.settings is settings
-    assert calls == ["work_runtime.database"]
-
-
-def test_register_model_creates_then_validates_sql_identity(monkeypatch, tmp_path):
-    from pricing_pipeline import notebook as api
-
-    context = _context(api, tmp_path)
-    source_root = tmp_path / "pricing_models" / "home_frequency"
-    source_root.mkdir(parents=True)
-    (source_root / "pricing_model.ipynb").write_text("{}", encoding="utf-8")
-    connection = object()
-
-    class Engine:
-        @contextmanager
-        def begin(self):
-            yield connection
-
-    context = api.NotebookContext(engine=Engine(), settings=context.settings)
-    calls = []
-
-    def register(con, config, *, created_by):
-        calls.append(("register", con, config, created_by))
-        return 41
-
-    def validate(con, config):
-        calls.append(("validate", con, config))
-        return PricingModelRecord(
-            model_id=41,
-            model_name=config.model_name,
-            model_label=config.model_label,
-            target_name=config.target_name,
-            model_type=config.model_type,
-            model_status="ACTIVE",
+    with pytest.raises(ValueError, match="not supported by the notebook workflow"):
+        api.PricingModelSpec(
+            name="CLAIM_FREQUENCY",
+            label="Claim frequency",
+            target="claim_count",
+            model_type="superglm_poisson",
+            deployment_slot="PRODUCTION",
+            features=("age", "region"),
+            dataset_name="claim_frequency_frame",
+            source_system="pricing_sql",
+            pk_columns=("policy_id",),
+            validation=validation,
         )
-
-    monkeypatch.setattr(api, "register_pricing_model", register)
-    monkeypatch.setattr(api, "validate_registered_model", validate)
-    split = ValidationSplitConfig.kfold(n_splits=4, random_state=13)
-
-    model = api.register_model(
-        context,
-        name="HOME_FREQUENCY",
-        label="Home frequency",
-        target="claim_count",
-        model_type="Poisson",
-        deployment_slot="production",
-        validation_split=split,
-        source_root=source_root,
-        created_by="analyst@example.test",
-    )
-
-    assert model.model_id == 41
-    assert model.config == ModelBuildConfig(
-        model_name="HOME_FREQUENCY",
-        model_label="Home frequency",
-        target_name="claim_count",
-        model_type="Poisson",
-        deployment_slot="PRODUCTION",
-        validation_split=split,
-    )
-    assert model.source_root == source_root.resolve()
-    assert [call[0] for call in calls] == ["register", "validate"]
-    assert calls[0][3] == "analyst@example.test"
 
 
 def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
@@ -244,7 +306,13 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         def begin(self):
             yield connection
 
-    context = api.NotebookContext(engine=Engine(), settings=context.settings)
+    context = api.NotebookContext(
+        engine=Engine(),
+        settings=context.settings,
+        mode=context.mode,
+        write_allowed=context.write_allowed,
+        destination=context.destination,
+    )
     validation = ValidationSplitConfig.kfold(n_splits=2, random_state=7)
     spec = api.PricingModelSpec(
         name="CLAIM_FREQUENCY",
@@ -263,10 +331,6 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
 
     def register(con, config, *, created_by):
         captured["register"] = (con, config, created_by)
-        return 41
-
-    def validate(con, config):
-        captured["validate"] = (con, config)
         return PricingModelRecord(
             model_id=41,
             model_name=config.model_name,
@@ -277,7 +341,6 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(api, "register_pricing_model", register)
-    monkeypatch.setattr(api, "validate_registered_model", validate)
 
     model = api.register_model(
         context,
@@ -293,7 +356,7 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         target_name="claim_count",
         model_type="superglm_poisson",
         deployment_slot="PRODUCTION",
-        validation_split=validation,
+        validation_split=spec.validation,
     )
     assert model.source_root == source_root.resolve()
     assert captured["register"] == (
@@ -301,120 +364,6 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         model.config,
         "analyst@example.test",
     )
-
-
-def test_build_candidate_derives_audit_plumbing(monkeypatch, tmp_path):
-    from pricing_pipeline import notebook as api
-
-    context = _context(api, tmp_path)
-    model = _registered_model(api, tmp_path)
-    frame = pd.DataFrame(
-        {
-            "policy_id": [10, 20, 30, 40],
-            "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "exposure": [1.0, 0.5, 1.5, 0.75],
-            "age": [25.0, 45.0, 35.0, 52.0],
-        }
-    )
-    X = frame[["age"]].copy()
-    y = frame["claim_count"]
-    weight = frame["exposure"]
-    offset = np.log(weight.to_numpy())
-    folds = [(np.array([0, 1]), np.array([2, 3]))]
-    captured = {}
-
-    monkeypatch.setattr(api, "validation_split_indices", lambda frame, split: folds)
-    monkeypatch.setattr(
-        api,
-        "build_export_id",
-        lambda model_name, run_key: f"{model_name}__{run_key}",
-    )
-    monkeypatch.setattr(
-        api,
-        "resolve_model_version_for_export",
-        lambda engine, *, model_name, export_id: "v7",
-    )
-
-    standard_result = SimpleNamespace(
-        completed_build={"manifest_id": "manifest-1", "split_set_id": "split-1"},
-        metrics={"cv_mean_deviance": 1.25},
-    )
-
-    def run_build(engine, **kwargs):
-        captured["engine"] = engine
-        captured.update(kwargs)
-        return standard_result
-
-    monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
-    offset_contract = api.OffsetExportContract(
-        handling="EXPORTED_FACTOR",
-        source_factor_name="exposure",
-        published_factor_name="exposure",
-        source_name="exposure",
-        label="log(exposure)",
-    )
-    offset_options = {
-        "offset_source": weight,
-        "offset_name": "exposure",
-        "offset_kind": "discrete",
-    }
-
-    candidate = api.build_candidate(
-        context,
-        model=model,
-        frame=frame,
-        X=X,
-        y=y,
-        model_factory=lambda: object(),
-        scoring=("deviance",),
-        dataset_name="home_model_frame",
-        source_system="pricing_sql",
-        data_as_of="2026-06-30",
-        pk_columns=("policy_id",),
-        effective_from="2026-08-01",
-        sample_weight=weight,
-        weight_column="exposure",
-        offset=offset,
-        offset_contract=offset_contract,
-        offset_export_options=offset_options,
-        run_key="notebook-run-1",
-        created_by="analyst@example.test",
-    )
-
-    assert candidate.model is model
-    assert candidate.standard_build is standard_result
-    assert captured["engine"] is context.engine
-    assert captured["model_name"] == "CLAIM_FREQUENCY"
-    assert captured["model_version"] == "v7"
-    assert captured["export_id"] == "CLAIM_FREQUENCY__notebook-run-1"
-    assert captured["effective_from"] == "2026-08-01"
-    assert captured["split_indices"] is folds
-    assert captured["validation_split"] == model.config.validation_split
-    assert captured["manifest_spec"].dataset_name == "home_model_frame"
-    assert captured["manifest_spec"].source_system == "pricing_sql"
-    assert captured["manifest_spec"].pk_columns == ("policy_id",)
-    assert captured["manifest_spec"].target_column == "claim_count"
-    assert captured["manifest_spec"].weight_column == "exposure"
-    identity_index = pd.Index(
-        frame["policy_id"].to_numpy(copy=True),
-        name="policy_id",
-    )
-    assert captured["inputs"].X.index.identical(identity_index)
-    assert captured["inputs"].y.index.identical(identity_index)
-    assert captured["inputs"].sample_weight.index.identical(identity_index)
-    assert captured["inputs"].offset.index.identical(identity_index)
-    assert np.array_equal(captured["inputs"].offset.to_numpy(), offset)
-    assert captured["inputs"].row_ids.equals(frame[["policy_id"]])
-    assert captured["output_dir"] == (
-        context.settings.workbench_artifact_root
-        / "CLAIM_FREQUENCY"
-        / "notebook-run-1"
-    )
-    assert captured["model_source_root"] == model.source_root
-    assert captured["split_artifact_root"] == context.settings.validation_split_artifact_root
-    assert captured["created_by"] == "analyst@example.test"
-    assert captured["offset_contract"] is offset_contract
-    assert captured["offset_export_options"] is offset_options
 
 
 @pytest.mark.parametrize(
@@ -437,6 +386,7 @@ def test_build_candidate_derives_simple_spec_inputs(
         api,
         tmp_path,
         exposure_column=exposure_column,
+        data_as_of_column="snapshot_date",
     )
     frame = pd.DataFrame(
         {
@@ -445,6 +395,7 @@ def test_build_candidate_derives_simple_spec_inputs(
             exposure_column: [1.0, 0.5, 1.5, 0.75],
             "age": [25.0, 45.0, 35.0, 52.0],
             "region": ["N", "S", "N", "S"],
+            "snapshot_date": ["2026-06-30"] * 4,
         }
     )
     folds = [(np.array([0, 1]), np.array([2, 3]))]
@@ -463,7 +414,7 @@ def test_build_candidate_derives_simple_spec_inputs(
     )
 
     standard_result = SimpleNamespace(
-        completed_build={"manifest_id": "manifest-1", "split_set_id": "split-1"},
+        completed_build=_approved_build(tmp_path),
         metrics={"cv_mean_deviance": 1.25},
     )
 
@@ -479,8 +430,6 @@ def test_build_candidate_derives_simple_spec_inputs(
         model=model,
         frame=frame,
         model_factory=lambda: object(),
-        data_as_of="2026-06-30",
-        run_key="notebook-run-1",
         created_by="analyst@example.test",
     )
 
@@ -497,7 +446,11 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert manifest_spec.data_as_of_date.isoformat() == "2026-06-30"
     assert manifest_spec.pk_columns == ("policy_id",)
     assert manifest_spec.target_column == "claim_count"
-    assert manifest_spec.weight_column == exposure_column
+    assert manifest_spec.weight_column is None
+    assert manifest_spec.feature_columns == ("age", "region")
+    assert manifest_spec.exposure_column == exposure_column
+    assert manifest_spec.data_as_of_column == "snapshot_date"
+    assert captured["effective_from"] is None
     assert captured["scoring"] == ("deviance",)
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
@@ -505,190 +458,7 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert contract.source_factor_name == exposure_column
     assert contract.published_factor_name == published_factor_name
     assert contract.source_name == exposure_column
-    export_options = captured["offset_export_options"]
-    assert export_options["offset_name"] == exposure_column
-    assert export_options["offset_kind"] == "auto"
-    assert export_options["offset_source"].equals(inputs.export_weight)
-
-
-def test_build_candidate_requires_metadata_for_caller_supplied_spec_offset(
-    monkeypatch,
-    tmp_path,
-):
-    from pricing_pipeline import notebook as api
-
-    context = _context(api, tmp_path)
-    model = _registered_spec_model(api, tmp_path)
-    frame = pd.DataFrame(
-        {
-            "policy_id": [10, 20, 30, 40],
-            "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "exposure": [1.0, 0.5, 1.5, 0.75],
-            "age": [25.0, 45.0, 35.0, 52.0],
-            "region": ["N", "S", "N", "S"],
-        }
-    )
-    monkeypatch.setattr(
-        api,
-        "validation_split_indices",
-        lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
-    )
-    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
-    monkeypatch.setattr(
-        api,
-        "resolve_model_version_for_export",
-        lambda *args, **kwargs: "v1",
-    )
-    monkeypatch.setattr(
-        api,
-        "run_standard_superglm_build",
-        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="caller-supplied offset.*offset_contract.*offset_export_options",
-    ):
-        api.build_candidate(
-            context,
-            model=model,
-            frame=frame,
-            model_factory=lambda: object(),
-            offset=np.array([0.0, 0.2, -0.1, 0.4]),
-            data_as_of="2026-06-30",
-            run_key="custom-offset",
-            created_by="analyst@example.test",
-        )
-
-
-def test_build_candidate_validates_spec_less_exported_offset_options(
-    monkeypatch,
-    tmp_path,
-):
-    from pricing_pipeline import notebook as api
-
-    context = _context(api, tmp_path)
-    model = _registered_model(api, tmp_path)
-    frame = pd.DataFrame(
-        {
-            "policy_id": [10, 20, 30, 40],
-            "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "age": [25.0, 45.0, 35.0, 52.0],
-        }
-    )
-    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
-    monkeypatch.setattr(
-        api,
-        "resolve_model_version_for_export",
-        lambda *args, **kwargs: "v1",
-    )
-    monkeypatch.setattr(
-        api,
-        "run_standard_superglm_build",
-        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
-    )
-    contract = api.OffsetExportContract(
-        handling="EXPORTED_FACTOR",
-        source_factor_name="exposure",
-        published_factor_name="exposure",
-        source_name="exposure",
-        label="log(exposure)",
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="offset_export_options.*offset_source.*offset_name",
-    ):
-        api.build_candidate(
-            context,
-            model=model,
-            frame=frame,
-            X=frame[["age"]],
-            y=frame["claim_count"],
-            model_factory=lambda: object(),
-            scoring=("deviance",),
-            dataset_name="claim_frequency_frame",
-            source_system="pricing_sql",
-            data_as_of="2026-06-30",
-            pk_columns=("policy_id",),
-            split_indices=[(np.array([0, 1]), np.array([2, 3]))],
-            offset=np.array([0.0, 0.2, -0.1, 0.4]),
-            offset_contract=contract,
-            offset_export_options={},
-            run_key="custom-offset",
-            created_by="analyst@example.test",
-        )
-
-
-@pytest.mark.parametrize("invalid_options", ["missing", "misaligned"])
-def test_build_candidate_validates_caller_supplied_exported_offset_options(
-    monkeypatch,
-    tmp_path,
-    invalid_options,
-):
-    from pricing_pipeline import notebook as api
-
-    context = _context(api, tmp_path)
-    model = _registered_spec_model(api, tmp_path)
-    frame = pd.DataFrame(
-        {
-            "policy_id": [10, 20, 30, 40],
-            "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "exposure": [1.0, 0.5, 1.5, 0.75],
-            "age": [25.0, 45.0, 35.0, 52.0],
-            "region": ["N", "S", "N", "S"],
-        }
-    )
-    monkeypatch.setattr(
-        api,
-        "validation_split_indices",
-        lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
-    )
-    monkeypatch.setattr(api, "build_export_id", lambda *args: "export-1")
-    monkeypatch.setattr(
-        api,
-        "resolve_model_version_for_export",
-        lambda *args, **kwargs: "v1",
-    )
-    monkeypatch.setattr(
-        api,
-        "run_standard_superglm_build",
-        lambda *args, **kwargs: SimpleNamespace(completed_build={}, metrics={}),
-    )
-    contract = api.OffsetExportContract(
-        handling="EXPORTED_FACTOR",
-        source_factor_name="exposure",
-        published_factor_name="exposure",
-        source_name="exposure",
-        label="log(exposure)",
-    )
-    options = (
-        {}
-        if invalid_options == "missing"
-        else {
-            "offset_source": frame["exposure"],
-            "offset_name": "different_exposure",
-        }
-    )
-    expected = (
-        "offset_export_options.*offset_source.*offset_name"
-        if invalid_options == "missing"
-        else "offset_name.*published_factor_name"
-    )
-
-    with pytest.raises(ValueError, match=expected):
-        api.build_candidate(
-            context,
-            model=model,
-            frame=frame,
-            model_factory=lambda: object(),
-            offset=np.array([0.0, 0.2, -0.1, 0.4]),
-            offset_contract=contract,
-            offset_export_options=options,
-            data_as_of="2026-06-30",
-            run_key="custom-offset",
-            created_by="analyst@example.test",
-        )
+    assert "offset_export_options" not in captured
 
 
 def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
@@ -697,7 +467,12 @@ def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
     context = _context(api, tmp_path)
     model = _registered_model(api, tmp_path)
     standard_build = SimpleNamespace(
-        completed_build={"manifest_id": "manifest-9", "split_set_id": "split-9"}
+        completed_build=_approved_build(
+            tmp_path,
+            manifest_id="manifest-9",
+            split_set_id="split-9",
+            export_id="claim-frequency__run-9",
+        )
     )
     candidate = api.BuiltCandidate(model=model, standard_build=standard_build)
     expected = CompletedModelPublishResult(
@@ -722,7 +497,7 @@ def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
 
     monkeypatch.setattr(api, "publish_completed_model_build", publish)
 
-    result = api.publish_candidate(context, candidate, created_by="analyst@example.test")
+    result = api.publish_candidate(context, candidate)
 
     assert result is expected
     assert result.model_id == 17
@@ -733,9 +508,7 @@ def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
         "engine": context.engine,
         "settings": context.settings,
         "model_config": model.config,
-        "dataset": None,
         "completed_build": standard_build.completed_build,
-        "created_by": "analyst@example.test",
     }
 
 
@@ -766,8 +539,7 @@ def test_open_candidate_uses_registered_python_config(monkeypatch, tmp_path):
     assert result is expected
     assert captured["engine"] is context.engine
     assert captured["settings"] is context.settings
-    assert captured["config_loader"]("CLAIM_FREQUENCY") is model.config
-    assert captured["model_names_loader"]() == ("CLAIM_FREQUENCY",)
+    assert captured["model_config"] is model.config
     assert captured["open"] == ("CLAIM_FREQUENCY", 4)
 
 
@@ -779,6 +551,7 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     session = object()
     candidate = SimpleNamespace(
         model_name=model.name,
+        workbench=SimpleNamespace(model_config=model.config),
         editor_session=session,
         editor_widget=object(),
     )
@@ -795,9 +568,9 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     )
     captured = {}
 
-    def create(loaded_candidate, **kwargs):
+    def save(loaded_candidate, **kwargs):
         captured["candidate"] = loaded_candidate
-        captured["create"] = kwargs
+        captured["save"] = kwargs
         return submission
 
     def publish(engine, **kwargs):
@@ -805,12 +578,11 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
         captured["publish"] = kwargs
         return expected
 
-    monkeypatch.setattr(api, "create_editor_submission", create)
+    monkeypatch.setattr(api, "save_editor_submission", save)
     monkeypatch.setattr(api, "publish_editor_submission", publish)
 
     result = api.publish_edits(
         context,
-        model=model,
         candidate=candidate,
         reason="Sparse age-band market adjustment",
         created_by="analyst@example.test",
@@ -818,10 +590,9 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
 
     assert result is expected
     assert captured["candidate"] is candidate
-    assert captured["create"]["editor_session"] is session
-    assert captured["create"]["reason"] == "Sparse age-band market adjustment"
-    assert captured["create"]["claimed_identity"] == "analyst@example.test"
-    assert captured["create"]["airflow_client"].triggered is False
+    assert captured["save"]["editor_session"] is session
+    assert captured["save"]["reason"] == "Sparse age-band market adjustment"
+    assert captured["save"]["claimed_identity"] == "analyst@example.test"
     assert captured["engine"] is context.engine
     assert captured["publish"] == {
         "settings": context.settings,
@@ -841,6 +612,7 @@ def test_publish_edits_requires_an_open_editor(tmp_path):
     model = _registered_model(api, tmp_path)
     candidate = SimpleNamespace(
         model_name=model.name,
+        workbench=SimpleNamespace(model_config=model.config),
         editor_session=None,
         editor_widget=None,
     )
@@ -848,7 +620,6 @@ def test_publish_edits_requires_an_open_editor(tmp_path):
     try:
         api.publish_edits(
             context,
-            model=model,
             candidate=candidate,
             reason="Market adjustment",
         )
@@ -858,12 +629,21 @@ def test_publish_edits_requires_an_open_editor(tmp_path):
         raise AssertionError("publish_edits accepted a candidate without an open editor")
 
 
-def test_deploy_package_reads_current_champion_then_uses_stale_guard(monkeypatch, tmp_path):
+def test_deploy_package_uses_the_champion_snapshot_seen_during_review(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
     model = _registered_model(api, tmp_path)
-    package = SimpleNamespace(rate_package_id=72)
+    package = api.Candidate(
+        workbench=SimpleNamespace(model_config=model.config),
+        model_name=model.name,
+        package_version=5,
+        rate_package_id=72,
+        parent_rate_package_id=None,
+        model_run_id=902,
+        bundle=object(),
+        technical={"model_id": model.model_id, "current_rate_package_id": 61},
+    )
     expected = SimpleNamespace(
         model_id=17,
         previous_rate_package_id=61,
@@ -872,40 +652,39 @@ def test_deploy_package_reads_current_champion_then_uses_stale_guard(monkeypatch
     )
     captured = {}
 
-    class FakeWorkbench:
-        def __init__(self, **kwargs):
-            captured["workbench"] = kwargs
-
-        def current_champion_rate_package_id(self, model_name, *, deployment_slot=None):
-            captured["champion"] = (model_name, deployment_slot)
-            return 61
-
     def deploy(engine, config, **kwargs):
         captured["engine"] = engine
         captured["config"] = config
         captured["deploy"] = kwargs
         return expected
 
-    monkeypatch.setattr(api, "Workbench", FakeWorkbench)
     monkeypatch.setattr(api, "deploy_rate_package", deploy)
 
     result = api.deploy_package(
         context,
-        model=model,
         package=package,
         reason="Approved at August pricing meeting",
         deployed_by="pricing.manager@example.test",
     )
 
     assert result is expected
-    assert captured["champion"] == ("CLAIM_FREQUENCY", "PRODUCTION")
     assert captured["engine"] is context.engine
     assert captured["config"] is model.config
     assert captured["deploy"] == {
         "rate_package_id": 72,
         "expected_current_rate_package_id": 61,
-        "deployment_slot": "PRODUCTION",
         "deployment_reason": "Approved at August pricing meeting",
         "deployed_by": "pricing.manager@example.test",
         "model_id": 17,
     }
+
+
+def test_deploy_package_rejects_a_package_that_was_not_opened_for_review(tmp_path):
+    from pricing_pipeline import notebook as api
+
+    with pytest.raises(TypeError, match="open_candidate"):
+        api.deploy_package(
+            _context(api, tmp_path),
+            package=SimpleNamespace(rate_package_id=72),
+            reason="Approved at August pricing meeting",
+        )

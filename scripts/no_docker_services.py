@@ -43,13 +43,6 @@ PROCESS_STOP_TIMEOUT_SECONDS = 15
 
 def service_catalog(*, python_executable: str = sys.executable) -> dict[str, ServiceCommand]:
     return {
-        "airflow": ServiceCommand(
-            name="airflow",
-            description="Start local Airflow standalone.",
-            argv=[python_executable, "scripts/start_airflow_local.py"],
-            category="service",
-            long_running=True,
-        ),
         "mlflow": ServiceCommand(
             name="mlflow",
             description="Start the local MLflow tracking server.",
@@ -80,18 +73,6 @@ def service_catalog(*, python_executable: str = sys.executable) -> dict[str, Ser
             name="load-fremtpl-replace",
             description="Truncate and reload freMTPL raw data.",
             argv=[python_executable, "scripts/load_fremtpl_raw.py", "--replace"],
-            category="pipeline-task",
-        ),
-        "pipeline": ServiceCommand(
-            name="pipeline",
-            description="Run the explicit freMTPL custom model publish path without Airflow.",
-            argv=[python_executable, "scripts/run_mtpl_frequency_custom.py"],
-            category="pipeline-task",
-        ),
-        "seed-demo": ServiceCommand(
-            name="seed-demo",
-            description="Seed simulated pricing model/package history.",
-            argv=[python_executable, "scripts/seed_demo_model_variants.py"],
             category="pipeline-task",
         ),
         "bootstrap": ServiceCommand(
@@ -581,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
         "launcher",
         help="Shell-wrapper entrypoint with optional --services CSV.",
         description="Open the persistent runtime TUI when --services is omitted.",
-        epilog="Example: scripts/start_no_docker_stack.sh --services airflow,mlflow",
+        epilog="Example: scripts/start_no_docker_stack.sh --services mlflow",
     )
     launcher_parser.add_argument("--dry-run", action="store_true")
     launcher_parser.add_argument(

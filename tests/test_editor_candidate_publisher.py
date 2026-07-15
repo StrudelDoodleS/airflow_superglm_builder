@@ -10,8 +10,19 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.publishing.lifecycle import PublishResult
 
 
+EDITOR_CONFIG = SimpleNamespace(
+    model_name="HOME_FREQ",
+    deployment_slot="HOME_FREQ_UAT",
+    target_name="claim_count",
+    model_type="superglm_poisson",
+)
+
+
 def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     from pricing_pipeline.publishing import editor_candidate
+
+    workbook_path = tmp_path / "rating_tables.xlsx"
+    workbook_path.write_bytes(b"editor workbook")
 
     submission = SimpleNamespace(
         path=str(tmp_path / "submission.json"),
@@ -37,12 +48,12 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
             model_name="HOME_FREQ",
             target_name="claim_count",
             model_type="superglm_poisson",
-            default_package_status="PUBLISHED",
         ),
     )
     exported = SimpleNamespace(
         export_id="editor__submission_1",
-        rating_workbook_path=str(tmp_path / "rating_tables.xlsx"),
+        rating_workbook_path=str(workbook_path),
+        rating_workbook_sha256=editor_candidate.sha256_file(workbook_path),
         publication_receipt_path=str(tmp_path / "publication_receipt.json"),
         publication_receipt_sha256="c" * 64,
         candidate_artifact_path=str(tmp_path / "candidate_bundle.joblib"),
@@ -51,7 +62,9 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         candidate_artifact_size_bytes=321,
         candidate_python_version="3.14.4",
         candidate_superglm_version="0.11.0",
-        revision_metadata_json='{"kind":"SUPERGLM_EDITOR"}',
+        revision_metadata_json=(
+            '{"claimed_identity":"prototype-local-not-authenticated","kind":"SUPERGLM_EDITOR"}'
+        ),
         metrics={"editor_training_deviance_delta": 0.009},
         metric_scopes={"editor_training_deviance_delta": "editor_training_parent"},
     )
@@ -65,8 +78,15 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         lambda path, digest, **kwargs: submission,
     )
 
-    def fake_load_parent_candidate(engine, loaded_submission, *, allowed_root):
+    def fake_load_parent_candidate(
+        engine,
+        loaded_submission,
+        *,
+        allowed_root,
+        model_config,
+    ):
         allowed_roots.append(("parent", allowed_root))
+        assert model_config is EDITOR_CONFIG
         return parent
 
     def fake_export_edited_model(
@@ -89,10 +109,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         editor_candidate,
-        "stage_editor_export",
-        lambda engine, loaded_parent, export, created_by: (
-            calls.append(("stage", created_by)) or "e" * 64
-        ),
+        "stage_rating_export",
+        lambda engine, **kwargs: calls.append(("stage", kwargs["created_by"])) or "e" * 64,
     )
 
     def fake_publish_rating_package(engine, **kwargs):
@@ -113,7 +131,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
             rating_workbook_path=exported.rating_workbook_path,
         )
 
-    def fake_record_derived_model_run(connection, **kwargs):
+    def fake_record_model_run(engine, *, connection, **kwargs):
+        assert engine is None
         assert publication_is_active, "lineage must execute inside package publication"
         assert connection is publish_connection
         calls.append(("lineage", kwargs))
@@ -126,8 +145,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         editor_candidate,
-        "record_derived_model_run",
-        fake_record_derived_model_run,
+        "record_model_run",
+        fake_record_model_run,
     )
 
     result = editor_candidate.publish_editor_submission(
@@ -138,6 +157,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         dag_id="pricing_publish_editor_candidate",
         airflow_run_id="manual__submission-1",
         created_by="analyst@example.test",
+        model_config=EDITOR_CONFIG,
     )
 
     assert result.parent_rate_package_id == submission.parent_rate_package_id
@@ -148,7 +168,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     publish_kwargs = calls[1][1]
     assert publish_kwargs["parent_rate_package_id"] == submission.parent_rate_package_id
     assert publish_kwargs["revision_metadata_json"] == (
-        '{"claimed_identity":"analyst@example.test","kind":"SUPERGLM_EDITOR",'
+        '{"claimed_identity":"prototype-local-not-authenticated","kind":"SUPERGLM_EDITOR",'
         '"published_by":"analyst@example.test"}'
     )
     assert callable(publish_kwargs["package_lineage_writer"])
@@ -168,6 +188,8 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     assert lineage_kwargs["parent_model_run_id"] == submission.parent_model_run_id
     assert lineage_kwargs["manifest_id"] == submission.manifest_id
     assert lineage_kwargs["split_set_id"] == submission.split_set_id
+    assert lineage_kwargs["rating_workbook_sha256"] == exported.rating_workbook_sha256
+    assert lineage_kwargs["mlflow_run_id"] == ""
     assert lineage_kwargs["candidate_artifact_sha256"] == "d" * 64
     assert allowed_roots == [("parent", tmp_path), ("edited", tmp_path)]
 
@@ -224,6 +246,7 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
         dag_id="pricing_publish_editor_candidate",
         airflow_run_id="manual__submission-1",
         created_by="analyst@example.test",
+        model_config=EDITOR_CONFIG,
     )
 
     assert result == existing
@@ -248,6 +271,9 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="editor__submission_1",
         manifest_id="manifest-1",
         split_set_id="split-1",
         pk_columns=("id",),
@@ -256,14 +282,20 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         offset_contract={"handling": "NONE"},
     )
     artifact = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_bytes(b"editor workbook")
     row = {
         "model_name": "HOME_FREQ",
+        "model_version": "20260603",
+        "export_id": "editor__submission_1",
         "rate_package_id": 108,
         "package_version": 8,
         "package_status": "PUBLISHED",
         "parent_rate_package_id": 107,
         "model_run_id": 908,
         "run_status": "SUCCESS",
+        "rating_workbook_path": str(workbook),
+        "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
         "candidate_artifact_path": artifact.path,
         "candidate_artifact_sha256": artifact.sha256,
         "candidate_artifact_format": artifact.format,
@@ -321,6 +353,26 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
     assert result.model_run_id == 908
     assert result.was_existing is True
 
+    for field_name in ("model_version", "export_id"):
+        original = row[field_name]
+        row[field_name] = f"wrong-{field_name}"
+        with pytest.raises(EditorSubmissionError, match=field_name):
+            editor_candidate._resolve_existing_editor_publication(
+                Engine(),
+                submission,
+                allowed_root=tmp_path,
+            )
+        row[field_name] = original
+
+    workbook.write_bytes(b"overwritten")
+    with pytest.raises(EditorSubmissionError, match="rating workbook"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+    workbook.write_bytes(b"editor workbook")
+
     Path(artifact.path).write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="failed verification"):
         editor_candidate._resolve_existing_editor_publication(
@@ -354,12 +406,19 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "split_set_id": "split-1",
         "model_source_sha256": "b" * 64,
     }
-    sql_lineage = dict(expected)
-    bundle_lineage = dict(expected)
+    identity = {
+        "model_name": "HOME_FREQ",
+        "model_version": "20260603",
+        "export_id": "editor__submission_1",
+    }
+    sql_lineage = {**expected, **identity}
+    bundle_lineage = {**expected, **identity}
     if lineage_owner == "sql":
         sql_lineage[field_name] = different_value
     else:
         bundle_lineage[field_name] = different_value
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_bytes(b"editor workbook")
 
     row = {
         "model_name": "HOME_FREQ",
@@ -369,6 +428,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "parent_rate_package_id": 107,
         "model_run_id": 908,
         "run_status": "SUCCESS",
+        "rating_workbook_path": str(workbook),
+        "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "d" * 64,
         "candidate_artifact_format": "superglm-candidate-joblib-v1",
@@ -449,7 +510,10 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         model_version="v4",
         effective_from=None,
         effective_to=None,
-        config=SimpleNamespace(default_package_status="PUBLISHED"),
+        config=SimpleNamespace(
+            target_name="ClaimCount",
+            model_type="Poisson",
+        ),
     )
     committed_artifact = tmp_path / "committed" / "candidate_bundle.joblib"
     committed_artifact.parent.mkdir()
@@ -468,10 +532,13 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         published_dir = Path(published_dir)
         candidate_path = write_dir / "candidate_bundle.joblib"
         candidate_path.write_bytes(b"retry bytes")
+        workbook_path = write_dir / "rating_tables.xlsx"
+        workbook_path.write_bytes(b"rating workbook")
         attempt_paths.append((write_dir, published_dir))
         return SimpleNamespace(
             export_id="editor__submission_1",
             rating_workbook_path=str(published_dir / "rating_tables.xlsx"),
+            rating_workbook_sha256=editor_candidate.sha256_file(workbook_path),
             publication_receipt_path=str(published_dir / "publication_receipt.json"),
             publication_receipt_sha256="c" * 64,
             candidate_artifact_path=str(published_dir / "candidate_bundle.joblib"),
@@ -504,7 +571,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         lambda *args, **kwargs: parent,
     )
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export)
-    monkeypatch.setattr(editor_candidate, "stage_editor_export", lambda *args, **kwargs: None)
+    monkeypatch.setattr(editor_candidate, "stage_rating_export", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         editor_candidate,
         "publish_rating_package",
@@ -521,6 +588,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
                 dag_id="pricing_publish_editor_candidate",
                 airflow_run_id="manual__submission-1",
                 created_by="analyst@example.test",
+                model_config=EDITOR_CONFIG,
             )
 
     assert len(attempt_paths) == 2
@@ -529,6 +597,63 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         assert not write_dir.exists()
         assert not published_dir.exists()
     assert committed_artifact.read_bytes() == b"committed bytes"
+
+
+def test_editor_publication_rejects_workbook_mutated_during_staging(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    staging_dir = tmp_path / ".staging" / "attempt"
+    final_dir = tmp_path / "attempts" / "attempt"
+    staging_dir.mkdir(parents=True)
+    final_dir.parent.mkdir(parents=True)
+    submission = SimpleNamespace(submission_id="submission-1")
+    parent = SimpleNamespace(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        effective_from=None,
+        effective_to=None,
+        config=SimpleNamespace(target_name="ClaimNb", model_type="Poisson"),
+    )
+
+    def export_model(*args, **kwargs):
+        workbook = staging_dir / "rating_tables.xlsx"
+        workbook.write_bytes(b"original")
+        return SimpleNamespace(
+            export_id="editor__submission_1",
+            rating_workbook_path=str(final_dir / "rating_tables.xlsx"),
+            rating_workbook_sha256=editor_candidate.sha256_file(workbook),
+            publication_receipt_path=str(final_dir / "publication_receipt.json"),
+            publication_receipt_sha256="c" * 64,
+        )
+
+    def mutate_workbook(*args, **kwargs):
+        (final_dir / "rating_tables.xlsx").write_bytes(b"mutated during staging")
+        return "a" * 64
+
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: parent)
+    monkeypatch.setattr(editor_candidate, "export_edited_model", export_model)
+    monkeypatch.setattr(editor_candidate, "stage_rating_export", mutate_workbook)
+    monkeypatch.setattr(
+        editor_candidate,
+        "publish_rating_package",
+        lambda *args, **kwargs: pytest.fail("mutated workbook reached package publication"),
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="changed during staging"):
+        editor_candidate._publish_new_editor_submission(
+            object(),
+            submission=submission,
+            allowed_root=tmp_path,
+            attempt=editor_candidate.EditorPublicationAttempt(staging_dir, final_dir),
+            dag_id="pricing_publish_editor_candidate",
+            airflow_run_id="manual__submission-1",
+            created_by="publisher@example.test",
+            model_config=EDITOR_CONFIG,
+        )
 
 
 def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
@@ -540,28 +665,44 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     import pandas as pd
 
     from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
     from pricing_pipeline.workbench.artifacts import CandidateBundle
 
     submission_dir = tmp_path / "submission"
     write_dir = submission_dir / "published" / ".staging" / "attempt-a"
     final_dir = submission_dir / "published" / "attempts" / "attempt-a"
     write_dir.mkdir(parents=True)
+    exposure = pd.Series([2.0], name="Exposure")
     bundle = CandidateBundle(
         fitted_model={"model": "parent"},
         X=pd.DataFrame({"x": [1.0]}),
         y=np.array([0.0]),
         sample_weight=None,
-        offset=None,
-        export_weight=None,
+        offset=np.log(exposure),
+        export_weight=exposure,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="parent-export",
         manifest_id="manifest-1",
         split_set_id="split-1",
         pk_columns=("id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
-        offset_contract={"handling": "NONE"},
+        offset_contract=OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name="Exposure",
+            published_factor_name="Exposure",
+            source_name="Exposure",
+            label="log(Exposure)",
+        ),
+        export_weight_name="Exposure",
     )
     parent = SimpleNamespace(
+        model_name="HOME_FREQ",
+        model_version="20260603",
         bundle=bundle,
         champion=editor_candidate.ChampionSnapshot(
             deployment_slot="HOME_FREQ_UAT",
@@ -594,22 +735,16 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         lambda *args, **kwargs: {"model": "edited"},
     )
 
+    captured_export = {}
+
     def fake_export_rating_tables(*args, output_path, **kwargs):
+        captured_export["weight"] = args[3]
+        captured_export["options"] = kwargs
         Path(output_path).write_bytes(b"workbook")
 
     def fake_write_receipt(receipt, path):
         Path(path).write_bytes(b"receipt")
         return "1" * 64
-
-    def fake_review_hook(hook, *, output_path, **kwargs):
-        nested_path = Path(output_path).parent / "reports" / Path(output_path).name
-        nested_path.parent.mkdir()
-        nested_path.write_bytes(b"review")
-        return SimpleNamespace(
-            path=str(nested_path),
-            sha256="2" * 64,
-            size_bytes=6,
-        )
 
     monkeypatch.setattr(editor_candidate, "export_rating_tables", fake_export_rating_tables)
     monkeypatch.setattr(
@@ -618,7 +753,6 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(editor_candidate, "write_publication_receipt", fake_write_receipt)
-    monkeypatch.setattr(editor_candidate, "call_review_hook", fake_review_hook)
     monkeypatch.setattr(editor_candidate, "inherited_cv_metrics", lambda bundle: ({}, {}))
     monkeypatch.setattr(
         editor_candidate,
@@ -635,15 +769,37 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     )
 
     assert Path(exported.rating_workbook_path) == final_dir / "rating_tables.xlsx"
+    assert exported.rating_workbook_sha256 == editor_candidate.sha256_file(
+        write_dir / "rating_tables.xlsx"
+    )
     assert Path(exported.publication_receipt_path) == final_dir / "publication_receipt.json"
     assert Path(exported.candidate_artifact_path) == final_dir / "candidate_bundle.joblib"
     assert (write_dir / "rating_tables.xlsx").read_bytes() == b"workbook"
     assert (write_dir / "candidate_bundle.joblib").is_file()
     assert not final_dir.exists()
     envelope = joblib.load(write_dir / "candidate_bundle.joblib")
-    assert envelope["bundle"].review_artifact["path"] == str(
-        final_dir / "reports" / "rating_tables_review.xlsx"
+    assert envelope["bundle"].model_name == "HOME_FREQ"
+    assert envelope["bundle"].model_version == "20260603"
+    assert envelope["bundle"].export_id == "editor__submission_1"
+    pd.testing.assert_series_equal(captured_export["weight"], exposure)
+    np.testing.assert_allclose(captured_export["options"]["offset"], np.log(exposure))
+    pd.testing.assert_series_equal(captured_export["options"]["offset_source"], exposure)
+    assert captured_export["options"]["offset_name"] == "Exposure"
+    assert captured_export["options"]["offset_kind"] == "auto"
+
+
+def test_editor_revision_preserves_claimed_identity_and_records_publisher():
+    from pricing_pipeline.publishing.editor_candidate import _revision_with_publisher_identity
+
+    revised = json.loads(
+        _revision_with_publisher_identity(
+            '{"claimed_identity":"analyst@example.test","kind":"SUPERGLM_EDITOR"}',
+            "publisher@example.test",
+        )
     )
+
+    assert revised["claimed_identity"] == "analyst@example.test"
+    assert revised["published_by"] == "publisher@example.test"
 
 
 def test_editor_publication_lock_serializes_the_same_submission(tmp_path):
@@ -714,6 +870,8 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "model_id": 17,
         "model_name": submission.model_name,
         "model_version": "v4",
+        "run_model_version": "v4",
+        "export_id": "parent-export",
         "package_version": submission.source_package_version,
         "rate_package_id": submission.parent_rate_package_id,
         "effective_from_date": effective_from_date,
@@ -763,7 +921,14 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         def begin(self):
             return Begin(self.connection)
 
-    bundle = SimpleNamespace(manifest_id="manifest-1", split_set_id="split-1")
+    bundle = SimpleNamespace(
+        model_name="HOME_FREQ",
+        model_version="v4",
+        export_id="parent-export",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
+    )
     load_calls = []
     champion_calls = []
 
@@ -782,14 +947,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     )
     monkeypatch.setattr(editor_candidate, "load_candidate_bundle", fake_load_candidate_bundle)
     monkeypatch.setattr(editor_candidate, "_load_champion_bundle", fake_load_champion_bundle)
-    injected_config = SimpleNamespace(deployment_slot="HOME_FREQ_UAT")
-    monkeypatch.setattr(
-        editor_candidate,
-        "get_model_config",
-        lambda model_name: (_ for _ in ()).throw(
-            AssertionError("explicit notebook config should bypass TOML registry discovery")
-        ),
-    )
+    injected_config = EDITOR_CONFIG
     engine = Engine()
 
     parent = editor_candidate.load_parent_candidate(
@@ -809,13 +967,27 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     assert "split_link.manifest_id = mr.manifest_id" in statement
     assert "split_link.dataset_role = 'training'" in statement
     assert "split_link.split_role = 'validation'" in statement
+    assert "mr.model_version AS run_model_version" in statement
+    assert "mr.export_id" in statement
+
+    for field_name in ("model_name", "model_version", "export_id"):
+        original = getattr(bundle, field_name)
+        setattr(bundle, field_name, f"wrong-{field_name}")
+        with pytest.raises(editor_candidate.EditorSubmissionError, match=field_name):
+            editor_candidate.load_parent_candidate(
+                engine,
+                submission,
+                allowed_root=configured_root,
+                model_config=injected_config,
+            )
+        setattr(bundle, field_name, original)
 
 
 @pytest.mark.parametrize(
     "submission_relative_path",
     ["submission.json", "crafted/deep/layout/submission.json"],
 )
-def test_edited_model_root_cannot_be_widened_by_submission_path(
+def test_editor_session_root_cannot_be_widened_by_submission_path(
     tmp_path,
     submission_relative_path,
 ):
@@ -823,62 +995,69 @@ def test_edited_model_root_cannot_be_widened_by_submission_path(
     from pricing_pipeline.workbench.submission import EditorSubmissionError
 
     configured_root = tmp_path / "configured-workbench"
-    outside_model = tmp_path / "outside" / "edited.joblib"
+    outside_session = tmp_path / "outside" / "editor_session.json"
+    parent = SimpleNamespace(bundle=SimpleNamespace(fitted_model=object()))
     submission = SimpleNamespace(
         path=str(tmp_path / submission_relative_path),
-        edited_model_path=str(outside_model),
+        editor_session_path=str(outside_session),
     )
 
     with pytest.raises(EditorSubmissionError, match="outside artifact root"):
         editor_candidate._load_edited_model(
+            parent,
             submission,
             allowed_root=configured_root,
         )
 
 
-def test_edited_model_loader_supports_nested_path_within_configured_root(
+def test_editor_session_replays_against_verified_parent_model(
     monkeypatch,
     tmp_path,
 ):
-    import platform
-
     from pricing_pipeline.publishing import editor_candidate
-    from pricing_pipeline.workbench.submission import EDITED_MODEL_FORMAT, sha256_file
+    from pricing_pipeline.workbench.submission import sha256_file
+    from superglm.editor import EditorSession
 
     configured_root = tmp_path / "configured-workbench"
-    model_path = configured_root / "models/HOME_FREQ/editor/deep/edited.joblib"
-    model_path.parent.mkdir(parents=True)
-    model_path.write_bytes(b"nested-model")
-    python_version = platform.python_version()
-    superglm_version = "test-superglm"
+    session_path = configured_root / "models/HOME_FREQ/editor/deep/session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_bytes(b'{"edits": []}\n')
+    fitted_model = object()
     edited_model = object()
+    bundle = SimpleNamespace(
+        fitted_model=fitted_model,
+        X=object(),
+        y=object(),
+        sample_weight=object(),
+        offset=object(),
+    )
+    parent = SimpleNamespace(bundle=bundle)
     submission = SimpleNamespace(
         path=str(configured_root / "submission.json"),
-        edited_model_path=str(model_path),
-        edited_model_format=EDITED_MODEL_FORMAT,
-        edited_model_size_bytes=model_path.stat().st_size,
-        edited_model_sha256=sha256_file(model_path),
-        edited_model_python_version=python_version,
-        edited_model_superglm_version=superglm_version,
+        editor_session_path=str(session_path),
+        editor_session_size_bytes=session_path.stat().st_size,
+        editor_session_sha256=sha256_file(session_path),
     )
-    monkeypatch.setattr(editor_candidate, "version", lambda name: superglm_version)
+    replay = SimpleNamespace(to_model=lambda **kwargs: (edited_model, kwargs))
     monkeypatch.setattr(
-        editor_candidate.joblib,
+        EditorSession,
         "load",
-        lambda path: {
-            "format": EDITED_MODEL_FORMAT,
-            "python_version": python_version,
-            "superglm_version": superglm_version,
-            "model": edited_model,
-        },
+        staticmethod(lambda path, *, model: replay),
     )
 
-    loaded = editor_candidate._load_edited_model(
+    loaded, replayed_inputs = editor_candidate._load_edited_model(
+        parent,
         submission,
         allowed_root=configured_root,
     )
 
     assert loaded is edited_model
+    assert replayed_inputs == {
+        "X": bundle.X,
+        "y": bundle.y,
+        "sample_weight": bundle.sample_weight,
+        "offset": bundle.offset,
+    }
 
 
 def test_training_comparison_metrics_are_stable_and_scoped():
@@ -907,6 +1086,9 @@ def test_training_comparison_metrics_are_stable_and_scoped():
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id="split-1",
         pk_columns=("id",),
@@ -922,9 +1104,7 @@ def test_training_comparison_metrics_are_stable_and_scoped():
         comparison_name="parent",
     )
 
-    assert metrics["editor_training_parent_mean_absolute_prediction_delta"] == pytest.approx(
-        0.175
-    )
+    assert metrics["editor_training_parent_mean_absolute_prediction_delta"] == pytest.approx(0.175)
     assert metrics["editor_training_parent_max_absolute_prediction_delta"] == pytest.approx(0.2)
     assert metrics["editor_training_deviance_delta"] == pytest.approx(-0.2675)
     assert set(scopes.values()) == {"editor_training_parent"}
@@ -945,6 +1125,9 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="parent-export",
         manifest_id="parent-manifest",
         split_set_id="parent-split",
         pk_columns=("id",),
@@ -966,6 +1149,9 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="champion-export",
         manifest_id="champion-manifest",
         split_set_id="champion-split",
         pk_columns=("id",),
@@ -1176,6 +1362,9 @@ def test_champion_snapshot_distinguishes_absent_and_unavailable_champion(
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="parent-export",
         manifest_id="parent-manifest",
         split_set_id=None,
         pk_columns=("id",),
@@ -1235,6 +1424,9 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id=None,
         pk_columns=("id",),
@@ -1264,7 +1456,7 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
 def test_package_sql_parity_uses_published_feature_names():
     import numpy as np
     import pandas as pd
-    from superglm import Numeric
+    from superglm import Numeric, SuperGLM
 
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
     from pricing_pipeline.publishing.superglm_metadata import (
@@ -1274,14 +1466,6 @@ def test_package_sql_parity_uses_published_feature_names():
         OffsetExportContract,
     )
     from pricing_pipeline.workbench.artifacts import CandidateBundle
-
-    class Model:
-        _specs = {"a/b": Numeric()}
-        _feature_order = ("a/b",)
-        _fit_used_offset = False
-
-        def predict(self, X, offset=None):
-            return np.asarray(X["a/b"], dtype=float) * 2.0
 
     class Result:
         def __init__(self, prediction):
@@ -1301,7 +1485,12 @@ def test_package_sql_parity_uses_published_feature_names():
             self.payloads.append(json.loads(params["features_json"]))
             return Result(params["x_prediction"])
 
-    model = Model()
+    training_x = pd.DataFrame({"a/b": np.linspace(0.5, 3.0, 30)})
+    training_y = np.random.default_rng(20260714).poisson(1.5, size=len(training_x))
+    model = SuperGLM(
+        features={"a/b": Numeric()},
+        selection_penalty=0.0,
+    ).fit(training_x, training_y)
     bundle = CandidateBundle(
         fitted_model=model,
         X=pd.DataFrame({"a/b": [1.5]}),
@@ -1310,6 +1499,9 @@ def test_package_sql_parity_uses_published_feature_names():
         offset=None,
         export_weight=None,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id=None,
         pk_columns=("id",),
@@ -1361,7 +1553,7 @@ class _ParityConnection:
         return _ParityResult(params["x_prediction"])
 
 
-def _offset_parity_bundle(*, handling, offset_source=None, published_values=None):
+def _offset_parity_bundle(*, handling, export_weight=None):
     import numpy as np
     import pandas as pd
 
@@ -1369,8 +1561,6 @@ def _offset_parity_bundle(*, handling, offset_source=None, published_values=None
 
     raw_exposure = np.array([2.0, 4.0])
     fitted_offset = np.log(raw_exposure)
-    if published_values is None:
-        published_values = raw_exposure
 
     class Model:
         def predict(self, X, offset=None):
@@ -1385,48 +1575,52 @@ def _offset_parity_bundle(*, handling, offset_source=None, published_values=None
             "source_name": "Exposure",
             "label": "log(Exposure)",
         }
-        export_options = {"offset_source": offset_source}
+        if export_weight is None:
+            export_weight = pd.Series(raw_exposure, name="Exposure")
+        export_weight_name = "Exposure"
     else:
         contract = {
             "handling": handling,
             "source_name": "Exposure",
             "label": "log(Exposure)",
         }
-        export_options = None
+        export_weight_name = None
 
     return CandidateBundle(
         fitted_model=Model(),
-        X=pd.DataFrame({"x": [1.0, 3.0], "Exposure": published_values}),
+        X=pd.DataFrame({"x": [1.0, 3.0]}),
         y=np.ones(2),
         sample_weight=None,
         offset=fitted_offset,
-        export_weight=None,
+        export_weight=export_weight,
         cv_report={},
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id=None,
         pk_columns=("id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
         offset_contract=contract,
-        offset_export_options=export_options,
+        export_weight_name=export_weight_name,
     ), raw_exposure
 
 
-@pytest.mark.parametrize("source_kind", ["column", "series", "array"])
-def test_package_sql_parity_uses_published_offset_source_for_exported_factor(source_kind):
+@pytest.mark.parametrize("weight_kind", ["series", "array"])
+def test_package_sql_parity_uses_bound_export_weight_for_exported_factor(weight_kind):
     import pandas as pd
 
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
 
     raw_exposure = pd.Series([2.0, 4.0], name="Exposure")
-    offset_sources = {
-        "column": "Exposure",
+    export_weights = {
         "series": raw_exposure,
         "array": raw_exposure.to_numpy(),
     }
     bundle, expected_exposure = _offset_parity_bundle(
         handling="EXPORTED_FACTOR",
-        offset_source=offset_sources[source_kind],
+        export_weight=export_weights[weight_kind],
     )
     connection = _ParityConnection()
 
@@ -1447,8 +1641,7 @@ def test_package_sql_parity_uses_published_offset_source_for_exported_factor(sou
     ] == expected_exposure.tolist()
 
 
-@pytest.mark.parametrize("source_kind", ["column", "series"])
-def test_package_sql_parity_preserves_categorical_offset_levels_positionally(source_kind):
+def test_package_sql_parity_preserves_bound_categorical_export_weight_positionally():
     import pandas as pd
 
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
@@ -1459,11 +1652,9 @@ def test_package_sql_parity_preserves_categorical_offset_levels_positionally(sou
         name="Exposure",
         dtype="category",
     )
-    offset_source = "Exposure" if source_kind == "column" else published_levels
     bundle, _raw_exposure = _offset_parity_bundle(
         handling="EXPORTED_FACTOR",
-        offset_source=offset_source,
-        published_values=published_levels.to_numpy(),
+        export_weight=published_levels,
     )
     connection = _ParityConnection()
 
@@ -1484,102 +1675,10 @@ def test_package_sql_parity_preserves_categorical_offset_levels_positionally(sou
     ] == published_levels.tolist()
 
 
-def test_package_sql_parity_normalizes_mapping_offset_source_positionally():
-    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
-
-    offset_source = {101: "basic", 303: "premium"}
-    bundle, _raw_exposure = _offset_parity_bundle(
-        handling="EXPORTED_FACTOR",
-        offset_source=offset_source,
-    )
-    connection = _ParityConnection()
-
-    verify_package_sql_parity(
-        connection,
-        rate_package_id=108,
-        edited_model=bundle.fitted_model,
-        bundle=bundle,
-        sample_size=2,
-        execute_params_hook=lambda params, expected: {
-            **params,
-            "x_prediction": expected,
-        },
-    )
-
-    assert [
-        json.loads(params["features_json"])["Exposure"] for params in connection.calls
-    ] == list(offset_source.values())
-
-
-@pytest.mark.parametrize(
-    ("offset_source", "message"),
-    [
-        ([2.0], "offset_source length 1 does not match candidate row count 2"),
-        ([2.0, float("nan")], "offset_source contains missing values"),
-        ([2.0, float("inf")], "offset_source contains non-finite numeric values"),
-    ],
-)
-def test_package_sql_parity_rejects_invalid_exported_offset_source_before_sql(
-    offset_source,
-    message,
-):
-    import numpy as np
-
-    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
-    from pricing_pipeline.workbench.submission import EditorSubmissionError
-
-    bundle, _raw_exposure = _offset_parity_bundle(
-        handling="EXPORTED_FACTOR",
-        offset_source=np.asarray(offset_source),
-    )
-
-    with pytest.raises(EditorSubmissionError, match=message):
-        verify_package_sql_parity(
-            _ParityConnection(allow_execute=False),
-            rate_package_id=108,
-            edited_model=bundle.fitted_model,
-            bundle=bundle,
-        )
-
-
-@pytest.mark.parametrize(
-    ("dtype", "infinity"),
-    [("object", float("inf")), ("category", float("-inf"))],
-)
-def test_package_sql_parity_rejects_nonfinite_numeric_levels_in_mixed_series(
-    dtype,
-    infinity,
-):
-    import numpy as np
-    import pandas as pd
-
-    from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
-    from pricing_pipeline.workbench.submission import EditorSubmissionError
-
-    offset_source = pd.Series(["basic", np.float64(infinity)], dtype=dtype)
-    bundle, _raw_exposure = _offset_parity_bundle(
-        handling="EXPORTED_FACTOR",
-        offset_source=offset_source,
-    )
-
-    with pytest.raises(
-        EditorSubmissionError,
-        match="offset_source contains non-finite numeric values",
-    ):
-        verify_package_sql_parity(
-            _ParityConnection(allow_execute=False),
-            rate_package_id=108,
-            edited_model=bundle.fitted_model,
-            bundle=bundle,
-        )
-
-
 def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
 
-    bundle, raw_exposure = _offset_parity_bundle(
-        handling="ALREADY_APPLIED_SQL_EXPOSURE"
-    )
+    bundle, raw_exposure = _offset_parity_bundle(handling="ALREADY_APPLIED_SQL_EXPOSURE")
     connection = _ParityConnection()
 
     verify_package_sql_parity(
@@ -1617,6 +1716,9 @@ def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
             "std_scores": {"deviance": 0.03},
             "oof_coverage": 1.0,
         },
+        model_name="HOME_FREQ",
+        model_version="20260603",
+        export_id="export-1",
         manifest_id="manifest-1",
         split_set_id="split-1",
         pk_columns=("id",),

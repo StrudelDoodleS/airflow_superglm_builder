@@ -19,63 +19,6 @@ def _required_text(value: str, field_name: str) -> str:
     return cleaned
 
 
-def existing_model_version_for_export(
-    engine,
-    *,
-    model_name: str,
-    export_id: str,
-) -> str | None:
-    model_name = _required_text(model_name, "model_name")
-    export_id = _required_text(export_id, "export_id")
-    schemas = schema_names_from_connectable(engine)
-
-    with engine.begin() as con:
-        version = con.execute(
-            text(
-                f"""
-                SELECT TOP (1) rp.model_version
-                FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
-                JOIN {schemas.pricing}.PRICING_MODEL AS pm
-                  ON pm.model_id = rp.model_id
-                WHERE pm.model_name = :model_name
-                  AND rp.source_export_id = :export_id
-                ORDER BY rp.rate_package_id DESC
-                """
-            ),
-            {"model_name": model_name, "export_id": export_id},
-        ).scalar()
-    return None if version is None else str(version)
-
-
-def next_trained_model_version(engine, *, model_name: str) -> str:
-    model_name = _required_text(model_name, "model_name")
-    schemas = schema_names_from_connectable(engine)
-
-    with engine.begin() as con:
-        versions = list(
-            con.execute(
-                text(
-                    f"""
-                    SELECT rp.model_version
-                    FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
-                    JOIN {schemas.pricing}.PRICING_MODEL AS pm
-                      ON pm.model_id = rp.model_id
-                    WHERE pm.model_name = :model_name
-                      AND rp.parent_rate_package_id IS NULL
-                    """
-                ),
-                {"model_name": model_name},
-            ).scalars()
-        )
-
-    version_numbers = []
-    for version in versions:
-        match = _VERSION_PATTERN.match(str(version))
-        if match is not None:
-            version_numbers.append(int(match.group(1)))
-    return f"v{max(version_numbers, default=0) + 1}"
-
-
 def resolve_model_version_for_export(
     engine,
     *,

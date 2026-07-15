@@ -6,7 +6,6 @@ import pytest
 
 from pricing_pipeline.infra.reset_schema import (
     CONFIRMATION_FLAG,
-    SCHEMA_CONFIG_KEYS,
     build_drop_batches,
     normalize_schema_names,
     reset_and_reseed_schema,
@@ -128,17 +127,9 @@ def test_cli_uses_runtime_schema_names_by_default():
                 "FakeSettings",
                 (),
                 {
-                    "schema_names": type(
-                        "FakeSchemaNames",
-                        (),
-                        {
-                            "as_execution_options": lambda self: {
-                                "pricing_schema": "python_pricing",
-                                "pricing_staging_schema": "python_stg",
-                                "mlops_schema": "python_mlops",
-                            }
-                        },
-                    )()
+                    "pricing_schema": "python_pricing",
+                    "pricing_staging_schema": "python_stg",
+                    "mlops_schema": "python_mlops",
                 },
             )()
 
@@ -156,17 +147,9 @@ def test_cli_rejects_schema_override_outside_runtime_schema_names():
                 "FakeSettings",
                 (),
                 {
-                    "schema_names": type(
-                        "FakeSchemaNames",
-                        (),
-                        {
-                            "as_execution_options": lambda self: {
-                                "pricing_schema": "python_pricing",
-                                "pricing_staging_schema": "python_stg",
-                                "mlops_schema": "python_mlops",
-                            }
-                        },
-                    )()
+                    "pricing_schema": "python_pricing",
+                    "pricing_staging_schema": "python_stg",
+                    "mlops_schema": "python_mlops",
                 },
             )()
 
@@ -307,11 +290,3 @@ def test_execute_uses_single_transaction_for_drop_and_migrations(
         index for index, statement in enumerate(engine.connection.executed) if "DROP " in statement
     )
     assert lock_position < first_drop_position
-
-
-def test_schema_config_key_order_is_stable():
-    assert SCHEMA_CONFIG_KEYS == (
-        "pricing_schema",
-        "pricing_staging_schema",
-        "mlops_schema",
-    )

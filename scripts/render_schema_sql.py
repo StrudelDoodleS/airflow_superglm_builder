@@ -114,7 +114,7 @@ def render_schema_sql(
         raise RuntimeError(f"No schema DDL files found in {migrations_dir}")
 
     parts = [
-        "-- Rendered Airflow SuperGLM Builder schema DDL.",
+        "-- Rendered SuperGLM pricing audit schema DDL.",
         "-- Run this against the already-created target database.",
         _schema_guard_sql(schemas).rstrip(),
     ]

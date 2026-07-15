@@ -62,7 +62,6 @@ def config() -> ModelBuildConfig:
         target_name="ClaimNb",
         model_type="superglm_poisson",
         deployment_slot="MTPL_FREQ_UAT",
-        default_package_status="PUBLISHED",
     )
 
 
@@ -114,11 +113,19 @@ def test_validate_registered_model_fails_on_metadata_mismatch():
 
 
 def test_register_pricing_model_inserts_without_updating_existing_rows():
-    con = FakeConnection(scalar=17)
+    row = {
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "model_label": "Motor frequency",
+        "target_name": "ClaimNb",
+        "model_type": "superglm_poisson",
+        "model_status": "ACTIVE",
+    }
+    con = FakeConnection(row, scalar=17)
 
-    model_id = register_pricing_model(con, config(), created_by="airflow")
+    record = register_pricing_model(con, config(), created_by="airflow")
 
-    assert model_id == 17
+    assert record == PricingModelRecord(**row)
     sql = con.events[0][0]
     assert "INSERT INTO pricing.PRICING_MODEL" in sql
     assert "MERGE" not in sql
