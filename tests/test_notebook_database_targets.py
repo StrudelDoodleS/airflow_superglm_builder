@@ -516,6 +516,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),
         model_source_sha256="e" * 64,
+        model_frame_sha256="f" * 64,
         metrics={"cv_mean_deviance": 1.25},
         metric_scopes={"cv_mean_deviance": "cv"},
         fold_metrics=(
@@ -784,6 +785,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),
         model_source_sha256="b" * 64,
+        model_frame_sha256="f" * 64,
     )
     candidate = api.BuiltCandidate(
         model=model,

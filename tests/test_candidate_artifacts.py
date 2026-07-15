@@ -40,6 +40,7 @@ def _minimal_bundle():
         pk_columns=("policy_id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
+        model_frame_sha256="c" * 64,
         offset_contract={"handling": "NONE"},
     )
 
@@ -75,10 +76,19 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     assert loaded.manifest_id == "manifest-1"
     assert loaded.split_set_id == "split-1"
     assert loaded.pk_columns == ("policy_id",)
+    assert loaded.model_frame_sha256 == "c" * 64
     assert loaded.X.equals(bundle.X)
     assert np.array_equal(loaded.y, bundle.y)
     assert loaded.offset_contract == OffsetExportContract(handling="NONE")
     assert not hasattr(loaded, "offset_export_options")
+
+
+@pytest.mark.parametrize("digest", ["", "A" * 64, "a" * 63, "g" * 64])
+def test_candidate_bundle_rejects_invalid_model_frame_sha256(digest):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+
+    with pytest.raises(CandidateArtifactError, match="model_frame_sha256"):
+        replace(_minimal_bundle(), model_frame_sha256=digest)
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,7 @@ class CandidateBundle:
     offset_contract: OffsetExportContract
     fit_sample_weight_name: str | None = None
     export_weight_name: str | None = None
+    model_frame_sha256: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -51,6 +52,17 @@ class CandidateBundle:
         except ValueError as exc:
             raise CandidateArtifactError(f"invalid offset_contract: {exc}") from exc
         object.__setattr__(self, "offset_contract", contract)
+
+        digest = self.model_frame_sha256
+        if digest is not None and (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or digest.lower() != digest
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise CandidateArtifactError(
+                "model_frame_sha256 must be a 64-character lowercase hex SHA-256 digest"
+            )
 
         if self.export_weight is None:
             if contract.handling == "EXPORTED_FACTOR":

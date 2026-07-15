@@ -32,6 +32,39 @@ def test_package_writer_does_not_write_deployment_tables_during_publish():
     assert "PRICING_PACKAGE_POINTER" not in writer
 
 
+@pytest.fixture
+def emitted_band_compile_sql():
+    engine = _FakeNewPackageEngine()
+
+    load_staging_to_rating_package(engine, _new_package_args())
+
+    band_sql = next(
+        sql
+        for sql, _params in engine.connection.statements
+        if "INSERT INTO pricing.PRICING_COMPILED_1D_RATE_BAND" in sql
+    )
+    return " ".join(band_sql.split())
+
+
+def test_package_writer_compiles_only_interval_offset_factors_as_bands(
+    emitted_band_compile_sql,
+):
+    assert (
+        "t.term_type = 'OFFSET_FACTOR' AND ls.level_set_type IN ('NUMERIC_BAND', 'SPLINE_GRID_1D')"
+    ) in emitted_band_compile_sql
+
+
+def test_package_writer_opens_only_the_terminal_compiled_band(emitted_band_compile_sql):
+    # SuperGLM assigns x.max to its final [left, max) bin; the compiled terminal
+    # must therefore be open-ended while every internal upper bound stays audited.
+    assert (
+        "CASE WHEN ROW_NUMBER() OVER ( PARTITION BY t.term_id ORDER BY "
+        "CASE WHEN fl.lower_bound IS NULL THEN 1 ELSE 0 END, "
+        "fl.lower_bound DESC, COALESCE(fl.order_index, 0) DESC, "
+        "fl.feature_level_id DESC ) = 1 THEN NULL ELSE fl.upper_bound END"
+    ) in emitted_band_compile_sql
+
+
 def test_package_writer_rejects_replaced_staging_before_lineage_write():
     engine = _FakeExistingPackageEngine(
         staged_meta=_staged_meta(source_file="/tmp/other/rating_tables.xlsx"),

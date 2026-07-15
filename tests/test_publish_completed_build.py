@@ -94,6 +94,7 @@ def _candidate_metadata(
     pk_columns=("policy_id",),
     row_count=1,
     row_order_sha256="d" * 64,
+    model_frame_sha256="f" * 64,
 ):
     metadata = save_candidate_bundle(
         CandidateBundle(
@@ -112,6 +113,7 @@ def _candidate_metadata(
             pk_columns=pk_columns,
             row_order_sha256=row_order_sha256,
             model_source_sha256=model_source_sha256,
+            model_frame_sha256=model_frame_sha256,
             offset_contract={"handling": "NONE"},
         ),
         Path(artifact_root) / "candidate.joblib",
@@ -124,6 +126,7 @@ def _candidate_metadata(
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
         "model_source_sha256": model_source_sha256,
+        "model_frame_sha256": model_frame_sha256,
     }
 
 
@@ -211,6 +214,7 @@ def _patch_candidate_sql_lineage(monkeypatch):
             pk_columns=("policy_id",),
             split_set_id=split_set_id,
             split_row_order_sha256=(None if split_set_id is None else "d" * 64),
+            model_frame_sha256="f" * 64,
         ),
     )
 
@@ -333,6 +337,13 @@ def test_completed_publication_requires_prebuilt_manifest_evidence():
             "pk_columns",
         ),
         ("row-count", {"row_count": 2}, {}, False, "row count"),
+        (
+            "model-frame",
+            {"model_frame_sha256": "e" * 64},
+            {},
+            False,
+            "model_frame_sha256",
+        ),
         ("missing-split", {}, {}, True, "split_set_id.*not found"),
         (
             "split-owner",
@@ -371,6 +382,7 @@ def test_candidate_publication_rejects_untrusted_sql_lineage_before_publish(
         "manifest_id": "manifest-existing",
         "row_count": 1,
         "pk_columns_json": json.dumps(["policy_id"]),
+        "model_frame_sha256": "f" * 64,
         **manifest_overrides,
     }
     split_row = (
@@ -457,6 +469,7 @@ def test_candidate_publication_resolves_omitted_split_against_sql_manifest(
             "manifest_id": "manifest-existing",
             "row_count": 1,
             "pk_columns_json": json.dumps(["policy_id"]),
+            "model_frame_sha256": "f" * 64,
         },
         split_row=split_row,
     )
@@ -635,6 +648,7 @@ def test_publish_completed_model_build_rejects_untrusted_candidate_before_publis
         ("manifest_id", "manifest-published"),
         ("split_set_id", "split-published"),
         ("model_source_sha256", "e" * 64),
+        ("model_frame_sha256", "e" * 64),
     ],
 )
 def test_publish_completed_model_build_rejects_candidate_lineage_mismatch(

@@ -347,6 +347,7 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
     assert manifest_row["exposure_column"] == "PolicyTerm"
     assert manifest_row["data_as_of_column"] == "SnapshotDate"
     assert len(manifest_row["model_frame_sha256"]) == 64
+    assert result.model_frame_sha256 == manifest_row["model_frame_sha256"]
     assert json.loads(manifest_row["frame_hash_metadata_json"])["packages"]["pandas"]
     assert manifest_row["created_by"] == "unit-test"
 

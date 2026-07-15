@@ -40,6 +40,7 @@ class ApprovedModelBuild(BaseModel):
     candidate_python_version: str
     candidate_superglm_version: str
     model_source_sha256: str
+    model_frame_sha256: str
     metrics: dict[str, float] = Field(default_factory=dict)
     metric_scopes: dict[str, str] = Field(default_factory=dict)
     fold_metrics: tuple[dict[str, int | str | float], ...] = ()
@@ -121,6 +122,7 @@ class ApprovedModelBuild(BaseModel):
         "publication_receipt_sha256",
         "candidate_artifact_sha256",
         "model_source_sha256",
+        "model_frame_sha256",
         mode="before",
     )
     @classmethod

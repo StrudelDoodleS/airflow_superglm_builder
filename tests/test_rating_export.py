@@ -625,6 +625,7 @@ def _retry_artifact_fields(tmp_path: Path):
                 pk_columns=("policy_id",),
                 row_order_sha256="d" * 64,
                 model_source_sha256="c" * 64,
+                model_frame_sha256="e" * 64,
                 offset_contract={"handling": "NONE"},
             ),
             tmp_path / "candidate.joblib",
@@ -639,6 +640,7 @@ def _retry_artifact_fields(tmp_path: Path):
             "candidate_python_version": metadata.python_version,
             "candidate_superglm_version": metadata.superglm_version,
             "model_source_sha256": "c" * 64,
+            "model_frame_sha256": "e" * 64,
         }
     return _RETRY_ARTIFACTS[key]
 
@@ -839,6 +841,7 @@ def test_existing_published_run_verifies_candidate_bundle_identity(tmp_path: Pat
             pk_columns=("policy_id",),
             row_order_sha256="d" * 64,
             model_source_sha256="b" * 64,
+            model_frame_sha256="e" * 64,
             offset_contract={"handling": "NONE"},
         ),
         tmp_path / "candidate.joblib",

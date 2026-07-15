@@ -120,6 +120,7 @@ def _approved_build(tmp_path: Path, **overrides) -> CompletedModelBuild:
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
         "model_source_sha256": "d" * 64,
+        "model_frame_sha256": "e" * 64,
     }
     values.update(overrides)
     return CompletedModelBuild(**values)

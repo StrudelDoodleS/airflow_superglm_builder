@@ -13,8 +13,10 @@ from pricing_pipeline.orchestration.publish_completed_build import (
     CompletedModelBuildError,
     _verify_candidate_artifact,
 )
+from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.orchestration import pipeline
+from pricing_pipeline.publishing.sqlite_notebook import _publish_sqlite_candidate_locked
 from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
 
 
@@ -35,6 +37,7 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
         pk_columns=("policy_id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
+        model_frame_sha256="c" * 64,
         offset_contract={"handling": "NONE"},
     )
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
@@ -62,6 +65,7 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
         candidate_python_version=metadata.python_version,
         candidate_superglm_version=metadata.superglm_version,
         model_source_sha256="b" * 64,
+        model_frame_sha256="c" * 64,
     )
     return bundle, build
 
@@ -99,6 +103,7 @@ def test_completed_build_rejects_candidate_model_identity_mismatch(
                 pk_columns=("policy_id",),
                 split_set_id="split-1",
                 split_row_order_sha256="a" * 64,
+                model_frame_sha256="c" * 64,
             ),
             allowed_root=tmp_path,
         )
@@ -120,9 +125,103 @@ def test_completed_build_accepts_matching_candidate_model_identity(tmp_path):
             pk_columns=bundle.pk_columns,
             split_set_id=bundle.split_set_id,
             split_row_order_sha256=bundle.row_order_sha256,
+            model_frame_sha256=bundle.model_frame_sha256,
         ),
         allowed_root=tmp_path,
     )
+
+
+@pytest.mark.parametrize("mismatch_source", ["artifact", "build", "sql"])
+def test_completed_build_rejects_model_frame_digest_mismatch(
+    tmp_path,
+    mismatch_source,
+):
+    bundle, build = _candidate(tmp_path)
+    sql_digest = bundle.model_frame_sha256
+    if mismatch_source == "artifact":
+        metadata = save_candidate_bundle(
+            replace(bundle, model_frame_sha256="d" * 64),
+            tmp_path / "mismatched-candidate.joblib",
+        )
+        build = build.model_copy(
+            update={
+                "candidate_artifact_path": metadata.path,
+                "candidate_artifact_sha256": metadata.sha256,
+                "candidate_artifact_format": metadata.format,
+                "candidate_artifact_size_bytes": metadata.size_bytes,
+                "candidate_python_version": metadata.python_version,
+                "candidate_superglm_version": metadata.superglm_version,
+            }
+        )
+    elif mismatch_source == "build":
+        build = build.model_copy(update={"model_frame_sha256": "d" * 64})
+    else:
+        sql_digest = "d" * 64
+
+    with pytest.raises(CompletedModelBuildError, match="model_frame_sha256"):
+        _verify_candidate_artifact(
+            build,
+            model_name=bundle.model_name,
+            model_version=bundle.model_version,
+            export_id=bundle.export_id,
+            manifest_id=bundle.manifest_id,
+            split_set_id=bundle.split_set_id,
+            sql_lineage=CandidateSQLLineage(
+                manifest_id=bundle.manifest_id,
+                row_count=1,
+                pk_columns=bundle.pk_columns,
+                split_set_id=bundle.split_set_id,
+                split_row_order_sha256=bundle.row_order_sha256,
+                model_frame_sha256=sql_digest,
+            ),
+            allowed_root=tmp_path,
+        )
+
+
+def test_local_publication_rejects_model_frame_digest_mismatch_before_staging(
+    tmp_path,
+    monkeypatch,
+):
+    bundle, build = _candidate(tmp_path)
+    workbook = tmp_path / "rating.xlsx"
+    workbook.write_bytes(b"rating workbook")
+    build = build.model_copy(
+        update={
+            "rating_workbook_path": str(workbook),
+            "rating_workbook_sha256": pipeline.sha256_file(workbook),
+        }
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.sqlite_notebook.load_candidate_sql_lineage",
+        lambda *args, **kwargs: CandidateSQLLineage(
+            manifest_id=bundle.manifest_id,
+            row_count=1,
+            pk_columns=bundle.pk_columns,
+            split_set_id=bundle.split_set_id,
+            split_row_order_sha256=bundle.row_order_sha256,
+            model_frame_sha256="d" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.publishing.sqlite_notebook.stage_rating_export",
+        lambda *args, **kwargs: pytest.fail("staging ran before digest verification"),
+    )
+
+    with pytest.raises(CompletedModelBuildError, match="model_frame_sha256"):
+        _publish_sqlite_candidate_locked(
+            object(),
+            model_id=17,
+            model_config=ModelBuildConfig(
+                model_name="CLAIM_FREQ",
+                model_label="Claim frequency",
+                target_name="claim_count",
+                model_type="superglm_poisson",
+                deployment_slot="CLAIM_FREQ_UAT",
+            ),
+            completed_build=build,
+            created_by="pytest",
+            artifact_root=tmp_path,
+        )
 
 
 @pytest.mark.parametrize("field_name", ["model_name", "model_version", "export_id"])
@@ -221,6 +320,7 @@ def test_existing_sql_run_rejects_candidate_model_identity_mismatch(
         candidate_python_version=build.candidate_python_version,
         candidate_superglm_version=build.candidate_superglm_version,
         model_source_sha256=build.model_source_sha256,
+        model_frame_sha256=build.model_frame_sha256,
     )
 
     with pytest.raises(pipeline.PublishedRunIntegrityError, match=field_name):

@@ -29,6 +29,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         sha256="a" * 64,
         submission_id="submission-1",
         model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
         source_package_version=7,
         parent_rate_package_id=107,
         parent_model_run_id=907,
@@ -204,6 +205,7 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
         sha256="a" * 64,
         submission_id="submission-1",
         model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
         parent_rate_package_id=107,
     )
     existing = editor_candidate.EditorPublicationResult(
@@ -252,6 +254,42 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
     assert result == existing
 
 
+def test_editor_retry_rejects_submission_slot_mismatch_before_existing_lookup(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission_path = tmp_path / "submission" / "submission.json"
+    submission_path.parent.mkdir()
+    submission = SimpleNamespace(
+        path=str(submission_path),
+        deployment_slot="HOME_FREQ_PRODUCTION",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_verified_submission",
+        lambda *args, **kwargs: submission,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "_resolve_existing_editor_publication",
+        lambda *args, **kwargs: pytest.fail("slot mismatch reached existing-publication lookup"),
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="deployment_slot"):
+        editor_candidate.publish_editor_submission(
+            object(),
+            settings=Settings(workbench_artifact_root=tmp_path),
+            submission_path=str(submission_path),
+            submission_sha256="a" * 64,
+            dag_id="pricing_publish_editor_candidate",
+            airflow_run_id="manual__submission-1",
+            created_by="analyst@example.test",
+            model_config=EDITOR_CONFIG,
+        )
+
+
 def test_existing_editor_publication_verifies_committed_candidate_bytes(
     monkeypatch,
     tmp_path,
@@ -280,6 +318,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
         offset_contract={"handling": "NONE"},
+        model_frame_sha256="f" * 64,
     )
     artifact = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
     workbook = tmp_path / "rating_tables.xlsx"
@@ -293,6 +332,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "package_status": "PUBLISHED",
         "parent_rate_package_id": 107,
         "model_run_id": 908,
+        "parent_model_run_id": 907,
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
@@ -305,6 +345,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "manifest_id": bundle.manifest_id,
         "split_set_id": bundle.split_set_id,
         "model_source_sha256": bundle.model_source_sha256,
+        "model_frame_sha256": bundle.model_frame_sha256,
     }
 
     class Rows:
@@ -316,6 +357,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
 
     class Connection:
         def execute(self, statement, params):
+            assert "manifest.model_frame_sha256" in str(statement)
+            assert "DATASET_MANIFEST AS manifest" in str(statement)
             return Rows()
 
     class Begin:
@@ -338,6 +381,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         submission_id="submission-1",
         model_name="HOME_FREQ",
         parent_rate_package_id=107,
+        parent_model_run_id=907,
         manifest_id=bundle.manifest_id,
         split_set_id=bundle.split_set_id,
         model_source_sha256=bundle.model_source_sha256,
@@ -364,6 +408,15 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             )
         row[field_name] = original
 
+    row["parent_model_run_id"] = 999
+    with pytest.raises(EditorSubmissionError, match="parent_model_run_id"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+    row["parent_model_run_id"] = submission.parent_model_run_id
+
     workbook.write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="rating workbook"):
         editor_candidate._resolve_existing_editor_publication(
@@ -389,6 +442,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         ("manifest_id", "different-manifest"),
         ("split_set_id", "different-split"),
         ("model_source_sha256", "c" * 64),
+        ("model_frame_sha256", None),
+        ("model_frame_sha256", "e" * 64),
     ],
 )
 def test_existing_editor_publication_rejects_mismatched_lineage(
@@ -405,6 +460,7 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
         "model_source_sha256": "b" * 64,
+        "model_frame_sha256": "f" * 64,
     }
     identity = {
         "model_name": "HOME_FREQ",
@@ -427,6 +483,7 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "package_status": "PUBLISHED",
         "parent_rate_package_id": 107,
         "model_run_id": 908,
+        "parent_model_run_id": 907,
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
@@ -475,10 +532,17 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         submission_id="submission-1",
         model_name="HOME_FREQ",
         parent_rate_package_id=107,
+        parent_model_run_id=907,
         **expected,
     )
 
-    expected_layer = "SQL lineage" if lineage_owner == "sql" else "bundle lineage"
+    expected_layer = (
+        "model_frame_sha256"
+        if field_name == "model_frame_sha256"
+        else "SQL lineage"
+        if lineage_owner == "sql"
+        else "bundle lineage"
+    )
     with pytest.raises(EditorSubmissionError, match=expected_layer):
         editor_candidate._resolve_existing_editor_publication(
             Engine(),
@@ -497,6 +561,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         sha256="a" * 64,
         submission_id="submission-1",
         model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
         source_package_version=7,
         parent_rate_package_id=107,
         parent_model_run_id=907,
@@ -913,6 +978,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
         "model_source_sha256": submission.model_source_sha256,
+        "model_frame_sha256": "d" * 64,
     }
 
     class Rows:
@@ -954,6 +1020,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         manifest_id="manifest-1",
         split_set_id="split-1",
         model_source_sha256="b" * 64,
+        model_frame_sha256="d" * 64,
     )
     load_calls = []
     champion_calls = []
@@ -996,6 +1063,26 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     assert "split_link.split_role = 'validation'" in statement
     assert "mr.model_version AS run_model_version" in statement
     assert "mr.export_id" in statement
+    assert "manifest.model_frame_sha256" in statement
+    assert "DATASET_MANIFEST AS manifest" in statement
+
+    for sql_digest, bundle_digest in (
+        (None, "d" * 64),
+        ("not-a-digest", "d" * 64),
+        ("d" * 64, None),
+        ("d" * 64, "e" * 64),
+    ):
+        row["model_frame_sha256"] = sql_digest
+        bundle.model_frame_sha256 = bundle_digest
+        with pytest.raises(editor_candidate.EditorSubmissionError, match="model_frame_sha256"):
+            editor_candidate.load_parent_candidate(
+                engine,
+                submission,
+                allowed_root=configured_root,
+                model_config=injected_config,
+            )
+    row["model_frame_sha256"] = "d" * 64
+    bundle.model_frame_sha256 = "d" * 64
 
     for field_name in ("model_name", "model_version", "export_id"):
         original = getattr(bundle, field_name)

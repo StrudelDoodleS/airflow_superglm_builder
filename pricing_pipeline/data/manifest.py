@@ -34,6 +34,7 @@ FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
 @dataclass(frozen=True)
 class DatasetManifestResult:
     manifest_id: str
+    model_frame_sha256: str
     split_set_id: str | None = None
     split_artifact_uri: str | None = None
 
@@ -267,6 +268,7 @@ def create_model_frame_manifest_with_split(
 
     return DatasetManifestResult(
         manifest_id=manifest_id,
+        model_frame_sha256=model_frame_sha256,
         split_set_id=split_set_id,
         split_artifact_uri=split_artifact_uri,
     )

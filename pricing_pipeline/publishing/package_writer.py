@@ -757,7 +757,17 @@ def publish_rating_package(
                 fl.level_code,
                 COALESCE(fl.order_index, 0),
                 fl.lower_bound,
-                fl.upper_bound,
+                CASE
+                    WHEN ROW_NUMBER() OVER (
+                        PARTITION BY t.term_id
+                        ORDER BY
+                            CASE WHEN fl.lower_bound IS NULL THEN 1 ELSE 0 END,
+                            fl.lower_bound DESC,
+                            COALESCE(fl.order_index, 0) DESC,
+                            fl.feature_level_id DESC
+                    ) = 1 THEN NULL
+                    ELSE fl.upper_bound
+                END,
                 fl.representative_value,
                 rc.multiplier,
                 rc.log_coefficient
@@ -774,7 +784,13 @@ def publish_rating_package(
             JOIN pricing.PRICING_FEATURE f
               ON f.feature_id = ls.feature_id
             WHERE t.rate_package_id = :rate_package_id
-              AND t.term_type IN ('DISCRETIZED_SPLINE_1D', 'NUMERIC_BANDED_1D')
+              AND (
+                  t.term_type IN ('DISCRETIZED_SPLINE_1D', 'NUMERIC_BANDED_1D')
+                  OR (
+                      t.term_type = 'OFFSET_FACTOR'
+                      AND ls.level_set_type IN ('NUMERIC_BAND', 'SPLINE_GRID_1D')
+                  )
+              )
               AND rc.is_deleted = 0
             ORDER BY
                 t.sequence_no,

@@ -83,6 +83,7 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
         candidate_python_version="3.14.4",
         candidate_superglm_version="0.11.0",
         model_source_sha256="a" * 64,
+        model_frame_sha256="b" * 64,
     )
 
 
@@ -102,6 +103,7 @@ def test_completed_build_and_export_are_one_record_type():
         "candidate_python_version",
         "candidate_superglm_version",
         "model_source_sha256",
+        "model_frame_sha256",
     ],
 )
 def test_approved_build_requires_all_audit_artifacts(tmp_path: Path, field_name: str):

@@ -139,6 +139,13 @@ def publish_editor_submission(
         submission_sha256,
         allowed_root=settings.workbench_artifact_root,
     )
+    submitted_slot = str(submission.deployment_slot or "").strip().upper()
+    configured_slot = str(model_config.deployment_slot or "").strip().upper()
+    if not submitted_slot or submitted_slot != configured_slot:
+        raise EditorSubmissionError(
+            "explicit model config deployment_slot does not match the editor submission"
+        )
+
     submission_dir = _submission_directory(
         submission,
         allowed_root=settings.workbench_artifact_root,
@@ -193,6 +200,28 @@ def _editor_publication_lock(submission_dir: Path) -> Iterator[None]:
         yield
 
 
+def _verify_model_frame_sha256(
+    bundle: CandidateBundle,
+    sql_digest: Any,
+    *,
+    context: str,
+) -> None:
+    if (
+        not isinstance(sql_digest, str)
+        or len(sql_digest) != 64
+        or any(character not in "0123456789abcdef" for character in sql_digest)
+    ):
+        raise EditorSubmissionError(
+            f"{context} SQL manifest model_frame_sha256 is missing or invalid"
+        )
+    if bundle.model_frame_sha256 is None:
+        raise EditorSubmissionError(f"{context} bundle model_frame_sha256 is missing")
+    if bundle.model_frame_sha256 != sql_digest:
+        raise EditorSubmissionError(
+            f"{context} bundle model_frame_sha256 does not match the SQL manifest"
+        )
+
+
 def _resolve_existing_editor_publication(
     engine,
     submission: EditorSubmission,
@@ -209,10 +238,12 @@ def _resolve_existing_editor_publication(
             rp.package_status,
             rp.parent_rate_package_id,
             mr.model_run_id,
+            mr.parent_model_run_id,
             mr.run_status,
             mr.model_version,
             mr.export_id,
             mr.manifest_id,
+            manifest.model_frame_sha256,
             mr.rating_workbook_path,
             mr.rating_workbook_sha256,
             split_link.split_set_id,
@@ -228,6 +259,8 @@ def _resolve_existing_editor_publication(
           ON pm.model_id = rp.model_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = rp.rate_package_id
+        LEFT JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
+          ON manifest.manifest_id = mr.manifest_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
           ON split_link.model_run_id = mr.model_run_id
          AND split_link.manifest_id = mr.manifest_id
@@ -297,8 +330,12 @@ def _resolve_existing_editor_publication(
         "split_set_id": submission.split_set_id,
         "model_source_sha256": submission.model_source_sha256,
     }
+    expected_sql_lineage = {
+        **expected_lineage,
+        "parent_model_run_id": submission.parent_model_run_id,
+    }
     sql_mismatches = [
-        field for field, expected in expected_lineage.items() if row.get(field) != expected
+        field for field, expected in expected_sql_lineage.items() if row.get(field) != expected
     ]
     if sql_mismatches:
         raise EditorSubmissionError(
@@ -331,6 +368,11 @@ def _resolve_existing_editor_publication(
             "existing editor publication bundle lineage does not match the submission: "
             + ", ".join(bundle_mismatches)
         )
+    _verify_model_frame_sha256(
+        bundle,
+        row.get("model_frame_sha256"),
+        context="existing editor publication",
+    )
     return EditorPublicationResult(
         submission_id=submission.submission_id,
         model_name=str(row["model_name"]),
@@ -403,6 +445,7 @@ def load_parent_candidate(
             mr.model_version AS run_model_version,
             mr.export_id,
             mr.manifest_id,
+            manifest.model_frame_sha256,
             split_link.split_set_id,
             mr.candidate_artifact_path,
             mr.candidate_artifact_sha256,
@@ -416,6 +459,8 @@ def load_parent_candidate(
           ON pm.model_id = rp.model_id
         JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = rp.rate_package_id
+        JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
+          ON manifest.manifest_id = mr.manifest_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
           ON split_link.model_run_id = mr.model_run_id
          AND split_link.manifest_id = mr.manifest_id
@@ -482,6 +527,11 @@ def load_parent_candidate(
             raise EditorSubmissionError(
                 f"parent bundle {field_name} does not match SQL/submission lineage"
             )
+    _verify_model_frame_sha256(
+        bundle,
+        row.get("model_frame_sha256"),
+        context="parent candidate",
+    )
     config = model_config
     configured_name = config.model_name
     if str(configured_name) != submission.model_name:

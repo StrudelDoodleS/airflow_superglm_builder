@@ -26,6 +26,7 @@ class CandidateSQLLineage:
     manifest_id: str
     row_count: int
     pk_columns: tuple[str, ...]
+    model_frame_sha256: str | None
     split_set_id: str | None
     split_row_order_sha256: str | None
 
@@ -86,7 +87,7 @@ def load_candidate_sql_lineage(
             con.execute(
                 text(
                     f"""
-                    SELECT manifest_id, row_count, pk_columns_json
+                    SELECT manifest_id, row_count, pk_columns_json, model_frame_sha256
                     FROM {schemas.pricing}.DATASET_MANIFEST
                     WHERE manifest_id = :manifest_id
                     """
@@ -168,6 +169,11 @@ def load_candidate_sql_lineage(
         manifest_id=manifest_id,
         row_count=int(manifest_row["row_count"]),
         pk_columns=tuple(raw_pk_columns),
+        model_frame_sha256=(
+            None
+            if manifest_row["model_frame_sha256"] is None
+            else str(manifest_row["model_frame_sha256"])
+        ),
         split_set_id=split_set_id,
         split_row_order_sha256=(None if split_row is None else str(split_row["row_order_sha256"])),
     )
@@ -204,6 +210,7 @@ def _verify_candidate_artifact(
         "manifest_id": manifest_id,
         "split_set_id": split_set_id,
         "model_source_sha256": build.model_source_sha256,
+        "model_frame_sha256": build.model_frame_sha256,
     }
     for field_name, expected_value in expected_lineage.items():
         actual_value = getattr(bundle, field_name)
@@ -212,6 +219,12 @@ def _verify_candidate_artifact(
                 f"candidate artifact {field_name} does not match completed-build "
                 f"lineage: expected={expected_value!r}, actual={actual_value!r}"
             )
+    if build.model_frame_sha256 != sql_lineage.model_frame_sha256:
+        raise CompletedModelBuildError(
+            "completed-build model_frame_sha256 does not match SQL manifest lineage: "
+            f"expected={sql_lineage.model_frame_sha256!r}, "
+            f"actual={build.model_frame_sha256!r}"
+        )
     if bundle.pk_columns != sql_lineage.pk_columns:
         raise CompletedModelBuildError(
             "candidate artifact pk_columns do not match SQL manifest lineage: "

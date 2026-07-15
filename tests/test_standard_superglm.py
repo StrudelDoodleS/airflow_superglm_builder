@@ -653,6 +653,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         return Path(output_path)
 
     manifest_ids = iter(("manifest-1", "manifest-2"))
+    manifest_digests = iter(("a" * 64, "b" * 64))
 
     def fake_manifest(engine, **kwargs):
         captured["manifest"] = kwargs
@@ -661,6 +662,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
             manifest_id=manifest_id,
             split_set_id=f"{manifest_id}-split",
             split_artifact_uri=str(tmp_path / "splits" / f"{manifest_id}-split.npz"),
+            model_frame_sha256=next(manifest_digests),
         )
 
     def fake_receipt_writer(receipt, path):
@@ -749,6 +751,7 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     assert bundle.model_name == "HOME_FREQ"
     assert bundle.model_version == "v1"
     assert bundle.export_id == "export-1"
+    assert bundle.model_frame_sha256 == "a" * 64
     first_paths = {
         "workbook": Path(result.completed_build.rating_workbook_path),
         "receipt": Path(result.completed_build.publication_receipt_path),
@@ -768,8 +771,10 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     assert captured["export_options"]["offset_name"] == "Exposure"
     assert captured["export_options"]["offset_kind"] == "auto"
     assert result.completed_build.manifest_id == "manifest-1"
+    assert result.completed_build.model_frame_sha256 == "a" * 64
     assert result.completed_build.split_set_id == "manifest-1-split"
     assert second_result.completed_build.manifest_id == "manifest-2"
+    assert second_result.completed_build.model_frame_sha256 == "b" * 64
     second_paths = {
         "workbook": Path(second_result.completed_build.rating_workbook_path),
         "receipt": Path(second_result.completed_build.publication_receipt_path),
