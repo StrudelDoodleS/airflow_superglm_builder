@@ -200,13 +200,20 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "split_link.dataset_role = 'training'" in statements[0][0]
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
+    assert "manifest.model_frame_sha256" in statements[0][0]
     assert "rp.package_version = :package_version" in statements[0][0]
     assert statements[0][1]["package_version"] == 7
 
 
-def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("frame_digest", [None, "c" * 64])
+def test_open_resolves_one_successful_run_and_verifies_bundle(
+    tmp_path,
+    monkeypatch,
+    frame_digest,
+):
     api = _api()
-    metadata = save_candidate_bundle(_bundle(), tmp_path / "candidate.joblib")
+    bundle = replace(_bundle(), model_frame_sha256=frame_digest)
+    metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
     row = {
         "model_name": "HOME_FREQ",
         "model_version": "20260603",
@@ -225,6 +232,7 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypa
         "model_source_sha256": "b" * 64,
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
+        "model_frame_sha256": frame_digest,
     }
     workbench = api.Workbench(
         engine=object(),
@@ -243,6 +251,58 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(tmp_path, monkeypa
     assert candidate.rate_package_id == 107
     assert candidate.model_run_id == 907
     assert candidate.bundle.manifest_id == "manifest-1"
+
+
+@pytest.mark.parametrize(
+    ("bundle_digest", "sql_digest"),
+    [
+        ("c" * 64, "d" * 64),
+        (None, "d" * 64),
+        ("c" * 64, None),
+    ],
+)
+def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
+    tmp_path,
+    monkeypatch,
+    bundle_digest,
+    sql_digest,
+):
+    api = _api()
+    bundle = replace(_bundle(), model_frame_sha256=bundle_digest)
+    metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
+    row = {
+        "model_name": "HOME_FREQ",
+        "model_version": "20260603",
+        "export_id": "export-1",
+        "package_version": 7,
+        "rate_package_id": 107,
+        "parent_rate_package_id": None,
+        "model_run_id": 907,
+        "run_status": "SUCCESS",
+        "candidate_artifact_path": metadata.path,
+        "candidate_artifact_sha256": metadata.sha256,
+        "candidate_artifact_format": metadata.format,
+        "candidate_artifact_size_bytes": metadata.size_bytes,
+        "candidate_python_version": metadata.python_version,
+        "candidate_superglm_version": metadata.superglm_version,
+        "model_source_sha256": "b" * 64,
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "model_frame_sha256": sql_digest,
+    }
+    workbench = api.Workbench(
+        engine=object(),
+        settings=_settings(tmp_path),
+        model_config=MODEL_CONFIG,
+    )
+    monkeypatch.setattr(
+        workbench,
+        "_candidate_rows",
+        lambda model_name, deployment_slot, *, package_version=None: [row],
+    )
+
+    with pytest.raises(api.CandidateLineageError, match="model_frame_sha256"):
+        workbench.open("HOME_FREQ", package_version=7)
 
 
 @pytest.mark.parametrize("field_name", ["model_name", "model_version", "export_id"])
