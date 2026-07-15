@@ -4,8 +4,12 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from scripts.scaffold_pricing_model import ScaffoldOptions, scaffold_pricing_model
+
+
+TEMPLATE_PATH = Path("scripts/templates/pricing_model.ipynb")
 
 
 def _code_cells(path):
@@ -20,6 +24,50 @@ def _code_cells(path):
         assert cell.get("execution_count") is None
         assert cell.get("outputs") == []
     return cells
+
+
+def test_scaffold_template_is_checked_in_as_valid_notebook_json():
+    assert TEMPLATE_PATH.is_file()
+
+    notebook = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+
+    assert notebook["nbformat"] == 4
+    assert notebook["cells"]
+
+
+def test_scaffold_renders_user_text_without_breaking_json_or_python(tmp_path):
+    root = tmp_path / 'repo "with quotes"'
+    model_label = 'Quoted "model"\nwith a second line'
+    target_name = 'target"]; raise RuntimeError("not data") #'
+    model_type = 'custom "model"\nkind'
+    deployment_slot = 'UAT"]; raise RuntimeError("not a slot") #'
+
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_name="SAFE_MODEL",
+            model_label=model_label,
+            target_name=target_name,
+            model_type=model_type,
+            deployment_slot=deployment_slot,
+            root=root,
+        )
+    )
+
+    notebook_path = root / "pricing_models" / "safe_model" / "pricing_model.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    source = "\n".join(_code_cells(notebook_path))
+    markdown = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "markdown"
+    )
+
+    assert f"# {model_label}" in markdown
+    assert f"label={json.dumps(model_label)}" in source
+    assert f"target={json.dumps(target_name)}" in source
+    assert f"model_type={json.dumps(model_type)}" in source
+    assert f"deployment_slot={json.dumps(deployment_slot)}" in source
+    assert str(root) not in source
 
 
 def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
