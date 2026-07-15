@@ -414,15 +414,15 @@ def test_build_candidate_derives_simple_spec_inputs(
         lambda engine, *, model_name, export_id: "v7",
     )
 
-    standard_result = SimpleNamespace(
-        completed_build=_approved_build(tmp_path),
+    completed_build = _approved_build(
+        tmp_path,
         metrics={"cv_mean_deviance": 1.25},
     )
 
     def run_build(engine, **kwargs):
         captured["engine"] = engine
         captured.update(kwargs)
-        return standard_result
+        return completed_build
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
@@ -434,7 +434,9 @@ def test_build_candidate_derives_simple_spec_inputs(
         created_by="analyst@example.test",
     )
 
-    assert candidate.standard_build is standard_result
+    assert candidate.completed_build is completed_build
+    assert candidate.metrics == {"cv_mean_deviance": 1.25}
+    assert candidate.metrics is not candidate.completed_build.metrics
     inputs = captured["inputs"]
     assert list(inputs.X.columns) == ["age", "region"]
     assert inputs.y.name == "claim_count"
@@ -452,6 +454,12 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert manifest_spec.exposure_column == exposure_column
     assert manifest_spec.data_as_of_column == "snapshot_date"
     assert captured["effective_from"] is None
+    assert captured["model_config"] is model.config
+    assert "model_name" not in captured
+    assert "model_type" not in captured
+    assert "target_name" not in captured
+    assert "deployment_slot" not in captured
+    assert "validation_split" not in captured
     assert captured["scoring"] == ("deviance",)
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
@@ -462,20 +470,94 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert "offset_export_options" not in captured
 
 
+def test_build_candidate_aligns_composite_primary_key_inputs(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+    from pricing_pipeline.modeling.standard_superglm import _validate_canonical_row_ids
+
+    context = _context(api, tmp_path)
+    model = _registered_spec_model(
+        api,
+        tmp_path,
+        pk_columns=("policy_id", "risk_id"),
+        sample_weight_column="credibility",
+        data_as_of_column="snapshot_date",
+    )
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 10, 20, 20],
+            "risk_id": [1, 2, 1, 2],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "exposure": [1.0, 0.5, 1.5, 0.75],
+            "credibility": [0.8, 0.9, 1.0, 0.7],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+            "snapshot_date": ["2026-06-30"] * 4,
+        },
+        index=[8, 3, 5, 1],
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        api,
+        "validation_split_indices",
+        lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
+    )
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda engine, *, model_name, export_id: "v7",
+    )
+
+    def run_build(engine, **kwargs):
+        del engine
+        captured.update(kwargs)
+        _validate_canonical_row_ids(
+            kwargs["frame"],
+            kwargs["inputs"],
+            pk_columns=("policy_id", "risk_id"),
+        )
+        return _approved_build(tmp_path)
+
+    monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
+
+    api.build_candidate(
+        context,
+        model=model,
+        frame=frame,
+        model_factory=lambda: object(),
+    )
+
+    assert captured["frame"] is frame
+    assert captured["inputs"].row_ids.equals(frame[["policy_id", "risk_id"]])
+    expected_identity = pd.MultiIndex.from_frame(
+        frame[["policy_id", "risk_id"]],
+        names=["policy_id", "risk_id"],
+    )
+    for values in (
+        captured["inputs"].X,
+        captured["inputs"].y,
+        captured["inputs"].sample_weight,
+        captured["inputs"].offset,
+        captured["inputs"].export_weight,
+    ):
+        assert values.index.identical(expected_identity)
+
+
 def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
     model = _registered_model(api, tmp_path)
-    standard_build = SimpleNamespace(
-        completed_build=_approved_build(
-            tmp_path,
-            manifest_id="manifest-9",
-            split_set_id="split-9",
-            export_id="claim-frequency__run-9",
-        )
+    completed_build = _approved_build(
+        tmp_path,
+        manifest_id="manifest-9",
+        split_set_id="split-9",
+        export_id="claim-frequency__run-9",
     )
-    candidate = api.BuiltCandidate(model=model, standard_build=standard_build)
+    candidate = api.BuiltCandidate(model=model, completed_build=completed_build)
     expected = CompletedModelPublishResult(
         model_id=17,
         model_name="CLAIM_FREQUENCY",
@@ -509,7 +591,7 @@ def test_publish_candidate_returns_generated_sql_ids(monkeypatch, tmp_path):
         "engine": context.engine,
         "settings": context.settings,
         "model_config": model.config,
-        "completed_build": standard_build.completed_build,
+        "completed_build": completed_build,
     }
 
 

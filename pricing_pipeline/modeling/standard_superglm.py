@@ -19,7 +19,7 @@ from pricing_pipeline.data.manifest import (
     create_model_frame_manifest_with_split,
 )
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
-from pricing_pipeline.models.config import ValidationSplitConfig
+from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
@@ -64,14 +64,6 @@ class CVEvidence:
     fold_metrics: tuple[FoldMetric, ...]
 
 
-@dataclass(frozen=True)
-class StandardBuildResult:
-    completed_build: ApprovedModelBuild
-    fold_indices: tuple[tuple[np.ndarray, np.ndarray], ...]
-    cv_report: dict[str, Any]
-    metrics: dict[str, float]
-
-
 def run_standard_superglm_build(
     engine,
     *,
@@ -83,21 +75,17 @@ def run_standard_superglm_build(
     scoring: str | Callable | Sequence[str | Callable],
     output_dir: str | Path,
     model_id: int,
-    model_name: str,
+    model_config: ModelBuildConfig,
     model_version: str,
-    model_type: str,
-    target_name: str,
-    deployment_slot: str,
     export_id: str,
     effective_from: str | None,
     manifest_spec: ModelFrameManifestSpec,
-    validation_split: ValidationSplitConfig,
     split_artifact_root: str | Path,
     model_source_root: str | Path,
     created_by: str,
     offset_contract: OffsetExportContract | None = None,
     cross_validate_fn: Callable[..., Any] = cross_validate,
-) -> StandardBuildResult:
+) -> ApprovedModelBuild:
     _validate_input_lengths(inputs)
     _validate_canonical_row_ids(
         frame,
@@ -153,7 +141,7 @@ def run_standard_superglm_build(
         engine,
         frame=frame,
         spec=manifest_spec,
-        validation_split=validation_split,
+        validation_split=model_config.validation_split,
         validation_split_artifact_root=Path(split_artifact_root),
         split_indices=list(evidence.fold_indices),
         created_by=created_by,
@@ -190,7 +178,7 @@ def run_standard_superglm_build(
 
         cv_report = dict(evidence.report)
         cv_report["full_fit_telemetry"] = telemetry
-        cv_report["model_name"] = model_name
+        cv_report["model_name"] = model_config.model_name
         cv_report["fit_mode"] = fit_mode
         cv_report["scoring"] = _scoring_labels(scoring)
         bundle = CandidateBundle(
@@ -203,7 +191,7 @@ def run_standard_superglm_build(
             offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
             export_weight=None if export_weight is None else np.asarray(export_weight).copy(),
             cv_report=cv_report,
-            model_name=model_name,
+            model_name=model_config.model_name,
             model_version=model_version,
             export_id=export_id,
             manifest_id=manifest.manifest_id,
@@ -230,13 +218,13 @@ def run_standard_superglm_build(
         )
         completed_build = ApprovedModelBuild(
             model_id=model_id,
-            model_name=model_name,
+            model_name=model_config.model_name,
             rating_workbook_path=str(workbook_path),
             rating_workbook_sha256=workbook_sha256,
             model_version=model_version,
-            model_type=model_type,
-            target_name=target_name,
-            deployment_slot=deployment_slot,
+            model_type=model_config.model_type,
+            target_name=model_config.target_name,
+            deployment_slot=model_config.deployment_slot,
             effective_from=effective_from,
             export_id=export_id,
             created_by=created_by,
@@ -256,12 +244,7 @@ def run_standard_superglm_build(
             metric_scopes={name: "cv" for name in evidence.metrics},
             fold_metrics=fold_metric_records,
         )
-        return StandardBuildResult(
-            completed_build=completed_build,
-            fold_indices=evidence.fold_indices,
-            cv_report=cv_report,
-            metrics=evidence.metrics,
-        )
+        return completed_build
     except BaseException:
         # The manifest/split was committed first and remains durable frame evidence.
         # Only the incomplete, retry-local artifact directory is disposable here.

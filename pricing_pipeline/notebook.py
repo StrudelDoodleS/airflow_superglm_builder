@@ -27,11 +27,11 @@ from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
-    StandardBuildResult,
     canonical_row_identity_index,
     run_standard_superglm_build,
 )
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.orchestration.publish_completed_build import (
     CompletedModelPublishResult,
     publish_completed_model_build,
@@ -206,11 +206,11 @@ class RegisteredModel:
 @dataclass(frozen=True)
 class BuiltCandidate:
     model: RegisteredModel
-    standard_build: StandardBuildResult
+    completed_build: ApprovedModelBuild
 
     @property
     def metrics(self) -> dict[str, float]:
-        return dict(self.standard_build.metrics)
+        return dict(self.completed_build.metrics)
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -397,27 +397,6 @@ def _resolve_data_as_of(
     return resolved
 
 
-def _with_row_identity(
-    value: pd.Series | pd.DataFrame | None,
-    *,
-    field_name: str,
-    identity_index: pd.Index,
-    default_name: str | None = None,
-) -> pd.Series | pd.DataFrame | None:
-    if value is None:
-        return None
-    aligned = value.copy()
-    if len(aligned) != len(identity_index):
-        raise ValueError(
-            f"{field_name} length {len(aligned)} does not match model frame "
-            f"length {len(identity_index)}"
-        )
-    aligned.index = identity_index
-    if isinstance(aligned, pd.Series) and aligned.name is None and default_name:
-        aligned.name = default_name
-    return aligned
-
-
 def build_candidate(
     pricing: NotebookContext,
     *,
@@ -448,18 +427,22 @@ def build_candidate(
         explicit=data_as_of,
         column=spec.data_as_of_column,
     )
-    X = frame.loc[:, list(spec.features)].copy()
-    y = frame[spec.target].astype(float).copy()
+    row_ids = frame.loc[:, list(spec.pk_columns)].copy()
+    identity_index = canonical_row_identity_index(row_ids)
+    aligned_frame = frame.copy()
+    aligned_frame.index = identity_index
+    X = aligned_frame.loc[:, list(spec.features)]
+    y = aligned_frame[spec.target].astype(float)
     sample_weight = None
     if spec.sample_weight_column is not None:
         column = spec.sample_weight_column
-        sample_weight = frame[column].astype(float).copy()
+        sample_weight = aligned_frame[column].astype(float)
     offset = None
     export_weight = None
     offset_contract = None
     if spec.exposure_column is not None:
         column = spec.exposure_column
-        exposure = frame[column].astype(float).copy()
+        exposure = aligned_frame[column].astype(float)
         values = exposure.to_numpy()
         if not np.isfinite(values).all() or (values <= 0).any():
             raise ValueError(f"exposure column {column!r} must contain finite positive values")
@@ -490,45 +473,17 @@ def build_candidate(
         )
     validation_split = spec.validation
     resolved_split_indices = validation_split_indices(frame, validation_split)
-    row_ids = frame.loc[:, list(spec.pk_columns)].copy()
-    identity_index = canonical_row_identity_index(row_ids)
-    aligned_X = _with_row_identity(
-        X,
-        field_name="X",
-        identity_index=identity_index,
-    )
-    if not isinstance(aligned_X, pd.DataFrame):
-        raise TypeError("X must be a pandas DataFrame")
     inputs = ModelInputs(
-        X=aligned_X,
-        y=_with_row_identity(
-            y,
-            field_name="y",
-            identity_index=identity_index,
-            default_name=model.config.target_name,
-        ),
-        sample_weight=_with_row_identity(
-            sample_weight,
-            field_name="sample_weight",
-            identity_index=identity_index,
-            default_name=spec.sample_weight_column,
-        ),
+        X=X,
+        y=y,
+        sample_weight=sample_weight,
         sample_weight_name=spec.sample_weight_column,
-        offset=_with_row_identity(
-            offset,
-            field_name="offset",
-            identity_index=identity_index,
-        ),
-        export_weight=_with_row_identity(
-            export_weight,
-            field_name="export_weight",
-            identity_index=identity_index,
-            default_name=spec.exposure_column,
-        ),
+        offset=offset,
+        export_weight=export_weight,
         export_weight_name=spec.exposure_column,
         row_ids=row_ids,
     )
-    standard_build = run_standard_superglm_build(
+    completed_build = run_standard_superglm_build(
         pricing.engine,
         frame=frame,
         inputs=inputs,
@@ -538,11 +493,8 @@ def build_candidate(
         scoring=spec.scoring,
         output_dir=(Path(pricing.settings.workbench_artifact_root) / model.name / resolved_run_key),
         model_id=model.model_id,
-        model_name=model.name,
+        model_config=model.config,
         model_version=model_version,
-        model_type=model.config.model_type,
-        target_name=model.config.target_name,
-        deployment_slot=model.config.deployment_slot,
         export_id=export_id,
         effective_from=None,
         manifest_spec=ModelFrameManifestSpec(
@@ -556,13 +508,12 @@ def build_candidate(
             exposure_column=spec.exposure_column,
             data_as_of_column=spec.data_as_of_column,
         ),
-        validation_split=validation_split,
         split_artifact_root=pricing.settings.validation_split_artifact_root,
         model_source_root=model.source_root,
         created_by=_created_by(created_by),
         offset_contract=offset_contract,
     )
-    return BuiltCandidate(model=model, standard_build=standard_build)
+    return BuiltCandidate(model=model, completed_build=completed_build)
 
 
 def publish_candidate(
@@ -577,14 +528,14 @@ def publish_candidate(
             settings=pricing.settings,
             model_id=candidate.model.model_id,
             model_config=candidate.model.config,
-            completed_build=candidate.standard_build.completed_build,
-            created_by=candidate.standard_build.completed_build.created_by,
+            completed_build=candidate.completed_build,
+            created_by=candidate.completed_build.created_by,
         )
     return publish_completed_model_build(
         pricing.engine,
         settings=pricing.settings,
         model_config=candidate.model.config,
-        completed_build=candidate.standard_build.completed_build,
+        completed_build=candidate.completed_build,
     )
 
 

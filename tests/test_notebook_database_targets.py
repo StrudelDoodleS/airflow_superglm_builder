@@ -537,7 +537,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     )
     candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(completed_build=completed_build, metrics={}),
+        completed_build=completed_build,
     )
 
     first = api.publish_candidate(
@@ -587,10 +587,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     )
     changed_run_candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(
-            completed_build=changed_run_evidence,
-            metrics={},
-        ),
+        completed_build=changed_run_evidence,
     )
     with pytest.raises(ValueError, match="incompatible model-run evidence"):
         api.publish_candidate(
@@ -606,10 +603,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     )
     conflicting_candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(
-            completed_build=conflicting_build,
-            metrics={},
-        ),
+        completed_build=conflicting_build,
     )
     with pytest.raises(ValueError, match="incompatible publication evidence"):
         api.publish_candidate(
@@ -675,14 +669,11 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     )
     mismatch_candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(
-            completed_build=completed_build.model_copy(
-                update={
-                    "export_id": mismatch_export_id,
-                    "model_version": mismatch_version,
-                }
-            ),
-            metrics={},
+        completed_build=completed_build.model_copy(
+            update={
+                "export_id": mismatch_export_id,
+                "model_version": mismatch_version,
+            }
         ),
     )
     with pytest.raises(ValueError, match="incompatible staged evidence"):
@@ -693,14 +684,11 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
 
     unreserved_candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(
-            completed_build=completed_build.model_copy(
-                update={
-                    "export_id": "claim-frequency__unreserved",
-                    "model_version": "v3",
-                }
-            ),
-            metrics={},
+        completed_build=completed_build.model_copy(
+            update={
+                "export_id": "claim-frequency__unreserved",
+                "model_version": "v3",
+            }
         ),
     )
     with pytest.raises(ValueError, match="has no reserved model version"):
@@ -789,7 +777,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     )
     candidate = api.BuiltCandidate(
         model=model,
-        standard_build=SimpleNamespace(completed_build=completed_build, metrics={}),
+        completed_build=completed_build,
     )
 
     with pytest.raises(

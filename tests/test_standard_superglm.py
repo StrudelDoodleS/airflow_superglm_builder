@@ -10,7 +10,8 @@ import pandas as pd
 import pytest
 
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
-from pricing_pipeline.models.config import ValidationSplitConfig
+from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.models.spec import ApprovedModelBuild
 
 
 class _FakeModel:
@@ -44,6 +45,23 @@ def _folds():
         (np.array([0, 1]), np.array([2])),
         (np.array([1, 2]), np.array([0])),
     ]
+
+
+def _model_config() -> ModelBuildConfig:
+    return ModelBuildConfig(
+        model_name="HOME_FREQ",
+        model_label="Home frequency",
+        target_name="target",
+        model_type="superglm_poisson",
+        deployment_slot="HOME_FREQ_CURRENT",
+        validation_split=ValidationSplitConfig(
+            method="custom",
+            n_splits=None,
+            random_state=None,
+            shuffle=False,
+            materialize=True,
+        ),
+    )
 
 
 def _cv_result(*, converged=(True, True), oof_predictions=None):
@@ -200,11 +218,8 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
-            model_name="HOME_FREQ",
+            model_config=_model_config(),
             model_version="v1",
-            model_type="superglm_poisson",
-            target_name="target",
-            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -213,13 +228,6 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
-            ),
-            validation_split=ValidationSplitConfig(
-                method="custom",
-                n_splits=None,
-                random_state=None,
-                shuffle=False,
-                materialize=True,
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -263,11 +271,8 @@ def test_standard_runner_rejects_model_source_drift_during_training(
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
-            model_name="HOME_FREQ",
+            model_config=_model_config(),
             model_version="v1",
-            model_type="superglm_poisson",
-            target_name="target",
-            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from=None,
             manifest_spec=ModelFrameManifestSpec(
@@ -276,13 +281,6 @@ def test_standard_runner_rejects_model_source_drift_during_training(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
-            ),
-            validation_split=ValidationSplitConfig(
-                method="custom",
-                n_splits=None,
-                random_state=None,
-                shuffle=False,
-                materialize=True,
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -362,11 +360,8 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
-            model_name="HOME_FREQ",
+            model_config=_model_config(),
             model_version="v1",
-            model_type="superglm_poisson",
-            target_name="target",
-            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -375,13 +370,6 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
-            ),
-            validation_split=ValidationSplitConfig(
-                method="custom",
-                n_splits=None,
-                random_state=None,
-                shuffle=False,
-                materialize=True,
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -424,11 +412,8 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
-            model_name="HOME_FREQ",
+            model_config=_model_config(),
             model_version="v1",
-            model_type="superglm_poisson",
-            target_name="target",
-            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -437,13 +422,6 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
-            ),
-            validation_split=ValidationSplitConfig(
-                method="custom",
-                n_splits=None,
-                random_state=None,
-                shuffle=False,
-                materialize=True,
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -590,11 +568,8 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             cross_validate_fn=lambda *args, **kwargs: _cv_result(),
             output_dir=tmp_path / "run",
             model_id=17,
-            model_name="HOME_FREQ",
+            model_config=_model_config(),
             model_version="v1",
-            model_type="superglm_poisson",
-            target_name="target",
-            deployment_slot="HOME_FREQ_CURRENT",
             export_id="export-1",
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
@@ -603,13 +578,6 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
-            ),
-            validation_split=ValidationSplitConfig(
-                method="custom",
-                n_splits=None,
-                random_state=None,
-                shuffle=False,
-                materialize=True,
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=source_root,
@@ -620,7 +588,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
     assert split_evidence.read_bytes() == b"durable split evidence"
 
 
-def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metadata(
+def test_standard_runner_uses_model_config_and_returns_approved_build(
     tmp_path,
     monkeypatch,
 ):
@@ -691,6 +659,21 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         OffsetExportContract,
     )
 
+    validation_split = ValidationSplitConfig(
+        method="custom",
+        n_splits=None,
+        random_state=None,
+        shuffle=False,
+        materialize=True,
+    )
+    model_config = ModelBuildConfig(
+        model_name="HOME_FREQ",
+        model_label="Home frequency",
+        target_name="target",
+        model_type="superglm_poisson",
+        deployment_slot="HOME_FREQ_CURRENT",
+        validation_split=validation_split,
+    )
     build_kwargs = {
         "frame": frame,
         "inputs": inputs,
@@ -701,11 +684,8 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
         "output_dir": tmp_path / "run",
         "model_id": 17,
-        "model_name": "HOME_FREQ",
+        "model_config": model_config,
         "model_version": "v1",
-        "model_type": "superglm_poisson",
-        "target_name": "target",
-        "deployment_slot": "HOME_FREQ_CURRENT",
         "export_id": "export-1",
         "effective_from": "2026-07-12",
         "manifest_spec": ModelFrameManifestSpec(
@@ -714,13 +694,6 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
             data_as_of_date="2026-06-30",
             pk_columns=("policy_id",),
             target_column="target",
-        ),
-        "validation_split": ValidationSplitConfig(
-            method="custom",
-            n_splits=None,
-            random_state=None,
-            shuffle=False,
-            materialize=True,
         ),
         "split_artifact_root": tmp_path / "splits",
         "model_source_root": source_root,
@@ -735,17 +708,16 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     }
     result = api.run_standard_superglm_build(object(), **build_kwargs)
 
-    from pricing_pipeline.orchestration.publish_completed_build import CompletedModelBuild
     from pricing_pipeline.workbench.artifacts import load_candidate_bundle
 
-    assert isinstance(result.completed_build, CompletedModelBuild)
+    assert isinstance(result, ApprovedModelBuild)
     bundle = load_candidate_bundle(
-        result.completed_build.candidate_artifact_path,
-        expected_sha256=result.completed_build.candidate_artifact_sha256,
-        expected_size_bytes=result.completed_build.candidate_artifact_size_bytes,
-        expected_format=result.completed_build.candidate_artifact_format,
-        expected_python_version=result.completed_build.candidate_python_version,
-        expected_superglm_version=result.completed_build.candidate_superglm_version,
+        result.candidate_artifact_path,
+        expected_sha256=result.candidate_artifact_sha256,
+        expected_size_bytes=result.candidate_artifact_size_bytes,
+        expected_format=result.candidate_artifact_format,
+        expected_python_version=result.candidate_python_version,
+        expected_superglm_version=result.candidate_superglm_version,
         allowed_root=tmp_path / "run",
     )
     assert bundle.model_name == "HOME_FREQ"
@@ -753,9 +725,9 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     assert bundle.export_id == "export-1"
     assert bundle.model_frame_sha256 == "a" * 64
     first_paths = {
-        "workbook": Path(result.completed_build.rating_workbook_path),
-        "receipt": Path(result.completed_build.publication_receipt_path),
-        "candidate": Path(result.completed_build.candidate_artifact_path),
+        "workbook": Path(result.rating_workbook_path),
+        "receipt": Path(result.publication_receipt_path),
+        "candidate": Path(result.candidate_artifact_path),
     }
     first_bytes = {name: path.read_bytes() for name, path in first_paths.items()}
     second_result = api.run_standard_superglm_build(object(), **build_kwargs)
@@ -764,21 +736,22 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
         [2],
         [0],
     ]
+    assert captured["manifest"]["validation_split"] == validation_split
     assert models[1].fit_X.equals(inputs.X)
     np.testing.assert_allclose(captured["export_weight"], exposure)
     np.testing.assert_allclose(captured["export_options"]["offset"], np.log(exposure))
     np.testing.assert_allclose(captured["export_options"]["offset_source"], exposure)
     assert captured["export_options"]["offset_name"] == "Exposure"
     assert captured["export_options"]["offset_kind"] == "auto"
-    assert result.completed_build.manifest_id == "manifest-1"
-    assert result.completed_build.model_frame_sha256 == "a" * 64
-    assert result.completed_build.split_set_id == "manifest-1-split"
-    assert second_result.completed_build.manifest_id == "manifest-2"
-    assert second_result.completed_build.model_frame_sha256 == "b" * 64
+    assert result.manifest_id == "manifest-1"
+    assert result.model_frame_sha256 == "a" * 64
+    assert result.split_set_id == "manifest-1-split"
+    assert second_result.manifest_id == "manifest-2"
+    assert second_result.model_frame_sha256 == "b" * 64
     second_paths = {
-        "workbook": Path(second_result.completed_build.rating_workbook_path),
-        "receipt": Path(second_result.completed_build.publication_receipt_path),
-        "candidate": Path(second_result.completed_build.candidate_artifact_path),
+        "workbook": Path(second_result.rating_workbook_path),
+        "receipt": Path(second_result.publication_receipt_path),
+        "candidate": Path(second_result.candidate_artifact_path),
     }
     assert {path.parent for path in first_paths.values()} == {
         (tmp_path / "run" / "manifest-1").resolve()
@@ -788,10 +761,10 @@ def test_standard_runner_uses_cv_folds_for_manifest_and_returns_candidate_metada
     }
     assert set(first_paths.values()).isdisjoint(second_paths.values())
     assert {name: path.read_bytes() for name, path in first_paths.items()} == first_bytes
-    assert Path(result.completed_build.candidate_artifact_path).exists()
-    assert result.completed_build.candidate_artifact_sha256
-    assert result.completed_build.model_source_sha256
-    assert result.completed_build.rating_workbook_sha256 == api.hash_file_sha256(
+    assert Path(result.candidate_artifact_path).exists()
+    assert result.candidate_artifact_sha256
+    assert result.model_source_sha256
+    assert result.rating_workbook_sha256 == api.hash_file_sha256(
         first_paths["workbook"]
     )
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
