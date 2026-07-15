@@ -262,7 +262,7 @@ def test_connect_rejects_unknown_explicit_mode():
                 context,
                 model=object(),
                 frame=object(),
-                model_factory=lambda: object(),
+                superglm_model=object(),
             ),
         ),
         (

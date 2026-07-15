@@ -192,14 +192,17 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
         "source_root",
         "created_by",
     )
-    assert tuple(signature(api.build_candidate).parameters) == (
+    build_parameters = signature(api.build_candidate).parameters
+    assert tuple(build_parameters) == (
         "pricing",
         "model",
         "frame",
-        "model_factory",
+        "superglm_model",
         "data_as_of",
         "created_by",
     )
+    assert "superglm_model" in build_parameters
+    assert "model_factory" not in build_parameters
     assert tuple(signature(api.publish_edits).parameters) == (
         "pricing",
         "candidate",
@@ -426,11 +429,12 @@ def test_build_candidate_derives_simple_spec_inputs(
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
+    superglm_model = object()
     candidate = api.build_candidate(
         context,
         model=model,
         frame=frame,
-        model_factory=lambda: object(),
+        superglm_model=superglm_model,
         created_by="analyst@example.test",
     )
 
@@ -455,6 +459,7 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert manifest_spec.data_as_of_column == "snapshot_date"
     assert captured["effective_from"] is None
     assert captured["model_config"] is model.config
+    assert captured["superglm_model"] is superglm_model
     assert "model_name" not in captured
     assert "model_type" not in captured
     assert "target_name" not in captured
@@ -523,14 +528,16 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
+    superglm_model = object()
     api.build_candidate(
         context,
         model=model,
         frame=frame,
-        model_factory=lambda: object(),
+        superglm_model=superglm_model,
     )
 
     assert captured["frame"] is frame
+    assert captured["superglm_model"] is superglm_model
     assert captured["inputs"].row_ids.equals(frame[["policy_id", "risk_id"]])
     expected_identity = pd.MultiIndex.from_frame(
         frame[["policy_id", "risk_id"]],

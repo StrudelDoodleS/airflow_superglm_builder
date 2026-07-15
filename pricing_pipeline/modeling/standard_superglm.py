@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 from collections.abc import Callable, Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ def run_standard_superglm_build(
     *,
     frame: pd.DataFrame,
     inputs: ModelInputs,
-    model_factory: Callable[[], Any],
+    superglm_model: Any,
     split_indices: Iterable[tuple[Any, Any]],
     fit_mode: str,
     scoring: str | Callable | Sequence[str | Callable],
@@ -92,17 +93,24 @@ def run_standard_superglm_build(
         inputs,
         pk_columns=manifest_spec.pk_columns,
     )
+    try:
+        cv_model = deepcopy(superglm_model)
+        final_model = deepcopy(superglm_model)
+    except Exception as exc:
+        raise StandardSuperGLMError(
+            "superglm_model must be an unfitted, copyable SuperGLM model"
+        ) from exc
     source_sha256 = hash_model_source(model_source_root)
     folds = list(split_indices)
     evidence = run_cross_validation(
-        model_factory(),
+        cv_model,
         inputs,
         split_indices=folds,
         fit_mode=fit_mode,
         scoring=scoring,
         cross_validate_fn=cross_validate_fn,
     )
-    fitted, telemetry = fit_full_model(model_factory(), inputs, fit_mode=fit_mode)
+    fitted, telemetry = fit_full_model(final_model, inputs, fit_mode=fit_mode)
     resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
     if resolved_offset_contract.handling == "EXPORTED_FACTOR" and inputs.export_weight is None:
         raise StandardSuperGLMError(

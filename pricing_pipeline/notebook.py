@@ -7,7 +7,7 @@ identifiers, audit records, artifact locations, and publication plumbing.
 from __future__ import annotations
 
 import getpass
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -402,7 +402,7 @@ def build_candidate(
     *,
     model: RegisteredModel,
     frame: pd.DataFrame,
-    model_factory: Callable[[], Any],
+    superglm_model: Any,
     data_as_of: date | datetime | str | None = None,
     created_by: str | None = None,
 ) -> BuiltCandidate:
@@ -487,7 +487,7 @@ def build_candidate(
         pricing.engine,
         frame=frame,
         inputs=inputs,
-        model_factory=model_factory,
+        superglm_model=superglm_model,
         split_indices=resolved_split_indices,
         fit_mode=spec.fit_mode,
         scoring=spec.scoring,

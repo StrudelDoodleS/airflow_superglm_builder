@@ -212,7 +212,7 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
                 X=frame[["age"]],
                 y=frame["target"].to_numpy(),
             ),
-            model_factory=_FakeModel,
+            superglm_model=_FakeModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -236,6 +236,69 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
                 "CV must not run before canonical-row validation"
             ),
         )
+
+
+def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+
+    class UncopyableModel:
+        def __deepcopy__(self, memo):
+            del memo
+            raise RuntimeError("copy blocked")
+
+    def must_not_run(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("training and persistence must not run after model copy failure")
+
+    monkeypatch.setattr(api, "run_cross_validation", must_not_run)
+    monkeypatch.setattr(api, "fit_full_model", must_not_run)
+    monkeypatch.setattr(api, "create_model_frame_manifest_with_split", must_not_run)
+    monkeypatch.setattr(api, "export_rating_tables", must_not_run)
+    monkeypatch.setattr(api, "save_candidate_bundle", must_not_run)
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="superglm_model must be an unfitted, copyable SuperGLM model",
+    ) as exc_info:
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=_identity_bound_inputs(api, frame),
+            superglm_model=UncopyableModel(),
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_id=17,
+            model_config=_model_config(),
+            model_version="v1",
+            export_id="export-1",
+            effective_from=None,
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+            ),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+        )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert not (tmp_path / "run").exists()
+    assert not (tmp_path / "splits").exists()
 
 
 def test_standard_runner_rejects_model_source_drift_during_training(
@@ -265,7 +328,7 @@ def test_standard_runner_rejects_model_source_drift_during_training(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
-            model_factory=_FakeModel,
+            superglm_model=_FakeModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -354,7 +417,7 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
                 y=np.zeros(len(X)),
                 row_ids=row_ids,
             ),
-            model_factory=_FakeModel,
+            superglm_model=_FakeModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -406,7 +469,7 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
-            model_factory=_FakeModel,
+            superglm_model=_FakeModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -561,7 +624,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
-            model_factory=_FakeModel,
+            superglm_model=_FakeModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -607,12 +670,20 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     (source_root / "model.toml").write_text('model_name = "HOME_FREQ"\n', encoding="utf-8")
     (source_root / "sql" / "source.sql").write_text("SELECT 1;\n", encoding="utf-8")
     captured = {}
-    models = []
+    superglm_model = _FakeModel()
+    cv_models = []
+    final_models = []
 
-    def model_factory():
-        model = _FakeModel()
-        models.append(model)
-        return model
+    def fake_cross_validate(model, *args, **kwargs):
+        del args, kwargs
+        cv_models.append(model)
+        return _cv_result()
+
+    real_fit_full_model = api.fit_full_model
+
+    def capture_fit_full_model(model, inputs, *, fit_mode):
+        final_models.append(model)
+        return real_fit_full_model(model, inputs, fit_mode=fit_mode)
 
     def fake_export(model, X, y, exposure, output_path, **kwargs):
         captured["export_weight"] = exposure
@@ -641,6 +712,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     monkeypatch.setattr(api, "create_model_frame_manifest_with_split", fake_manifest)
     monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
     monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
+    monkeypatch.setattr(api, "fit_full_model", capture_fit_full_model)
 
     base_inputs = _identity_bound_inputs(api, frame)
     exposure = pd.Series(
@@ -677,11 +749,11 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     build_kwargs = {
         "frame": frame,
         "inputs": inputs,
-        "model_factory": model_factory,
+        "superglm_model": superglm_model,
         "split_indices": _folds(),
         "fit_mode": "fit_reml",
         "scoring": ("deviance",),
-        "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
+        "cross_validate_fn": fake_cross_validate,
         "output_dir": tmp_path / "run",
         "model_id": 17,
         "model_config": model_config,
@@ -737,7 +809,17 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         [0],
     ]
     assert captured["manifest"]["validation_split"] == validation_split
-    assert models[1].fit_X.equals(inputs.X)
+    assert len(cv_models) == 2
+    assert len(final_models) == 2
+    assert all(model is not superglm_model for model in cv_models)
+    assert all(model is not superglm_model for model in final_models)
+    assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))
+    assert cv_models[0] is not cv_models[1]
+    assert final_models[0] is not final_models[1]
+    assert bundle.fitted_model is not superglm_model
+    assert final_models[0].fit_X.equals(inputs.X)
+    assert superglm_model.fit_X is None
+    assert superglm_model.fit_y is None
     np.testing.assert_allclose(captured["export_weight"], exposure)
     np.testing.assert_allclose(captured["export_options"]["offset"], np.log(exposure))
     np.testing.assert_allclose(captured["export_options"]["offset_source"], exposure)
