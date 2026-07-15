@@ -692,7 +692,7 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     session = object()
     candidate = SimpleNamespace(
         model_name=model.name,
-        workbench=SimpleNamespace(model_config=model.config),
+        workbench=SimpleNamespace(engine=context.engine, model_config=model.config),
         editor_session=session,
         editor_widget=object(),
     )
@@ -746,6 +746,37 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     }
 
 
+def test_publish_edits_rejects_candidate_opened_with_different_context(monkeypatch, tmp_path):
+    from pricing_pipeline import notebook as api
+
+    reviewed_context = _context(api, tmp_path)
+    publishing_context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    candidate = SimpleNamespace(
+        model_name=model.name,
+        workbench=SimpleNamespace(
+            engine=reviewed_context.engine,
+            model_config=model.config,
+        ),
+        editor_session=object(),
+        editor_widget=object(),
+    )
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("cross-context publish reached save or publish")
+
+    monkeypatch.setattr(api, "save_editor_submission", unexpected_call)
+    monkeypatch.setattr(api, "publish_editor_submission", unexpected_call)
+
+    with pytest.raises(ValueError, match="different notebook context"):
+        api.publish_edits(
+            publishing_context,
+            candidate=candidate,
+            reason="Sparse age-band market adjustment",
+            created_by="analyst@example.test",
+        )
+
+
 def test_publish_edits_requires_an_open_editor(tmp_path):
     from pricing_pipeline import notebook as api
 
@@ -776,7 +807,7 @@ def test_deploy_package_uses_the_champion_snapshot_seen_during_review(monkeypatc
     context = _context(api, tmp_path)
     model = _registered_model(api, tmp_path)
     package = api.Candidate(
-        workbench=SimpleNamespace(model_config=model.config),
+        workbench=SimpleNamespace(engine=context.engine, model_config=model.config),
         model_name=model.name,
         package_version=5,
         rate_package_id=72,
@@ -818,6 +849,41 @@ def test_deploy_package_uses_the_champion_snapshot_seen_during_review(monkeypatc
         "deployed_by": "pricing.manager@example.test",
         "model_id": 17,
     }
+
+
+def test_deploy_package_rejects_package_opened_with_different_context(monkeypatch, tmp_path):
+    from pricing_pipeline import notebook as api
+
+    reviewed_context = _context(api, tmp_path)
+    deployment_context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    package = api.Candidate(
+        workbench=SimpleNamespace(
+            engine=reviewed_context.engine,
+            model_config=model.config,
+        ),
+        model_name=model.name,
+        package_version=5,
+        rate_package_id=72,
+        parent_rate_package_id=None,
+        model_run_id=902,
+        bundle=object(),
+        technical={"model_id": model.model_id, "current_rate_package_id": 61},
+    )
+
+    monkeypatch.setattr(
+        api,
+        "deploy_rate_package",
+        lambda *args, **kwargs: pytest.fail("cross-context deployment reached deploy_rate_package"),
+    )
+
+    with pytest.raises(ValueError, match="different notebook context"):
+        api.deploy_package(
+            deployment_context,
+            package=package,
+            reason="Approved at August pricing meeting",
+            deployed_by="pricing.manager@example.test",
+        )
 
 
 def test_deploy_package_rejects_a_package_that_was_not_opened_for_review(tmp_path):

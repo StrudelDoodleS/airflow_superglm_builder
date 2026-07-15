@@ -344,6 +344,13 @@ def test_completed_publication_requires_prebuilt_manifest_evidence():
             False,
             "model_frame_sha256",
         ),
+        (
+            "pre-v033-null-model-frame",
+            {"model_frame_sha256": None},
+            {},
+            False,
+            "model_frame_sha256",
+        ),
         ("missing-split", {}, {}, True, "split_set_id.*not found"),
         (
             "split-owner",

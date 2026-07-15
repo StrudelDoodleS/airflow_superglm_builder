@@ -35,6 +35,30 @@ def test_scaffold_template_is_checked_in_as_valid_notebook_json():
     assert notebook["cells"]
 
 
+def test_scaffold_separates_editor_open_from_publishing_the_retained_candidate(tmp_path):
+    scaffold_pricing_model(
+        ScaffoldOptions(
+            model_name="MY_MODEL",
+            target_name="target",
+            root=tmp_path,
+        )
+    )
+
+    cells = _code_cells(tmp_path / "pricing_models" / "my_model" / "pricing_model.ipynb")
+    editor_index = next(index for index, cell in enumerate(cells) if ".editor()" in cell)
+    publish_index = next(index for index, cell in enumerate(cells) if "publish_edits(" in cell)
+    editor_cell = cells[editor_index]
+    publish_cell = cells[publish_index]
+    before_publish = publish_cell.split("publish_edits(", 1)[0]
+
+    assert editor_index < publish_index
+    assert "publish_edits(" not in editor_cell
+    assert "reviewed = open_candidate(" in editor_cell
+    assert "reviewed = None" not in before_publish
+    assert "open_candidate(" not in before_publish
+    assert "candidate=reviewed" in publish_cell
+
+
 def test_scaffold_renders_user_text_without_breaking_json_or_python(tmp_path):
     root = tmp_path / 'repo "with quotes"'
     model_label = 'Quoted "model"\nwith a second line'

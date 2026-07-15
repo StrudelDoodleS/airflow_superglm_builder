@@ -582,6 +582,8 @@ def publish_edits(
         )
     if candidate.editor_session is None or candidate.editor_widget is None:
         raise RuntimeError("Open the candidate editor before publishing edits")
+    if candidate.workbench.engine is not pricing.engine:
+        raise ValueError("candidate was opened with a different notebook context")
     identity = _created_by(created_by)
     submission = save_editor_submission(
         candidate,
@@ -620,6 +622,8 @@ def deploy_package(
             "package must come from open_candidate(); deployment requires the "
             "champion snapshot that was visible during review"
         )
+    if package.workbench.engine is not pricing.engine:
+        raise ValueError("package was opened with a different notebook context")
     if "current_rate_package_id" not in package.technical:
         raise ValueError("reviewed package has no champion snapshot")
     current_rate_package_id = package.technical["current_rate_package_id"]
