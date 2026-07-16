@@ -220,14 +220,19 @@ def test_pricing_model_spec_allows_one_operational_column_for_multiple_roles():
         dataset_name="claim_frequency_frame",
         source_system="pricing_sql",
         pk_columns=("policy_id",),
-        offset_column="offset",
+        offset_column="weight",
         offset_source_column="weight",
-        offset_label="log(weight)",
+        offset_label="identity(weight)",
         sample_weight_column="weight",
         export_weight_column="weight",
     )
 
-    assert spec.offset_source_column == spec.sample_weight_column == spec.export_weight_column
+    assert (
+        spec.offset_column
+        == spec.offset_source_column
+        == spec.sample_weight_column
+        == spec.export_weight_column
+    )
 
 
 def test_pricing_model_spec_materializes_split_evidence_automatically():
@@ -303,6 +308,20 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
         ({"features": ("policy_id",)}, "model column roles overlap"),
         ({"features": ("term",)}, "model column roles overlap"),
         ({"data_as_of_column": "term"}, "model column roles overlap"),
+        (
+            {"validation": ValidationSplitConfig.column_kfold(column="claim_count")},
+            "model column roles overlap",
+        ),
+        (
+            {
+                "validation": ValidationSplitConfig.column_holdout(
+                    column="region",
+                    train_values=("A",),
+                    test_values=("B",),
+                )
+            },
+            "model column roles overlap",
+        ),
     ],
 )
 def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
@@ -326,6 +345,28 @@ def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
 
     with pytest.raises(ValueError, match=message):
         api.PricingModelSpec(**values)
+
+
+@pytest.mark.parametrize("stratify_column", ["claim_count", "region"])
+def test_pricing_model_spec_allows_stratifying_by_target_or_feature(stratify_column):
+    from pricing_pipeline import notebook as api
+
+    spec = api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="PRODUCTION",
+        features=("age", "region"),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+        validation=ValidationSplitConfig.train_test_split(
+            stratify_column=stratify_column,
+        ),
+    )
+
+    assert spec.validation.stratify_column == stratify_column
 
 
 @pytest.mark.parametrize(
@@ -486,6 +527,67 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
 
     assert not context.settings.workbench_artifact_root.exists()
     assert not context.settings.validation_split_artifact_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("stratify_column", "test_size", "match"),
+    [
+        (
+            "validation_cohort",
+            0.25,
+            "model frame is missing declared columns: validation_cohort",
+        ),
+        ("policy_id", 0.5, "least populated class"),
+    ],
+)
+def test_build_candidate_validates_stratifier_before_reserving_model_version(
+    monkeypatch,
+    tmp_path,
+    stratify_column,
+    test_size,
+    match,
+):
+    from pricing_pipeline import notebook as api
+
+    context = replace(
+        _context(api, tmp_path),
+        mode="local",
+        destination="local SQLite database",
+    )
+    validation = ValidationSplitConfig.train_test_split(
+        test_size=test_size,
+        random_state=7,
+        stratify_column=stratify_column,
+    )
+    model = _registered_model(api, tmp_path)
+    model = replace(
+        model,
+        config=replace(model.config, validation_split=validation),
+        spec=replace(model.spec, validation=validation),
+    )
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+
+    monkeypatch.setattr(
+        api,
+        "resolve_sqlite_model_version",
+        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=object(),
+            data_as_of="2026-06-30",
+        )
 
 
 def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch, tmp_path):

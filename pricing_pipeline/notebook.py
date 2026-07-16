@@ -189,7 +189,7 @@ class PricingModelSpec:
             "target": (self.target,),
             "primary key": self.pk_columns,
             "feature": self.features,
-            "split": (self.validation.column, self.validation.stratify_column),
+            "split": (self.validation.column,),
             "offset": (self.offset_column,),
             "offset source": (self.offset_source_column,),
             "sample weight": (self.sample_weight_column,),
@@ -452,6 +452,7 @@ def build_candidate(
         spec.sample_weight_column,
         spec.export_weight_column,
         spec.data_as_of_column,
+        spec.validation.stratify_column,
     }
     required_columns.discard(None)
     missing_columns = sorted(required_columns - set(frame.columns))
@@ -495,6 +496,8 @@ def build_candidate(
     if spec.export_weight_column is not None:
         export_weight = aligned_frame[spec.export_weight_column].astype(float)
 
+    validation_split = spec.validation
+    resolved_split_indices = validation_split_indices(frame, validation_split)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     resolved_run_key = f"notebook_{timestamp}_{uuid4().hex[:8]}"
     export_id = build_export_id(model.name, resolved_run_key)
@@ -510,8 +513,6 @@ def build_candidate(
             model_name=model.name,
             export_id=export_id,
         )
-    validation_split = spec.validation
-    resolved_split_indices = validation_split_indices(frame, validation_split)
     inputs = ModelInputs(
         X=X,
         y=y,
