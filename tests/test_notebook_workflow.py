@@ -529,9 +529,23 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     assert not context.settings.validation_split_artifact_root.exists()
 
 
-def test_build_candidate_requires_declared_stratify_column_before_version_work(
+@pytest.mark.parametrize(
+    ("stratify_column", "test_size", "match"),
+    [
+        (
+            "validation_cohort",
+            0.25,
+            "model frame is missing declared columns: validation_cohort",
+        ),
+        ("policy_id", 0.5, "least populated class"),
+    ],
+)
+def test_build_candidate_validates_stratifier_before_reserving_model_version(
     monkeypatch,
     tmp_path,
+    stratify_column,
+    test_size,
+    match,
 ):
     from pricing_pipeline import notebook as api
 
@@ -541,9 +555,9 @@ def test_build_candidate_requires_declared_stratify_column_before_version_work(
         destination="local SQLite database",
     )
     validation = ValidationSplitConfig.train_test_split(
-        test_size=0.25,
+        test_size=test_size,
         random_state=7,
-        stratify_column="validation_cohort",
+        stratify_column=stratify_column,
     )
     model = _registered_model(api, tmp_path)
     model = replace(
@@ -566,10 +580,7 @@ def test_build_candidate_requires_declared_stratify_column_before_version_work(
         lambda *args, **kwargs: pytest.fail("model version was reserved"),
     )
 
-    with pytest.raises(
-        ValueError,
-        match="model frame is missing declared columns: validation_cohort",
-    ):
+    with pytest.raises(ValueError, match=match):
         api.build_candidate(
             context,
             model=model,

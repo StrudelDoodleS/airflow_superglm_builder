@@ -644,6 +644,28 @@ def test_kfold_without_shuffle_does_not_pass_a_random_seed_to_sklearn():
     assert [test.tolist() for _, test in folds] == [[0, 1], [2, 3], [4, 5]]
 
 
+def test_train_test_split_can_stratify_by_repeated_composite_pk_component():
+    frame = pd.DataFrame(
+        {
+            "policy_id": [101, 101, 102, 102, 103, 103, 104, 104],
+            "risk_id": [1, 2, 1, 2, 1, 2, 1, 2],
+        }
+    )
+
+    [(train, test)] = validation_split_indices(
+        frame,
+        ValidationSplitConfig.train_test_split(
+            test_size=0.5,
+            random_state=7,
+            stratify_column="policy_id",
+        ),
+    )
+
+    expected_policies = [101, 102, 103, 104]
+    assert sorted(frame.iloc[train]["policy_id"]) == expected_policies
+    assert sorted(frame.iloc[test]["policy_id"]) == expected_policies
+
+
 def test_column_kfold_validation_split_uses_positional_indices_and_stable_fold_order():
     frame = pd.DataFrame(
         {

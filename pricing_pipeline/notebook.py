@@ -496,6 +496,8 @@ def build_candidate(
     if spec.export_weight_column is not None:
         export_weight = aligned_frame[spec.export_weight_column].astype(float)
 
+    validation_split = spec.validation
+    resolved_split_indices = validation_split_indices(frame, validation_split)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     resolved_run_key = f"notebook_{timestamp}_{uuid4().hex[:8]}"
     export_id = build_export_id(model.name, resolved_run_key)
@@ -511,8 +513,6 @@ def build_candidate(
             model_name=model.name,
             export_id=export_id,
         )
-    validation_split = spec.validation
-    resolved_split_indices = validation_split_indices(frame, validation_split)
     inputs = ModelInputs(
         X=X,
         y=y,
