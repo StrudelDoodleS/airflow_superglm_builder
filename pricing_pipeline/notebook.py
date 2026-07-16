@@ -189,7 +189,7 @@ class PricingModelSpec:
             "target": (self.target,),
             "primary key": self.pk_columns,
             "feature": self.features,
-            "split": (self.validation.column, self.validation.stratify_column),
+            "split": (self.validation.column,),
             "offset": (self.offset_column,),
             "offset source": (self.offset_source_column,),
             "sample weight": (self.sample_weight_column,),

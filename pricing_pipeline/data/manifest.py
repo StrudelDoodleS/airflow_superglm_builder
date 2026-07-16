@@ -147,6 +147,11 @@ class ModelFrameManifestSpec:
             "offset_label",
             _optional_text(self.offset_label, field_name="offset_label"),
         )
+        if self.offset_column is None:
+            if self.offset_source_column is not None or self.offset_label is not None:
+                raise ValueError("offset_source_column and offset_label require offset_column")
+        elif self.offset_label is None:
+            raise ValueError("offset_label is required when offset_column is configured")
         object.__setattr__(
             self,
             "export_weight_column",

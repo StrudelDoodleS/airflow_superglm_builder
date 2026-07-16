@@ -12,6 +12,7 @@ import pytest
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
 class _FakeModel:
@@ -573,6 +574,235 @@ def _identity_bound_inputs(api, frame, **overrides):
     return api.ModelInputs(**values)
 
 
+@pytest.mark.parametrize(
+    (
+        "handling",
+        "manifest_offset",
+        "manifest_offset_source",
+        "manifest_label",
+        "offset_source_mode",
+        "match",
+    ),
+    [
+        (
+            "NONE",
+            "TermOffset",
+            "Term",
+            "log(Term / 12)",
+            None,
+            "handling NONE",
+        ),
+        (
+            "EXPORTED_FACTOR",
+            "TermOffset",
+            None,
+            "log(Term / 12)",
+            "frame",
+            "EXPORTED_FACTOR.*offset_source_column",
+        ),
+        (
+            "EXPORTED_FACTOR",
+            "TermOffset",
+            "OtherTerm",
+            "log(Term / 12)",
+            "frame",
+            "offset_source_column.*source_name",
+        ),
+        (
+            "EXPORTED_FACTOR",
+            "TermOffset",
+            "Term",
+            "wrong label",
+            "frame",
+            "offset_label.*label",
+        ),
+        (
+            "ALREADY_APPLIED_SQL_EXPOSURE",
+            "TermOffset",
+            "Term",
+            "log(Term / 12)",
+            None,
+            "ALREADY_APPLIED_SQL_EXPOSURE.*offset_source_column",
+        ),
+        (
+            "EXPORTED_FACTOR",
+            "OtherOffset",
+            "Term",
+            "log(Term / 12)",
+            "frame",
+            "offset_column.*ModelInputs.offset",
+        ),
+        (
+            "EXPORTED_FACTOR",
+            "TermOffset",
+            "Term",
+            "log(Term / 12)",
+            "wrong",
+            "offset_source_column values.*ModelInputs.offset_source",
+        ),
+        (
+            "NONE",
+            None,
+            None,
+            None,
+            "frame",
+            "ModelInputs.offset_source.*handling NONE",
+        ),
+        (
+            "ALREADY_APPLIED_SQL_EXPOSURE",
+            "TermOffset",
+            None,
+            "log(Term / 12)",
+            "frame",
+            "ModelInputs.offset_source.*ALREADY_APPLIED_SQL_EXPOSURE",
+        ),
+    ],
+)
+def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
+    tmp_path,
+    handling,
+    manifest_offset,
+    manifest_offset_source,
+    manifest_label,
+    offset_source_mode,
+    match,
+):
+    api = _api()
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+            "Term": [12.0, 24.0, 36.0],
+            "OtherTerm": [12.0, 24.0, 36.0],
+            "TermOffset": [0.0, np.log(2.0), np.log(3.0)],
+            "OtherOffset": [1.0, 1.0, 1.0],
+        }
+    )
+    identity = pd.Index(frame["policy_id"], name="policy_id")
+    offset = pd.Series(frame["TermOffset"].to_numpy(), index=identity, name="TermOffset")
+    term = pd.Series(frame["Term"].to_numpy(), index=identity, name="Term")
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "model.py").write_text("MODEL = 'HOME_FREQ'\n")
+    input_overrides = {}
+    if handling != "NONE":
+        input_overrides["offset"] = offset
+    if offset_source_mode:
+        source = term
+        if offset_source_mode == "wrong":
+            source = pd.Series([1.0, 2.0, 3.0], index=identity, name="Term")
+        input_overrides.update(offset_source=source, offset_source_name="Term")
+    inputs = _identity_bound_inputs(api, frame, **input_overrides)
+    contract = OffsetExportContract(handling="NONE")
+    if handling == "EXPORTED_FACTOR":
+        contract = OffsetExportContract(
+            handling="EXPORTED_FACTOR",
+            source_factor_name="Term",
+            published_factor_name="Term",
+            source_name="Term",
+            label="log(Term / 12)",
+        )
+    elif handling == "ALREADY_APPLIED_SQL_EXPOSURE":
+        contract = OffsetExportContract(
+            handling="ALREADY_APPLIED_SQL_EXPOSURE",
+            source_name="Term",
+            label="log(Term / 12)",
+        )
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.run_standard_superglm_build(
+            object(),
+            frame=frame,
+            inputs=inputs,
+            superglm_model=_FakeModel(),
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            output_dir=tmp_path / "run",
+            model_id=17,
+            model_config=_model_config(),
+            model_version="v1",
+            export_id="export-1",
+            effective_from=None,
+            manifest_spec=ModelFrameManifestSpec(
+                dataset_name="home_freq_frame",
+                source_system="pytest",
+                data_as_of_date="2026-06-30",
+                pk_columns=("policy_id",),
+                target_column="target",
+                offset_column=manifest_offset,
+                offset_source_column=manifest_offset_source,
+                offset_label=manifest_label,
+            ),
+            split_artifact_root=tmp_path / "splits",
+            model_source_root=tmp_path / "source",
+            created_by="pytest",
+            offset_contract=contract,
+            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
+                "CV must not run before offset audit validation"
+            ),
+        )
+
+
+def test_manifest_offset_contract_accepts_already_applied_sql_exposure():
+    api = _api()
+    frame = pd.DataFrame({"LogExposure": [0.0, np.log(2.0)]})
+    manifest_spec = ModelFrameManifestSpec(
+        dataset_name="home_freq_frame",
+        source_system="pytest",
+        data_as_of_date="2026-06-30",
+        pk_columns=("policy_id",),
+        target_column="target",
+        offset_column="LogExposure",
+        offset_label="log(Exposure)",
+    )
+    contract = OffsetExportContract(
+        handling="ALREADY_APPLIED_SQL_EXPOSURE",
+        source_name="Exposure",
+        label="log(Exposure)",
+    )
+
+    api._validate_manifest_offset_contract(
+        frame,
+        manifest_spec,
+        contract,
+        offset=frame["LogExposure"],
+        offset_source=None,
+        offset_source_name=None,
+    )
+
+
+def test_manifest_offset_contract_accepts_identity_offset_source():
+    api = _api()
+    frame = pd.DataFrame({"Term": [12.0, 36.0]})
+    manifest_spec = ModelFrameManifestSpec(
+        dataset_name="home_freq_frame",
+        source_system="pytest",
+        data_as_of_date="2026-06-30",
+        pk_columns=("policy_id",),
+        target_column="target",
+        offset_column="Term",
+        offset_source_column="Term",
+        offset_label="identity(Term)",
+    )
+    contract = OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="Term",
+        published_factor_name="Term",
+        source_name="Term",
+        label="identity(Term)",
+    )
+
+    api._validate_manifest_offset_contract(
+        frame,
+        manifest_spec,
+        contract,
+        offset=frame["Term"],
+        offset_source=frame["Term"],
+        offset_source_name="Term",
+    )
+
+
 def test_canonical_validation_rejects_reversed_then_reset_feature_frame():
     api = _api()
     frame = pd.DataFrame(
@@ -722,6 +952,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
             "target": [0.0, 1.0, 0.0],
             "age": [20.0, 30.0, 40.0],
             "Term": [12.0, 36.0, 24.0],
+            "TermOffset": [0.0, np.log(3.0), np.log(2.0)],
             "RatingWeight": [2.0, 4.0, 3.0],
         }
     )
@@ -789,16 +1020,16 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     inputs = _identity_bound_inputs(
         api,
         frame,
-        offset=np.log(term / 12.0),
+        offset=pd.Series(
+            frame["TermOffset"].to_numpy(copy=True),
+            index=base_inputs.X.index,
+            name="TermOffset",
+        ),
         offset_source=term,
         offset_source_name="Term",
         export_weight=rating_weight,
         export_weight_name="RatingWeight",
     )
-    from pricing_pipeline.publishing.superglm_publication_receipt import (
-        OffsetExportContract,
-    )
-
     validation_split = ValidationSplitConfig(
         method="custom",
         n_splits=None,
@@ -834,6 +1065,9 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
             data_as_of_date="2026-06-30",
             pk_columns=("policy_id",),
             target_column="target",
+            offset_column="TermOffset",
+            offset_source_column="Term",
+            offset_label="log(Term / 12)",
         ),
         "split_artifact_root": tmp_path / "splits",
         "model_source_root": source_root,

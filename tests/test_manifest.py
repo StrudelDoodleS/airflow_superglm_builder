@@ -56,6 +56,62 @@ def test_new_manifest_id_includes_dataset_date_prefix_and_unique_suffix():
     assert first != second
 
 
+@pytest.mark.parametrize(
+    "offset_fields",
+    [
+        {},
+        {
+            "offset_column": "LogExposure",
+            "offset_label": "log(Exposure)",
+        },
+        {
+            "offset_column": "TermOffset",
+            "offset_source_column": "TermMonths",
+            "offset_label": "log(TermMonths / 12)",
+        },
+    ],
+    ids=["none", "already-applied-sql-exposure", "exported-factor"],
+)
+def test_model_frame_manifest_spec_accepts_valid_offset_shapes(offset_fields):
+    spec = ModelFrameManifestSpec(
+        dataset_name="frequency",
+        source_system="test",
+        data_as_of_date="2026-06-30",
+        pk_columns=("PolicyID",),
+        target_column="ClaimNb",
+        **offset_fields,
+    )
+
+    assert spec.offset_column == offset_fields.get("offset_column")
+    assert spec.offset_source_column == offset_fields.get("offset_source_column")
+    assert spec.offset_label == offset_fields.get("offset_label")
+
+
+@pytest.mark.parametrize(
+    "offset_fields",
+    [
+        {"offset_source_column": "TermMonths"},
+        {"offset_label": "log(TermMonths / 12)"},
+        {"offset_column": "TermOffset"},
+        {
+            "offset_column": "TermOffset",
+            "offset_source_column": "TermMonths",
+        },
+    ],
+    ids=["source-only", "label-only", "offset-only", "offset-and-source-without-label"],
+)
+def test_model_frame_manifest_spec_rejects_invalid_offset_shapes(offset_fields):
+    with pytest.raises(ValueError, match="offset"):
+        ModelFrameManifestSpec(
+            dataset_name="frequency",
+            source_system="test",
+            data_as_of_date="2026-06-30",
+            pk_columns=("PolicyID",),
+            target_column="ClaimNb",
+            **offset_fields,
+        )
+
+
 def test_build_column_metadata_marks_roles_and_counts_columns():
     frame = manifest_frame()
 
@@ -187,7 +243,6 @@ def test_build_column_metadata_preserves_intentional_operational_role_overlap():
         {
             "PolicyID": [1, 2],
             "ClaimNb": [0, 1],
-            "TermOffset": [0.0, np.log(3.0)],
             "TermMonths": [12, 36],
         }
     )
@@ -201,9 +256,9 @@ def test_build_column_metadata_preserves_intentional_operational_role_overlap():
             data_as_of_date="2026-06-30",
             pk_columns=("PolicyID",),
             target_column="ClaimNb",
-            offset_column="TermOffset",
+            offset_column="TermMonths",
             offset_source_column="TermMonths",
-            offset_label="log(TermMonths / 12)",
+            offset_label="identity(TermMonths)",
             export_weight_column="TermMonths",
         ),
     )
@@ -211,8 +266,7 @@ def test_build_column_metadata_preserves_intentional_operational_role_overlap():
     assert dict(zip(columns["column_name"], columns["column_role"], strict=True)) == {
         "PolicyID": "KEY",
         "ClaimNb": "TARGET",
-        "TermOffset": "OFFSET",
-        "TermMonths": "OFFSET_SOURCE+EXPORT_WEIGHT",
+        "TermMonths": "OFFSET+OFFSET_SOURCE+EXPORT_WEIGHT",
     }
 
 

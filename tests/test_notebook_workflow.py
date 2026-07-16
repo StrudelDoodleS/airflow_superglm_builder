@@ -220,14 +220,19 @@ def test_pricing_model_spec_allows_one_operational_column_for_multiple_roles():
         dataset_name="claim_frequency_frame",
         source_system="pricing_sql",
         pk_columns=("policy_id",),
-        offset_column="offset",
+        offset_column="weight",
         offset_source_column="weight",
-        offset_label="log(weight)",
+        offset_label="identity(weight)",
         sample_weight_column="weight",
         export_weight_column="weight",
     )
 
-    assert spec.offset_source_column == spec.sample_weight_column == spec.export_weight_column
+    assert (
+        spec.offset_column
+        == spec.offset_source_column
+        == spec.sample_weight_column
+        == spec.export_weight_column
+    )
 
 
 def test_pricing_model_spec_materializes_split_evidence_automatically():
@@ -303,6 +308,20 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
         ({"features": ("policy_id",)}, "model column roles overlap"),
         ({"features": ("term",)}, "model column roles overlap"),
         ({"data_as_of_column": "term"}, "model column roles overlap"),
+        (
+            {"validation": ValidationSplitConfig.column_kfold(column="claim_count")},
+            "model column roles overlap",
+        ),
+        (
+            {
+                "validation": ValidationSplitConfig.column_holdout(
+                    column="region",
+                    train_values=("A",),
+                    test_values=("B",),
+                )
+            },
+            "model column roles overlap",
+        ),
     ],
 )
 def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
@@ -326,6 +345,28 @@ def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
 
     with pytest.raises(ValueError, match=message):
         api.PricingModelSpec(**values)
+
+
+@pytest.mark.parametrize("stratify_column", ["claim_count", "region"])
+def test_pricing_model_spec_allows_stratifying_by_target_or_feature(stratify_column):
+    from pricing_pipeline import notebook as api
+
+    spec = api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="PRODUCTION",
+        features=("age", "region"),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+        validation=ValidationSplitConfig.train_test_split(
+            stratify_column=stratify_column,
+        ),
+    )
+
+    assert spec.validation.stratify_column == stratify_column
 
 
 @pytest.mark.parametrize(

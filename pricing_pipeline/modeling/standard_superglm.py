@@ -95,6 +95,20 @@ def run_standard_superglm_build(
         inputs,
         pk_columns=manifest_spec.pk_columns,
     )
+    resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
+    offset_source_name = _weight_name(
+        inputs.offset_source,
+        inputs.offset_source_name,
+        role="offset_source",
+    )
+    _validate_manifest_offset_contract(
+        frame,
+        manifest_spec,
+        resolved_offset_contract,
+        offset=inputs.offset,
+        offset_source=inputs.offset_source,
+        offset_source_name=offset_source_name,
+    )
     if getattr(superglm_model, "_result", None) is not None:
         raise StandardSuperGLMError(
             "superglm_model must be an unfitted, copyable SuperGLM model"
@@ -117,24 +131,10 @@ def run_standard_superglm_build(
         cross_validate_fn=cross_validate_fn,
     )
     fitted, telemetry = fit_full_model(final_model, inputs, fit_mode=fit_mode)
-    resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
-    if resolved_offset_contract.handling == "EXPORTED_FACTOR" and inputs.offset_source is None:
-        raise StandardSuperGLMError(
-            "EXPORTED_FACTOR requires ModelInputs.offset_source"
-        )
     fit_weight_name = _weight_name(
         inputs.sample_weight,
         inputs.sample_weight_name,
         role="sample_weight",
-    )
-    offset_source_name = (
-        _weight_name(
-            inputs.offset_source,
-            inputs.offset_source_name,
-            role="offset_source",
-        )
-        if inputs.offset_source is not None
-        else None
     )
     export_weight_name = (
         _weight_name(
@@ -145,13 +145,6 @@ def run_standard_superglm_build(
         if inputs.export_weight is not None
         else None
     )
-    if (
-        resolved_offset_contract.handling == "EXPORTED_FACTOR"
-        and offset_source_name != resolved_offset_contract.source_name
-    ):
-        raise StandardSuperGLMError(
-            "ModelInputs.offset_source_name must match offset_contract.source_name"
-        )
     if hash_model_source(model_source_root) != source_sha256:
         raise StandardSuperGLMError(
             "model source changed during training; save the final definition and rebuild"
@@ -677,6 +670,59 @@ def _resolved_offset_contract(
             "a fitted offset requires a model-owned non-NONE OffsetExportContract"
         )
     return offset_contract
+
+
+def _validate_manifest_offset_contract(
+    frame: pd.DataFrame,
+    manifest_spec: ModelFrameManifestSpec,
+    contract: OffsetExportContract,
+    *,
+    offset: pd.Series | np.ndarray | None,
+    offset_source: pd.Series | np.ndarray | None,
+    offset_source_name: str | None,
+) -> None:
+    expects_offset = contract.handling != "NONE"
+    if (manifest_spec.offset_column is not None) != expects_offset:
+        requirement = "non-null" if expects_offset else "null"
+        raise StandardSuperGLMError(
+            f"handling {contract.handling} requires manifest offset_column to be {requirement}"
+        )
+    if manifest_spec.offset_label != contract.label:
+        raise StandardSuperGLMError("manifest offset_label must match offset_contract.label")
+
+    expected_source = contract.source_name if contract.handling == "EXPORTED_FACTOR" else None
+    if manifest_spec.offset_source_column != expected_source:
+        raise StandardSuperGLMError(
+            f"handling {contract.handling} requires manifest offset_source_column to match "
+            f"offset_contract.source_name {expected_source!r}"
+        )
+    if offset_source_name != expected_source:
+        raise StandardSuperGLMError(
+            f"ModelInputs.offset_source must match handling {contract.handling} source "
+            f"{expected_source!r}"
+        )
+    if expected_source is not None:
+        if expected_source not in frame:
+            raise StandardSuperGLMError(
+                f"manifest offset_source_column {expected_source!r} is missing from the model frame"
+            )
+        if not np.array_equal(
+            frame[expected_source].to_numpy(),
+            np.asarray(offset_source),
+        ):
+            raise StandardSuperGLMError(
+                "manifest offset_source_column values must match ModelInputs.offset_source"
+            )
+
+    if not expects_offset:
+        return
+    offset_column = manifest_spec.offset_column
+    if offset_column not in frame:
+        raise StandardSuperGLMError(
+            f"manifest offset_column {offset_column!r} is missing from the model frame"
+        )
+    if not np.array_equal(frame[offset_column].to_numpy(), np.asarray(offset)):
+        raise StandardSuperGLMError("manifest offset_column values must match ModelInputs.offset")
 
 
 def _weight_name(
