@@ -17,7 +17,7 @@ import pandas as pd
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
-BUNDLE_FORMAT = "superglm-candidate-joblib-v1"
+BUNDLE_FORMAT = "superglm-candidate-joblib-v2"
 
 
 class CandidateArtifactError(RuntimeError):
@@ -42,7 +42,9 @@ class CandidateBundle:
     row_order_sha256: str
     model_source_sha256: str
     offset_contract: OffsetExportContract
+    offset_source: pd.Series | np.ndarray | None = None
     fit_sample_weight_name: str | None = None
+    offset_source_name: str | None = None
     export_weight_name: str | None = None
     model_frame_sha256: str | None = None
 
@@ -64,41 +66,45 @@ class CandidateBundle:
                 "model_frame_sha256 must be a 64-character lowercase hex SHA-256 digest"
             )
 
-        if self.export_weight is None:
-            if contract.handling == "EXPORTED_FACTOR":
-                raise CandidateArtifactError("EXPORTED_FACTOR requires export_weight")
-            if self.export_weight_name is not None:
-                raise CandidateArtifactError(
-                    "export_weight_name was supplied without export_weight"
-                )
-            return
+        if contract.handling == "EXPORTED_FACTOR" and self.offset_source is None:
+            raise CandidateArtifactError("EXPORTED_FACTOR requires offset_source")
 
-        if not isinstance(self.export_weight, pd.Series | np.ndarray):
-            raise CandidateArtifactError("export_weight must be a pandas Series or numpy array")
-        if isinstance(self.export_weight, np.ndarray) and self.export_weight.ndim != 1:
-            raise CandidateArtifactError("export_weight must be one-dimensional")
-        values = pd.Series(self.export_weight).reset_index(drop=True)
-        if len(values) != len(self.X):
-            raise CandidateArtifactError(
-                f"export_weight length {len(values)} does not match X row count {len(self.X)}"
-            )
-        if values.isna().any():
-            raise CandidateArtifactError("export_weight contains missing values")
-        numeric_values = [
-            value
-            for value in values
-            if not isinstance(value, (bool, np.bool_)) and pd.api.types.is_number(value)
-        ]
-        if any(not np.isfinite(value) for value in numeric_values):
-            raise CandidateArtifactError("export_weight contains non-finite numeric values")
+        for role, values, name in (
+            ("offset_source", self.offset_source, self.offset_source_name),
+            ("export_weight", self.export_weight, self.export_weight_name),
+        ):
+            if values is None:
+                if name is not None:
+                    raise CandidateArtifactError(f"{role}_name was supplied without {role}")
+                continue
+            if not isinstance(values, pd.Series | np.ndarray):
+                raise CandidateArtifactError(
+                    f"{role} must be a pandas Series or numpy array"
+                )
+            if isinstance(values, np.ndarray) and values.ndim != 1:
+                raise CandidateArtifactError(f"{role} must be one-dimensional")
+            series = pd.Series(values).reset_index(drop=True)
+            if len(series) != len(self.X):
+                raise CandidateArtifactError(
+                    f"{role} length {len(series)} does not match X row count {len(self.X)}"
+                )
+            if series.isna().any():
+                raise CandidateArtifactError(f"{role} contains missing values")
+            numeric_values = [
+                value
+                for value in series
+                if not isinstance(value, (bool, np.bool_)) and pd.api.types.is_number(value)
+            ]
+            if any(not np.isfinite(value) for value in numeric_values):
+                raise CandidateArtifactError(f"{role} contains non-finite numeric values")
 
         if contract.handling != "EXPORTED_FACTOR":
             return
-        if not self.export_weight_name:
-            raise CandidateArtifactError("EXPORTED_FACTOR requires export_weight_name")
-        if self.export_weight_name != contract.source_name:
+        if not self.offset_source_name:
+            raise CandidateArtifactError("EXPORTED_FACTOR requires offset_source_name")
+        if self.offset_source_name != contract.source_name:
             raise CandidateArtifactError(
-                "export_weight_name must match offset_contract source_name"
+                "offset_source_name must match offset_contract source_name"
             )
 
 

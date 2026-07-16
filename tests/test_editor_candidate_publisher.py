@@ -38,7 +38,7 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "publication_receipt_sha256": "c" * 64,
         "candidate_artifact_path": str(tmp_path / "candidate_bundle.joblib"),
         "candidate_artifact_sha256": "d" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
@@ -541,7 +541,7 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "d" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
@@ -793,14 +793,16 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     write_dir = submission_dir / "published" / ".staging" / "attempt-a"
     final_dir = submission_dir / "published" / "attempts" / "attempt-a"
     write_dir.mkdir(parents=True)
-    exposure = pd.Series([2.0], name="Exposure")
+    term = pd.Series([36.0], name="Term")
+    rating_weight = pd.Series([2.0], name="RatingWeight")
     bundle = CandidateBundle(
         fitted_model={"model": "parent"},
         X=pd.DataFrame({"x": [1.0]}),
         y=np.array([0.0]),
         sample_weight=None,
-        offset=np.log(exposure),
-        export_weight=exposure,
+        offset=np.log(term / 12.0),
+        offset_source=term,
+        export_weight=rating_weight,
         cv_report={},
         model_name="HOME_FREQ",
         model_version="20260603",
@@ -813,12 +815,13 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         model_frame_sha256="f" * 64,
         offset_contract=OffsetExportContract(
             handling="EXPORTED_FACTOR",
-            source_factor_name="Exposure",
-            published_factor_name="Exposure",
-            source_name="Exposure",
-            label="log(Exposure)",
+            source_factor_name="Term",
+            published_factor_name="Term",
+            source_name="Term",
+            label="log(Term / 12)",
         ),
-        export_weight_name="Exposure",
+        offset_source_name="Term",
+        export_weight_name="RatingWeight",
     )
     parent = SimpleNamespace(
         model_id=17,
@@ -918,10 +921,10 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert envelope["bundle"].model_name == "HOME_FREQ"
     assert envelope["bundle"].model_version == "20260603"
     assert envelope["bundle"].export_id == "editor__submission_1"
-    pd.testing.assert_series_equal(captured_export["weight"], exposure)
-    np.testing.assert_allclose(captured_export["options"]["offset"], np.log(exposure))
-    pd.testing.assert_series_equal(captured_export["options"]["offset_source"], exposure)
-    assert captured_export["options"]["offset_name"] == "Exposure"
+    pd.testing.assert_series_equal(captured_export["weight"], rating_weight)
+    np.testing.assert_allclose(captured_export["options"]["offset"], np.log(term / 12.0))
+    pd.testing.assert_series_equal(captured_export["options"]["offset_source"], term)
+    assert captured_export["options"]["offset_name"] == "Term"
     assert captured_export["options"]["offset_kind"] == "auto"
     assert exported.revision_metadata["claimed_identity"] == "analyst@example.test"
     assert "published_by" not in exported.revision_metadata
@@ -1033,7 +1036,7 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "split_set_id": submission.split_set_id,
         "candidate_artifact_path": submission.baseline_candidate_path,
         "candidate_artifact_sha256": submission.baseline_candidate_sha256,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
@@ -1431,7 +1434,7 @@ def test_champion_comparison_rejects_incompatible_offset_contract(
         "run_status": "SUCCESS",
         "candidate_artifact_path": str(tmp_path / "champion.joblib"),
         "candidate_artifact_sha256": "a" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
@@ -1727,14 +1730,14 @@ class _ParityConnection:
         return _ParityResult(params["x_prediction"])
 
 
-def _offset_parity_bundle(*, handling, export_weight=None):
+def _offset_parity_bundle(*, handling, offset_source=None):
     import numpy as np
     import pandas as pd
 
     from pricing_pipeline.workbench.artifacts import CandidateBundle
 
-    raw_exposure = np.array([2.0, 4.0])
-    fitted_offset = np.log(raw_exposure)
+    raw_source = np.array([12.0, 36.0])
+    fitted_offset = np.log(raw_source / 12.0)
 
     class Model:
         def predict(self, X, offset=None):
@@ -1744,21 +1747,21 @@ def _offset_parity_bundle(*, handling, export_weight=None):
     if handling == "EXPORTED_FACTOR":
         contract = {
             "handling": handling,
-            "source_factor_name": "Exposure",
-            "published_factor_name": "Exposure",
-            "source_name": "Exposure",
-            "label": "log(Exposure)",
+            "source_factor_name": "Term",
+            "published_factor_name": "Term",
+            "source_name": "Term",
+            "label": "log(Term / 12)",
         }
-        if export_weight is None:
-            export_weight = pd.Series(raw_exposure, name="Exposure")
-        export_weight_name = "Exposure"
+        if offset_source is None:
+            offset_source = pd.Series(raw_source, name="Term")
+        offset_source_name = "Term"
     else:
         contract = {
             "handling": handling,
-            "source_name": "Exposure",
-            "label": "log(Exposure)",
+            "source_name": "Term",
+            "label": "log(Term / 12)",
         }
-        export_weight_name = None
+        offset_source_name = None
 
     return CandidateBundle(
         fitted_model=Model(),
@@ -1766,7 +1769,8 @@ def _offset_parity_bundle(*, handling, export_weight=None):
         y=np.ones(2),
         sample_weight=None,
         offset=fitted_offset,
-        export_weight=export_weight,
+        offset_source=offset_source,
+        export_weight=None,
         cv_report={},
         model_name="HOME_FREQ",
         model_version="20260603",
@@ -1777,24 +1781,24 @@ def _offset_parity_bundle(*, handling, export_weight=None):
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
         offset_contract=contract,
-        export_weight_name=export_weight_name,
-    ), raw_exposure
+        offset_source_name=offset_source_name,
+    ), raw_source
 
 
 @pytest.mark.parametrize("weight_kind", ["series", "array"])
-def test_package_sql_parity_uses_bound_export_weight_for_exported_factor(weight_kind):
+def test_package_sql_parity_uses_bound_offset_source_for_exported_factor(weight_kind):
     import pandas as pd
 
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
 
-    raw_exposure = pd.Series([2.0, 4.0], name="Exposure")
-    export_weights = {
-        "series": raw_exposure,
-        "array": raw_exposure.to_numpy(),
+    raw_source = pd.Series([12.0, 36.0], name="Term")
+    offset_sources = {
+        "series": raw_source,
+        "array": raw_source.to_numpy(),
     }
-    bundle, expected_exposure = _offset_parity_bundle(
+    bundle, expected_source = _offset_parity_bundle(
         handling="EXPORTED_FACTOR",
-        export_weight=export_weights[weight_kind],
+        offset_source=offset_sources[weight_kind],
     )
     connection = _ParityConnection()
 
@@ -1811,11 +1815,11 @@ def test_package_sql_parity_uses_bound_export_weight_for_exported_factor(weight_
     )
 
     assert [
-        json.loads(params["features_json"])["Exposure"] for params in connection.calls
-    ] == expected_exposure.tolist()
+        json.loads(params["features_json"])["Term"] for params in connection.calls
+    ] == expected_source.tolist()
 
 
-def test_package_sql_parity_preserves_bound_categorical_export_weight_positionally():
+def test_package_sql_parity_preserves_bound_categorical_offset_source_positionally():
     import pandas as pd
 
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
@@ -1823,12 +1827,12 @@ def test_package_sql_parity_preserves_bound_categorical_export_weight_positional
     published_levels = pd.Series(
         ["basic", "premium"],
         index=pd.Index([101, 303]),
-        name="Exposure",
+        name="Term",
         dtype="category",
     )
     bundle, _raw_exposure = _offset_parity_bundle(
         handling="EXPORTED_FACTOR",
-        export_weight=published_levels,
+        offset_source=published_levels,
     )
     connection = _ParityConnection()
 
@@ -1845,14 +1849,16 @@ def test_package_sql_parity_preserves_bound_categorical_export_weight_positional
     )
 
     assert [
-        json.loads(params["features_json"])["Exposure"] for params in connection.calls
+        json.loads(params["features_json"])["Term"] for params in connection.calls
     ] == published_levels.tolist()
 
 
 def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
+    import numpy as np
+
     from pricing_pipeline.publishing.editor_candidate import verify_package_sql_parity
 
-    bundle, raw_exposure = _offset_parity_bundle(handling="ALREADY_APPLIED_SQL_EXPOSURE")
+    bundle, _raw_source = _offset_parity_bundle(handling="ALREADY_APPLIED_SQL_EXPOSURE")
     connection = _ParityConnection()
 
     verify_package_sql_parity(
@@ -1867,7 +1873,10 @@ def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
         },
     )
 
-    assert [params["exposure"] for params in connection.calls] == raw_exposure.tolist()
+    np.testing.assert_allclose(
+        [params["exposure"] for params in connection.calls],
+        np.exp(bundle.offset),
+    )
 
 
 def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():

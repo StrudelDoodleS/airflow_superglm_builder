@@ -45,6 +45,10 @@ def test_offline_upgrade_adds_dataset_manifest_frame_evidence_columns(tmp_path):
     assert columns["frame_hash_metadata_json"] == "TEXT"
     assert columns["exposure_column"] == "TEXT"
     assert columns["data_as_of_column"] == "TEXT"
+    assert columns["offset_column"] == "TEXT"
+    assert columns["offset_source_column"] == "TEXT"
+    assert columns["offset_label"] == "TEXT"
+    assert columns["export_weight_column"] == "TEXT"
 
 
 def test_fresh_offline_dataset_manifest_requires_frame_evidence(tmp_path):
@@ -64,3 +68,7 @@ def test_fresh_offline_dataset_manifest_requires_frame_evidence(tmp_path):
         }
     assert columns["model_frame_sha256"] is True
     assert columns["frame_hash_metadata_json"] is True
+    assert columns["offset_column"] is False
+    assert columns["offset_source_column"] is False
+    assert columns["offset_label"] is False
+    assert columns["export_weight_column"] is False

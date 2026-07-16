@@ -85,8 +85,11 @@ class PricingModelSpec:
     source_system: str
     pk_columns: tuple[str, ...]
     validation: ValidationSplitConfig = ValidationSplitConfig.kfold()
-    exposure_column: str | None = None
+    offset_column: str | None = None
+    offset_source_column: str | None = None
+    offset_label: str | None = None
     sample_weight_column: str | None = None
+    export_weight_column: str | None = None
     data_as_of_column: str | None = None
     scoring: tuple[str, ...] = ("deviance",)
     fit_mode: str = "fit_reml"
@@ -127,8 +130,11 @@ class PricingModelSpec:
             tuple(_required_text(value, "scoring") for value in self.scoring),
         )
         for field_name in (
-            "exposure_column",
+            "offset_column",
+            "offset_source_column",
+            "offset_label",
             "sample_weight_column",
+            "export_weight_column",
             "data_as_of_column",
         ):
             value = getattr(self, field_name)
@@ -136,6 +142,18 @@ class PricingModelSpec:
                 self,
                 field_name,
                 None if value is None else _required_text(value, field_name),
+            )
+        offset_fields = (
+            self.offset_column,
+            self.offset_source_column,
+            self.offset_label,
+        )
+        if any(value is not None for value in offset_fields) and not all(
+            value is not None for value in offset_fields
+        ):
+            raise ValueError(
+                "offset_column, offset_source_column, and offset_label must be "
+                "configured together"
             )
         if not self.features:
             raise ValueError("features must contain at least one column")
@@ -171,18 +189,29 @@ class PricingModelSpec:
             "target": (self.target,),
             "primary key": self.pk_columns,
             "feature": self.features,
-            "exposure": (self.exposure_column,),
+            "split": (self.validation.column, self.validation.stratify_column),
+            "offset": (self.offset_column,),
+            "offset source": (self.offset_source_column,),
             "sample weight": (self.sample_weight_column,),
+            "export weight": (self.export_weight_column,),
             "data as of": (self.data_as_of_column,),
         }
         for role, columns in role_values.items():
             for column in columns:
                 if column is not None:
                     roles.setdefault(column, []).append(role)
+        structural_roles = {
+            "target",
+            "primary key",
+            "feature",
+            "split",
+            "data as of",
+        }
         overlaps = {
             column: assigned_roles
             for column, assigned_roles in roles.items()
             if len(assigned_roles) > 1
+            and any(role in structural_roles for role in assigned_roles)
         }
         if overlaps:
             detail = "; ".join(
@@ -418,8 +447,10 @@ def build_candidate(
         *spec.features,
         *spec.pk_columns,
         spec.target,
-        spec.exposure_column,
+        spec.offset_column,
+        spec.offset_source_column,
         spec.sample_weight_column,
+        spec.export_weight_column,
         spec.data_as_of_column,
     }
     required_columns.discard(None)
@@ -443,23 +474,26 @@ def build_candidate(
         column = spec.sample_weight_column
         sample_weight = aligned_frame[column].astype(float)
     offset = None
+    offset_source = None
     export_weight = None
     offset_contract = None
-    if spec.exposure_column is not None:
-        column = spec.exposure_column
-        exposure = aligned_frame[column].astype(float)
-        values = exposure.to_numpy()
-        if not np.isfinite(values).all() or (values <= 0).any():
-            raise ValueError(f"exposure column {column!r} must contain finite positive values")
-        offset = np.log(exposure)
-        export_weight = exposure
+    if spec.offset_column is not None:
+        offset = aligned_frame[spec.offset_column].astype(float)
+        if not np.isfinite(offset.to_numpy()).all():
+            raise ValueError(
+                f"offset column {spec.offset_column!r} must contain finite numeric values"
+            )
+        source_column = spec.offset_source_column
+        offset_source = aligned_frame[source_column].copy()
         offset_contract = OffsetExportContract(
             handling="EXPORTED_FACTOR",
-            source_factor_name=column,
-            published_factor_name=clean_identifier(column),
-            source_name=column,
-            label=f"log({column})",
+            source_factor_name=source_column,
+            published_factor_name=clean_identifier(source_column),
+            source_name=source_column,
+            label=spec.offset_label,
         )
+    if spec.export_weight_column is not None:
+        export_weight = aligned_frame[spec.export_weight_column].astype(float)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     resolved_run_key = f"notebook_{timestamp}_{uuid4().hex[:8]}"
@@ -484,8 +518,10 @@ def build_candidate(
         sample_weight=sample_weight,
         sample_weight_name=spec.sample_weight_column,
         offset=offset,
+        offset_source=offset_source,
+        offset_source_name=spec.offset_source_column,
         export_weight=export_weight,
-        export_weight_name=spec.exposure_column,
+        export_weight_name=spec.export_weight_column,
         row_ids=row_ids,
     )
     completed_build = run_standard_superglm_build(
@@ -510,7 +546,10 @@ def build_candidate(
             target_column=spec.target,
             weight_column=spec.sample_weight_column,
             feature_columns=spec.features,
-            exposure_column=spec.exposure_column,
+            offset_column=spec.offset_column,
+            offset_source_column=spec.offset_source_column,
+            offset_label=spec.offset_label,
+            export_weight_column=spec.export_weight_column,
             data_as_of_column=spec.data_as_of_column,
         ),
         split_artifact_root=pricing.settings.validation_split_artifact_root,

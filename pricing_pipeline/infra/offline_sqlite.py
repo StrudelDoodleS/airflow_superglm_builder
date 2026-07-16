@@ -26,6 +26,10 @@ _OFFLINE_COLUMN_UPGRADES = (
     ("pricing", "DATASET_MANIFEST", "frame_hash_metadata_json", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "exposure_column", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "data_as_of_column", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "offset_column", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "offset_source_column", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "offset_label", "TEXT"),
+    ("pricing", "DATASET_MANIFEST", "export_weight_column", "TEXT"),
     (
         "pricing",
         "MODEL_RUN",

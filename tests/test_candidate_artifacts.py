@@ -30,6 +30,7 @@ def _minimal_bundle():
         y=np.array([0.0, 1.0]),
         sample_weight=None,
         offset=None,
+        offset_source=None,
         export_weight=None,
         cv_report={"scope": "cv", "pooled_scores": {"deviance": 0.4}},
         model_name="HOME_FREQ",
@@ -69,7 +70,7 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
     loaded = _load(Path(metadata.path), metadata, allowed_root=tmp_path)
 
-    assert metadata.format == "superglm-candidate-joblib-v1"
+    assert metadata.format == "superglm-candidate-joblib-v2"
     assert loaded.model_name == "HOME_FREQ"
     assert loaded.model_version == "v1"
     assert loaded.export_id == "export-1"
@@ -92,21 +93,21 @@ def test_candidate_bundle_rejects_invalid_model_frame_sha256(digest):
 
 
 @pytest.mark.parametrize(
-    ("export_weight", "export_weight_name", "message"),
+    ("offset_source", "offset_source_name", "message"),
     [
-        (None, "Exposure", "EXPORTED_FACTOR requires export_weight"),
-        (np.array([2.0, 4.0]), None, "EXPORTED_FACTOR requires export_weight_name"),
-        (np.array([2.0]), "Exposure", "export_weight length 1 does not match X row count 2"),
+        (None, "Term", "EXPORTED_FACTOR requires offset_source"),
+        (np.array([12.0, 36.0]), None, "EXPORTED_FACTOR requires offset_source_name"),
+        (np.array([12.0]), "Term", "offset_source length 1 does not match X row count 2"),
         (
-            np.array([2.0, float("inf")]),
-            "Exposure",
-            "export_weight contains non-finite numeric values",
+            np.array([12.0, float("inf")]),
+            "Term",
+            "offset_source contains non-finite numeric values",
         ),
     ],
 )
-def test_exported_offset_bundle_rejects_missing_or_invalid_bound_weight(
-    export_weight,
-    export_weight_name,
+def test_exported_offset_bundle_rejects_missing_or_invalid_source(
+    offset_source,
+    offset_source_name,
     message,
 ):
     CandidateArtifactError, _, _, _ = _artifact_api()
@@ -117,37 +118,37 @@ def test_exported_offset_bundle_rejects_missing_or_invalid_bound_weight(
     with pytest.raises(CandidateArtifactError, match=message):
         replace(
             _minimal_bundle(),
-            offset=np.log(np.array([2.0, 4.0])),
-            export_weight=export_weight,
-            export_weight_name=export_weight_name,
+            offset=np.log(np.array([1.0, 3.0])),
+            offset_source=offset_source,
+            offset_source_name=offset_source_name,
             offset_contract=OffsetExportContract(
                 handling="EXPORTED_FACTOR",
-                source_factor_name="Exposure",
-                published_factor_name="Exposure",
-                source_name="Exposure",
-                label="log(Exposure)",
+                source_factor_name="Term",
+                published_factor_name="Term",
+                source_name="Term",
+                label="log(Term / 12)",
             ),
         )
 
 
-def test_exported_offset_bundle_rejects_weight_name_that_conflicts_with_contract():
+def test_exported_offset_bundle_rejects_source_name_that_conflicts_with_contract():
     CandidateArtifactError, _, _, _ = _artifact_api()
     from pricing_pipeline.publishing.superglm_publication_receipt import (
         OffsetExportContract,
     )
 
-    with pytest.raises(CandidateArtifactError, match="export_weight_name.*source_name"):
+    with pytest.raises(CandidateArtifactError, match="offset_source_name.*source_name"):
         replace(
             _minimal_bundle(),
-            offset=np.log(np.array([2.0, 4.0])),
-            export_weight=np.array([2.0, 4.0]),
-            export_weight_name="OtherExposure",
+            offset=np.log(np.array([1.0, 3.0])),
+            offset_source=np.array([12.0, 36.0]),
+            offset_source_name="OtherTerm",
             offset_contract=OffsetExportContract(
                 handling="EXPORTED_FACTOR",
-                source_factor_name="Exposure",
-                published_factor_name="Exposure",
-                source_name="Exposure",
-                label="log(Exposure)",
+                source_factor_name="Term",
+                published_factor_name="Term",
+                source_name="Term",
+                label="log(Term / 12)",
             ),
         )
 

@@ -851,7 +851,7 @@ def export_edited_model(
         export_options["offset"] = parent.bundle.offset
     if contract.handling == "EXPORTED_FACTOR":
         export_options.update(
-            offset_source=parent.bundle.export_weight,
+            offset_source=parent.bundle.offset_source,
             offset_name=contract.source_factor_name,
             offset_kind="auto",
         )
@@ -1006,7 +1006,7 @@ def verify_package_sql_parity(
         expected = np.asarray(edited_model.predict(sample, offset=sample_offset), dtype=float)
     contract = bundle.offset_contract
     sample_published_offset_source = (
-        pd.Series(bundle.export_weight).reset_index(drop=True).iloc[:count]
+        pd.Series(bundle.offset_source).reset_index(drop=True).iloc[:count]
         if contract.handling == "EXPORTED_FACTOR"
         else None
     )

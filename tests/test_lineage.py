@@ -57,7 +57,7 @@ def _approved_build() -> ApprovedModelBuild:
         publication_receipt_sha256="b" * 64,
         candidate_artifact_path="/tmp/attempt-2/candidate.joblib",
         candidate_artifact_sha256="c" * 64,
-        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_format="superglm-candidate-joblib-v2",
         candidate_artifact_size_bytes=321,
         candidate_python_version="3.14.4",
         candidate_superglm_version="0.11.0",

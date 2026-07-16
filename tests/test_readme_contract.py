@@ -69,5 +69,21 @@ def test_readme_documents_automatic_audit_evidence_and_lineage():
         assert expected in readme
 
 
+def test_readme_documents_explicit_independent_offset_and_weight_inputs():
+    readme = _readme()
+
+    for expected in (
+        'frame["term_offset"] = np.log(frame["term"] / 12.0)',
+        'offset_column="term_offset"',
+        'offset_source_column="term"',
+        'offset_label="log(term / 12)"',
+        'sample_weight_column="model_weight"',
+        'export_weight_column="rating_table_weight"',
+    ):
+        assert expected in readme
+
+    assert "exposure_column=" not in readme
+
+
 def test_readme_is_concise_enough_to_be_an_entry_point():
     assert len(_readme().splitlines()) < 300

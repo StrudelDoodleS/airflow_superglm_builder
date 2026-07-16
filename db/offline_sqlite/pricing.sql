@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS pricing.DATASET_MANIFEST (
     frame_hash_metadata_json TEXT NOT NULL,
     exposure_column TEXT,
     data_as_of_column TEXT,
+    offset_column TEXT,
+    offset_source_column TEXT,
+    offset_label TEXT,
+    export_weight_column TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );

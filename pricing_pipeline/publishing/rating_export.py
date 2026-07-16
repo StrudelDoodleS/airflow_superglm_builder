@@ -15,7 +15,7 @@ def export_rating_tables(
     model,
     X,
     y,
-    exposure,
+    export_weight,
     output_path: Path,
     *,
     offset=None,
@@ -33,7 +33,7 @@ def export_rating_tables(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    export_kwargs = {"sample_weight": exposure, "n_bins": n_bins}
+    export_kwargs = {"sample_weight": export_weight, "n_bins": n_bins}
     optional_export_kwargs = {
         "offset": offset,
         "offset_source": offset_source,

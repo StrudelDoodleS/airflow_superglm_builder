@@ -76,7 +76,6 @@ def _notebook(
 ) -> str:
     feature = "feature_1" if target_name != "feature_1" else "feature_2"
     primary_key = "row_id" if target_name != "row_id" else "record_id"
-    exposure = "exposure" if target_name != "exposure" else "earned_exposure"
     python_values = {
         "__PACKAGE_NAME__": package_name,
         "__MODEL_NAME__": model_name,
@@ -86,18 +85,12 @@ def _notebook(
         "__DEPLOYMENT_SLOT__": deployment_slot,
         "__FEATURE_NAME__": feature,
         "__PRIMARY_KEY__": primary_key,
-        "__EXPOSURE_NAME__": exposure,
         "__DATASET_NAME__": f"{package_name}_model_frame",
     }
-    replacements = {
-        token: json.dumps(value)[1:-1] for token, value in python_values.items()
-    }
+    replacements = {token: json.dumps(value)[1:-1] for token, value in python_values.items()}
     replacements["__MODEL_LABEL_MARKDOWN__"] = model_label
     template = json.loads(_NOTEBOOK_TEMPLATE.read_text(encoding="utf-8"))
-    return (
-        json.dumps(_render_template(template, replacements), indent=1, ensure_ascii=False)
-        + "\n"
-    )
+    return json.dumps(_render_template(template, replacements), indent=1, ensure_ascii=False) + "\n"
 
 
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:

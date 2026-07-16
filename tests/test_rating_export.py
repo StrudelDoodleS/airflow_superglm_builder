@@ -62,7 +62,7 @@ def test_export_rating_tables_forwards_weights_and_offset(tmp_path: Path):
     output_path = tmp_path / "nested" / "rating_tables.xlsx"
     X = pd.DataFrame({"x": [1, 2]})
     y = np.array([0.0, 1.0])
-    exposure = np.array([0.5, 2.0])
+    export_weight = np.array([0.5, 2.0])
     offset = np.log(np.array([1.0, 3.0]))
     offset_source = pd.Series([12, 36], name="TermMonths")
 
@@ -70,7 +70,7 @@ def test_export_rating_tables_forwards_weights_and_offset(tmp_path: Path):
         model,
         X,
         y,
-        exposure,
+        export_weight,
         output_path,
         offset=offset,
         offset_source=offset_source,
@@ -83,7 +83,7 @@ def test_export_rating_tables_forwards_weights_and_offset(tmp_path: Path):
     assert output_path.read_bytes() == b"workbook"
     args, kwargs = model.calls[0]
     assert args == (output_path, X, y)
-    np.testing.assert_array_equal(kwargs.pop("sample_weight"), exposure)
+    np.testing.assert_array_equal(kwargs.pop("sample_weight"), export_weight)
     np.testing.assert_array_equal(kwargs.pop("offset"), offset)
     pd.testing.assert_series_equal(kwargs.pop("offset_source"), offset_source)
     assert kwargs == {
@@ -92,6 +92,56 @@ def test_export_rating_tables_forwards_weights_and_offset(tmp_path: Path):
         "offset_kind": "discrete",
         "offset_max_exact_levels": 50,
     }
+
+
+def test_export_rating_tables_preserves_raw_offset_levels(tmp_path: Path):
+    from superglm import Categorical, SuperGLM
+
+    row_count = 80
+    term = pd.Series(np.resize([12.0, 36.0], row_count), name="Term")
+    X = pd.DataFrame({"territory": np.resize(["north", "south"], row_count)})
+    offset = np.log(term / 12.0)
+    y = np.random.default_rng(20260716).poisson(
+        np.exp(-1.0 + offset.to_numpy())
+    )
+    model = SuperGLM(
+        features={"territory": Categorical(base="first")},
+        selection_penalty=0.0,
+    ).fit(X, y, offset=offset)
+    workbook_path = tmp_path / "rating_tables.xlsx"
+
+    rating_export.export_rating_tables(
+        model,
+        X,
+        y,
+        np.ones(row_count),
+        workbook_path,
+        offset=offset,
+        offset_source=term,
+        offset_name="Term",
+        offset_kind="discrete",
+    )
+
+    raw = pd.read_excel(workbook_path, sheet_name="Rating Tables", header=None)
+    header_positions = [
+        (row, column)
+        for row in range(len(raw))
+        for column in range(len(raw.columns) - 1)
+        if raw.iat[row, column] == "Term"
+        and raw.iat[row, column + 1] == "Relativity"
+    ]
+    assert len(header_positions) == 1
+    header_row, source_column = header_positions[0]
+    offset_rows = raw.iloc[header_row + 1 :, [source_column, source_column + 1]].dropna()
+    relativities = dict(
+        zip(
+            pd.to_numeric(offset_rows.iloc[:, 0]),
+            pd.to_numeric(offset_rows.iloc[:, 1]),
+            strict=True,
+        )
+    )
+
+    assert relativities == pytest.approx({12.0: 1.0, 36.0: 3.0})
 
 
 def test_export_rating_tables_requires_supported_superglm(tmp_path: Path):
@@ -491,7 +541,7 @@ def _model_run_build(**overrides):
         "publication_receipt_sha256": "c" * 64,
         "candidate_artifact_path": "/tmp/candidate.joblib",
         "candidate_artifact_sha256": "a" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 123,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",

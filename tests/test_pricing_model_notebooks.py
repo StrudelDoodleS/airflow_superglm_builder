@@ -160,7 +160,14 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "display(raw" not in source
     assert "display(frame" not in source
     assert 'frame["LogDensity"] = np.log(' in source
-    assert '*FEATURES]' in source
+    assert 'frame["LogExposure"] = np.log(frame["Exposure"].astype(float))' in source
+    assert "*FEATURES]" in source
+    assert 'offset_column="LogExposure"' in model_cell
+    assert 'offset_source_column="Exposure"' in model_cell
+    assert 'offset_label="log(Exposure)"' in model_cell
+    assert "sample_weight_column=None" in model_cell
+    assert 'export_weight_column="Exposure"' in model_cell
+    assert "exposure_column=" not in source
 
     for hidden_model_surface in (
         "FEATURE_COLUMNS",

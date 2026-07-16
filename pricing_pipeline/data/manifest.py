@@ -90,7 +90,10 @@ class ModelFrameManifestSpec:
     target_column: str | None
     weight_column: str | None = None
     feature_columns: tuple[str, ...] = ()
-    exposure_column: str | None = None
+    offset_column: str | None = None
+    offset_source_column: str | None = None
+    offset_label: str | None = None
+    export_weight_column: str | None = None
     data_as_of_column: str | None = None
 
     def __post_init__(self) -> None:
@@ -128,8 +131,29 @@ class ModelFrameManifestSpec:
         object.__setattr__(self, "feature_columns", feature_columns)
         object.__setattr__(
             self,
-            "exposure_column",
-            _optional_text(self.exposure_column, field_name="exposure_column"),
+            "offset_column",
+            _optional_text(self.offset_column, field_name="offset_column"),
+        )
+        object.__setattr__(
+            self,
+            "offset_source_column",
+            _optional_text(
+                self.offset_source_column,
+                field_name="offset_source_column",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "offset_label",
+            _optional_text(self.offset_label, field_name="offset_label"),
+        )
+        object.__setattr__(
+            self,
+            "export_weight_column",
+            _optional_text(
+                self.export_weight_column,
+                field_name="export_weight_column",
+            ),
         )
         object.__setattr__(
             self,
@@ -184,7 +208,10 @@ def create_model_frame_manifest_with_split(
                 "weight_column": spec.weight_column,
                 "model_frame_sha256": model_frame_sha256,
                 "frame_hash_metadata_json": frame_hash_metadata_json,
-                "exposure_column": spec.exposure_column,
+                "offset_column": spec.offset_column,
+                "offset_source_column": spec.offset_source_column,
+                "offset_label": spec.offset_label,
+                "export_weight_column": spec.export_weight_column,
                 "data_as_of_column": spec.data_as_of_column,
                 "created_by": created_by,
             }
@@ -294,8 +321,12 @@ def _validate_model_frame(
         required_columns.append(spec.target_column)
     if spec.weight_column is not None:
         required_columns.append(spec.weight_column)
-    if spec.exposure_column is not None:
-        required_columns.append(spec.exposure_column)
+    if spec.offset_column is not None:
+        required_columns.append(spec.offset_column)
+    if spec.offset_source_column is not None:
+        required_columns.append(spec.offset_source_column)
+    if spec.export_weight_column is not None:
+        required_columns.append(spec.export_weight_column)
     if spec.data_as_of_column is not None:
         required_columns.append(spec.data_as_of_column)
     missing = [column for column in required_columns if column not in frame.columns]
@@ -329,8 +360,12 @@ def _validate_model_frame(
             raise ValueError("validation split column must not be the target column")
         if split_column == spec.weight_column:
             raise ValueError("validation split column must not be the weight column")
-        if split_column == spec.exposure_column:
-            raise ValueError("validation split column must not be the exposure column")
+        if split_column == spec.offset_column:
+            raise ValueError("validation split column must not be the offset column")
+        if split_column == spec.offset_source_column:
+            raise ValueError("validation split column must not be the offset-source column")
+        if split_column == spec.export_weight_column:
+            raise ValueError("validation split column must not be the export-weight column")
         if split_column == spec.data_as_of_column:
             raise ValueError("validation split column must not be the data-as-of column")
         if split_column in spec.feature_columns:
@@ -491,12 +526,20 @@ def build_column_metadata(
     spec: ModelFrameManifestSpec,
     split_column: str | None = None,
 ) -> pd.DataFrame:
-    role_by_column: dict[str, str] = {}
+    roles_by_column: dict[str, list[str]] = {}
     role_columns = (
         ("KEY", spec.pk_columns),
         ("TARGET", () if spec.target_column is None else (spec.target_column,)),
         ("WEIGHT", () if spec.weight_column is None else (spec.weight_column,)),
-        ("EXPOSURE", () if spec.exposure_column is None else (spec.exposure_column,)),
+        ("OFFSET", () if spec.offset_column is None else (spec.offset_column,)),
+        (
+            "OFFSET_SOURCE",
+            () if spec.offset_source_column is None else (spec.offset_source_column,),
+        ),
+        (
+            "EXPORT_WEIGHT",
+            () if spec.export_weight_column is None else (spec.export_weight_column,),
+        ),
         (
             "DATA_AS_OF",
             () if spec.data_as_of_column is None else (spec.data_as_of_column,),
@@ -504,14 +547,20 @@ def build_column_metadata(
         ("SPLIT", () if split_column is None else (split_column,)),
         ("FEATURE", spec.feature_columns),
     )
+    combinable_roles = {"WEIGHT", "OFFSET", "OFFSET_SOURCE", "EXPORT_WEIGHT"}
     for role, columns in role_columns:
         for column in columns:
-            previous_role = role_by_column.get(column)
-            if previous_role is not None:
+            existing_roles = roles_by_column.setdefault(column, [])
+            if existing_roles and not ({*existing_roles, role} <= combinable_roles):
                 raise ValueError(
-                    f"column {column!r} is declared as both {previous_role} and {role}"
+                    f"column {column!r} is declared as both "
+                    f"{'+'.join(existing_roles)} and {role}"
                 )
-            role_by_column[column] = role
+            existing_roles.append(role)
+
+    role_by_column = {
+        column: "+".join(roles) for column, roles in roles_by_column.items()
+    }
 
     column_df = pd.DataFrame(
         {
