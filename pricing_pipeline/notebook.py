@@ -452,6 +452,7 @@ def build_candidate(
         spec.sample_weight_column,
         spec.export_weight_column,
         spec.data_as_of_column,
+        spec.validation.stratify_column,
     }
     required_columns.discard(None)
     missing_columns = sorted(required_columns - set(frame.columns))

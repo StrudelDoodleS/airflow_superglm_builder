@@ -529,6 +529,56 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     assert not context.settings.validation_split_artifact_root.exists()
 
 
+def test_build_candidate_requires_declared_stratify_column_before_version_work(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context = replace(
+        _context(api, tmp_path),
+        mode="local",
+        destination="local SQLite database",
+    )
+    validation = ValidationSplitConfig.train_test_split(
+        test_size=0.25,
+        random_state=7,
+        stratify_column="validation_cohort",
+    )
+    model = _registered_model(api, tmp_path)
+    model = replace(
+        model,
+        config=replace(model.config, validation_split=validation),
+        spec=replace(model.spec, validation=validation),
+    )
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+
+    monkeypatch.setattr(
+        api,
+        "resolve_sqlite_model_version",
+        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="model frame is missing declared columns: validation_cohort",
+    ):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=object(),
+            data_as_of="2026-06-30",
+        )
+
+
 def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 
