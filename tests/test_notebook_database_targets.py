@@ -511,7 +511,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         publication_receipt_sha256="b" * 64,
         candidate_artifact_path=str(tmp_path / "candidate.joblib"),
         candidate_artifact_sha256="c" * 64,
-        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_format="superglm-candidate-joblib-v2",
         candidate_artifact_size_bytes=123,
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),

@@ -36,7 +36,7 @@ Open the notebook and work from top to bottom:
 1. Select local or remote database mode in the first cell.
 2. Load the source data and perform visible feature transforms in Python.
 3. Declare `PricingModelSpec` and the validation strategy.
-4. Define `make_model()` with ordinary SuperGLM code.
+4. Define the feature objects and `SuperGLM` with ordinary Python.
 5. Call `register_model`, `build_candidate`, and `publish_candidate`.
 6. Optionally open the published package in the editor and publish retained
    edits.
@@ -50,9 +50,12 @@ The bundled reference is
 
 ## What remains visible
 
-The analyst supplies the decisions that genuinely belong to the model:
+The analyst supplies the decisions that genuinely belong to the model. Offset
+transforms are ordinary visible Python too:
 
 ```python
+frame["term_offset"] = np.log(frame["term"] / 12.0)
+
 MODEL = PricingModelSpec(
     name="CLAIM_FREQUENCY",
     label="Claim frequency",
@@ -63,7 +66,11 @@ MODEL = PricingModelSpec(
     dataset_name="claim_frequency_model_frame",
     source_system="pricing_sql",
     pk_columns=("policy_id",),
-    exposure_column="exposure",
+    offset_column="term_offset",
+    offset_source_column="term",
+    offset_label="log(term / 12)",
+    sample_weight_column="model_weight",
+    export_weight_column="rating_table_weight",
     data_as_of_column="data_as_of",
     validation=ValidationSplitConfig.kfold(
         n_splits=5,
@@ -72,6 +79,13 @@ MODEL = PricingModelSpec(
     ),
 )
 ```
+
+`offset_column` is passed to fitting exactly as stored; the pipeline never logs
+it. `offset_source_column` preserves the upstream values used as workbook levels
+(for example, `term` 12 and 36 produce relativities 1 and 3 after fitting
+`log(term / 12)`). `sample_weight_column` affects fitting only, while
+`export_weight_column` affects rating-table aggregation only. These inputs do
+not fall back to one another. Set any unused field to `None`.
 
 Feature transforms also remain normal Python:
 
@@ -109,7 +123,8 @@ arguments:
 - stable SQL model ID and generated trained-model version;
 - dataset name, source system, data-as-of date, exact final-frame SHA-256, row
   count, primary-key columns, and explicit
-  key/feature/target/weight/exposure/data-as-of roles;
+  key/feature/target/offset/offset-source/sample-weight/export-weight/data-as-of
+  roles;
 - ordered column names, dtypes, null counts, distinct counts, and the runtime
   metadata needed to interpret the frame checksum;
 - validation method, parameters, folds, split membership evidence, and split

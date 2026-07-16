@@ -82,7 +82,7 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
         publication_receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
         candidate_artifact_path=str(candidate),
         candidate_artifact_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
-        candidate_artifact_format="superglm-candidate-joblib-v1",
+        candidate_artifact_format="superglm-candidate-joblib-v2",
         candidate_artifact_size_bytes=candidate.stat().st_size,
         candidate_python_version="3.14.4",
         candidate_superglm_version="0.11.0",

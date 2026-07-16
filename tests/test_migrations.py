@@ -81,6 +81,23 @@ def test_dataset_manifest_frame_evidence_migration_adds_auditable_columns():
     assert "ISJSON(frame_hash_metadata_json) = 1" in sql
 
 
+def test_dataset_manifest_offset_contract_migration_adds_explicit_audit_columns():
+    path = Path("db/migrations/V034__dataset_manifest_offset_contract.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "ADD offset_column NVARCHAR(128) NULL" in sql
+    assert "ADD offset_source_column NVARCHAR(128) NULL" in sql
+    assert "ADD offset_label NVARCHAR(512) NULL" in sql
+    assert "ADD export_weight_column NVARCHAR(128) NULL" in sql
+    assert "ALTER COLUMN column_role NVARCHAR(128) NOT NULL" in sql
+    assert "CREATE OR ALTER VIEW pricing.V_CURRENT_DATASET_CV_FOLD" in sql
+    assert "dm.offset_column" in sql
+    assert "dm.offset_source_column" in sql
+    assert "dm.offset_label" in sql
+    assert "dm.export_weight_column" in sql
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 

@@ -721,7 +721,8 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
             "policy_id": [1, 2, 3],
             "target": [0.0, 1.0, 0.0],
             "age": [20.0, 30.0, 40.0],
-            "Exposure": [2.0, 4.0, 3.0],
+            "Term": [12.0, 36.0, 24.0],
+            "RatingWeight": [2.0, 4.0, 3.0],
         }
     )
     source_root = tmp_path / "pricing_models" / "home_freq"
@@ -775,17 +776,24 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     monkeypatch.setattr(api, "fit_full_model", capture_fit_full_model)
 
     base_inputs = _identity_bound_inputs(api, frame)
-    exposure = pd.Series(
-        frame["Exposure"].to_numpy(copy=True),
+    term = pd.Series(
+        frame["Term"].to_numpy(copy=True),
         index=base_inputs.X.index,
-        name="Exposure",
+        name="Term",
+    )
+    rating_weight = pd.Series(
+        frame["RatingWeight"].to_numpy(copy=True),
+        index=base_inputs.X.index,
+        name="RatingWeight",
     )
     inputs = _identity_bound_inputs(
         api,
         frame,
-        offset=np.log(exposure),
-        export_weight=exposure,
-        export_weight_name="Exposure",
+        offset=np.log(term / 12.0),
+        offset_source=term,
+        offset_source_name="Term",
+        export_weight=rating_weight,
+        export_weight_name="RatingWeight",
     )
     from pricing_pipeline.publishing.superglm_publication_receipt import (
         OffsetExportContract,
@@ -832,10 +840,10 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         "created_by": "pytest",
         "offset_contract": OffsetExportContract(
             handling="EXPORTED_FACTOR",
-            source_factor_name="Exposure",
-            published_factor_name="Exposure",
-            source_name="Exposure",
-            label="log(Exposure)",
+            source_factor_name="Term",
+            published_factor_name="Term",
+            source_name="Term",
+            label="log(Term / 12)",
         ),
     }
     result = api.run_standard_superglm_build(object(), **build_kwargs)
@@ -880,11 +888,15 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert final_models[0].fit_X.equals(inputs.X)
     assert superglm_model.fit_X is None
     assert superglm_model.fit_y is None
-    np.testing.assert_allclose(captured["export_weight"], exposure)
-    np.testing.assert_allclose(captured["export_options"]["offset"], np.log(exposure))
-    np.testing.assert_allclose(captured["export_options"]["offset_source"], exposure)
-    assert captured["export_options"]["offset_name"] == "Exposure"
+    np.testing.assert_allclose(captured["export_weight"], rating_weight)
+    np.testing.assert_allclose(captured["export_options"]["offset"], np.log(term / 12.0))
+    np.testing.assert_allclose(captured["export_options"]["offset_source"], term)
+    assert captured["export_options"]["offset_name"] == "Term"
     assert captured["export_options"]["offset_kind"] == "auto"
+    np.testing.assert_allclose(bundle.offset_source, term)
+    np.testing.assert_allclose(bundle.export_weight, rating_weight)
+    assert bundle.offset_source_name == "Term"
+    assert bundle.export_weight_name == "RatingWeight"
     assert result.manifest_id == "manifest-1"
     assert result.model_frame_sha256 == "a" * 64
     assert result.split_set_id == "manifest-1-split"

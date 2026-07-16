@@ -46,7 +46,6 @@ def _registered_model(api, tmp_path: Path):
         dataset_name="claim_frequency_frame",
         source_system="pricing_sql",
         pk_columns=("policy_id",),
-        exposure_column="exposure",
         validation=ValidationSplitConfig.kfold(n_splits=2, random_state=7),
     )
     return api.RegisteredModel(
@@ -77,7 +76,11 @@ def _registered_spec_model(api, tmp_path: Path, **spec_overrides):
         "dataset_name": "claim_frequency_frame",
         "source_system": "pricing_sql",
         "pk_columns": ("policy_id",),
-        "exposure_column": "exposure",
+        "offset_column": "term_offset",
+        "offset_source_column": "term",
+        "offset_label": "log(term / 12)",
+        "sample_weight_column": "model_weight",
+        "export_weight_column": "rating_weight",
         "validation": ValidationSplitConfig.kfold(n_splits=2, random_state=7),
     }
     values.update(spec_overrides)
@@ -116,7 +119,7 @@ def _approved_build(tmp_path: Path, **overrides) -> ApprovedModelBuild:
         "publication_receipt_sha256": "b" * 64,
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "c" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v1",
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
         "candidate_artifact_size_bytes": 123,
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.11.0",
@@ -146,7 +149,11 @@ def test_pricing_model_spec_holds_analyst_decisions():
         dataset_name="  claim_frequency_frame  ",
         source_system="  pricing_sql  ",
         pk_columns=(" policy_id ",),
-        exposure_column=" exposure ",
+        offset_column=" term_offset ",
+        offset_source_column=" term ",
+        offset_label=" log(term / 12) ",
+        sample_weight_column=" model_weight ",
+        export_weight_column=" rating_weight ",
         validation=validation,
     )
 
@@ -159,10 +166,68 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.dataset_name == "claim_frequency_frame"
     assert spec.source_system == "pricing_sql"
     assert spec.pk_columns == ("policy_id",)
-    assert spec.exposure_column == "exposure"
+    assert spec.offset_column == "term_offset"
+    assert spec.offset_source_column == "term"
+    assert spec.offset_label == "log(term / 12)"
+    assert spec.sample_weight_column == "model_weight"
+    assert spec.export_weight_column == "rating_weight"
     assert spec.validation is validation
     assert spec.scoring == ("deviance",)
     assert spec.fit_mode == "fit_reml"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"offset_source_column": None},
+        {"offset_label": None},
+        {"offset_column": None},
+    ],
+)
+def test_pricing_model_spec_requires_complete_offset_contract(override):
+    from pricing_pipeline import notebook as api
+
+    values = {
+        "name": "CLAIM_FREQUENCY",
+        "label": "Claim frequency",
+        "target": "claim_count",
+        "model_type": "superglm_poisson",
+        "deployment_slot": "PRODUCTION",
+        "features": ("age", "region"),
+        "dataset_name": "claim_frequency_frame",
+        "source_system": "pricing_sql",
+        "pk_columns": ("policy_id",),
+        "offset_column": "term_offset",
+        "offset_source_column": "term",
+        "offset_label": "log(term / 12)",
+    }
+    values.update(override)
+
+    with pytest.raises(ValueError, match="offset_column, offset_source_column, and offset_label"):
+        api.PricingModelSpec(**values)
+
+
+def test_pricing_model_spec_allows_one_operational_column_for_multiple_roles():
+    from pricing_pipeline import notebook as api
+
+    spec = api.PricingModelSpec(
+        name="CLAIM_FREQUENCY",
+        label="Claim frequency",
+        target="claim_count",
+        model_type="superglm_poisson",
+        deployment_slot="PRODUCTION",
+        features=("age", "region"),
+        dataset_name="claim_frequency_frame",
+        source_system="pricing_sql",
+        pk_columns=("policy_id",),
+        offset_column="offset",
+        offset_source_column="weight",
+        offset_label="log(weight)",
+        sample_weight_column="weight",
+        export_weight_column="weight",
+    )
+
+    assert spec.offset_source_column == spec.sample_weight_column == spec.export_weight_column
 
 
 def test_pricing_model_spec_materializes_split_evidence_automatically():
@@ -236,7 +301,8 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
         ),
         ({"features": ("claim_count",)}, "model column roles overlap"),
         ({"features": ("policy_id",)}, "model column roles overlap"),
-        ({"features": ("exposure",)}, "model column roles overlap"),
+        ({"features": ("term",)}, "model column roles overlap"),
+        ({"data_as_of_column": "term"}, "model column roles overlap"),
     ],
 )
 def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
@@ -252,7 +318,9 @@ def test_pricing_model_spec_rejects_ambiguous_column_roles(overrides, message):
         "dataset_name": "claim_frequency_frame",
         "source_system": "pricing_sql",
         "pk_columns": ("policy_id",),
-        "exposure_column": "exposure",
+        "offset_column": "term_offset",
+        "offset_source_column": "term",
+        "offset_label": "log(term / 12)",
     }
     values.update(overrides)
 
@@ -329,7 +397,6 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         dataset_name="claim_frequency_frame",
         source_system="pricing_sql",
         pk_columns=("policy_id",),
-        exposure_column="exposure",
         validation=validation,
     )
     captured = {}
@@ -421,33 +488,23 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     assert not context.settings.validation_split_artifact_root.exists()
 
 
-@pytest.mark.parametrize(
-    ("exposure_column", "published_factor_name"),
-    [
-        ("exposure", "exposure"),
-        ("Earned Exposure", "Earned_Exposure"),
-    ],
-)
-def test_build_candidate_derives_simple_spec_inputs(
-    monkeypatch,
-    tmp_path,
-    exposure_column,
-    published_factor_name,
-):
+def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
     model = _registered_spec_model(
         api,
         tmp_path,
-        exposure_column=exposure_column,
         data_as_of_column="snapshot_date",
     )
     frame = pd.DataFrame(
         {
             "policy_id": [10, 20, 30, 40],
             "claim_count": [0.0, 1.0, 0.0, 2.0],
-            exposure_column: [1.0, 0.5, 1.5, 0.75],
+            "term": [12.0, 36.0, 12.0, 36.0],
+            "term_offset": np.log([1.0, 3.0, 1.0, 3.0]),
+            "model_weight": [0.5, 0.75, 1.25, 1.5],
+            "rating_weight": [10.0, 20.0, 30.0, 40.0],
             "age": [25.0, 45.0, 35.0, 52.0],
             "region": ["N", "S", "N", "S"],
             "snapshot_date": ["2026-06-30"] * 4,
@@ -495,18 +552,25 @@ def test_build_candidate_derives_simple_spec_inputs(
     inputs = captured["inputs"]
     assert list(inputs.X.columns) == ["age", "region"]
     assert inputs.y.name == "claim_count"
-    assert np.allclose(inputs.offset.to_numpy(), np.log(frame[exposure_column]))
-    assert inputs.export_weight.name == exposure_column
-    assert np.allclose(inputs.export_weight.to_numpy(), frame[exposure_column])
+    pd.testing.assert_series_equal(inputs.offset, frame.set_index("policy_id")["term_offset"])
+    pd.testing.assert_series_equal(inputs.offset_source, frame.set_index("policy_id")["term"])
+    pd.testing.assert_series_equal(inputs.sample_weight, frame.set_index("policy_id")["model_weight"])
+    pd.testing.assert_series_equal(inputs.export_weight, frame.set_index("policy_id")["rating_weight"])
+    assert inputs.offset_source_name == "term"
+    assert inputs.sample_weight_name == "model_weight"
+    assert inputs.export_weight_name == "rating_weight"
     manifest_spec = captured["manifest_spec"]
     assert manifest_spec.dataset_name == "claim_frequency_frame"
     assert manifest_spec.source_system == "pricing_sql"
     assert manifest_spec.data_as_of_date.isoformat() == "2026-06-30"
     assert manifest_spec.pk_columns == ("policy_id",)
     assert manifest_spec.target_column == "claim_count"
-    assert manifest_spec.weight_column is None
+    assert manifest_spec.weight_column == "model_weight"
     assert manifest_spec.feature_columns == ("age", "region")
-    assert manifest_spec.exposure_column == exposure_column
+    assert manifest_spec.offset_column == "term_offset"
+    assert manifest_spec.offset_source_column == "term"
+    assert manifest_spec.offset_label == "log(term / 12)"
+    assert manifest_spec.export_weight_column == "rating_weight"
     assert manifest_spec.data_as_of_column == "snapshot_date"
     assert captured["effective_from"] is None
     assert captured["model_config"] is model.config
@@ -520,9 +584,10 @@ def test_build_candidate_derives_simple_spec_inputs(
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
     assert contract.handling == "EXPORTED_FACTOR"
-    assert contract.source_factor_name == exposure_column
-    assert contract.published_factor_name == published_factor_name
-    assert contract.source_name == exposure_column
+    assert contract.source_factor_name == "term"
+    assert contract.published_factor_name == "term"
+    assert contract.source_name == "term"
+    assert contract.label == "log(term / 12)"
     assert "offset_export_options" not in captured
 
 
@@ -546,7 +611,9 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
             "policy_id": [10, 10, 20, 20],
             "risk_id": [1, 2, 1, 2],
             "claim_count": [0.0, 1.0, 0.0, 2.0],
-            "exposure": [1.0, 0.5, 1.5, 0.75],
+            "term": [12.0, 36.0, 12.0, 36.0],
+            "term_offset": np.log([1.0, 3.0, 1.0, 3.0]),
+            "rating_weight": [1.0, 0.5, 1.5, 0.75],
             "credibility": [0.8, 0.9, 1.0, 0.7],
             "age": [25.0, 45.0, 35.0, 52.0],
             "region": ["N", "S", "N", "S"],
@@ -599,6 +666,7 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
         captured["inputs"].y,
         captured["inputs"].sample_weight,
         captured["inputs"].offset,
+        captured["inputs"].offset_source,
         captured["inputs"].export_weight,
     ):
         assert values.index.identical(expected_identity)

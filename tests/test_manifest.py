@@ -138,7 +138,9 @@ def test_build_column_metadata_records_only_explicit_feature_roles():
             "PolicyID": [1, 2],
             "ClaimNb": [0, 1],
             "FitWeight": [1.0, 0.5],
-            "Exposure": [1.0, 0.5],
+            "TermOffset": [0.0, np.log(3.0)],
+            "TermMonths": [12, 36],
+            "ExportWeight": [10.0, 20.0],
             "SnapshotDate": ["2026-06-30", "2026-06-30"],
             "Fold": [1, 2],
             "DriverAge": [25, 40],
@@ -156,7 +158,10 @@ def test_build_column_metadata_records_only_explicit_feature_roles():
             pk_columns=("PolicyID",),
             target_column="ClaimNb",
             weight_column="FitWeight",
-            exposure_column="Exposure",
+            offset_column="TermOffset",
+            offset_source_column="TermMonths",
+            offset_label="log(TermMonths / 12)",
+            export_weight_column="ExportWeight",
             data_as_of_column="SnapshotDate",
             feature_columns=("DriverAge",),
         ),
@@ -167,11 +172,47 @@ def test_build_column_metadata_records_only_explicit_feature_roles():
         "PolicyID": "KEY",
         "ClaimNb": "TARGET",
         "FitWeight": "WEIGHT",
-        "Exposure": "EXPOSURE",
+        "TermOffset": "OFFSET",
+        "TermMonths": "OFFSET_SOURCE",
+        "ExportWeight": "EXPORT_WEIGHT",
         "SnapshotDate": "DATA_AS_OF",
         "Fold": "SPLIT",
         "DriverAge": "FEATURE",
         "SourceNote": "OTHER",
+    }
+
+
+def test_build_column_metadata_preserves_intentional_operational_role_overlap():
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2],
+            "ClaimNb": [0, 1],
+            "TermOffset": [0.0, np.log(3.0)],
+            "TermMonths": [12, 36],
+        }
+    )
+
+    columns = build_column_metadata(
+        frame,
+        manifest_id="manifest_shared_operational_column",
+        spec=ModelFrameManifestSpec(
+            dataset_name="frequency",
+            source_system="test",
+            data_as_of_date="2026-06-30",
+            pk_columns=("PolicyID",),
+            target_column="ClaimNb",
+            offset_column="TermOffset",
+            offset_source_column="TermMonths",
+            offset_label="log(TermMonths / 12)",
+            export_weight_column="TermMonths",
+        ),
+    )
+
+    assert dict(zip(columns["column_name"], columns["column_role"], strict=True)) == {
+        "PolicyID": "KEY",
+        "ClaimNb": "TARGET",
+        "TermOffset": "OFFSET",
+        "TermMonths": "OFFSET_SOURCE+EXPORT_WEIGHT",
     }
 
 
@@ -286,7 +327,9 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
             "PolicyID": [2, 1, 3],
             "LossCost": [3.4, 1.2, 0.0],
             "ExposureYears": [1.0, 0.5, 0.25],
-            "PolicyTerm": [1.0, 0.5, 0.25],
+            "TermOffset": [0.0, np.log(3.0), np.log(2.0)],
+            "PolicyTerm": [12, 36, 24],
+            "ExportWeight": [4.0, 5.0, 6.0],
             "SnapshotDate": ["2026-06-30"] * 3,
             "BandedDriverAge": ["30-39", "18-29", "40-49"],
         }
@@ -315,7 +358,10 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
             target_column="LossCost",
             weight_column="ExposureYears",
             feature_columns=("BandedDriverAge",),
-            exposure_column="PolicyTerm",
+            offset_column="TermOffset",
+            offset_source_column="PolicyTerm",
+            offset_label="log(PolicyTerm / 12)",
+            export_weight_column="ExportWeight",
             data_as_of_column="SnapshotDate",
         ),
         manifest_id="manifest_frame_1",
@@ -344,7 +390,11 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
     assert json.loads(manifest_row["pk_columns_json"]) == ["PolicyID"]
     assert manifest_row["target_column"] == "LossCost"
     assert manifest_row["weight_column"] == "ExposureYears"
-    assert manifest_row["exposure_column"] == "PolicyTerm"
+    assert manifest_row["offset_column"] == "TermOffset"
+    assert manifest_row["offset_source_column"] == "PolicyTerm"
+    assert manifest_row["offset_label"] == "log(PolicyTerm / 12)"
+    assert manifest_row["export_weight_column"] == "ExportWeight"
+    assert "exposure_column" not in manifest_row
     assert manifest_row["data_as_of_column"] == "SnapshotDate"
     assert len(manifest_row["model_frame_sha256"]) == 64
     assert result.model_frame_sha256 == manifest_row["model_frame_sha256"]
@@ -362,7 +412,9 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
         "PolicyID": "KEY",
         "LossCost": "TARGET",
         "ExposureYears": "WEIGHT",
-        "PolicyTerm": "EXPOSURE",
+        "TermOffset": "OFFSET",
+        "PolicyTerm": "OFFSET_SOURCE",
+        "ExportWeight": "EXPORT_WEIGHT",
         "SnapshotDate": "DATA_AS_OF",
         "BandedDriverAge": "FEATURE",
     }

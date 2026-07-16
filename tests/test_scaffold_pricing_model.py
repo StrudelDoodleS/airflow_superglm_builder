@@ -123,6 +123,16 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert '"feature_1": Numeric()' in source
     assert "features=FEATURES," in source
     assert "features=tuple(FEATURES)," in source
+    assert "offset_column=None" in source
+    assert "offset_source_column=None" in source
+    assert "offset_label=None" in source
+    assert "sample_weight_column=None" in source
+    assert "export_weight_column=None" in source
+    assert "exposure_column=" not in source
+    assert '# frame["term_offset"] = np.log(frame["term"] / 12.0)' in source
+    assert '# offset_column="term_offset"' in source
+    assert '# offset_source_column="term"' in source
+    assert '# offset_label="log(term / 12)"' in source
     assert "register_model(" in source
     assert "build_candidate(" in source
     assert "superglm_model=superglm_model" in source

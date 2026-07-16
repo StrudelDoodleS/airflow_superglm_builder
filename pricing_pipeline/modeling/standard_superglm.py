@@ -45,6 +45,8 @@ class ModelInputs:
     sample_weight: pd.Series | np.ndarray | None = None
     sample_weight_name: str | None = None
     offset: pd.Series | np.ndarray | None = None
+    offset_source: pd.Series | np.ndarray | None = None
+    offset_source_name: str | None = None
     export_weight: pd.Series | np.ndarray | None = None
     export_weight_name: str | None = None
     row_ids: pd.DataFrame | None = None
@@ -116,17 +118,23 @@ def run_standard_superglm_build(
     )
     fitted, telemetry = fit_full_model(final_model, inputs, fit_mode=fit_mode)
     resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
-    if resolved_offset_contract.handling == "EXPORTED_FACTOR" and inputs.export_weight is None:
+    if resolved_offset_contract.handling == "EXPORTED_FACTOR" and inputs.offset_source is None:
         raise StandardSuperGLMError(
-            "EXPORTED_FACTOR requires ModelInputs.export_weight; sample_weight is not a substitute"
+            "EXPORTED_FACTOR requires ModelInputs.offset_source"
         )
     fit_weight_name = _weight_name(
         inputs.sample_weight,
         inputs.sample_weight_name,
         role="sample_weight",
     )
-    export_weight = (
-        inputs.export_weight if inputs.export_weight is not None else inputs.sample_weight
+    offset_source_name = (
+        _weight_name(
+            inputs.offset_source,
+            inputs.offset_source_name,
+            role="offset_source",
+        )
+        if inputs.offset_source is not None
+        else None
     )
     export_weight_name = (
         _weight_name(
@@ -135,14 +143,14 @@ def run_standard_superglm_build(
             role="export_weight",
         )
         if inputs.export_weight is not None
-        else fit_weight_name
+        else None
     )
     if (
         resolved_offset_contract.handling == "EXPORTED_FACTOR"
-        and export_weight_name != resolved_offset_contract.source_name
+        and offset_source_name != resolved_offset_contract.source_name
     ):
         raise StandardSuperGLMError(
-            "ModelInputs.export_weight_name must match offset_contract.source_name"
+            "ModelInputs.offset_source_name must match offset_contract.source_name"
         )
     if hash_model_source(model_source_root) != source_sha256:
         raise StandardSuperGLMError(
@@ -166,7 +174,7 @@ def run_standard_superglm_build(
             export_options["offset"] = inputs.offset
         if resolved_offset_contract.handling == "EXPORTED_FACTOR":
             export_options.update(
-                offset_source=export_weight,
+                offset_source=inputs.offset_source,
                 offset_name=resolved_offset_contract.source_factor_name,
                 offset_kind="auto",
             )
@@ -174,7 +182,7 @@ def run_standard_superglm_build(
             fitted,
             inputs.X,
             inputs.y,
-            export_weight,
+            inputs.export_weight,
             output_path=workbook_path,
             **export_options,
         )
@@ -201,7 +209,16 @@ def run_standard_superglm_build(
                 None if inputs.sample_weight is None else np.asarray(inputs.sample_weight).copy()
             ),
             offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
-            export_weight=None if export_weight is None else np.asarray(export_weight).copy(),
+            offset_source=(
+                None
+                if inputs.offset_source is None
+                else np.asarray(inputs.offset_source).copy()
+            ),
+            export_weight=(
+                None
+                if inputs.export_weight is None
+                else np.asarray(inputs.export_weight).copy()
+            ),
             cv_report=cv_report,
             model_name=model_config.model_name,
             model_version=model_version,
@@ -217,6 +234,7 @@ def run_standard_superglm_build(
             model_frame_sha256=manifest.model_frame_sha256,
             offset_contract=resolved_offset_contract,
             fit_sample_weight_name=fit_weight_name,
+            offset_source_name=offset_source_name,
             export_weight_name=export_weight_name,
         )
         artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
@@ -270,6 +288,7 @@ def _validate_input_lengths(inputs: ModelInputs) -> None:
         "y": inputs.y,
         "sample_weight": inputs.sample_weight,
         "offset": inputs.offset,
+        "offset_source": inputs.offset_source,
         "export_weight": inputs.export_weight,
     }
     for name, value in values.items():
@@ -339,6 +358,7 @@ def _validate_canonical_row_ids(
         "y": inputs.y,
         "sample_weight": inputs.sample_weight,
         "offset": inputs.offset,
+        "offset_source": inputs.offset_source,
         "export_weight": inputs.export_weight,
     }
     for name, value in aligned_values.items():
