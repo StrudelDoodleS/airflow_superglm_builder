@@ -254,7 +254,11 @@ def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
     engine, paths = open_offline_sqlite(tmp_path)
     engine.dispose()
     with sqlite3.connect(paths["pricing"]) as connection:
-        for column in sorted(candidate_columns):
+        drop_order = [
+            "candidate_superglm_git_sha",
+            *sorted(candidate_columns - {"candidate_superglm_git_sha"}),
+        ]
+        for column in drop_order:
             connection.execute(f"ALTER TABLE MODEL_RUN DROP COLUMN {column}")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)

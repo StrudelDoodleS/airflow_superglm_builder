@@ -82,7 +82,16 @@ _OFFLINE_COLUMN_UPGRADES = (
         "pricing",
         "MODEL_RUN",
         "candidate_superglm_git_sha",
-        "TEXT",
+        (
+            "TEXT CHECK ("
+            "(candidate_artifact_format IS NULL "
+            "OR candidate_artifact_format <> 'superglm-candidate-joblib-v3' "
+            "OR candidate_superglm_git_sha IS NOT NULL) "
+            "AND (candidate_superglm_git_sha IS NULL "
+            "OR (length(candidate_superglm_git_sha) = 40 "
+            "AND candidate_superglm_git_sha NOT GLOB '*[^0-9a-f]*'))"
+            ")"
+        ),
     ),
     (
         "pricing",

@@ -126,7 +126,20 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     candidate_artifact_size_bytes INTEGER,
     candidate_python_version TEXT,
     candidate_superglm_version TEXT,
-    candidate_superglm_git_sha TEXT,
+    candidate_superglm_git_sha TEXT CHECK (
+        (
+            candidate_artifact_format IS NULL
+            OR candidate_artifact_format <> 'superglm-candidate-joblib-v3'
+            OR candidate_superglm_git_sha IS NOT NULL
+        )
+        AND (
+            candidate_superglm_git_sha IS NULL
+            OR (
+                length(candidate_superglm_git_sha) = 40
+                AND candidate_superglm_git_sha NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+    ),
     model_source_sha256 TEXT,
     effective_from TEXT,
     run_status TEXT NOT NULL DEFAULT 'SUCCEEDED',
