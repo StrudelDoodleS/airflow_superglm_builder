@@ -124,6 +124,10 @@ class PricingModelSpec:
             "pk_columns",
             tuple(_required_text(value, "pk_columns") for value in self.pk_columns),
         )
+        if not isinstance(self.scoring, tuple | list) or any(
+            not isinstance(value, str) for value in self.scoring
+        ):
+            raise ValueError("scoring must contain named metric strings")
         object.__setattr__(
             self,
             "scoring",

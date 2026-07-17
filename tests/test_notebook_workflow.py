@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
@@ -175,6 +176,34 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.validation is validation
     assert spec.scoring == ("deviance", "nll", "gini")
     assert spec.fit_mode == "fit_reml"
+
+
+@pytest.mark.parametrize(
+    "scoring",
+    [
+        (lambda y, mu: 0.0,),
+        (partial(pow, 2),),
+        ("value".upper,),
+        (type("Scorer", (), {"__call__": lambda self, y, mu: 0.0})(),),
+        "deviance",
+    ],
+)
+def test_pricing_model_spec_rejects_unnamed_or_callable_scoring(scoring):
+    from pricing_pipeline import notebook as api
+
+    with pytest.raises(ValueError, match="scoring must contain named metric strings"):
+        api.PricingModelSpec(
+            name="CLAIM_FREQUENCY",
+            label="Claim frequency",
+            target="claim_count",
+            model_type="superglm_poisson",
+            deployment_slot="PRODUCTION",
+            features=("age", "region"),
+            dataset_name="claim_frequency_frame",
+            source_system="pricing_sql",
+            pk_columns=("policy_id",),
+            scoring=scoring,
+        )
 
 
 @pytest.mark.parametrize(
