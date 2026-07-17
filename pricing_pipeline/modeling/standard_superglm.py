@@ -15,11 +15,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from pricing_pipeline.build_identity import (
+    BuildIdentity,
+    BuildIdentityError,
+    stable_build_export_id,
+    verify_build_identity,
+)
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
     create_model_frame_manifest_with_split,
 )
-from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild, ValidationSplitResult
 from pricing_pipeline.modeling.validation_curves import (
@@ -82,6 +87,7 @@ def run_standard_superglm_build(
     inputs: ModelInputs,
     superglm_model: Any,
     split_indices: Iterable[tuple[Any, Any]],
+    expected_build_identity: BuildIdentity,
     fit_mode: str,
     scoring: str | Callable | Sequence[str | Callable],
     output_dir: str | Path,
@@ -117,8 +123,22 @@ def run_standard_superglm_build(
         offset_source=inputs.offset_source,
         offset_source_name=offset_source_name,
     )
-    if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError("superglm_model must be an unfitted, copyable SuperGLM model")
+    folds = tuple(split_indices)
+    identity_inputs = {
+        "frame": frame,
+        "model_config": model_config,
+        "manifest_spec": manifest_spec,
+        "superglm_model": superglm_model,
+        "split_indices": folds,
+        "fit_mode": fit_mode,
+        "scoring": scoring,
+        "model_source_root": model_source_root,
+    }
+    _verify_expected_build_identity(expected_build_identity, identity_inputs)
+    if export_id != stable_build_export_id(expected_build_identity):
+        raise StandardSuperGLMError(
+            "export_id must equal the stable export identity for this build fingerprint"
+        )
     try:
         cv_model = deepcopy(superglm_model)
         final_model = deepcopy(superglm_model)
@@ -126,8 +146,6 @@ def run_standard_superglm_build(
         raise StandardSuperGLMError(
             "superglm_model must be an unfitted, copyable SuperGLM model"
         ) from exc
-    source_sha256 = hash_model_source(model_source_root)
-    folds = list(split_indices)
     evidence = run_cross_validation(
         cv_model,
         inputs,
@@ -151,10 +169,7 @@ def run_standard_superglm_build(
         if inputs.export_weight is not None
         else None
     )
-    if hash_model_source(model_source_root) != source_sha256:
-        raise StandardSuperGLMError(
-            "model source changed during training; save the final definition and rebuild"
-        )
+    _verify_expected_build_identity(expected_build_identity, identity_inputs)
 
     manifest = create_model_frame_manifest_with_split(
         engine,
@@ -165,6 +180,10 @@ def run_standard_superglm_build(
         split_indices=list(evidence.fold_indices),
         created_by=created_by,
     )
+    if manifest.model_frame_sha256 != expected_build_identity.model_frame_sha256:
+        raise StandardSuperGLMError(
+            "persisted manifest model-frame hash does not match the approved build identity"
+        )
     run_dir = _manifest_attempt_directory(output_dir, manifest.manifest_id)
     try:
         workbook_path = run_dir / "rating_tables.xlsx"
@@ -221,11 +240,13 @@ def run_standard_superglm_build(
             manifest_id=manifest.manifest_id,
             split_set_id=manifest.split_set_id,
             pk_columns=manifest_spec.pk_columns,
-            row_order_sha256=compute_row_order_sha256(
-                frame,
-                pk_columns=manifest_spec.pk_columns,
-            ),
-            model_source_sha256=source_sha256,
+            row_order_sha256=expected_build_identity.row_order_sha256,
+            model_source_sha256=expected_build_identity.model_source_sha256,
+            build_fingerprint_sha256=expected_build_identity.build_fingerprint_sha256,
+            builder_source_sha256=expected_build_identity.builder_source_sha256,
+            materialized_split_sha256=expected_build_identity.materialized_split_sha256,
+            runtime_sha256=expected_build_identity.runtime_sha256,
+            candidate_superglm_sha256=expected_build_identity.candidate_superglm_sha256,
             model_frame_sha256=manifest.model_frame_sha256,
             offset_contract=resolved_offset_contract,
             fit_sample_weight_name=fit_weight_name,
@@ -233,6 +254,15 @@ def run_standard_superglm_build(
             export_weight_name=export_weight_name,
         )
         artifact = save_candidate_bundle(bundle, run_dir / "candidate_bundle.joblib")
+        if (
+            artifact.python_version != expected_build_identity.candidate_python_version
+            or artifact.superglm_version != expected_build_identity.candidate_superglm_version
+            or artifact.superglm_git_sha != expected_build_identity.candidate_superglm_git_sha
+        ):
+            raise StandardSuperGLMError(
+                "candidate artifact runtime does not match the approved build identity"
+            )
+        _verify_expected_build_identity(expected_build_identity, identity_inputs)
         fold_metric_records = tuple(
             {
                 "fold_no": metric.fold_no,
@@ -262,7 +292,13 @@ def run_standard_superglm_build(
             candidate_python_version=artifact.python_version,
             candidate_superglm_version=artifact.superglm_version,
             candidate_superglm_git_sha=artifact.superglm_git_sha,
-            model_source_sha256=source_sha256,
+            build_fingerprint_sha256=expected_build_identity.build_fingerprint_sha256,
+            builder_source_sha256=expected_build_identity.builder_source_sha256,
+            materialized_split_sha256=expected_build_identity.materialized_split_sha256,
+            runtime_sha256=expected_build_identity.runtime_sha256,
+            candidate_superglm_sha256=expected_build_identity.candidate_superglm_sha256,
+            row_order_sha256=expected_build_identity.row_order_sha256,
+            model_source_sha256=expected_build_identity.model_source_sha256,
             model_frame_sha256=manifest.model_frame_sha256,
             publication_receipt_path=str(receipt_path),
             publication_receipt_sha256=receipt_sha256,
@@ -280,6 +316,16 @@ def run_standard_superglm_build(
         # Only the incomplete, retry-local artifact directory is disposable here.
         shutil.rmtree(run_dir)
         raise
+
+
+def _verify_expected_build_identity(
+    expected: BuildIdentity,
+    identity_inputs: dict[str, Any],
+) -> None:
+    try:
+        verify_build_identity(expected, **identity_inputs)
+    except BuildIdentityError as exc:
+        raise StandardSuperGLMError(str(exc)) from exc
 
 
 def _validate_input_lengths(inputs: ModelInputs) -> None:

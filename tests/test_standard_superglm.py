@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import platform
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import pandas as pd
 import pytest
 from superglm.links import LogLink
 
+from pricing_pipeline.build_identity import BuildIdentity, BuildIdentityError
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
@@ -34,12 +36,43 @@ class _FakeModel:
         return {"converged": True, "n_iter": 4}
 
 
+def _build_identity(**overrides) -> BuildIdentity:
+    values = {
+        "build_fingerprint_sha256": "1" * 64,
+        "model_frame_sha256": "2" * 64,
+        "row_order_sha256": "3" * 64,
+        "model_source_sha256": "4" * 64,
+        "builder_source_sha256": "5" * 64,
+        "materialized_split_sha256": "6" * 64,
+        "runtime_sha256": "7" * 64,
+        "candidate_superglm_sha256": "8" * 64,
+        "candidate_python_version": platform.python_version(),
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "25c06fc84b674bb2ee777ea99567772d8d57a17c",
+    }
+    values.update(overrides)
+    return BuildIdentity(**values)
+
+
+def _stable_export_id() -> str:
+    return "build_" + "1" * 64
+
+
 def _api():
     try:
         module = importlib.import_module("pricing_pipeline.modeling.standard_superglm")
         return module
     except ModuleNotFoundError as exc:
         pytest.fail(f"standard SuperGLM API is not implemented: {exc}")
+
+
+@pytest.fixture(autouse=True)
+def _accept_fixture_build_identity(monkeypatch):
+    monkeypatch.setattr(
+        _api(),
+        "verify_build_identity",
+        lambda expected, **kwargs: expected,
+    )
 
 
 def _folds():
@@ -824,13 +857,14 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
             ),
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -886,13 +920,14 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
             inputs=_identity_bound_inputs(api, frame),
             superglm_model=UncopyableModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from=None,
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -936,10 +971,17 @@ def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
         "deepcopy",
         lambda model: pytest.fail(f"fitted model was copied: {model!r}"),
     )
+    monkeypatch.setattr(
+        api,
+        "verify_build_identity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            BuildIdentityError("SuperGLM identity is invalid: model is not pristine")
+        ),
+    )
 
     with pytest.raises(
         api.StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
+        match="SuperGLM identity is invalid: model is not pristine",
     ):
         api.run_standard_superglm_build(
             object(),
@@ -947,13 +989,14 @@ def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
             inputs=_identity_bound_inputs(api, frame),
             superglm_model=superglm_model,
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from=None,
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -983,8 +1026,19 @@ def test_standard_runner_rejects_model_source_drift_during_training(
             "age": [20.0, 30.0, 40.0],
         }
     )
-    source_hashes = iter(("a" * 64, "b" * 64))
-    monkeypatch.setattr(api, "hash_model_source", lambda root: next(source_hashes))
+    verification_calls = 0
+
+    def verify_identity(expected, **kwargs):
+        nonlocal verification_calls
+        del kwargs
+        verification_calls += 1
+        if verification_calls == 2:
+            raise BuildIdentityError(
+                "build contract changed during execution: model_source_sha256"
+            )
+        return expected
+
+    monkeypatch.setattr(api, "verify_build_identity", verify_identity)
     monkeypatch.setattr(
         api,
         "create_model_frame_manifest_with_split",
@@ -993,20 +1047,21 @@ def test_standard_runner_rejects_model_source_drift_during_training(
         ),
     )
 
-    with pytest.raises(api.StandardSuperGLMError, match="model source changed"):
+    with pytest.raises(api.StandardSuperGLMError, match="model_source_sha256"):
         api.run_standard_superglm_build(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from=None,
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -1089,13 +1144,14 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
             ),
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -1141,13 +1197,14 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
             inputs=_identity_bound_inputs(api, frame),
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -1181,6 +1238,45 @@ def _identity_bound_inputs(api, frame, **overrides):
     }
     values.update(overrides)
     return api.ModelInputs(**values)
+
+
+def _minimal_standard_build(api, tmp_path):
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0.0, 1.0, 0.0],
+            "age": [20.0, 30.0, 40.0],
+        }
+    )
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text("MODEL = 'HOME_FREQ'\n", encoding="utf-8")
+    return {
+        "frame": frame,
+        "inputs": _identity_bound_inputs(api, frame),
+        "superglm_model": _FakeModel(),
+        "split_indices": _folds(),
+        "expected_build_identity": _build_identity(),
+        "fit_mode": "fit_reml",
+        "scoring": ("deviance",),
+        "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
+        "output_dir": tmp_path / "run",
+        "model_id": 17,
+        "model_config": _model_config(),
+        "model_version": "v1",
+        "export_id": _stable_export_id(),
+        "effective_from": None,
+        "manifest_spec": ModelFrameManifestSpec(
+            dataset_name="home_freq_frame",
+            source_system="pytest",
+            data_as_of_date="2026-06-30",
+            pk_columns=("policy_id",),
+            target_column="target",
+        ),
+        "split_artifact_root": tmp_path / "splits",
+        "model_source_root": source_root,
+        "created_by": "pytest",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1325,13 +1421,14 @@ def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
             inputs=inputs,
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from=None,
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -1469,6 +1566,102 @@ def test_canonical_validation_rejects_reordered_optional_row_inputs(field_name):
         api._validate_canonical_row_ids(frame, inputs, pk_columns=("policy_id",))
 
 
+def test_standard_runner_binds_export_id_to_build_fingerprint_before_copy(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    build = _minimal_standard_build(api, tmp_path)
+    build["export_id"] = "incidental-attempt-id"
+    monkeypatch.setattr(
+        api,
+        "deepcopy",
+        lambda model: pytest.fail(f"model copied before export identity check: {model!r}"),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="stable export identity"):
+        api.run_standard_superglm_build(object(), **build)
+
+
+def test_standard_runner_rejects_manifest_frame_mismatch_before_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    build = _minimal_standard_build(api, tmp_path)
+    monkeypatch.setattr(
+        api,
+        "create_model_frame_manifest_with_split",
+        lambda *args, **kwargs: SimpleNamespace(
+            manifest_id="manifest-mismatch",
+            split_set_id="split-mismatch",
+            model_frame_sha256="f" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "export_rating_tables",
+        lambda *args, **kwargs: pytest.fail("artifacts were created after manifest mismatch"),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="manifest model-frame hash"):
+        api.run_standard_superglm_build(object(), **build)
+
+    assert not (tmp_path / "run").exists()
+
+
+def test_standard_runner_final_drift_removes_attempt_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    build = _minimal_standard_build(api, tmp_path)
+    split_evidence = tmp_path / "splits" / "split-final-drift.npz"
+    verification_calls = 0
+
+    def verify_identity(expected, **kwargs):
+        nonlocal verification_calls
+        del kwargs
+        verification_calls += 1
+        if verification_calls == 3:
+            raise BuildIdentityError(
+                "build contract changed during execution: builder_source_sha256"
+            )
+        return expected
+
+    def persist_manifest(*args, **kwargs):
+        del args, kwargs
+        split_evidence.parent.mkdir(parents=True)
+        split_evidence.write_bytes(b"durable split evidence")
+        return SimpleNamespace(
+            manifest_id="manifest-final-drift",
+            split_set_id="split-final-drift",
+            model_frame_sha256="2" * 64,
+        )
+
+    def export_workbook(model, X, y, weight, output_path, **kwargs):
+        del model, X, y, weight, kwargs
+        Path(output_path).write_bytes(b"workbook")
+
+    def write_receipt(receipt, path):
+        del receipt
+        Path(path).write_bytes(b"receipt")
+        return "a" * 64
+
+    monkeypatch.setattr(api, "verify_build_identity", verify_identity)
+    monkeypatch.setattr(api, "create_model_frame_manifest_with_split", persist_manifest)
+    monkeypatch.setattr(api, "export_rating_tables", export_workbook)
+    monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
+    monkeypatch.setattr(api, "write_publication_receipt", write_receipt)
+
+    with pytest.raises(api.StandardSuperGLMError, match="builder_source_sha256"):
+        api.run_standard_superglm_build(object(), **build)
+
+    assert verification_calls == 3
+    assert not (tmp_path / "run" / "manifest-final-drift").exists()
+    assert split_evidence.read_bytes() == b"durable split evidence"
+
+
 @pytest.mark.parametrize(
     "manifest_id",
     ("../escape", "nested/manifest", "manifest id", ".", ""),
@@ -1508,6 +1701,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             manifest_id="manifest-failure",
             split_set_id="manifest-failure-split",
             split_artifact_uri=str(split_evidence),
+            model_frame_sha256="2" * 64,
         )
 
     def failing_export(model, X, y, exposure, output_path, **kwargs):
@@ -1525,6 +1719,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             inputs=_identity_bound_inputs(api, frame),
             superglm_model=_FakeModel(),
             split_indices=_folds(),
+            expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
             cross_validate_fn=lambda *args, **kwargs: _cv_result(),
@@ -1532,7 +1727,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             model_id=17,
             model_config=_model_config(),
             model_version="v1",
-            export_id="export-1",
+            export_id=_stable_export_id(),
             effective_from="2026-07-12",
             manifest_spec=ModelFrameManifestSpec(
                 dataset_name="home_freq_frame",
@@ -1598,7 +1793,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         return Path(output_path)
 
     manifest_ids = iter(("manifest-1", "manifest-2", "manifest-3"))
-    manifest_digests = iter(("a" * 64, "b" * 64, "c" * 64))
+    manifest_digests = iter(("a" * 64, "a" * 64, "a" * 64))
 
     def fake_manifest(engine, **kwargs):
         captured["manifest"] = kwargs
@@ -1664,6 +1859,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         "inputs": inputs,
         "superglm_model": superglm_model,
         "split_indices": _folds(),
+        "expected_build_identity": _build_identity(model_frame_sha256="a" * 64),
         "fit_mode": "fit_reml",
         "scoring": ("deviance",),
         "cross_validate_fn": fake_cross_validate,
@@ -1671,7 +1867,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         "model_id": 17,
         "model_config": model_config,
         "model_version": "v1",
-        "export_id": "export-1",
+        "export_id": _stable_export_id(),
         "effective_from": "2026-07-12",
         "manifest_spec": ModelFrameManifestSpec(
             dataset_name="home_freq_frame",
@@ -1714,7 +1910,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     )
     assert bundle.model_name == "HOME_FREQ"
     assert bundle.model_version == "v1"
-    assert bundle.export_id == "export-1"
+    assert bundle.export_id == _stable_export_id()
     assert bundle.model_frame_sha256 == "a" * 64
     assert "estimators" not in bundle.cv_report
     assert "curve_similarity" not in bundle.cv_report
@@ -1759,10 +1955,10 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert result.model_frame_sha256 == "a" * 64
     assert result.split_set_id == "manifest-1-split"
     assert second_result.manifest_id == "manifest-2"
-    assert second_result.model_frame_sha256 == "b" * 64
+    assert second_result.model_frame_sha256 == "a" * 64
     assert isinstance(malformed_result, ApprovedModelBuild)
     assert malformed_result.manifest_id == "manifest-3"
-    assert malformed_result.model_frame_sha256 == "c" * 64
+    assert malformed_result.model_frame_sha256 == "a" * 64
     assert malformed_result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert malformed_result.validation_curve_status == "UNAVAILABLE"
     assert "unique" in malformed_result.validation_curve_reason

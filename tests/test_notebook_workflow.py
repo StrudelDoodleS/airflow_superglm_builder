@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pricing_pipeline.build_identity import BuildIdentity, BuildIdentityError
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
@@ -125,11 +126,33 @@ def _approved_build(tmp_path: Path, **overrides) -> ApprovedModelBuild:
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.12.0",
         "candidate_superglm_git_sha": "f" * 40,
+        "build_fingerprint_sha256": "1" * 64,
+        "builder_source_sha256": "2" * 64,
+        "materialized_split_sha256": "3" * 64,
+        "runtime_sha256": "4" * 64,
+        "candidate_superglm_sha256": "5" * 64,
+        "row_order_sha256": "6" * 64,
         "model_source_sha256": "d" * 64,
         "model_frame_sha256": "e" * 64,
     }
     values.update(overrides)
     return ApprovedModelBuild(**values)
+
+
+def _build_identity() -> BuildIdentity:
+    return BuildIdentity(
+        build_fingerprint_sha256="1" * 64,
+        model_frame_sha256="2" * 64,
+        row_order_sha256="3" * 64,
+        model_source_sha256="4" * 64,
+        builder_source_sha256="5" * 64,
+        materialized_split_sha256="6" * 64,
+        runtime_sha256="7" * 64,
+        candidate_superglm_sha256="8" * 64,
+        candidate_python_version="3.14.2",
+        candidate_superglm_version="0.12.0",
+        candidate_superglm_git_sha="9" * 40,
+    )
 
 
 def test_pricing_model_spec_holds_analyst_decisions():
@@ -509,13 +532,11 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
     )
 
 
-def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
+def test_build_candidate_rejects_invalid_model_identity_before_version_or_artifact_work(
     monkeypatch,
     tmp_path,
 ):
     from pricing_pipeline import notebook as api
-    from pricing_pipeline.modeling.standard_superglm import StandardSuperGLMError
-
     context = replace(
         _context(api, tmp_path),
         mode="local",
@@ -524,11 +545,11 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     model = _registered_model(api, tmp_path)
     frame = pd.DataFrame(
         {
-            "policy_id": [10],
-            "claim_count": [0.0],
-            "exposure": [1.0],
-            "age": [25.0],
-            "region": ["N"],
+            "policy_id": [10, 20],
+            "claim_count": [0.0, 1.0],
+            "exposure": [1.0, 1.0],
+            "age": [25.0, 45.0],
+            "region": ["N", "S"],
         }
     )
 
@@ -544,8 +565,8 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     )
 
     with pytest.raises(
-        StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
+        BuildIdentityError,
+        match="SuperGLM identity is invalid",
     ):
         api.build_candidate(
             context,
@@ -646,11 +667,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     captured = {}
 
     monkeypatch.setattr(api, "validation_split_indices", lambda frame, split: folds)
-    monkeypatch.setattr(
-        api,
-        "build_export_id",
-        lambda model_name, run_key: f"{model_name}__{run_key}",
-    )
+    monkeypatch.setattr(api, "create_build_identity", lambda **kwargs: _build_identity())
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",
@@ -714,6 +731,10 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert "validation_split" not in captured
     assert captured["scoring"] == ("deviance", "nll", "gini")
     assert captured["fit_mode"] == "fit_reml"
+    assert captured["expected_build_identity"] == _build_identity()
+    assert captured["export_id"] == "build_" + "1" * 64
+    assert Path(captured["output_dir"]).name.startswith("attempt_")
+    assert "1" * 64 not in str(captured["output_dir"])
     contract = captured["offset_contract"]
     assert contract.handling == "EXPORTED_FACTOR"
     assert contract.source_factor_name == "term"
@@ -721,6 +742,118 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert contract.source_name == "term"
     assert contract.label == "log(term / 12)"
     assert "offset_export_options" not in captured
+
+
+def test_build_candidate_computes_identity_before_reservation_and_separates_attempts(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    events = []
+    identity_calls = []
+    reservations = []
+    attempts = []
+
+    monkeypatch.setattr(
+        api,
+        "validation_split_indices",
+        lambda frame, split: [
+            (np.array([0, 1]), np.array([2, 3])),
+            (np.array([2, 3]), np.array([0, 1])),
+        ],
+    )
+
+    def build_identity(**kwargs):
+        events.append("identity")
+        identity_calls.append(kwargs)
+        return _build_identity()
+
+    def reserve(engine, *, model_name, export_id):
+        del engine
+        events.append("reserve")
+        reservations.append((model_name, export_id))
+        return "v7"
+
+    def run_build(engine, **kwargs):
+        del engine
+        events.append("run")
+        attempts.append(Path(kwargs["output_dir"]))
+        return _approved_build(tmp_path)
+
+    monkeypatch.setattr(api, "create_build_identity", build_identity)
+    monkeypatch.setattr(api, "resolve_model_version_for_export", reserve)
+    monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
+
+    superglm_model = object()
+    for _ in range(2):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=superglm_model,
+            data_as_of="2026-06-30",
+        )
+
+    assert events == ["identity", "reserve", "run"] * 2
+    assert reservations == [
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64),
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64),
+    ]
+    assert attempts[0] != attempts[1]
+    assert all(path.name.startswith("attempt_") for path in attempts)
+    assert all("1" * 64 not in str(path) for path in attempts)
+    assert identity_calls[0]["frame"] is frame
+    assert identity_calls[0]["model_config"] is model.config
+    assert identity_calls[0]["superglm_model"] is identity_calls[1]["superglm_model"]
+    assert identity_calls[0]["scoring"] == ("deviance", "nll", "gini")
+
+
+def test_build_candidate_identity_failure_happens_before_version_reservation(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    monkeypatch.setattr(
+        api,
+        "create_build_identity",
+        lambda **kwargs: (_ for _ in ()).throw(BuildIdentityError("untrusted model")),
+    )
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: pytest.fail("version was reserved"),
+    )
+
+    with pytest.raises(BuildIdentityError, match="untrusted model"):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=object(),
+            data_as_of="2026-06-30",
+        )
 
 
 def test_built_candidate_returns_fresh_wide_validation_metrics(tmp_path):
@@ -827,6 +960,7 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
         "validation_split_indices",
         lambda frame, split: [(np.array([0, 1]), np.array([2, 3]))],
     )
+    monkeypatch.setattr(api, "create_build_identity", lambda **kwargs: _build_identity())
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",

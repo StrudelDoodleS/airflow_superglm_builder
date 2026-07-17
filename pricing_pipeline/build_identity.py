@@ -17,9 +17,6 @@ import pandas as pd
 
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec, model_frame_evidence
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
-from pricing_pipeline.modeling.superglm_identity import (
-    canonical_superglm_payload,
-)
 from pricing_pipeline.models.config import ModelBuildConfig
 
 
@@ -96,6 +93,8 @@ def create_build_identity(
     )
 
     try:
+        from pricing_pipeline.modeling.superglm_identity import canonical_superglm_payload
+
         superglm_payload = canonical_superglm_payload(superglm_model)
     except Exception as exc:
         raise BuildIdentityError(f"SuperGLM identity is invalid: {exc}") from exc

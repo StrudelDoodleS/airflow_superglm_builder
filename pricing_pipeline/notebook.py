@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from pricing_pipeline.build_identity import create_build_identity, stable_build_export_id
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
     validation_split_indices,
@@ -27,7 +28,6 @@ from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
-    StandardSuperGLMError,
     canonical_row_identity_index,
     run_standard_superglm_build,
 )
@@ -44,7 +44,6 @@ from pricing_pipeline.publishing.model_versions import resolve_model_version_for
 from pricing_pipeline.publishing.naming import clean_identifier
 from pricing_pipeline.publishing.deployment import deploy_rate_package
 from pricing_pipeline.publishing.editor_candidate import publish_editor_submission
-from pricing_pipeline.publishing.rating_export import build_export_id
 from pricing_pipeline.publishing.sqlite_notebook import (
     publish_sqlite_candidate,
     register_sqlite_model,
@@ -460,10 +459,6 @@ def build_candidate(
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
     pricing.require_write("build_candidate")
-    if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
     spec = model.spec
     required_columns = {
         *spec.features,
@@ -518,23 +513,6 @@ def build_candidate(
     if spec.export_weight_column is not None:
         export_weight = aligned_frame[spec.export_weight_column].astype(float)
 
-    validation_split = spec.validation
-    resolved_split_indices = validation_split_indices(frame, validation_split)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    resolved_run_key = f"notebook_{timestamp}_{uuid4().hex[:8]}"
-    export_id = build_export_id(model.name, resolved_run_key)
-    if pricing.mode == "local":
-        model_version = resolve_sqlite_model_version(
-            pricing.engine,
-            model_name=model.name,
-            export_id=export_id,
-        )
-    else:
-        model_version = resolve_model_version_for_export(
-            pricing.engine,
-            model_name=model.name,
-            export_id=export_id,
-        )
     inputs = ModelInputs(
         X=X,
         y=y,
@@ -547,34 +525,62 @@ def build_candidate(
         export_weight_name=spec.export_weight_column,
         row_ids=row_ids,
     )
+    manifest_spec = ModelFrameManifestSpec(
+        dataset_name=spec.dataset_name,
+        source_system=spec.source_system,
+        data_as_of_date=resolved_data_as_of,
+        pk_columns=spec.pk_columns,
+        target_column=spec.target,
+        weight_column=spec.sample_weight_column,
+        feature_columns=spec.features,
+        offset_column=spec.offset_column,
+        offset_source_column=spec.offset_source_column,
+        offset_label=spec.offset_label,
+        export_weight_column=spec.export_weight_column,
+        data_as_of_column=spec.data_as_of_column,
+    )
+    resolved_split_indices = tuple(validation_split_indices(frame, spec.validation))
+    build_identity = create_build_identity(
+        frame=frame,
+        model_config=model.config,
+        manifest_spec=manifest_spec,
+        superglm_model=superglm_model,
+        split_indices=resolved_split_indices,
+        fit_mode=spec.fit_mode,
+        scoring=spec.scoring,
+        model_source_root=model.source_root,
+    )
+    export_id = stable_build_export_id(build_identity)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    attempt_key = f"attempt_{timestamp}_{uuid4().hex[:8]}"
+    if pricing.mode == "local":
+        model_version = resolve_sqlite_model_version(
+            pricing.engine,
+            model_name=model.name,
+            export_id=export_id,
+        )
+    else:
+        model_version = resolve_model_version_for_export(
+            pricing.engine,
+            model_name=model.name,
+            export_id=export_id,
+        )
     completed_build = run_standard_superglm_build(
         pricing.engine,
         frame=frame,
         inputs=inputs,
         superglm_model=superglm_model,
         split_indices=resolved_split_indices,
+        expected_build_identity=build_identity,
         fit_mode=spec.fit_mode,
         scoring=spec.scoring,
-        output_dir=(Path(pricing.settings.workbench_artifact_root) / model.name / resolved_run_key),
+        output_dir=(Path(pricing.settings.workbench_artifact_root) / model.name / attempt_key),
         model_id=model.model_id,
         model_config=model.config,
         model_version=model_version,
         export_id=export_id,
         effective_from=None,
-        manifest_spec=ModelFrameManifestSpec(
-            dataset_name=spec.dataset_name,
-            source_system=spec.source_system,
-            data_as_of_date=resolved_data_as_of,
-            pk_columns=spec.pk_columns,
-            target_column=spec.target,
-            weight_column=spec.sample_weight_column,
-            feature_columns=spec.features,
-            offset_column=spec.offset_column,
-            offset_source_column=spec.offset_source_column,
-            offset_label=spec.offset_label,
-            export_weight_column=spec.export_weight_column,
-            data_as_of_column=spec.data_as_of_column,
-        ),
+        manifest_spec=manifest_spec,
         split_artifact_root=pricing.settings.validation_split_artifact_root,
         model_source_root=model.source_root,
         created_by=_created_by(created_by),
