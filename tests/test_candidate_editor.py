@@ -60,6 +60,11 @@ def _bundle() -> CandidateBundle:
         pk_columns=("policy_id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
+        build_fingerprint_sha256="c" * 64,
+        builder_source_sha256="d" * 64,
+        materialized_split_sha256="e" * 64,
+        runtime_sha256="f" * 64,
+        candidate_superglm_sha256="0" * 64,
         offset_contract={
             "handling": "ALREADY_APPLIED_SQL_EXPOSURE",
             "source_name": "Exposure",

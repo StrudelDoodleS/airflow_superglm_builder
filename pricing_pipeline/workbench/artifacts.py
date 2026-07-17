@@ -13,6 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from pricing_pipeline.models.spec import BUILD_IDENTITY_SHA256_FIELDS
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
@@ -40,6 +41,11 @@ class CandidateBundle:
     pk_columns: tuple[str, ...]
     row_order_sha256: str
     model_source_sha256: str
+    build_fingerprint_sha256: str
+    builder_source_sha256: str
+    materialized_split_sha256: str
+    runtime_sha256: str
+    candidate_superglm_sha256: str
     offset_contract: OffsetExportContract
     offset_source: pd.Series | np.ndarray | None = None
     fit_sample_weight_name: str | None = None
@@ -54,16 +60,19 @@ class CandidateBundle:
             raise CandidateArtifactError(f"invalid offset_contract: {exc}") from exc
         object.__setattr__(self, "offset_contract", contract)
 
-        digest = self.model_frame_sha256
-        if digest is not None and (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or digest.lower() != digest
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise CandidateArtifactError(
-                "model_frame_sha256 must be a 64-character lowercase hex SHA-256 digest"
-            )
+        for field_name in BUILD_IDENTITY_SHA256_FIELDS:
+            digest = getattr(self, field_name)
+            if digest is None and field_name == "model_frame_sha256":
+                continue
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or digest.lower() != digest
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise CandidateArtifactError(
+                    f"{field_name} must be a 64-character lowercase hex SHA-256 digest"
+                )
 
         if contract.handling == "EXPORTED_FACTOR" and self.offset_source is None:
             raise CandidateArtifactError("EXPORTED_FACTOR requires offset_source")

@@ -14,6 +14,7 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
     ApprovedModelBuild,
     ApprovedModelBuildError,
+    BUILD_IDENTITY_SHA256_FIELDS,
 )
 from pricing_pipeline.orchestration.pipeline import publish_model_export
 from pricing_pipeline.publishing.model_registry import validate_registered_model
@@ -202,8 +203,10 @@ def _verify_candidate_artifact(
         "export_id": build.export_id,
         "manifest_id": build.manifest_id,
         "split_set_id": build.split_set_id,
-        "model_source_sha256": build.model_source_sha256,
-        "model_frame_sha256": build.model_frame_sha256,
+        **{
+            field_name: getattr(build, field_name)
+            for field_name in BUILD_IDENTITY_SHA256_FIELDS
+        },
     }
     for field_name, expected_value in expected_lineage.items():
         actual_value = getattr(bundle, field_name)

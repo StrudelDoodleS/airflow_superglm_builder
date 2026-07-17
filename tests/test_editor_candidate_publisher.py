@@ -18,6 +18,14 @@ EDITOR_CONFIG = SimpleNamespace(
     model_type="superglm_poisson",
 )
 
+_ROOT_BUILD_IDENTITY = {
+    "build_fingerprint_sha256": "1" * 64,
+    "builder_source_sha256": "2" * 64,
+    "materialized_split_sha256": "3" * 64,
+    "runtime_sha256": "4" * 64,
+    "candidate_superglm_sha256": "5" * 64,
+}
+
 
 def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModelBuild:
     workbook_path = workbook_path or tmp_path / "rating_tables.xlsx"
@@ -43,6 +51,12 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.12.0",
         "candidate_superglm_git_sha": "f" * 40,
+        "build_fingerprint_sha256": "1" * 64,
+        "builder_source_sha256": "2" * 64,
+        "materialized_split_sha256": "3" * 64,
+        "runtime_sha256": "4" * 64,
+        "candidate_superglm_sha256": "5" * 64,
+        "row_order_sha256": "6" * 64,
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "f" * 64,
         "metrics": {"editor_training_deviance_delta": 0.009},
@@ -362,6 +376,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="editor__submission_1",
@@ -807,6 +822,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         offset_source=term,
         export_weight=rating_weight,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="parent-export",
@@ -848,7 +864,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         deployment_slot="HOME_FREQ_UAT",
         manifest_id="manifest-1",
         split_set_id="split-1",
-        model_source_sha256="b" * 64,
+        model_source_sha256="9" * 64,
         reason="Market calibration",
         claimed_identity="analyst@example.test",
         parent_rate_package_id=107,
@@ -915,8 +931,18 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert build.created_by == "publisher@example.test"
     assert build.manifest_id == submission.manifest_id
     assert build.split_set_id == submission.split_set_id
-    assert build.model_source_sha256 == submission.model_source_sha256
+    assert build.model_source_sha256 == bundle.model_source_sha256
     assert build.model_frame_sha256 == bundle.model_frame_sha256
+    for field_name in (
+        "build_fingerprint_sha256",
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+        "row_order_sha256",
+    ):
+        assert getattr(build, field_name) == getattr(bundle, field_name)
+        assert getattr(exported.bundle, field_name) == getattr(bundle, field_name)
     assert (write_dir / "rating_tables.xlsx").read_bytes() == b"workbook"
     assert (write_dir / "candidate_bundle.joblib").is_file()
     assert not final_dir.exists()
@@ -1267,6 +1293,7 @@ def test_training_comparison_metrics_are_stable_and_scoped():
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="export-1",
@@ -1306,6 +1333,7 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="parent-export",
@@ -1330,6 +1358,7 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="champion-export",
@@ -1545,6 +1574,7 @@ def test_champion_snapshot_distinguishes_absent_and_unavailable_champion(
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="parent-export",
@@ -1607,6 +1637,7 @@ def test_package_specific_parity_uses_bounded_rows_and_explicit_package_id():
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="export-1",
@@ -1682,6 +1713,7 @@ def test_package_sql_parity_uses_published_feature_names():
         offset=None,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="export-1",
@@ -1778,6 +1810,7 @@ def _offset_parity_bundle(*, handling, offset_source=None):
         offset_source=offset_source,
         export_weight=None,
         cv_report={},
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="export-1",
@@ -1905,6 +1938,7 @@ def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
             "std_scores": {"deviance": 0.03},
             "oof_coverage": 1.0,
         },
+        **_ROOT_BUILD_IDENTITY,
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="export-1",

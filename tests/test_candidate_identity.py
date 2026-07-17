@@ -37,6 +37,11 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
         model_frame_sha256="c" * 64,
+        build_fingerprint_sha256="d" * 64,
+        builder_source_sha256="e" * 64,
+        materialized_split_sha256="f" * 64,
+        runtime_sha256="0" * 64,
+        candidate_superglm_sha256="1" * 64,
         offset_contract={"handling": "NONE"},
     )
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
@@ -64,6 +69,12 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
         candidate_python_version=metadata.python_version,
         candidate_superglm_version=metadata.superglm_version,
         candidate_superglm_git_sha=metadata.superglm_git_sha,
+        build_fingerprint_sha256=bundle.build_fingerprint_sha256,
+        builder_source_sha256=bundle.builder_source_sha256,
+        materialized_split_sha256=bundle.materialized_split_sha256,
+        runtime_sha256=bundle.runtime_sha256,
+        candidate_superglm_sha256=bundle.candidate_superglm_sha256,
+        row_order_sha256=bundle.row_order_sha256,
         model_source_sha256="b" * 64,
         model_frame_sha256="c" * 64,
     )
@@ -304,6 +315,12 @@ def test_existing_sql_run_rejects_candidate_model_identity_mismatch(
         candidate_python_version=build.candidate_python_version,
         candidate_superglm_version=build.candidate_superglm_version,
         candidate_superglm_git_sha=build.candidate_superglm_git_sha,
+        build_fingerprint_sha256=build.build_fingerprint_sha256,
+        builder_source_sha256=build.builder_source_sha256,
+        materialized_split_sha256=build.materialized_split_sha256,
+        runtime_sha256=build.runtime_sha256,
+        candidate_superglm_sha256=build.candidate_superglm_sha256,
+        row_order_sha256=build.row_order_sha256,
         model_source_sha256=build.model_source_sha256,
         model_frame_sha256=build.model_frame_sha256,
     )

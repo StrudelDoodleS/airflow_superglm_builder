@@ -21,6 +21,18 @@ class ApprovedModelBuildError(ValueError):
     """Raised when an approved notebook build is incomplete or invalid."""
 
 
+BUILD_IDENTITY_SHA256_FIELDS = (
+    "build_fingerprint_sha256",
+    "model_frame_sha256",
+    "row_order_sha256",
+    "model_source_sha256",
+    "builder_source_sha256",
+    "materialized_split_sha256",
+    "runtime_sha256",
+    "candidate_superglm_sha256",
+)
+
+
 class ValidationSplitResult(BaseModel):
     """Held-out metrics and authoritative row counts for one validation split."""
 
@@ -195,6 +207,12 @@ class ApprovedModelBuild(BaseModel):
     candidate_python_version: str
     candidate_superglm_version: str
     candidate_superglm_git_sha: str
+    build_fingerprint_sha256: str
+    builder_source_sha256: str
+    materialized_split_sha256: str
+    runtime_sha256: str
+    candidate_superglm_sha256: str
+    row_order_sha256: str
     model_source_sha256: str
     model_frame_sha256: str
     metrics: dict[str, float] = Field(default_factory=dict)
@@ -295,13 +313,14 @@ class ApprovedModelBuild(BaseModel):
         "rating_workbook_sha256",
         "publication_receipt_sha256",
         "candidate_artifact_sha256",
-        "model_source_sha256",
-        "model_frame_sha256",
+        *BUILD_IDENTITY_SHA256_FIELDS,
         mode="before",
     )
     @classmethod
     def _sha256(cls, value: Any) -> str:
-        digest = str(value).strip()
+        if not isinstance(value, str):
+            raise ValueError("must be a 64-character lowercase hex SHA-256 digest")
+        digest = value.strip()
         if (
             len(digest) != 64
             or digest.lower() != digest

@@ -90,6 +90,12 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
         candidate_python_version="3.14.4",
         candidate_superglm_version="0.12.0",
         candidate_superglm_git_sha="a" * 40,
+        build_fingerprint_sha256="c" * 64,
+        builder_source_sha256="d" * 64,
+        materialized_split_sha256="e" * 64,
+        runtime_sha256="f" * 64,
+        candidate_superglm_sha256="0" * 64,
+        row_order_sha256="1" * 64,
         model_source_sha256="a" * 64,
         model_frame_sha256="b" * 64,
     )
@@ -698,6 +704,12 @@ def test_approved_build_rejects_fold_metrics_that_disagree_with_validation_split
         "candidate_python_version",
         "candidate_superglm_version",
         "candidate_superglm_git_sha",
+        "build_fingerprint_sha256",
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+        "row_order_sha256",
         "model_source_sha256",
         "model_frame_sha256",
     ],
@@ -707,6 +719,35 @@ def test_approved_build_requires_all_audit_artifacts(tmp_path: Path, field_name:
     payload.pop(field_name)
 
     with pytest.raises(CompletedModelBuildError, match=field_name):
+        CompletedModelBuild(**payload)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "build_fingerprint_sha256",
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+        "row_order_sha256",
+        "model_source_sha256",
+        "model_frame_sha256",
+    ],
+)
+@pytest.mark.parametrize("invalid_digest", ["A" * 64, int("1" * 64)])
+def test_approved_build_rejects_invalid_identity_sha256(
+    tmp_path: Path,
+    field_name: str,
+    invalid_digest,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload[field_name] = invalid_digest
+
+    with pytest.raises(
+        CompletedModelBuildError,
+        match=rf"{field_name}.*64-character lowercase hex SHA-256",
+    ):
         CompletedModelBuild(**payload)
 
 

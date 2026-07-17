@@ -48,6 +48,11 @@ def _minimal_bundle():
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
         model_frame_sha256="c" * 64,
+        build_fingerprint_sha256="d" * 64,
+        builder_source_sha256="e" * 64,
+        materialized_split_sha256="f" * 64,
+        runtime_sha256="0" * 64,
+        candidate_superglm_sha256="1" * 64,
         offset_contract={"handling": "NONE"},
     )
 
@@ -167,7 +172,14 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     assert loaded.manifest_id == "manifest-1"
     assert loaded.split_set_id == "split-1"
     assert loaded.pk_columns == ("policy_id",)
+    assert loaded.row_order_sha256 == "a" * 64
+    assert loaded.model_source_sha256 == "b" * 64
     assert loaded.model_frame_sha256 == "c" * 64
+    assert loaded.build_fingerprint_sha256 == "d" * 64
+    assert loaded.builder_source_sha256 == "e" * 64
+    assert loaded.materialized_split_sha256 == "f" * 64
+    assert loaded.runtime_sha256 == "0" * 64
+    assert loaded.candidate_superglm_sha256 == "1" * 64
     assert loaded.X.equals(bundle.X)
     assert np.array_equal(loaded.y, bundle.y)
     assert loaded.offset_contract == OffsetExportContract(handling="NONE")
@@ -219,12 +231,28 @@ def test_legacy_v2_candidate_bundle_is_rejected_before_deserializing(
     assert deserialized is False
 
 
-@pytest.mark.parametrize("digest", ["", "A" * 64, "a" * 63, "g" * 64])
-def test_candidate_bundle_rejects_invalid_model_frame_sha256(digest):
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "build_fingerprint_sha256",
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+        "row_order_sha256",
+        "model_source_sha256",
+        "model_frame_sha256",
+    ],
+)
+@pytest.mark.parametrize(
+    "digest",
+    ["", "A" * 64, "a" * 63, "g" * 64, int("1" * 64)],
+)
+def test_candidate_bundle_rejects_invalid_identity_sha256(field_name, digest):
     CandidateArtifactError, _, _, _ = _artifact_api()
 
-    with pytest.raises(CandidateArtifactError, match="model_frame_sha256"):
-        replace(_minimal_bundle(), model_frame_sha256=digest)
+    with pytest.raises(CandidateArtifactError, match=field_name):
+        replace(_minimal_bundle(), **{field_name: digest})
 
 
 @pytest.mark.parametrize(

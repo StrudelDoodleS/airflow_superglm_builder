@@ -94,6 +94,11 @@ def _candidate_metadata(
     row_count=1,
     row_order_sha256="d" * 64,
     model_frame_sha256="f" * 64,
+    build_fingerprint_sha256="1" * 64,
+    builder_source_sha256="2" * 64,
+    materialized_split_sha256="3" * 64,
+    runtime_sha256="4" * 64,
+    candidate_superglm_sha256="5" * 64,
 ):
     metadata = save_candidate_bundle(
         CandidateBundle(
@@ -113,6 +118,11 @@ def _candidate_metadata(
             row_order_sha256=row_order_sha256,
             model_source_sha256=model_source_sha256,
             model_frame_sha256=model_frame_sha256,
+            build_fingerprint_sha256=build_fingerprint_sha256,
+            builder_source_sha256=builder_source_sha256,
+            materialized_split_sha256=materialized_split_sha256,
+            runtime_sha256=runtime_sha256,
+            candidate_superglm_sha256=candidate_superglm_sha256,
             offset_contract={"handling": "NONE"},
         ),
         Path(artifact_root) / "candidate.joblib",
@@ -125,6 +135,12 @@ def _candidate_metadata(
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
         "candidate_superglm_git_sha": metadata.superglm_git_sha,
+        "build_fingerprint_sha256": build_fingerprint_sha256,
+        "builder_source_sha256": builder_source_sha256,
+        "materialized_split_sha256": materialized_split_sha256,
+        "runtime_sha256": runtime_sha256,
+        "candidate_superglm_sha256": candidate_superglm_sha256,
+        "row_order_sha256": row_order_sha256,
         "model_source_sha256": model_source_sha256,
         "model_frame_sha256": model_frame_sha256,
     }
@@ -653,6 +669,12 @@ def test_publish_completed_model_build_rejects_untrusted_candidate_before_publis
 @pytest.mark.parametrize(
     ("lineage_field", "published_value"),
     [
+        ("build_fingerprint_sha256", "6" * 64),
+        ("builder_source_sha256", "6" * 64),
+        ("materialized_split_sha256", "6" * 64),
+        ("runtime_sha256", "6" * 64),
+        ("candidate_superglm_sha256", "6" * 64),
+        ("row_order_sha256", "6" * 64),
         ("manifest_id", "manifest-published"),
         ("split_set_id", "split-published"),
         ("model_source_sha256", "e" * 64),
