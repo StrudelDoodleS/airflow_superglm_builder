@@ -547,6 +547,6 @@ def test_exact_wrapper_requires_a_pristine_copyable_exact_superglm(monkeypatch):
         _real_cv(_configured_model(), return_estimators=False)
 
 
-def test_standard_cross_validation_default_is_the_exact_wrapper():
+def test_standard_cross_validation_resolves_the_exact_wrapper_at_call_time():
     default = inspect.signature(run_cross_validation).parameters["cross_validate_fn"].default
-    assert default is exact_superglm_cross_validate
+    assert default is None

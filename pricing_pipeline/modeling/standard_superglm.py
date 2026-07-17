@@ -100,13 +100,12 @@ def run_standard_superglm_build(
     model_source_root: str | Path,
     created_by: str,
     offset_contract: OffsetExportContract | None = None,
-    cross_validate_fn: Callable[..., Any] = exact_superglm_cross_validate,
 ) -> ApprovedModelBuild:
-    _validate_input_lengths(inputs)
-    _validate_canonical_row_ids(
+    frame, inputs, folds = _trusted_build_snapshot(
         frame,
         inputs,
-        pk_columns=manifest_spec.pk_columns,
+        manifest_spec=manifest_spec,
+        split_indices=split_indices,
     )
     resolved_offset_contract = _resolved_offset_contract(inputs, offset_contract)
     offset_source_name = _weight_name(
@@ -122,7 +121,7 @@ def run_standard_superglm_build(
         offset_source=inputs.offset_source,
         offset_source_name=offset_source_name,
     )
-    folds = tuple(split_indices)
+    _validate_final_frame_roles(frame, inputs, manifest_spec)
     identity_inputs = {
         "frame": frame,
         "model_config": model_config,
@@ -152,7 +151,6 @@ def run_standard_superglm_build(
         split_indices=folds,
         fit_mode=fit_mode,
         scoring=scoring,
-        cross_validate_fn=cross_validate_fn,
     )
     fitted, telemetry = fit_full_model(final_model, inputs, fit_mode=fit_mode)
     fit_weight_name = _weight_name(
@@ -344,6 +342,205 @@ def _validate_input_lengths(inputs: ModelInputs) -> None:
             )
 
 
+def _trusted_build_snapshot(
+    frame: pd.DataFrame,
+    inputs: ModelInputs,
+    *,
+    manifest_spec: ModelFrameManifestSpec,
+    split_indices: Iterable[tuple[Any, Any]],
+) -> tuple[
+    pd.DataFrame,
+    ModelInputs,
+    tuple[tuple[np.ndarray, np.ndarray], ...],
+]:
+    if not isinstance(frame, pd.DataFrame):
+        raise StandardSuperGLMError("frame must be a pandas DataFrame")
+    if not isinstance(inputs, ModelInputs):
+        raise StandardSuperGLMError("inputs must be ModelInputs")
+
+    trusted_frame = frame.copy(deep=True)
+    trusted_inputs = ModelInputs(
+        X=_copy_row_input(inputs.X),
+        y=_copy_row_input(inputs.y),
+        sample_weight=_copy_row_input(inputs.sample_weight),
+        sample_weight_name=inputs.sample_weight_name,
+        offset=_copy_row_input(inputs.offset),
+        offset_source=_copy_row_input(inputs.offset_source),
+        offset_source_name=inputs.offset_source_name,
+        export_weight=_copy_row_input(inputs.export_weight),
+        export_weight_name=inputs.export_weight_name,
+        row_ids=_copy_row_input(inputs.row_ids),
+    )
+    _validate_input_lengths(trusted_inputs)
+    _validate_canonical_row_ids(
+        trusted_frame,
+        trusted_inputs,
+        pk_columns=manifest_spec.pk_columns,
+    )
+    trusted_folds = PrecomputedSplitter(
+        split_indices,
+        row_count=len(trusted_frame),
+    ).folds
+    return trusted_frame, trusted_inputs, trusted_folds
+
+
+def _copy_row_input(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, pd.Series | pd.DataFrame):
+        return value.copy(deep=True)
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return deepcopy(value)
+
+
+def _validate_final_frame_roles(
+    frame: pd.DataFrame,
+    inputs: ModelInputs,
+    manifest_spec: ModelFrameManifestSpec,
+) -> None:
+    feature_columns = list(manifest_spec.feature_columns)
+    if list(inputs.X.columns) != feature_columns:
+        raise StandardSuperGLMError(
+            "ModelInputs.X feature columns/order must exactly match manifest "
+            f"feature_columns: expected={feature_columns!r}, "
+            f"actual={list(inputs.X.columns)!r}"
+        )
+    _validate_frame_columns(frame, feature_columns, role="ModelInputs.X")
+    _require_equal_values(
+        inputs.X,
+        frame.loc[:, feature_columns],
+        role="ModelInputs.X feature values",
+    )
+
+    target_name = manifest_spec.target_column
+    _validate_frame_columns(frame, [target_name], role="ModelInputs.y")
+    if isinstance(inputs.y, pd.Series):
+        if inputs.y.name != target_name:
+            raise StandardSuperGLMError(
+                "ModelInputs.y name must exactly match the declared target column "
+                f"{target_name!r}"
+            )
+        actual_target = inputs.y.to_frame(name=target_name)
+    elif isinstance(inputs.y, pd.DataFrame) and list(inputs.y.columns) == [target_name]:
+        actual_target = inputs.y
+    else:
+        raise StandardSuperGLMError(
+            "ModelInputs.y must be a named Series or one-column DataFrame for the "
+            f"declared target {target_name!r}"
+        )
+    _require_equal_values(
+        actual_target,
+        frame.loc[:, [target_name]],
+        role="ModelInputs.y target values",
+    )
+
+    _validate_named_frame_role(
+        frame,
+        value=inputs.sample_weight,
+        explicit_name=inputs.sample_weight_name,
+        column=manifest_spec.weight_column,
+        role="sample_weight",
+    )
+    _validate_frame_role(
+        frame,
+        value=inputs.offset,
+        column=manifest_spec.offset_column,
+        role="offset",
+    )
+    _validate_named_frame_role(
+        frame,
+        value=inputs.offset_source,
+        explicit_name=inputs.offset_source_name,
+        column=manifest_spec.offset_source_column,
+        role="offset_source",
+    )
+    _validate_named_frame_role(
+        frame,
+        value=inputs.export_weight,
+        explicit_name=inputs.export_weight_name,
+        column=manifest_spec.export_weight_column,
+        role="export_weight",
+    )
+
+
+def _validate_frame_columns(frame: pd.DataFrame, columns: list[str], *, role: str) -> None:
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise StandardSuperGLMError(
+            f"{role} declared columns are missing from the final model frame: "
+            + ", ".join(missing)
+        )
+
+
+def _validate_named_frame_role(
+    frame: pd.DataFrame,
+    *,
+    value: pd.Series | np.ndarray | None,
+    explicit_name: str | None,
+    column: str | None,
+    role: str,
+) -> None:
+    if column is None:
+        if value is not None or explicit_name is not None:
+            raise StandardSuperGLMError(
+                f"ModelInputs.{role} must be absent when the manifest has no {role} column"
+            )
+        return
+    if value is None:
+        raise StandardSuperGLMError(
+            f"ModelInputs.{role} is required for declared column {column!r}"
+        )
+    actual_name = _weight_name(value, explicit_name, role=role)
+    if actual_name != column:
+        raise StandardSuperGLMError(
+            f"ModelInputs.{role} name must exactly match declared column {column!r}"
+        )
+    _validate_frame_role(frame, value=value, column=column, role=role)
+
+
+def _validate_frame_role(
+    frame: pd.DataFrame,
+    *,
+    value: pd.Series | np.ndarray | None,
+    column: str | None,
+    role: str,
+) -> None:
+    if column is None:
+        if value is not None:
+            raise StandardSuperGLMError(
+                f"ModelInputs.{role} must be absent when the manifest has no {role} column"
+            )
+        return
+    if value is None:
+        raise StandardSuperGLMError(
+            f"ModelInputs.{role} is required for declared column {column!r}"
+        )
+    _validate_frame_columns(frame, [column], role=f"ModelInputs.{role}")
+    _require_equal_values(
+        value,
+        frame[column],
+        role=f"ModelInputs.{role} values",
+    )
+
+
+def _require_equal_values(actual: Any, expected: Any, *, role: str) -> None:
+    actual_frame = actual.to_frame() if isinstance(actual, pd.Series) else actual
+    expected_frame = expected.to_frame() if isinstance(expected, pd.Series) else expected
+    try:
+        pd.testing.assert_frame_equal(
+            actual_frame.reset_index(drop=True),
+            expected_frame.reset_index(drop=True),
+            check_dtype=False,
+            check_exact=True,
+            check_names=False,
+        )
+    except AssertionError as exc:
+        raise StandardSuperGLMError(
+            f"{role} must exactly match the fingerprinted final model frame"
+        ) from exc
+
+
 def _validate_canonical_row_ids(
     frame: pd.DataFrame,
     inputs: ModelInputs,
@@ -443,9 +640,11 @@ def run_cross_validation(
     split_indices: Iterable[tuple[Any, Any]],
     fit_mode: str,
     scoring: str | Callable | Sequence[str | Callable],
-    cross_validate_fn: Callable[..., Any] = exact_superglm_cross_validate,
+    cross_validate_fn: Callable[..., Any] | None = None,
 ) -> CVEvidence:
     _validate_input_lengths(inputs)
+    if cross_validate_fn is None:
+        cross_validate_fn = exact_superglm_cross_validate
     splitter = PrecomputedSplitter(split_indices, row_count=len(inputs.X))
     cv_options = {
         "cv": splitter,
@@ -829,7 +1028,7 @@ def _validate_manifest_offset_contract(
         )
     if offset_source_name != expected_source:
         raise StandardSuperGLMError(
-            f"ModelInputs.offset_source must match handling {contract.handling} source "
+            f"ModelInputs.offset_source name must match handling {contract.handling} source "
             f"{expected_source!r}"
         )
     if expected_source is not None:

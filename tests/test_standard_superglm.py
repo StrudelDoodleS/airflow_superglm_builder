@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import platform
 from pathlib import Path
@@ -872,13 +873,11 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
-            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
-                "CV must not run before canonical-row validation"
-            ),
         )
 
 
@@ -935,6 +934,7 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -1004,6 +1004,7 @@ def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
@@ -1046,6 +1047,11 @@ def test_standard_runner_rejects_model_source_drift_during_training(
             "source drift must fail before audit evidence is persisted"
         ),
     )
+    monkeypatch.setattr(
+        api,
+        "exact_superglm_cross_validate",
+        lambda *args, **kwargs: _cv_result(),
+    )
 
     with pytest.raises(api.StandardSuperGLMError, match="model_source_sha256"):
         api.run_standard_superglm_build(
@@ -1069,11 +1075,11 @@ def test_standard_runner_rejects_model_source_drift_during_training(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
-            cross_validate_fn=lambda *args, **kwargs: _cv_result(),
         )
 
 
@@ -1159,13 +1165,11 @@ def test_standard_runner_rejects_inputs_not_aligned_to_canonical_frame(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
-            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
-                "CV must not run before canonical-row validation"
-            ),
         )
 
 
@@ -1212,13 +1216,11 @@ def test_standard_runner_rejects_missing_or_duplicate_row_identity_before_cv(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=tmp_path / "source",
             created_by="pytest",
-            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
-                "CV must not run before canonical-row validation"
-            ),
         )
 
 
@@ -1259,7 +1261,6 @@ def _minimal_standard_build(api, tmp_path):
         "expected_build_identity": _build_identity(),
         "fit_mode": "fit_reml",
         "scoring": ("deviance",),
-        "cross_validate_fn": lambda *args, **kwargs: _cv_result(),
         "output_dir": tmp_path / "run",
         "model_id": 17,
         "model_config": _model_config(),
@@ -1272,11 +1273,208 @@ def _minimal_standard_build(api, tmp_path):
             data_as_of_date="2026-06-30",
             pk_columns=("policy_id",),
             target_column="target",
+            feature_columns=("age",),
         ),
         "split_artifact_root": tmp_path / "splits",
         "model_source_root": source_root,
         "created_by": "pytest",
     }
+
+
+def _complete_role_build(api, tmp_path):
+    frame = pd.DataFrame(
+        {
+            "policy_id": [1, 2, 3],
+            "target": [0, 1, 0],
+            "age": [20.0, 30.0, 40.0],
+            "age_squared": [400.0, 900.0, 1600.0],
+            "fit_weight": [1.0, 1.5, 2.0],
+            "fitted_offset": [0.0, np.log(2.0), np.log(3.0)],
+            "raw_term": [12.0, 24.0, 36.0],
+            "export_weight": [2.0, 3.0, 4.0],
+        }
+    )
+    row_ids = frame[["policy_id"]].copy()
+    identity = pd.Index(row_ids["policy_id"].to_numpy(copy=True), name="policy_id")
+
+    def series(column, *, dtype=None):
+        values = frame[column].to_numpy(copy=True)
+        if dtype is not None:
+            values = values.astype(dtype)
+        return pd.Series(values, index=identity, name=column)
+
+    X = frame[["age", "age_squared"]].copy()
+    X.index = identity
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text("MODEL = 'HOME_FREQ'\n", encoding="utf-8")
+    contract = OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="raw_term",
+        published_factor_name="RawTerm",
+        source_name="raw_term",
+        label="log(raw_term / 12)",
+    )
+    return {
+        "frame": frame,
+        "inputs": api.ModelInputs(
+            X=X,
+            y=series("target", dtype=float),
+            sample_weight=series("fit_weight"),
+            sample_weight_name="fit_weight",
+            offset=series("fitted_offset"),
+            offset_source=series("raw_term"),
+            offset_source_name="raw_term",
+            export_weight=series("export_weight"),
+            export_weight_name="export_weight",
+            row_ids=row_ids,
+        ),
+        "superglm_model": _FakeModel(),
+        "split_indices": _folds(),
+        "expected_build_identity": _build_identity(),
+        "fit_mode": "fit_reml",
+        "scoring": ("deviance",),
+        "output_dir": tmp_path / "run",
+        "model_id": 17,
+        "model_config": _model_config(),
+        "model_version": "v1",
+        "export_id": _stable_export_id(),
+        "effective_from": None,
+        "manifest_spec": ModelFrameManifestSpec(
+            dataset_name="home_freq_frame",
+            source_system="pytest",
+            data_as_of_date="2026-06-30",
+            pk_columns=("policy_id",),
+            target_column="target",
+            weight_column="fit_weight",
+            feature_columns=("age", "age_squared"),
+            offset_column="fitted_offset",
+            offset_source_column="raw_term",
+            offset_label="log(raw_term / 12)",
+            export_weight_column="export_weight",
+        ),
+        "split_artifact_root": tmp_path / "splits",
+        "model_source_root": source_root,
+        "created_by": "pytest",
+        "offset_contract": contract,
+    }
+
+
+def test_publishable_standard_runner_does_not_expose_cv_implementation_choice():
+    parameters = inspect.signature(_api().run_standard_superglm_build).parameters
+
+    assert "cross_validate_fn" not in parameters
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("X_columns", "ModelInputs.X.*feature columns"),
+        ("X_values", "ModelInputs.X.*values"),
+        ("y_name", "ModelInputs.y.*target"),
+        ("y_values", "ModelInputs.y.*target"),
+        ("sample_weight_name", "sample_weight.*name"),
+        ("sample_weight_values", "sample_weight.*values"),
+        ("offset_values", "offset.*values"),
+        ("offset_source_name", "offset_source.*name"),
+        ("offset_source_values", "offset_source.*values"),
+        ("export_weight_name", "export_weight.*name"),
+        ("export_weight_values", "export_weight.*values"),
+        ("row_ids", "row_ids.*values"),
+    ],
+)
+def test_publishable_standard_runner_rejects_each_final_frame_role_drift_before_cv(
+    tmp_path,
+    monkeypatch,
+    mutation,
+    match,
+):
+    api = _api()
+    build = _complete_role_build(api, tmp_path)
+    inputs = build["inputs"]
+    values = {
+        name: getattr(inputs, name) for name in api.ModelInputs.__dataclass_fields__
+    }
+    if mutation.endswith("_values"):
+        role = mutation.removesuffix("_values")
+        changed = values[role].copy()
+        changed.iloc[0] = changed.iloc[0] + 1
+        values[role] = changed
+    elif mutation == "y_name":
+        values["y"] = values["y"].rename("wrong_target")
+    elif mutation.endswith("_name"):
+        values[mutation] = "wrong_column"
+    elif mutation == "X_columns":
+        values["X"] = values["X"].rename(columns={"age_squared": "hidden_transform"})
+    elif mutation == "row_ids":
+        changed = values["row_ids"].copy()
+        changed.iloc[0, 0] = 999
+        values["row_ids"] = changed
+    else:  # pragma: no cover - protects the test table itself
+        raise AssertionError(mutation)
+    build["inputs"] = api.ModelInputs(**values)
+    monkeypatch.setattr(
+        api,
+        "run_cross_validation",
+        lambda *args, **kwargs: pytest.fail("CV ran after final-frame role drift"),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.run_standard_superglm_build(object(), **build)
+
+
+def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    build = _complete_role_build(api, tmp_path)
+    caller_frame = build["frame"]
+    caller_inputs = build["inputs"]
+    caller_splits = build["split_indices"]
+    expected_frame = caller_frame.copy(deep=True)
+    expected_X = caller_inputs.X.copy(deep=True)
+    expected_y = caller_inputs.y.copy(deep=True)
+    expected_folds = [
+        (train.copy(), validation.copy()) for train, validation in caller_splits
+    ]
+
+    def mutating_exact_cv(model, X, y, **kwargs):
+        del model, X, y, kwargs
+        caller_frame.loc[:, "age_squared"] = -1.0
+        caller_inputs.X.loc[:, "age_squared"] = -2.0
+        caller_inputs.y.iloc[:] = 99.0
+        caller_inputs.sample_weight.iloc[:] = 88.0
+        caller_inputs.offset.iloc[:] = 77.0
+        caller_inputs.offset_source.iloc[:] = 66.0
+        caller_inputs.export_weight.iloc[:] = 55.0
+        caller_inputs.row_ids.iloc[0, 0] = 999
+        caller_splits[0][0][0] = 2
+        caller_splits[0][1][0] = 1
+        return _cv_result()
+
+    def capture_full_fit(model, inputs, *, fit_mode):
+        del fit_mode
+        pd.testing.assert_frame_equal(inputs.X, expected_X)
+        pd.testing.assert_series_equal(inputs.y, expected_y)
+        return model, {"converged": True}
+
+    def capture_manifest(engine, **kwargs):
+        del engine
+        pd.testing.assert_frame_equal(kwargs["frame"], expected_frame)
+        for actual, expected in zip(
+            kwargs["split_indices"], expected_folds, strict=True
+        ):
+            np.testing.assert_array_equal(actual[0], expected[0])
+            np.testing.assert_array_equal(actual[1], expected[1])
+        raise RuntimeError("trusted snapshots captured")
+
+    monkeypatch.setattr(api, "exact_superglm_cross_validate", mutating_exact_cv)
+    monkeypatch.setattr(api, "fit_full_model", capture_full_fit)
+    monkeypatch.setattr(api, "create_model_frame_manifest_with_split", capture_manifest)
+
+    with pytest.raises(RuntimeError, match="trusted snapshots captured"):
+        api.run_standard_superglm_build(object(), **build)
 
 
 @pytest.mark.parametrize(
@@ -1436,6 +1634,7 @@ def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
                 offset_column=manifest_offset,
                 offset_source_column=manifest_offset_source,
                 offset_label=manifest_label,
@@ -1444,9 +1643,6 @@ def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
             model_source_root=tmp_path / "source",
             created_by="pytest",
             offset_contract=contract,
-            cross_validate_fn=lambda *args, **kwargs: pytest.fail(
-                "CV must not run before offset audit validation"
-            ),
         )
 
 
@@ -1591,6 +1787,11 @@ def test_standard_runner_rejects_manifest_frame_mismatch_before_artifacts(
     build = _minimal_standard_build(api, tmp_path)
     monkeypatch.setattr(
         api,
+        "exact_superglm_cross_validate",
+        lambda *args, **kwargs: _cv_result(),
+    )
+    monkeypatch.setattr(
+        api,
         "create_model_frame_manifest_with_split",
         lambda *args, **kwargs: SimpleNamespace(
             manifest_id="manifest-mismatch",
@@ -1653,6 +1854,11 @@ def test_standard_runner_final_drift_removes_attempt_artifacts(
     monkeypatch.setattr(api, "export_rating_tables", export_workbook)
     monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
     monkeypatch.setattr(api, "write_publication_receipt", write_receipt)
+    monkeypatch.setattr(
+        api,
+        "exact_superglm_cross_validate",
+        lambda *args, **kwargs: _cv_result(),
+    )
 
     with pytest.raises(api.StandardSuperGLMError, match="builder_source_sha256"):
         api.run_standard_superglm_build(object(), **build)
@@ -1711,6 +1917,11 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
 
     monkeypatch.setattr(api, "create_model_frame_manifest_with_split", fake_manifest)
     monkeypatch.setattr(api, "export_rating_tables", failing_export)
+    monkeypatch.setattr(
+        api,
+        "exact_superglm_cross_validate",
+        lambda *args, **kwargs: _cv_result(),
+    )
 
     with pytest.raises(RuntimeError, match="artifact export failed"):
         api.run_standard_superglm_build(
@@ -1722,7 +1933,6 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             expected_build_identity=_build_identity(),
             fit_mode="fit_reml",
             scoring=("deviance",),
-            cross_validate_fn=lambda *args, **kwargs: _cv_result(),
             output_dir=tmp_path / "run",
             model_id=17,
             model_config=_model_config(),
@@ -1735,6 +1945,7 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
                 data_as_of_date="2026-06-30",
                 pk_columns=("policy_id",),
                 target_column="target",
+                feature_columns=("age",),
             ),
             split_artifact_root=tmp_path / "splits",
             model_source_root=source_root,
@@ -1814,6 +2025,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
     monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
     monkeypatch.setattr(api, "fit_full_model", capture_fit_full_model)
+    monkeypatch.setattr(api, "exact_superglm_cross_validate", fake_cross_validate)
 
     base_inputs = _identity_bound_inputs(api, frame)
     term = pd.Series(
@@ -1862,7 +2074,6 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         "expected_build_identity": _build_identity(model_frame_sha256="a" * 64),
         "fit_mode": "fit_reml",
         "scoring": ("deviance",),
-        "cross_validate_fn": fake_cross_validate,
         "output_dir": tmp_path / "run",
         "model_id": 17,
         "model_config": model_config,
@@ -1875,9 +2086,11 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
             data_as_of_date="2026-06-30",
             pk_columns=("policy_id",),
             target_column="target",
+            feature_columns=("age",),
             offset_column="TermOffset",
             offset_source_column="Term",
             offset_label="log(Term / 12)",
+            export_weight_column="RatingWeight",
         ),
         "split_artifact_root": tmp_path / "splits",
         "model_source_root": source_root,
