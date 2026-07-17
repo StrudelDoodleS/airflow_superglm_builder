@@ -91,7 +91,7 @@ class PricingModelSpec:
     sample_weight_column: str | None = None
     export_weight_column: str | None = None
     data_as_of_column: str | None = None
-    scoring: tuple[str, ...] = ("deviance",)
+    scoring: tuple[str, ...] = ("deviance", "nll", "gini")
     fit_mode: str = "fit_reml"
 
     def __post_init__(self) -> None:
@@ -241,6 +241,24 @@ class BuiltCandidate:
     @property
     def metrics(self) -> dict[str, float]:
         return dict(self.completed_build.metrics)
+
+    @property
+    def validation_metrics(self) -> pd.DataFrame:
+        base_columns = ["validation_split_no", "n_train", "n_validation"]
+        splits = self.completed_build.validation_splits
+        if not splits:
+            return pd.DataFrame(columns=base_columns)
+        metric_names = list(splits[0].metrics)
+        rows = [
+            {
+                "validation_split_no": split.validation_split_no,
+                "n_train": split.n_train,
+                "n_validation": split.n_validation,
+                **split.metrics,
+            }
+            for split in splits
+        ]
+        return pd.DataFrame.from_records(rows, columns=[*base_columns, *metric_names])
 
 
 def _required_text(value: Any, field_name: str) -> str:

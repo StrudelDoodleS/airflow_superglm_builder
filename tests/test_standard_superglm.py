@@ -125,9 +125,10 @@ def test_precomputed_splitter_rejects_out_of_range_indices():
 def test_cv_report_adapter_returns_json_primitives_and_stable_metrics():
     api = _api()
 
-    report, metrics, fold_metrics = api.cv_result_to_records(
+    report, metrics, fold_metrics, _ = api.cv_result_to_records(
         _cv_result(),
         oof_coverage=2 / 3,
+        scoring=("deviance",),
     )
 
     json.dumps(report, allow_nan=False)
@@ -146,6 +147,153 @@ def test_cv_report_adapter_returns_json_primitives_and_stable_metrics():
         (1, "deviance", pytest.approx(0.4)),
         (2, "deviance", pytest.approx(0.5)),
     ]
+
+
+def test_cv_report_adapter_returns_wide_validation_splits_in_requested_order():
+    api = _api()
+    result = _cv_result()
+    result.fold_scores["nll"] = [0.6, 0.7]
+    result.fold_scores["gini"] = [0.8, 0.9]
+    result.mean_scores.update(nll=0.65, gini=0.85)
+    result.pooled_scores.update(nll=0.64)
+    result.std_scores.update(nll=0.05, gini=0.05)
+
+    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+        result,
+        oof_coverage=2 / 3,
+        scoring=("deviance", "nll", "gini"),
+    )
+
+    assert [
+        {
+            "validation_split_no": split.validation_split_no,
+            "n_train": split.n_train,
+            "n_validation": split.n_validation,
+            "metrics": split.metrics,
+        }
+        for split in validation_splits
+    ] == [
+        {
+            "validation_split_no": 1,
+            "n_train": 2,
+            "n_validation": 1,
+            "metrics": {"deviance": 0.4, "nll": 0.6, "gini": 0.8},
+        },
+        {
+            "validation_split_no": 2,
+            "n_train": 2,
+            "n_validation": 1,
+            "metrics": {"deviance": 0.5, "nll": 0.7, "gini": 0.9},
+        },
+    ]
+    assert [(metric.fold_no, metric.metric_name) for metric in fold_metrics] == [
+        (1, "deviance"),
+        (1, "nll"),
+        (1, "gini"),
+        (2, "deviance"),
+        (2, "nll"),
+        (2, "gini"),
+    ]
+
+
+def test_cv_report_adapter_does_not_fabricate_omitted_custom_metrics():
+    api = _api()
+    result = _cv_result()
+    result.fold_scores["gini"] = [0.8, 0.9]
+    result.mean_scores["gini"] = 0.85
+    result.std_scores["gini"] = 0.05
+
+    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+        result,
+        oof_coverage=2 / 3,
+        scoring=("deviance", "gini"),
+    )
+
+    assert list(validation_splits[0].metrics) == ["deviance", "gini"]
+    assert {metric.metric_name for metric in fold_metrics} == {"deviance", "gini"}
+    assert all("nll" not in split.metrics for split in validation_splits)
+
+
+def test_cv_report_adapter_rejects_missing_requested_fold_metric():
+    api = _api()
+    result = _cv_result()
+    result.fold_scores = result.fold_scores.drop(columns="deviance")
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="fold 1 is missing requested metrics: deviance",
+    ):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=("deviance",),
+        )
+
+
+def test_cv_report_adapter_rejects_non_finite_requested_fold_metric():
+    api = _api()
+    result = _cv_result()
+    result.fold_scores.loc[1, "deviance"] = float("nan")
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="fold 2 score 'deviance' must be finite",
+    ):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=("deviance",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("fold_values", "match"),
+    [
+        ([0], "one row per materialized split"),
+        ([0, 0], "fold numbering must be exactly 0 through 1"),
+        ([1, 2], "fold numbering must be exactly 0 through 1"),
+    ],
+)
+def test_cv_report_adapter_rejects_missing_duplicate_or_misnumbered_fold_rows(
+    fold_values,
+    match,
+):
+    api = _api()
+    result = _cv_result()
+    result.fold_scores = result.fold_scores.iloc[: len(fold_values)].copy()
+    result.fold_scores["fold"] = fold_values
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=("deviance",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "match"),
+    [
+        ("n_test", 2, "fold 2 reported n_test=2 but materialized n_validation=1"),
+        ("n_train", True, "fold 2 reported n_train must be a positive integer"),
+    ],
+)
+def test_cv_report_adapter_rejects_invalid_or_mismatched_reported_split_counts(
+    column,
+    value,
+    match,
+):
+    api = _api()
+    result = _cv_result()
+    result.fold_scores[column] = result.fold_scores[column].astype(object)
+    result.fold_scores.loc[1, column] = value
+
+    with pytest.raises(api.StandardSuperGLMError, match=match):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=("deviance",),
+        )
 
 
 def test_run_cross_validation_passes_strict_superglm_options():
@@ -1157,6 +1305,20 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         first_paths["workbook"]
     )
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
+    assert [split.model_dump() for split in result.validation_splits] == [
+        {
+            "validation_split_no": 1,
+            "n_train": 2,
+            "n_validation": 1,
+            "metrics": {"deviance": pytest.approx(0.4)},
+        },
+        {
+            "validation_split_no": 2,
+            "n_train": 2,
+            "n_validation": 1,
+            "metrics": {"deviance": pytest.approx(0.5)},
+        },
+    ]
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]

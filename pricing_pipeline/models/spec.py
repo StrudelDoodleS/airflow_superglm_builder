@@ -12,6 +12,42 @@ class ApprovedModelBuildError(ValueError):
     """Raised when an approved notebook build is incomplete or invalid."""
 
 
+class ValidationSplitResult(BaseModel):
+    """Held-out metrics and authoritative row counts for one validation split."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    validation_split_no: int
+    n_train: int
+    n_validation: int
+    metrics: dict[str, float]
+
+    @field_validator("validation_split_no", "n_train", "n_validation", mode="before")
+    @classmethod
+    def _positive_integer(cls, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("must be a positive integer")
+        return value
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _finite_metrics(cls, value: Any) -> dict[str, float]:
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError("must contain at least one metric")
+        metrics: dict[str, float] = {}
+        for key, raw_metric in value.items():
+            metric_name = str(key).strip()
+            if not metric_name:
+                raise ValueError("metric names must be non-empty strings")
+            if isinstance(raw_metric, bool) or not isinstance(raw_metric, Real):
+                raise ValueError(f"metric {metric_name!r} must be a finite number")
+            metric_value = float(raw_metric)
+            if not math.isfinite(metric_value):
+                raise ValueError(f"metric {metric_name!r} must be finite")
+            metrics[metric_name] = metric_value
+        return metrics
+
+
 class ApprovedModelBuild(BaseModel):
     """Immutable notebook output passed unchanged into local or remote publication."""
 
@@ -45,6 +81,7 @@ class ApprovedModelBuild(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
     metric_scopes: dict[str, str] = Field(default_factory=dict)
     fold_metrics: tuple[dict[str, int | str | float], ...] = ()
+    validation_splits: tuple[ValidationSplitResult, ...] = ()
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -228,6 +265,33 @@ class ApprovedModelBuild(BaseModel):
         unknown = sorted(set(self.metric_scopes) - set(self.metrics))
         if unknown:
             raise ValueError("metric_scopes reference unknown metrics: " + ", ".join(unknown))
+        return self
+
+    @model_validator(mode="after")
+    def _validation_evidence_is_consistent(self) -> "ApprovedModelBuild":
+        split_numbers = tuple(split.validation_split_no for split in self.validation_splits)
+        if split_numbers != tuple(range(1, len(self.validation_splits) + 1)):
+            raise ValueError("validation_splits must be numbered consecutively from 1")
+        if self.validation_splits:
+            metric_names = tuple(self.validation_splits[0].metrics)
+            if any(tuple(split.metrics) != metric_names for split in self.validation_splits[1:]):
+                raise ValueError(
+                    "validation_splits must contain the same metrics in requested order"
+                )
+            expected_fold_metrics = {
+                (split.validation_split_no, metric_name): metric_value
+                for split in self.validation_splits
+                for metric_name, metric_value in split.metrics.items()
+            }
+            actual_fold_metrics: dict[tuple[int, str], float] = {}
+            duplicate_key = False
+            for metric in self.fold_metrics:
+                key = (int(metric["fold_no"]), str(metric["metric_name"]))
+                if key in actual_fold_metrics:
+                    duplicate_key = True
+                actual_fold_metrics[key] = float(metric["metric_value"])
+            if duplicate_key or actual_fold_metrics != expected_fold_metrics:
+                raise ValueError("fold_metrics must exactly match validation_splits")
         return self
 
 

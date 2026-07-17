@@ -97,6 +97,166 @@ def test_completed_build_and_export_are_one_record_type():
     assert ApprovedModelBuildError is CompletedModelBuildError
 
 
+def test_approved_build_holds_ordered_validation_split_results(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["validation_splits"] = (
+        {
+            "validation_split_no": 1,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.4, "nll": 0.2, "gini": 0.7},
+        },
+    )
+    payload["fold_metrics"] = (
+        {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+        {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+        {"fold_no": 1, "metric_name": "gini", "metric_value": 0.7},
+    )
+
+    build = ApprovedModelBuild(**payload)
+
+    split = build.validation_splits[0]
+    assert split.validation_split_no == 1
+    assert split.n_train == 80
+    assert split.n_validation == 20
+    assert list(split.metrics) == ["deviance", "nll", "gini"]
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"validation_split_no": 0}, "validation_split_no.*positive integer"),
+        ({"n_train": 0}, "n_train.*positive integer"),
+        ({"n_validation": 0}, "n_validation.*positive integer"),
+        ({"metrics": {}}, "metrics.*at least one metric"),
+        ({"metrics": {"deviance": float("nan")}}, "deviance.*finite"),
+    ],
+)
+def test_approved_build_rejects_invalid_validation_split_values(
+    tmp_path: Path,
+    override,
+    match,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    split = {
+        "validation_split_no": 1,
+        "n_train": 80,
+        "n_validation": 20,
+        "metrics": {"deviance": 0.4},
+    }
+    split.update(override)
+    payload["validation_splits"] = (split,)
+
+    with pytest.raises(ApprovedModelBuildError, match=match):
+        ApprovedModelBuild(**payload)
+
+
+def test_approved_build_rejects_misnumbered_validation_splits(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["validation_splits"] = (
+        {
+            "validation_split_no": 1,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.4},
+        },
+        {
+            "validation_split_no": 3,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.5},
+        },
+    )
+
+    with pytest.raises(
+        ApprovedModelBuildError,
+        match="validation_splits must be numbered consecutively from 1",
+    ):
+        ApprovedModelBuild(**payload)
+
+
+def test_approved_build_rejects_incomplete_validation_split_metrics(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["validation_splits"] = (
+        {
+            "validation_split_no": 1,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.4, "nll": 0.2},
+        },
+        {
+            "validation_split_no": 2,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.5},
+        },
+    )
+
+    with pytest.raises(
+        ApprovedModelBuildError,
+        match="validation_splits must contain the same metrics in requested order",
+    ):
+        ApprovedModelBuild(**payload)
+
+
+@pytest.mark.parametrize(
+    "fold_metrics",
+    [
+        (
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
+        ),
+        (
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
+            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
+        ),
+        (
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
+            {"fold_no": 2, "metric_name": "nll", "metric_value": 9.9},
+        ),
+        (
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
+            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
+            {"fold_no": 2, "metric_name": "gini", "metric_value": 0.8},
+        ),
+    ],
+)
+def test_approved_build_rejects_fold_metrics_that_disagree_with_validation_splits(
+    tmp_path: Path,
+    fold_metrics,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["validation_splits"] = (
+        {
+            "validation_split_no": 1,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.4, "nll": 0.2},
+        },
+        {
+            "validation_split_no": 2,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.5, "nll": 0.3},
+        },
+    )
+    payload["fold_metrics"] = fold_metrics
+
+    with pytest.raises(
+        ApprovedModelBuildError,
+        match="fold_metrics must exactly match validation_splits",
+    ):
+        ApprovedModelBuild(**payload)
+
+
 @pytest.mark.parametrize(
     "field_name",
     [

@@ -8,6 +8,7 @@ import shutil
 from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from pricing_pipeline.data.manifest import (
 )
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.models.spec import ApprovedModelBuild, ValidationSplitResult
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
 from pricing_pipeline.publishing.superglm_publication_receipt import (
@@ -65,6 +66,7 @@ class CVEvidence:
     report: dict[str, Any]
     metrics: dict[str, float]
     fold_metrics: tuple[FoldMetric, ...]
+    validation_splits: tuple[ValidationSplitResult, ...]
 
 
 def run_standard_superglm_build(
@@ -267,6 +269,7 @@ def run_standard_superglm_build(
             metrics=evidence.metrics,
             metric_scopes={name: "cv" for name in evidence.metrics},
             fold_metrics=fold_metric_records,
+            validation_splits=evidence.validation_splits,
         )
         return completed_build
     except BaseException:
@@ -472,9 +475,10 @@ def run_cross_validation(
             raise StandardSuperGLMError(f"fold {fold_numbers[0]} did not converge")
         raise StandardSuperGLMError(f"folds {fold_numbers} did not converge")
 
-    report, metrics, fold_metrics = cv_result_to_records(
+    report, metrics, fold_metrics, validation_splits = cv_result_to_records(
         result,
         oof_coverage=splitter.oof_coverage,
+        scoring=scoring,
     )
     return CVEvidence(
         fold_indices=tuple(
@@ -484,6 +488,7 @@ def run_cross_validation(
         report=report,
         metrics=metrics,
         fold_metrics=fold_metrics,
+        validation_splits=validation_splits,
     )
 
 
@@ -559,7 +564,13 @@ def cv_result_to_records(
     result,
     *,
     oof_coverage: float,
-) -> tuple[dict[str, Any], dict[str, float], tuple[FoldMetric, ...]]:
+    scoring: str | Callable | Sequence[str | Callable],
+) -> tuple[
+    dict[str, Any],
+    dict[str, float],
+    tuple[FoldMetric, ...],
+    tuple[ValidationSplitResult, ...],
+]:
     mean_scores = {
         str(name): _finite_score(value, label=f"mean score {name!r}")
         for name, value in result.mean_scores.items()
@@ -577,22 +588,73 @@ def cv_result_to_records(
     metrics.update({f"cv_std_{name}": value for name, value in std_scores.items()})
     metrics["cv_oof_coverage"] = float(oof_coverage)
 
-    metric_names = tuple(mean_scores)
+    metric_names = _requested_metric_names(scoring, mean_scores)
     fold_metrics: list[FoldMetric] = []
-    for record in result.fold_scores.to_dict("records"):
+    validation_splits: list[ValidationSplitResult] = []
+    result_folds = tuple(result.fold_indices or ())
+    fold_score_records = result.fold_scores.to_dict("records")
+    if len(fold_score_records) != len(result_folds):
+        raise StandardSuperGLMError(
+            "SuperGLM fold_scores must contain one row per materialized split"
+        )
+    expected_fold_numbers = list(range(len(result_folds)))
+    reported_fold_numbers = [record.get("fold") for record in fold_score_records]
+    if reported_fold_numbers != expected_fold_numbers:
+        raise StandardSuperGLMError(
+            f"SuperGLM fold_scores fold numbering must be exactly 0 through {len(result_folds) - 1}"
+        )
+
+    for row_no, record in enumerate(fold_score_records):
         fold_no = int(record["fold"]) + 1
-        for metric_name in metric_names:
-            if metric_name in record:
-                fold_metrics.append(
-                    FoldMetric(
-                        fold_no=fold_no,
-                        metric_name=metric_name,
-                        metric_value=_finite_score(
-                            record[metric_name],
-                            label=f"fold {fold_no} score {metric_name!r}",
-                        ),
-                    )
+        train_indices, validation_indices = result_folds[row_no]
+        reported_counts = (
+            ("n_train", "n_train", len(train_indices)),
+            ("n_test", "n_validation", len(validation_indices)),
+        )
+        for reported_name, materialized_name, materialized_count in reported_counts:
+            if reported_name not in record:
+                continue
+            reported_count = record[reported_name]
+            if (
+                isinstance(reported_count, bool)
+                or not isinstance(reported_count, Integral)
+                or reported_count <= 0
+            ):
+                raise StandardSuperGLMError(
+                    f"fold {fold_no} reported {reported_name} must be a positive integer"
                 )
+            if reported_count != materialized_count:
+                raise StandardSuperGLMError(
+                    f"fold {fold_no} reported {reported_name}={reported_count} but "
+                    f"materialized {materialized_name}={materialized_count}"
+                )
+        missing_metrics = [name for name in metric_names if name not in record]
+        if missing_metrics:
+            raise StandardSuperGLMError(
+                f"fold {fold_no} is missing requested metrics: {', '.join(missing_metrics)}"
+            )
+        split_metrics: dict[str, float] = {}
+        for metric_name in metric_names:
+            metric_value = _finite_score(
+                record[metric_name],
+                label=f"fold {fold_no} score {metric_name!r}",
+            )
+            split_metrics[metric_name] = metric_value
+            fold_metrics.append(
+                FoldMetric(
+                    fold_no=fold_no,
+                    metric_name=metric_name,
+                    metric_value=metric_value,
+                )
+            )
+        validation_splits.append(
+            ValidationSplitResult(
+                validation_split_no=fold_no,
+                n_train=len(train_indices),
+                n_validation=len(validation_indices),
+                metrics=split_metrics,
+            )
+        )
 
     fold_indices = [
         {"train": train.tolist(), "test": test.tolist()}
@@ -609,7 +671,17 @@ def cv_result_to_records(
         "oof_coverage": float(oof_coverage),
         "oof_predictions": _json_primitive(result.oof_predictions),
     }
-    return report, metrics, tuple(fold_metrics)
+    return report, metrics, tuple(fold_metrics), tuple(validation_splits)
+
+
+def _requested_metric_names(
+    scoring: str | Callable | Sequence[str | Callable],
+    mean_scores: dict[str, float],
+) -> tuple[str, ...]:
+    values = (scoring,) if isinstance(scoring, str) or callable(scoring) else tuple(scoring)
+    if all(isinstance(value, str) for value in values):
+        return tuple(values)
+    return tuple(mean_scores)
 
 
 def _finite_score(value: Any, *, label: str) -> float:

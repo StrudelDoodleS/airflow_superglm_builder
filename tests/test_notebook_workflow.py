@@ -173,7 +173,7 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.sample_weight_column == "model_weight"
     assert spec.export_weight_column == "rating_weight"
     assert spec.validation is validation
-    assert spec.scoring == ("deviance",)
+    assert spec.scoring == ("deviance", "nll", "gini")
     assert spec.fit_mode == "fit_reml"
 
 
@@ -683,7 +683,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert "target_name" not in captured
     assert "deployment_slot" not in captured
     assert "validation_split" not in captured
-    assert captured["scoring"] == ("deviance",)
+    assert captured["scoring"] == ("deviance", "nll", "gini")
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
     assert contract.handling == "EXPORTED_FACTOR"
@@ -692,6 +692,73 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert contract.source_name == "term"
     assert contract.label == "log(term / 12)"
     assert "offset_export_options" not in captured
+
+
+def test_built_candidate_returns_fresh_wide_validation_metrics(tmp_path):
+    from pricing_pipeline import notebook as api
+
+    model = _registered_model(api, tmp_path)
+    completed_build = _approved_build(
+        tmp_path,
+        fold_metrics=(
+            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
+            {"fold_no": 1, "metric_name": "gini", "metric_value": 0.7},
+            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
+            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
+            {"fold_no": 2, "metric_name": "gini", "metric_value": 0.8},
+        ),
+        validation_splits=(
+            {
+                "validation_split_no": 1,
+                "n_train": 80,
+                "n_validation": 20,
+                "metrics": {"deviance": 0.4, "nll": 0.2, "gini": 0.7},
+            },
+            {
+                "validation_split_no": 2,
+                "n_train": 80,
+                "n_validation": 20,
+                "metrics": {"deviance": 0.5, "nll": 0.3, "gini": 0.8},
+            },
+        ),
+    )
+    candidate = api.BuiltCandidate(model=model, completed_build=completed_build)
+
+    validation_metrics = candidate.validation_metrics
+
+    pd.testing.assert_frame_equal(
+        validation_metrics,
+        pd.DataFrame(
+            {
+                "validation_split_no": [1, 2],
+                "n_train": [80, 80],
+                "n_validation": [20, 20],
+                "deviance": [0.4, 0.5],
+                "nll": [0.2, 0.3],
+                "gini": [0.7, 0.8],
+            }
+        ),
+    )
+    validation_metrics.loc[0, "deviance"] = 99.0
+    assert candidate.validation_metrics.loc[0, "deviance"] == pytest.approx(0.4)
+    assert candidate.validation_metrics is not validation_metrics
+
+
+def test_built_candidate_returns_empty_validation_metrics_for_legacy_record(tmp_path):
+    from pricing_pipeline import notebook as api
+
+    candidate = api.BuiltCandidate(
+        model=_registered_model(api, tmp_path),
+        completed_build=_approved_build(tmp_path),
+    )
+
+    assert candidate.validation_metrics.empty
+    assert list(candidate.validation_metrics) == [
+        "validation_split_no",
+        "n_train",
+        "n_validation",
+    ]
 
 
 def test_build_candidate_aligns_composite_primary_key_inputs(
