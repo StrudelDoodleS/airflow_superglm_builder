@@ -49,7 +49,15 @@ from superglm.features.spline import CardinalCRSpline
 from superglm.types import LambdaPolicy
 
 
-def _function_metadata(value: object) -> tuple[Any, ...]:
+_FUNCTION_METADATA_MAX_DEPTH = 64
+
+
+def _function_metadata(
+    value: object,
+    *,
+    _seen: frozenset[int] = frozenset(),
+    _depth: int = 0,
+) -> tuple[Any, ...]:
     if value is None:
         return ("none",)
     if type(value) is bool:
@@ -64,25 +72,76 @@ def _function_metadata(value: object) -> tuple[Any, ...]:
         return ("float", value)
     if type(value) is str:
         return ("str", value)
+    if _depth >= _FUNCTION_METADATA_MAX_DEPTH:
+        return ("unsupported-depth",)
+    value_id = id(value)
+    if value_id in _seen:
+        return ("recursive",)
+    nested_seen = _seen | {value_id}
+    nested_depth = _depth + 1
     if type(value) is tuple:
-        return ("tuple", tuple(_function_metadata(item) for item in value))
+        return (
+            "tuple",
+            tuple(
+                _function_metadata(item, _seen=nested_seen, _depth=nested_depth) for item in value
+            ),
+        )
     if type(value) is dict and all(type(key) is str for key in value):
         return (
             "dict",
-            tuple((key, _function_metadata(value[key])) for key in sorted(value)),
+            tuple(
+                (
+                    key,
+                    _function_metadata(
+                        value[key],
+                        _seen=nested_seen,
+                        _depth=nested_depth,
+                    ),
+                )
+                for key in sorted(value)
+            ),
         )
-    return ("unsupported", type(value).__module__, type(value).__qualname__)
+    if type(value) is types.FunctionType:
+        code = value.__code__
+        return (
+            "function",
+            ("code", id(code), code),
+            _function_metadata(value.__name__, _seen=nested_seen, _depth=nested_depth),
+            _function_metadata(value.__qualname__, _seen=nested_seen, _depth=nested_depth),
+            _function_metadata(value.__module__, _seen=nested_seen, _depth=nested_depth),
+            _function_metadata(value.__defaults__, _seen=nested_seen, _depth=nested_depth),
+            _function_metadata(value.__kwdefaults__, _seen=nested_seen, _depth=nested_depth),
+            _closure_metadata(value.__closure__, _seen=nested_seen, _depth=nested_depth),
+        )
+    return ("unsupported",)
 
 
-def _closure_metadata(value: object) -> tuple[Any, ...]:
+def _closure_metadata(
+    value: object,
+    *,
+    _seen: frozenset[int] = frozenset(),
+    _depth: int = 0,
+) -> tuple[Any, ...]:
     if value is None:
         return ("none",)
     if type(value) is not tuple or not all(type(cell) is types.CellType for cell in value):
         return ("unsupported",)
+    if _depth >= _FUNCTION_METADATA_MAX_DEPTH:
+        return ("unsupported-depth",)
+    value_id = id(value)
+    if value_id in _seen:
+        return ("recursive",)
+    nested_seen = _seen | {value_id}
     contents = []
     for cell in value:
         try:
-            contents.append(_function_metadata(cell.cell_contents))
+            contents.append(
+                _function_metadata(
+                    cell.cell_contents,
+                    _seen=nested_seen,
+                    _depth=_depth + 1,
+                )
+            )
         except ValueError:
             contents.append(("empty",))
     return ("closure", tuple(contents))
@@ -110,9 +169,17 @@ _CROSS_VALIDATE_GLOBAL_NAMES = (
     "CrossValidationResult",
 )
 _PINNED_CROSS_VALIDATE_GLOBALS = tuple(
-    (name, _UPSTREAM_CROSS_VALIDATE.__globals__[name]) for name in _CROSS_VALIDATE_GLOBAL_NAMES
+    (
+        name,
+        _UPSTREAM_CROSS_VALIDATE.__globals__[name],
+        _function_metadata(_UPSTREAM_CROSS_VALIDATE.__globals__[name]),
+    )
+    for name in _CROSS_VALIDATE_GLOBAL_NAMES
 )
-_PINNED_POOLED_PARTS = tuple(sorted(_UPSTREAM_CROSS_VALIDATE.__globals__["_POOLED_PARTS"].items()))
+_PINNED_POOLED_PARTS = tuple(
+    (name, value, _function_metadata(value))
+    for name, value in sorted(_UPSTREAM_CROSS_VALIDATE.__globals__["_POOLED_PARTS"].items())
+)
 _EXACT_DEEPCOPY = copy.deepcopy
 
 
@@ -315,11 +382,10 @@ def _scoped_exact_cross_validate() -> types.FunctionType:
 
 
 def _cross_validate_globals_match(upstream_globals: dict[str, Any]) -> bool:
-    if any(
-        upstream_globals.get(name) is not expected
-        for name, expected in _PINNED_CROSS_VALIDATE_GLOBALS
-    ):
-        return False
+    for name, expected, expected_metadata in _PINNED_CROSS_VALIDATE_GLOBALS:
+        actual = upstream_globals.get(name)
+        if actual is not expected or _function_metadata(actual) != expected_metadata:
+            return False
     pooled_parts = upstream_globals.get("_POOLED_PARTS")
     if (
         type(pooled_parts) is not dict
@@ -328,8 +394,10 @@ def _cross_validate_globals_match(upstream_globals: dict[str, Any]) -> bool:
     ):
         return False
     return all(
-        name in pooled_parts and pooled_parts[name] is expected
-        for name, expected in _PINNED_POOLED_PARTS
+        name in pooled_parts
+        and pooled_parts[name] is expected
+        and _function_metadata(pooled_parts[name]) == expected_metadata
+        for name, expected, expected_metadata in _PINNED_POOLED_PARTS
     )
 
 
@@ -1415,13 +1483,19 @@ _NUMPY_FLOAT_TYPES = frozenset({np.float16, np.float32, np.float64, np.longdoubl
 def _integer(value: object, label: str) -> int:
     value_type = type(value)
     if value_type is int:
-        return value
-    if value_type not in _NUMPY_INTEGER_TYPES:
+        normalized = value
+    elif value_type not in _NUMPY_INTEGER_TYPES:
         raise SuperGLMIdentityError(f"{label} must be an integer")
+    else:
+        try:
+            normalized = int(value)
+        except Exception as exc:
+            raise SuperGLMIdentityError(f"{label} must be an integer") from exc
     try:
-        return int(value)
+        json.dumps(normalized)
     except Exception as exc:
-        raise SuperGLMIdentityError(f"{label} must be an integer") from exc
+        raise SuperGLMIdentityError(f"{label} must be a JSON-encodable integer") from exc
+    return normalized
 
 
 def _finite_float(value: object, label: str) -> float:

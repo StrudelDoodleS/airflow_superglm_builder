@@ -735,6 +735,23 @@ def test_malformed_and_hostile_scalar_state_fails_closed(case, message):
         identity.canonical_superglm_payload(model)
 
 
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [("max_iter", "max_iter"), ("polynomial_degree", r"Polynomial\.degree")],
+)
+def test_json_unencodable_native_integers_fail_before_payload_return(case, message):
+    model = SuperGLM(features={"x": Polynomial()})
+    if case == "max_iter":
+        model._max_iter = 10**10000
+    else:
+        model._specs["x"].degree = 10**10000
+
+    with pytest.raises(identity.SuperGLMIdentityError, match=message):
+        identity.canonical_superglm_payload(model)
+    with pytest.raises(identity.SuperGLMIdentityError, match=message):
+        identity.canonical_superglm_bytes(model)
+
+
 def test_level_grouping_non_scalar_mapping_values_fail_closed():
     grouping = _grouping()
     grouping.original_to_group["a"] = np.array(["low", "high"])

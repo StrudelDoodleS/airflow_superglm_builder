@@ -181,6 +181,60 @@ def test_scoped_function_rejects_in_place_pooled_registry_drift(monkeypatch):
         identity._scoped_exact_cross_validate()
 
 
+@pytest.mark.parametrize("location", ["resolver", "pooled_deviance"])
+@pytest.mark.parametrize("replacement_kind", ["behavior_drift", "equal_code_copy"])
+def test_scoped_function_rejects_in_place_guarded_callable_code_drift(
+    monkeypatch,
+    location,
+    replacement_kind,
+):
+    upstream_globals = identity._UPSTREAM_CROSS_VALIDATE.__globals__
+    guarded = (
+        upstream_globals["_resolve_scorers"]
+        if location == "resolver"
+        else upstream_globals["_POOLED_PARTS"]["deviance"]
+    )
+
+    def drifted(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("drifted callable executed")
+
+    replacement = (
+        drifted.__code__ if replacement_kind == "behavior_drift" else guarded.__code__.replace()
+    )
+    if replacement_kind == "equal_code_copy":
+        assert replacement is not guarded.__code__
+        assert replacement == guarded.__code__
+    monkeypatch.setattr(guarded, "__code__", replacement)
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    [("__defaults__", ("drift",)), ("__name__", "drifted"), ("__module__", "drifted")],
+)
+def test_scoped_function_rejects_direct_callable_metadata_drift(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    guarded = identity._UPSTREAM_CROSS_VALIDATE.__globals__["_resolve_scorers"]
+    monkeypatch.setattr(guarded, attribute, replacement)
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
+def test_scoped_function_rejects_pooled_callable_kwdefault_drift(monkeypatch):
+    guarded = identity._UPSTREAM_CROSS_VALIDATE.__globals__["_POOLED_PARTS"]["deviance"]
+    monkeypatch.setitem(guarded.__kwdefaults__, "offset", "drift")
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
 def test_scoped_function_preserves_every_guarded_global_except_clone():
     upstream = identity._UPSTREAM_CROSS_VALIDATE
 
@@ -440,6 +494,28 @@ def test_scoped_function_rejects_non_function_structure_without_attribute_leaks(
 def test_scoped_function_rejects_in_place_keyword_default_metadata_drift(monkeypatch):
     upstream = identity._UPSTREAM_CROSS_VALIDATE
     monkeypatch.setitem(upstream.__kwdefaults__, "return_oof", True)
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
+@pytest.mark.parametrize("case", ["cycle", "excessive_depth"])
+def test_scoped_function_rejects_recursive_or_excessively_deep_default_metadata(
+    monkeypatch,
+    case,
+):
+    if case == "cycle":
+        hostile = {}
+        hostile["self"] = hostile
+    else:
+        hostile = None
+        for _ in range(2000):
+            hostile = {"child": hostile}
+    monkeypatch.setitem(
+        identity._UPSTREAM_CROSS_VALIDATE.__kwdefaults__,
+        "error_score",
+        hostile,
+    )
 
     with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
         identity._scoped_exact_cross_validate()
