@@ -49,6 +49,16 @@ from superglm.types import LambdaPolicy
 from pricing_pipeline.modeling import superglm_identity as identity
 
 
+class _HostileFloat(np.float64):
+    def __float__(self):
+        raise AssertionError("float coercion must not run")
+
+
+class _HostileInt(np.int64):
+    def __int__(self):
+        raise AssertionError("integer coercion must not run")
+
+
 def test_runtime_identity_resolves_the_locked_superglm_pin():
     runtime = identity.resolve_superglm_runtime_identity()
 
@@ -65,6 +75,39 @@ def test_runtime_identity_fails_closed_on_a_version_mismatch(monkeypatch):
 
     with pytest.raises(identity.SuperGLMIdentityError, match="requires SuperGLM version"):
         identity.resolve_superglm_runtime_identity()
+
+
+def test_runtime_identity_rejects_hostile_version_without_coercion_or_repr(monkeypatch):
+    class HostileVersionMeta(type):
+        def __getattribute__(cls, name):
+            if name in {"__module__", "__qualname__"}:
+                raise AssertionError("version type inspection must not run")
+            return super().__getattribute__(name)
+
+    class HostileVersion(metaclass=HostileVersionMeta):
+        def __eq__(self, other):
+            raise AssertionError("version comparison must not run")
+
+        def __repr__(self):
+            raise AssertionError("version repr must not run")
+
+    distribution_called = False
+
+    def unexpected_distribution(package):
+        nonlocal distribution_called
+        distribution_called = True
+        return object()
+
+    monkeypatch.setattr(identity.metadata, "version", lambda package: HostileVersion())
+    monkeypatch.setattr(identity.metadata, "distribution", unexpected_distribution)
+
+    with pytest.raises(
+        identity.SuperGLMIdentityError,
+        match="metadata.version returned unsupported type",
+    ):
+        identity.resolve_superglm_runtime_identity()
+
+    assert distribution_called is False
 
 
 @pytest.mark.parametrize(
@@ -654,6 +697,44 @@ def test_polynomial_non_scalar_fitted_bounds_fail_closed(bound_name):
         identity.canonical_superglm_payload(model)
 
 
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("spline_lo", r"PSpline.*bounds"),
+        ("spline_hi", r"PSpline.*bounds"),
+        ("ordered_select", r"OrderedCategorical\.select"),
+        ("hostile_tol", "tol"),
+        ("hostile_max_iter", "max_iter"),
+        ("huge_polynomial_bound", r"Polynomial.*bounds"),
+    ],
+)
+def test_malformed_and_hostile_scalar_state_fails_closed(case, message):
+    if case in {"spline_lo", "spline_hi"}:
+        spline = PSpline()
+        setattr(spline, "_lo" if case == "spline_lo" else "_hi", np.array([0.0, 1.0]))
+        model = SuperGLM(features={"x": spline})
+    elif case == "ordered_select":
+        ordered = OrderedCategorical(
+            order=["a", "b", "c"],
+            basis=PSpline(n_knots=1),
+        )
+        ordered.select = np.array([True, False])
+        model = SuperGLM(features={"x": ordered})
+    elif case == "hostile_tol":
+        model = SuperGLM(features={"x": Numeric()})
+        model._tol = _HostileFloat(1e-7)
+    elif case == "hostile_max_iter":
+        model = SuperGLM(features={"x": Numeric()})
+        model._max_iter = _HostileInt(100)
+    else:
+        polynomial = Polynomial(degree=3)
+        polynomial._lo = 10**1000
+        model = SuperGLM(features={"x": polynomial})
+
+    with pytest.raises(identity.SuperGLMIdentityError, match=message):
+        identity.canonical_superglm_payload(model)
+
+
 def test_level_grouping_non_scalar_mapping_values_fail_closed():
     grouping = _grouping()
     grouping.original_to_group["a"] = np.array(["low", "high"])
@@ -702,6 +783,35 @@ def test_ordered_categorical_step_and_spline_semantics_are_recorded():
     assert spline_payload["basis"] == "spline"
     assert spline_payload["level_values"] == {"a": 1.0, "b": 2.0, "c": 4.0}
     assert step_payload != spline_payload
+
+
+def test_ordered_categorical_source_spline_configuration_is_semantic():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        first = SuperGLM(
+            features={
+                "band": OrderedCategorical(
+                    order=["a", "b", "c"],
+                    basis=PSpline(n_knots=5),
+                )
+            }
+        )
+        second = SuperGLM(
+            features={
+                "band": OrderedCategorical(
+                    order=["a", "b", "c"],
+                    basis=PSpline(n_knots=10),
+                )
+            }
+        )
+
+    first_payload = identity.canonical_superglm_payload(first)["features"]["plan"][0]["spec"]
+    second_payload = identity.canonical_superglm_payload(second)["features"]["plan"][0]["spec"]
+
+    assert first_payload["spline"]["n_knots"] == second_payload["spline"]["n_knots"] == 2
+    assert first_payload["source_spline"]["n_knots"] == 5
+    assert second_payload["source_spline"]["n_knots"] == 10
+    assert identity.canonical_superglm_bytes(first) != identity.canonical_superglm_bytes(second)
 
 
 def test_numpy_string_scalars_match_native_ordered_categorical_configuration():
@@ -856,6 +966,59 @@ def test_each_fit_driving_spline_configuration_changes_identity(changed_spline):
     changed = SuperGLM(features={"x": changed_spline})
 
     assert identity.canonical_superglm_bytes(baseline) != identity.canonical_superglm_bytes(changed)
+
+
+@pytest.mark.parametrize(
+    ("spline", "state_changes", "message"),
+    [
+        (NaturalSpline(), {"select": True}, "NaturalSpline.*select"),
+        (
+            NaturalSpline(),
+            {
+                "constraint_kind": "increasing",
+                "constraint_mode": "fit",
+                "monotone": "increasing",
+                "monotone_mode": "fit",
+            },
+            "NaturalSpline.*constraint",
+        ),
+        (CubicRegressionSpline(), {"degree": 2}, "CubicRegressionSpline.*degree"),
+        (CubicRegressionSpline(), {"_m_orders": (4,)}, "CubicRegressionSpline.*order"),
+        (CardinalCRSpline(), {"degree": 2}, "CardinalCRSpline.*degree"),
+        (CardinalCRSpline(), {"_m_orders": (1, 2)}, "CardinalCRSpline.*multi-order"),
+        (
+            CardinalCRSpline(),
+            {"select": True, "_m_orders": (1,)},
+            "CardinalCRSpline.*select",
+        ),
+        (PSpline(), {"select": True, "_m_orders": (3,)}, "PSpline.*select"),
+        (BSplineSmooth(), {"select": True, "_m_orders": (3,)}, "BSplineSmooth.*select"),
+    ],
+)
+def test_exact_spline_constructor_invariants_are_enforced(
+    spline,
+    state_changes,
+    message,
+):
+    for field_name, value in state_changes.items():
+        setattr(spline, field_name, value)
+
+    with pytest.raises(identity.SuperGLMIdentityError, match=message):
+        identity.canonical_superglm_payload(SuperGLM(features={"x": spline}))
+
+
+@pytest.mark.parametrize(
+    "spline",
+    [
+        PSpline(select=True, m=2),
+        BSplineSmooth(select=True, m=2),
+        CubicRegressionSpline(select=True, m=3),
+        CardinalCRSpline(select=True, m=2),
+        NaturalSpline(m=(1, 2)),
+    ],
+)
+def test_supported_exact_spline_constructor_capabilities_remain_valid(spline):
+    identity.canonical_superglm_payload(SuperGLM(features={"x": spline}))
 
 
 def test_lambda_policy_mapping_insertion_order_is_not_semantic():

@@ -97,6 +97,22 @@ _PINNED_CROSS_VALIDATE_KWDEFAULTS_METADATA = _function_metadata(
     _UPSTREAM_CROSS_VALIDATE.__kwdefaults__
 )
 _PINNED_CROSS_VALIDATE_CLOSURE_METADATA = _closure_metadata(_UPSTREAM_CROSS_VALIDATE.__closure__)
+_CROSS_VALIDATE_GLOBAL_NAMES = (
+    "np",
+    "_resolve_scorers",
+    "_POOLED_PARTS",
+    "copy",
+    "_clone_model",
+    "time",
+    "_RESERVED_COLUMNS",
+    "logger",
+    "pd",
+    "CrossValidationResult",
+)
+_PINNED_CROSS_VALIDATE_GLOBALS = tuple(
+    (name, _UPSTREAM_CROSS_VALIDATE.__globals__[name]) for name in _CROSS_VALIDATE_GLOBAL_NAMES
+)
+_PINNED_POOLED_PARTS = tuple(sorted(_UPSTREAM_CROSS_VALIDATE.__globals__["_POOLED_PARTS"].items()))
 _EXACT_DEEPCOPY = copy.deepcopy
 
 
@@ -114,15 +130,22 @@ def resolve_superglm_runtime_identity() -> SuperGLMRuntimeIdentity:
     """Resolve and enforce the one supported SuperGLM distribution pin."""
     try:
         installed_version = metadata.version("superglm")
+    except metadata.PackageNotFoundError as exc:
+        raise SuperGLMIdentityError("the pinned SuperGLM distribution is not installed") from exc
+    except Exception as exc:
+        raise SuperGLMIdentityError("the pinned SuperGLM distribution cannot be inspected") from exc
+    if type(installed_version) is not str:
+        raise SuperGLMIdentityError("metadata.version returned unsupported type")
+    if installed_version != SUPERGLM_VERSION:
+        raise SuperGLMIdentityError(
+            f"runtime requires SuperGLM version {SUPERGLM_VERSION!r}, found {installed_version!r}"
+        )
+    try:
         installed_distribution = metadata.distribution("superglm")
     except metadata.PackageNotFoundError as exc:
         raise SuperGLMIdentityError("the pinned SuperGLM distribution is not installed") from exc
     except Exception as exc:
         raise SuperGLMIdentityError("the pinned SuperGLM distribution cannot be inspected") from exc
-    if type(installed_version) is not str or installed_version != SUPERGLM_VERSION:
-        raise SuperGLMIdentityError(
-            f"runtime requires SuperGLM version {SUPERGLM_VERSION!r}, found {installed_version!r}"
-        )
 
     try:
         direct_url_text = installed_distribution.read_text("direct_url.json")
@@ -200,7 +223,7 @@ def exact_superglm_cross_validate(model: SuperGLM, X, y, **kwargs):
     scoped_cross_validate = _scoped_exact_cross_validate()
     try:
         result = scoped_cross_validate(snapshot, X, y, **kwargs)
-    except Exception as upstream_error:
+    except BaseException as upstream_error:
         try:
             _verify_cross_validate_models(snapshot, model, expected_identity)
         except SuperGLMIdentityError as mutation_error:
@@ -215,10 +238,27 @@ def _verify_cross_validate_models(
     model: SuperGLM,
     expected_identity: bytes,
 ) -> None:
-    if _model_semantic_bytes(snapshot) != expected_identity:
+    snapshot_identity, snapshot_error = _capture_model_semantic_bytes(snapshot)
+    model_identity, model_error = _capture_model_semantic_bytes(model)
+    if snapshot_error is not None:
+        raise SuperGLMIdentityError(
+            "SuperGLM snapshot identity verification failed"
+        ) from snapshot_error
+    if model_error is not None:
+        raise SuperGLMIdentityError("SuperGLM identity verification failed") from model_error
+    if snapshot_identity != expected_identity:
         raise SuperGLMIdentityError("SuperGLM snapshot changed during cross-validation")
-    if _model_semantic_bytes(model) != expected_identity:
+    if model_identity != expected_identity:
         raise SuperGLMIdentityError("SuperGLM changed during cross-validation")
+
+
+def _capture_model_semantic_bytes(
+    model: SuperGLM,
+) -> tuple[bytes | None, BaseException | None]:
+    try:
+        return _model_semantic_bytes(model), None
+    except BaseException as error:
+        return None, error
 
 
 def _scoped_exact_cross_validate() -> types.FunctionType:
@@ -248,6 +288,7 @@ def _scoped_exact_cross_validate() -> types.FunctionType:
         or _function_metadata(defaults) != _PINNED_CROSS_VALIDATE_DEFAULTS_METADATA
         or _function_metadata(kwdefaults) != _PINNED_CROSS_VALIDATE_KWDEFAULTS_METADATA
         or _closure_metadata(closure) != _PINNED_CROSS_VALIDATE_CLOSURE_METADATA
+        or not _cross_validate_globals_match(upstream.__globals__)
     ):
         raise SuperGLMIdentityError(
             "pinned SuperGLM cross_validate function structure does not match the exact adapter"
@@ -271,6 +312,25 @@ def _scoped_exact_cross_validate() -> types.FunctionType:
     if hasattr(upstream, "__type_params__"):
         scoped.__type_params__ = upstream.__type_params__
     return scoped
+
+
+def _cross_validate_globals_match(upstream_globals: dict[str, Any]) -> bool:
+    if any(
+        upstream_globals.get(name) is not expected
+        for name, expected in _PINNED_CROSS_VALIDATE_GLOBALS
+    ):
+        return False
+    pooled_parts = upstream_globals.get("_POOLED_PARTS")
+    if (
+        type(pooled_parts) is not dict
+        or len(pooled_parts) != len(_PINNED_POOLED_PARTS)
+        or not all(type(name) is str for name in pooled_parts)
+    ):
+        return False
+    return all(
+        name in pooled_parts and pooled_parts[name] is expected
+        for name, expected in _PINNED_POOLED_PARTS
+    )
 
 
 def _pristine_superglm_copy(model: SuperGLM) -> tuple[SuperGLM, bytes]:
@@ -591,6 +651,7 @@ def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
     if basis not in {"step", "spline"}:
         raise SuperGLMIdentityError("OrderedCategorical has an unsupported basis")
     base = _native_string(spec.base, "OrderedCategorical.base")
+    select = _bool_value(spec.select, "OrderedCategorical.select")
     if type(spec._ordered_levels) is not list:
         raise SuperGLMIdentityError("OrderedCategorical ordered levels are malformed")
     ordered_levels = _native_string_values(
@@ -642,18 +703,19 @@ def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
         "grouping": grouping,
     }
     if basis == "step":
-        if spec._spline_obj is not None or spec._spline is not None or bool(spec.select):
+        if spec._spline_obj is not None or spec._spline is not None or select:
             raise SuperGLMIdentityError("OrderedCategorical step state is malformed")
         return payload
 
     if type(spec._spline) not in _SPLINE_KINDS:
         raise SuperGLMIdentityError("OrderedCategorical spline must be an exact built-in spline")
+    source_spline_payload = None
     if spec._spline_obj is not None:
         if type(spec._spline_obj) not in _SPLINE_KINDS:
             raise SuperGLMIdentityError(
                 "OrderedCategorical source spline must be an exact built-in spline"
             )
-        _spline_payload(spec._spline_obj)
+        source_spline_payload = _spline_payload(spec._spline_obj)
     spline_payload = _spline_payload(spec._spline)
     expected_kind = _SPLINE_KINDS[type(spec._spline)]
     requested_n_knots = _integer(spec.n_knots, "OrderedCategorical.n_knots")
@@ -664,17 +726,18 @@ def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
     )
     if (
         _native_string(spec.kind, "OrderedCategorical.kind") != expected_kind
-        or bool(spec.select) != bool(spec._spline.select)
-        or _native_string(spec.penalty, "OrderedCategorical.penalty")
-        != _native_string(spec._spline.penalty, "OrderedCategorical spline penalty")
-        or _integer(spec.degree, "OrderedCategorical.degree") != int(spec._spline.degree)
-        or expected_n_knots != int(spec._spline.n_knots)
+        or select != spline_payload["select"]
+        or _native_string(spec.penalty, "OrderedCategorical.penalty") != spline_payload["penalty"]
+        or _integer(spec.degree, "OrderedCategorical.degree") != spline_payload["degree"]
+        or expected_n_knots != spline_payload["n_knots"]
     ):
         raise SuperGLMIdentityError("OrderedCategorical spline metadata is malformed")
     payload["level_values"] = level_values
     if original_level_values is not None:
         payload["original_level_values"] = original_level_values
     payload["spline"] = spline_payload
+    if source_spline_payload is not None:
+        payload["source_spline"] = source_spline_payload
     return payload
 
 
@@ -872,6 +935,39 @@ _SPLINE_EXTRA_FIELDS = {
 }
 
 
+def _validate_pinned_spline_invariants(
+    spline_type: type[object],
+    degree: int,
+    m_orders: tuple[int, ...],
+    select: bool,
+    constraint: dict[str, str] | None,
+) -> None:
+    if spline_type is NaturalSpline:
+        if select:
+            raise SuperGLMIdentityError("NaturalSpline does not support select")
+        if constraint is not None:
+            raise SuperGLMIdentityError("NaturalSpline does not support constraints")
+    elif spline_type is CubicRegressionSpline:
+        if degree != 3:
+            raise SuperGLMIdentityError("CubicRegressionSpline degree must be 3")
+        if any(order > 3 for order in m_orders):
+            raise SuperGLMIdentityError("CubicRegressionSpline penalty order must not exceed 3")
+    elif spline_type is CardinalCRSpline:
+        if degree != 3:
+            raise SuperGLMIdentityError("CardinalCRSpline degree must be 3")
+        if len(m_orders) > 1:
+            raise SuperGLMIdentityError("CardinalCRSpline does not support multi-order penalties")
+        if any(order > 2 for order in m_orders):
+            raise SuperGLMIdentityError("CardinalCRSpline penalty order must not exceed 2")
+        if select and m_orders != (2,):
+            raise SuperGLMIdentityError("CardinalCRSpline select requires penalty order 2")
+    elif spline_type is PSpline:
+        if select and max(m_orders) > 2:
+            raise SuperGLMIdentityError("PSpline select requires penalty orders at most 2")
+    elif spline_type is BSplineSmooth and select and max(m_orders) > 2:
+        raise SuperGLMIdentityError("BSplineSmooth select requires penalty orders at most 2")
+
+
 def _spline_payload(spec: object) -> dict[str, Any]:
     spline_type = type(spec)
     if spline_type not in _SPLINE_KINDS:
@@ -887,7 +983,12 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         raise SuperGLMIdentityError(
             f"{spline_type.__name__} is not pristine: fitted basis is populated"
         )
-    if spec._lo != 0.0 or spec._hi != 1.0:
+    try:
+        lower_bound = _finite_float(spec._lo, f"{spline_type.__name__}._lo")
+        upper_bound = _finite_float(spec._hi, f"{spline_type.__name__}._hi")
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError(f"{spline_type.__name__} fitted bounds are malformed") from exc
+    if lower_bound != 0.0 or upper_bound != 1.0:
         raise SuperGLMIdentityError(
             f"{spline_type.__name__} is not pristine: fitted bounds are populated"
         )
@@ -951,11 +1052,12 @@ def _spline_payload(spec: object) -> dict[str, Any]:
 
     if type(spec._m_orders) is not tuple or not spec._m_orders:
         raise SuperGLMIdentityError("spline derivative penalty orders are malformed")
-    m_orders = [_integer(order, "spline m") for order in spec._m_orders]
+    m_orders = tuple(_integer(order, "spline m") for order in spec._m_orders)
     if any(order < 1 for order in m_orders) or len(m_orders) != len(set(m_orders)):
         raise SuperGLMIdentityError("spline derivative penalty orders must be unique and positive")
-
+    select = _bool_value(spec.select, f"{spline_type.__name__}.select")
     constraint = _constraint_payload(spec)
+    _validate_pinned_spline_invariants(spline_type, degree, m_orders, select, constraint)
     lambda_policy = _lambda_policy_payload(spec._lambda_policy)
     return {
         "kind": _SPLINE_PAYLOAD_KINDS[spline_type],
@@ -964,7 +1066,7 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         "knot_strategy": knot_strategy,
         "knot_alpha": knot_alpha,
         "penalty": penalty,
-        "select": _bool_value(spec.select, f"{spline_type.__name__}.select"),
+        "select": select,
         "knots": explicit_knots,
         "boundary": boundary,
         "discrete": (
@@ -977,7 +1079,7 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         ),
         "extrapolation": extrapolation,
         "constraint": constraint,
-        "m": m_orders,
+        "m": list(m_orders),
         "lambda_policy": lambda_policy,
     }
 
@@ -1291,27 +1393,55 @@ def _validate_positive_integer_config(value: object, label: str) -> None:
         raise SuperGLMIdentityError(f"{label} must contain positive integers")
 
 
+_NUMPY_INTEGER_TYPES = frozenset(
+    {
+        np.int8,
+        np.int16,
+        np.int32,
+        np.int64,
+        np.intp,
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.uint64,
+        np.uintp,
+        np.longlong,
+        np.ulonglong,
+    }
+)
+_NUMPY_FLOAT_TYPES = frozenset({np.float16, np.float32, np.float64, np.longdouble})
+
+
 def _integer(value: object, label: str) -> int:
-    if type(value) is bool or isinstance(value, np.bool_):
+    value_type = type(value)
+    if value_type is int:
+        return value
+    if value_type not in _NUMPY_INTEGER_TYPES:
         raise SuperGLMIdentityError(f"{label} must be an integer")
-    if type(value) is not int and not isinstance(value, np.integer):
-        raise SuperGLMIdentityError(f"{label} must be an integer")
-    return int(value)
+    try:
+        return int(value)
+    except Exception as exc:
+        raise SuperGLMIdentityError(f"{label} must be an integer") from exc
 
 
 def _finite_float(value: object, label: str) -> float:
-    if type(value) is bool or isinstance(value, np.bool_):
+    value_type = type(value)
+    if value_type not in {int, float} | _NUMPY_INTEGER_TYPES | _NUMPY_FLOAT_TYPES:
         raise SuperGLMIdentityError(f"{label} must be a finite number")
-    if type(value) not in {int, float} and not isinstance(value, np.integer | np.floating):
-        raise SuperGLMIdentityError(f"{label} must be a finite number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except Exception as exc:
+        raise SuperGLMIdentityError(f"{label} must be a finite number") from exc
     if not math.isfinite(normalized):
         raise SuperGLMIdentityError(f"{label} must be a finite number")
     return 0.0 if normalized == 0.0 else normalized
 
 
 def _bool_value(value: object, label: str) -> bool:
-    if type(value) is not bool and not isinstance(value, np.bool_):
+    value_type = type(value)
+    if value_type is bool:
+        return value
+    if value_type is not np.bool_:
         raise SuperGLMIdentityError(f"{label} must be boolean")
     return bool(value)
 

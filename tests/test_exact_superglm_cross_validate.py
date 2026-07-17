@@ -15,6 +15,8 @@ from superglm import (
     GroupElasticNet,
     IdentityLink,
     Numeric,
+    OrderedCategorical,
+    PSpline,
     Polynomial,
     SuperGLM,
     cross_validate,
@@ -148,6 +150,49 @@ def test_scoped_function_copy_preserves_function_metadata_and_only_replaces_clon
     assert upstream.__globals__["_clone_model"] is original_clone
 
 
+_CROSS_VALIDATE_GLOBAL_BINDINGS = (
+    "np",
+    "_resolve_scorers",
+    "_POOLED_PARTS",
+    "copy",
+    "_clone_model",
+    "time",
+    "_RESERVED_COLUMNS",
+    "logger",
+    "pd",
+    "CrossValidationResult",
+)
+
+
+@pytest.mark.parametrize("binding_name", _CROSS_VALIDATE_GLOBAL_BINDINGS)
+def test_scoped_function_rejects_referenced_global_binding_drift(monkeypatch, binding_name):
+    upstream_globals = identity._UPSTREAM_CROSS_VALIDATE.__globals__
+    monkeypatch.setitem(upstream_globals, binding_name, object())
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
+def test_scoped_function_rejects_in_place_pooled_registry_drift(monkeypatch):
+    pooled_parts = identity._UPSTREAM_CROSS_VALIDATE.__globals__["_POOLED_PARTS"]
+    monkeypatch.setitem(pooled_parts, "deviance", lambda *args: (0.0, 1.0))
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="function structure"):
+        identity._scoped_exact_cross_validate()
+
+
+def test_scoped_function_preserves_every_guarded_global_except_clone():
+    upstream = identity._UPSTREAM_CROSS_VALIDATE
+
+    scoped = identity._scoped_exact_cross_validate()
+
+    for binding_name in _CROSS_VALIDATE_GLOBAL_BINDINGS:
+        if binding_name == "_clone_model":
+            assert scoped.__globals__[binding_name] is copy.deepcopy
+        else:
+            assert scoped.__globals__[binding_name] is upstream.__globals__[binding_name]
+
+
 def test_exact_wrapper_preserves_auto_detect_spline_configuration_on_real_folds():
     model = SuperGLM(
         family="gaussian",
@@ -238,6 +283,35 @@ def test_exception_exit_detects_snapshot_mutation_and_chains_upstream_error(monk
     assert raised.value.__cause__ is upstream_error
 
 
+def test_exception_exit_detects_ordered_source_spline_mutation(monkeypatch):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            features={
+                "band": OrderedCategorical(
+                    order=["a", "b", "c"],
+                    basis=PSpline(n_knots=5),
+                )
+            }
+        )
+    upstream_error = RuntimeError("upstream failed")
+
+    def mutating_cross_validate(snapshot, X, y, **kwargs):
+        del X, y, kwargs
+        snapshot._specs["band"]._spline_obj.n_knots = 10
+        raise upstream_error
+
+    monkeypatch.setattr(identity, "_scoped_exact_cross_validate", lambda: mutating_cross_validate)
+
+    with pytest.raises(
+        identity.SuperGLMIdentityError,
+        match="SuperGLM snapshot changed during cross-validation",
+    ) as raised:
+        exact_superglm_cross_validate(model, _frame(), _response(), cv=_TwoFoldSplitter())
+
+    assert raised.value.__cause__ is upstream_error
+
+
 def test_exception_exit_preserves_original_error_when_models_are_unchanged(monkeypatch):
     model = _configured_model()
     upstream_error = RuntimeError("upstream failed")
@@ -252,6 +326,88 @@ def test_exception_exit_preserves_original_error_when_models_are_unchanged(monke
         exact_superglm_cross_validate(model, _frame(), _response(), cv=_TwoFoldSplitter())
 
     assert raised.value is upstream_error
+
+
+@pytest.mark.parametrize(
+    ("error_type", "argument"),
+    [(KeyboardInterrupt, "stop"), (SystemExit, 17)],
+)
+def test_clean_base_exception_exit_preserves_the_original_object(
+    monkeypatch,
+    error_type,
+    argument,
+):
+    model = _configured_model()
+    upstream_error = error_type(argument)
+
+    def failing_cross_validate(snapshot, X, y, **kwargs):
+        del snapshot, X, y, kwargs
+        raise upstream_error
+
+    monkeypatch.setattr(identity, "_scoped_exact_cross_validate", lambda: failing_cross_validate)
+
+    with pytest.raises(error_type) as raised:
+        exact_superglm_cross_validate(model, _frame(), _response(), cv=_TwoFoldSplitter())
+
+    assert raised.value is upstream_error
+
+
+@pytest.mark.parametrize("target", ["snapshot", "caller"])
+@pytest.mark.parametrize(
+    ("error_type", "argument"),
+    [(KeyboardInterrupt, "stop"), (SystemExit, 17)],
+)
+def test_base_exception_exit_detects_model_mutation_and_preserves_cause(
+    monkeypatch,
+    target,
+    error_type,
+    argument,
+):
+    model = _configured_model()
+    upstream_error = error_type(argument)
+
+    def mutating_cross_validate(snapshot, X, y, **kwargs):
+        del X, y, kwargs
+        (snapshot if target == "snapshot" else model)._tol = 0.125
+        raise upstream_error
+
+    monkeypatch.setattr(identity, "_scoped_exact_cross_validate", lambda: mutating_cross_validate)
+    message = "snapshot changed" if target == "snapshot" else "changed during"
+
+    with pytest.raises(identity.SuperGLMIdentityError, match=message) as raised:
+        exact_superglm_cross_validate(model, _frame(), _response(), cv=_TwoFoldSplitter())
+
+    assert raised.value.__cause__ is upstream_error
+
+
+def test_base_exception_exit_wraps_hostile_verification_and_checks_both_models(monkeypatch):
+    model = _configured_model()
+    upstream_error = KeyboardInterrupt("stop")
+    verification_calls = []
+    original_semantic_bytes = identity._model_semantic_bytes
+
+    def mutating_cross_validate(snapshot, X, y, **kwargs):
+        del X, y, kwargs
+        snapshot._specs["age"]._lo = np.array([0.0, 1.0])
+
+        def recording_semantic_bytes(candidate):
+            verification_calls.append(candidate)
+            return original_semantic_bytes(candidate)
+
+        monkeypatch.setattr(identity, "_model_semantic_bytes", recording_semantic_bytes)
+        raise upstream_error
+
+    monkeypatch.setattr(identity, "_scoped_exact_cross_validate", lambda: mutating_cross_validate)
+
+    with pytest.raises(
+        identity.SuperGLMIdentityError,
+        match="snapshot identity verification failed",
+    ) as raised:
+        exact_superglm_cross_validate(model, _frame(), _response(), cv=_TwoFoldSplitter())
+
+    assert raised.value.__cause__ is upstream_error
+    assert len(verification_calls) == 2
+    assert verification_calls[1] is model
 
 
 def test_exact_wrapper_rejects_pin_and_function_structure_mismatches(monkeypatch):
