@@ -8,7 +8,7 @@ import math
 import platform
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import pandas as pd
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec, model_frame_evidence
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
 class BuildIdentityError(ValueError):
@@ -50,6 +51,7 @@ def create_build_identity(
     split_indices: Sequence[tuple[Any, Any]],
     fit_mode: str,
     scoring: str | Sequence[str],
+    offset_contract: OffsetExportContract,
     model_source_root: str | Path,
     builder_source_root: str | Path | None = None,
 ) -> BuildIdentity:
@@ -61,6 +63,8 @@ def create_build_identity(
 
     fit_mode = _required_text(fit_mode, "fit_mode")
     scoring_names = _scoring_names(scoring)
+    if not isinstance(offset_contract, OffsetExportContract):
+        raise BuildIdentityError("offset_contract must be a complete OffsetExportContract")
     split_payload = _materialized_split_payload(
         split_indices,
         row_count=len(frame),
@@ -126,7 +130,11 @@ def create_build_identity(
             "definition": model_config.validation_split,
             "materialized_split_sha256": materialized_split_sha256,
         },
-        "fit": {"mode": fit_mode, "scoring": scoring_names},
+        "fit": {
+            "mode": fit_mode,
+            "scoring": scoring_names,
+            "offset_export_contract": offset_contract.model_dump(mode="python"),
+        },
         "runtime": runtime_payload,
         "source": {
             "model_source_sha256": model_source_sha256,
@@ -357,40 +365,114 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 
 def _canonical_value(value: Any) -> Any:
-    if value is None or type(value) in {bool, str, int}:
-        return value
-    if isinstance(value, np.generic):
-        return _canonical_value(value.item())
-    if isinstance(value, pd.Timestamp):
-        return {"type": "datetime", "value": value.isoformat()}
-    if isinstance(value, datetime):
-        return {"type": "datetime", "value": value.isoformat()}
+    if value is pd.NA or value is pd.NaT:
+        raise BuildIdentityError("canonical build value must not be missing")
+    if isinstance(value, np.datetime64):
+        if np.isnat(value):
+            raise BuildIdentityError("canonical build value datetime must not be NaT")
+        return _canonical_datetime(value)
+    if isinstance(value, np.timedelta64):
+        if np.isnat(value):
+            raise BuildIdentityError("canonical build value timedelta must not be NaT")
+        return _canonical_timedelta(value)
+    if isinstance(value, pd.Timestamp | datetime):
+        return _canonical_datetime(value)
     if isinstance(value, date):
         return {"type": "date", "value": value.isoformat()}
+    if isinstance(value, pd.Timedelta | timedelta):
+        return _canonical_timedelta(value)
+    if isinstance(value, pd.Period):
+        if pd.isna(value):
+            raise BuildIdentityError("canonical build value period must not be NaT")
+        return {
+            "type": "period",
+            "ordinal": int(value.ordinal),
+            "frequency": value.freqstr,
+        }
+    if isinstance(value, pd.Interval):
+        return {
+            "type": "interval",
+            "closed": value.closed,
+            "left": _canonical_value(value.left),
+            "right": _canonical_value(value.right),
+        }
+    if isinstance(value, np.generic):
+        return _canonical_value(value.item())
+    if value is None:
+        return {"type": "none"}
+    if type(value) is bool:
+        return {"type": "bool", "value": value}
+    if type(value) is str:
+        return {"type": "string", "value": value}
+    if type(value) is int:
+        return {"type": "integer", "value": value}
     if type(value) is float:
         if not math.isfinite(value):
-            raise BuildIdentityError("canonical build values must be finite")
-        return 0.0 if value == 0.0 else value
+            raise BuildIdentityError("canonical build value floats must be finite")
+        return {"type": "float", "value": 0.0 if value == 0.0 else value}
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            "type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "fields": {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)},
+            "type": "dataclass",
+            "class": f"{type(value).__module__}.{type(value).__qualname__}",
+            "fields": [
+                {
+                    "name": field.name,
+                    "value": _canonical_value(getattr(value, field.name)),
+                }
+                for field in fields(value)
+            ],
         }
     if isinstance(value, Mapping):
-        normalized = {}
+        normalized = []
         for key, item in value.items():
             if not isinstance(key, str) or not key:
                 raise BuildIdentityError(
                     "canonical build mappings require non-empty string keys"
                 )
-            normalized[key] = _canonical_value(item)
-        return normalized
+            normalized.append(
+                {
+                    "key": _canonical_value(key),
+                    "value": _canonical_value(item),
+                }
+            )
+        normalized.sort(key=lambda item: item["key"]["value"])
+        return {"type": "mapping", "items": normalized}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_canonical_value(item) for item in value]
+        return {
+            "type": "sequence",
+            "class": f"{type(value).__module__}.{type(value).__qualname__}",
+            "items": [_canonical_value(item) for item in value],
+        }
     raise BuildIdentityError(
         "unsupported canonical build value "
         f"{type(value).__module__}.{type(value).__qualname__}"
     )
+
+
+def _canonical_datetime(value: Any) -> dict[str, str]:
+    try:
+        timestamp = pd.Timestamp(value)
+        encoded = timestamp.isoformat()
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise BuildIdentityError(
+            "canonical build value datetime is not representable"
+        ) from exc
+    if pd.isna(timestamp):
+        raise BuildIdentityError("canonical build value datetime must not be NaT")
+    return {"type": "datetime", "value": encoded}
+
+
+def _canonical_timedelta(value: Any) -> dict[str, str]:
+    try:
+        duration = pd.Timedelta(value)
+        encoded = duration.isoformat()
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise BuildIdentityError(
+            "canonical build value timedelta is not representable"
+        ) from exc
+    if pd.isna(duration):
+        raise BuildIdentityError("canonical build value timedelta must not be NaT")
+    return {"type": "timedelta", "value": encoded}
 
 
 def _required_text(value: Any, field_name: str) -> str:

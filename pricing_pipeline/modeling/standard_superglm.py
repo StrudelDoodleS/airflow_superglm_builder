@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import shutil
@@ -132,6 +131,7 @@ def run_standard_superglm_build(
         "split_indices": folds,
         "fit_mode": fit_mode,
         "scoring": scoring,
+        "offset_contract": resolved_offset_contract,
         "model_source_root": model_source_root,
     }
     _verify_expected_build_identity(expected_build_identity, identity_inputs)
@@ -434,58 +434,6 @@ def canonical_row_identity_index(row_ids: pd.DataFrame) -> pd.Index:
         row_ids,
         names=list(row_ids.columns),
     )
-
-
-def hash_model_source(root: str | Path) -> str:
-    source_root = Path(root).resolve()
-    if not source_root.is_dir():
-        raise StandardSuperGLMError(f"model source root does not exist: {source_root}")
-    paths = sorted(
-        path
-        for path in source_root.rglob("*")
-        if path.is_file()
-        and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
-        and ".ipynb_checkpoints" not in path.relative_to(source_root).parts
-    )
-    if not paths:
-        raise StandardSuperGLMError(
-            f"model source root contains no .ipynb, .py, .sql, or .toml files: {source_root}"
-        )
-    digest = hashlib.sha256()
-    for path in paths:
-        digest.update(path.relative_to(source_root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        if path.suffix.lower() == ".ipynb":
-            try:
-                notebook = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise StandardSuperGLMError(f"invalid model notebook source: {path}") from exc
-            cells = notebook.get("cells")
-            if not isinstance(cells, list):
-                raise StandardSuperGLMError(f"invalid model notebook cells: {path}")
-            source_cells = []
-            for cell in cells:
-                if not isinstance(cell, dict):
-                    raise StandardSuperGLMError(f"invalid model notebook cell: {path}")
-                raw_source = cell.get("source", "")
-                source = "".join(raw_source) if isinstance(raw_source, list) else str(raw_source)
-                source_cells.append(
-                    {
-                        "cell_type": str(cell.get("cell_type") or ""),
-                        "source": source,
-                    }
-                )
-            source_bytes = json.dumps(
-                source_cells,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        else:
-            source_bytes = path.read_bytes()
-        digest.update(source_bytes)
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def run_cross_validation(

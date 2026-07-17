@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import date
+from dataclasses import fields, replace
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 
@@ -18,6 +18,7 @@ from pricing_pipeline.build_identity import (
 )
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
 def _source_tree(root: Path, content: str = "MODEL = 'poisson'\n") -> Path:
@@ -104,6 +105,7 @@ def _identity_args(tmp_path: Path) -> dict:
         "split_indices": _splits(),
         "fit_mode": "fit_reml",
         "scoring": ("deviance", "nll", "gini"),
+        "offset_contract": OffsetExportContract(handling="NONE"),
         "model_source_root": _source_tree(tmp_path / "model_source"),
         "builder_source_root": _source_tree(
             tmp_path / "builder_source",
@@ -360,6 +362,150 @@ def test_numpy_and_native_split_definition_scalars_are_equivalent(tmp_path: Path
     numpy_args["split_indices"] = (_splits(np.int32)[0],)
 
     assert create_build_identity(**native_args) == create_build_identity(**numpy_args)
+
+
+def _identity_with_split_values(tmp_path: Path, *values: object):
+    args = _identity_args(tmp_path)
+    args["model_config"] = _model_config(
+        ValidationSplitConfig.column_holdout(
+            column="fold",
+            train_values=tuple(values),
+            test_values=("validation",),
+            materialize=True,
+        )
+    )
+    args["split_indices"] = (_splits()[0],)
+    return create_build_identity(**args)
+
+
+def test_canonical_build_identity_distinguishes_date_from_craftable_mapping(
+    tmp_path: Path,
+):
+    date_identity = _identity_with_split_values(
+        tmp_path / "date",
+        date(2026, 7, 17),
+    )
+    mapping_identity = _identity_with_split_values(
+        tmp_path / "mapping",
+        {"type": "date", "value": "2026-07-17"},
+    )
+
+    assert date_identity.build_fingerprint_sha256 != mapping_identity.build_fingerprint_sha256
+
+
+def test_canonical_build_identity_distinguishes_dataclass_from_craftable_mapping(
+    tmp_path: Path,
+):
+    nested = ValidationSplitConfig.column_holdout(
+        column="nested_fold",
+        train_values=(1,),
+        test_values=(2,),
+        materialize=True,
+    )
+    crafted_mapping = {
+        "type": f"{type(nested).__module__}.{type(nested).__qualname__}",
+        "fields": {field.name: getattr(nested, field.name) for field in fields(nested)},
+    }
+
+    dataclass_identity = _identity_with_split_values(tmp_path / "dataclass", nested)
+    mapping_identity = _identity_with_split_values(
+        tmp_path / "mapping",
+        crafted_mapping,
+    )
+
+    assert dataclass_identity.build_fingerprint_sha256 != mapping_identity.build_fingerprint_sha256
+
+
+@pytest.mark.parametrize(
+    ("native_value", "numpy_value", "pandas_value"),
+    [
+        (
+            datetime(2026, 7, 17, 12, 34, 56, 123456),
+            np.datetime64("2026-07-17T12:34:56.123456"),
+            pd.Timestamp("2026-07-17T12:34:56.123456"),
+        ),
+        (
+            timedelta(days=2, seconds=3, microseconds=456789),
+            np.timedelta64(172803456789, "us"),
+            pd.Timedelta(days=2, seconds=3, microseconds=456789),
+        ),
+    ],
+)
+def test_temporal_split_scalars_preserve_native_numpy_pandas_equivalence(
+    tmp_path: Path,
+    native_value,
+    numpy_value,
+    pandas_value,
+):
+    native = _identity_with_split_values(tmp_path / "native", native_value)
+    numpy_identity = _identity_with_split_values(tmp_path / "numpy", numpy_value)
+    pandas_identity = _identity_with_split_values(tmp_path / "pandas", pandas_value)
+
+    assert native == numpy_identity == pandas_identity
+
+
+def test_period_and_interval_split_scalars_are_deterministic_and_material(
+    tmp_path: Path,
+):
+    values = (
+        pd.Period("2026-07", freq="M"),
+        pd.Interval(
+            pd.Timestamp("2026-07-01"),
+            pd.Timestamp("2026-08-01"),
+            closed="left",
+        ),
+        pd.Interval(pd.Timedelta(days=1), pd.Timedelta(days=2), closed="both"),
+    )
+
+    first = _identity_with_split_values(tmp_path / "first", *values)
+    second = _identity_with_split_values(tmp_path / "second", *values)
+    changed = _identity_with_split_values(
+        tmp_path / "changed",
+        *values[:-1],
+        pd.Interval(pd.Timedelta(days=1), pd.Timedelta(days=3), closed="both"),
+    )
+
+    assert first == second
+    assert changed.build_fingerprint_sha256 != first.build_fingerprint_sha256
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        pd.NaT,
+        pd.NA,
+        np.datetime64("NaT"),
+        np.timedelta64("NaT"),
+        pd.Period("NaT", freq="D"),
+        np.timedelta64(1, "Y"),
+        pd.Interval(0.0, np.inf),
+    ],
+)
+def test_build_identity_rejects_invalid_temporal_split_scalars(
+    tmp_path: Path,
+    invalid_value,
+):
+    with pytest.raises(BuildIdentityError, match="canonical build value"):
+        _identity_with_split_values(tmp_path, invalid_value)
+
+
+def test_complete_offset_export_contract_is_material_and_verified(tmp_path: Path):
+    baseline_args = _identity_args(tmp_path / "baseline")
+    changed_args = _identity_args(tmp_path / "changed")
+    changed_args["offset_contract"] = OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="term",
+        published_factor_name="PolicyTerm",
+        source_name="term",
+        label="log(term / 12)",
+    )
+
+    baseline = create_build_identity(**baseline_args)
+    changed = create_build_identity(**changed_args)
+
+    assert changed.build_fingerprint_sha256 != baseline.build_fingerprint_sha256
+    with pytest.raises(BuildIdentityError, match="build_fingerprint_sha256"):
+        verify_build_identity(baseline, **changed_args)
 
 
 @pytest.mark.parametrize(

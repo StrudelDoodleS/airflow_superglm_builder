@@ -548,6 +548,7 @@ def build_candidate(
         split_indices=resolved_split_indices,
         fit_mode=spec.fit_mode,
         scoring=spec.scoring,
+        offset_contract=offset_contract or OffsetExportContract(handling="NONE"),
         model_source_root=model.source_root,
     )
     export_id = stable_build_export_id(build_identity)
