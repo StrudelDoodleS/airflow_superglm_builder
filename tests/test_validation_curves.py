@@ -387,6 +387,66 @@ def test_any_malformed_supported_continuous_term_is_atomically_unavailable(case)
 
 
 @pytest.mark.parametrize(
+    "domain",
+    [
+        [10.0, 10.0, 30.0],
+        [10, 10.0, 30],
+    ],
+    ids=("exact-duplicate", "float-coercion-collision"),
+)
+def test_duplicate_canonical_continuous_domains_are_atomically_unavailable(domain):
+    api = _api()
+    term = _continuous_term()
+    term["domain"]["x"] = list(domain)
+    term["support"]["x"] = list(domain)
+
+    capture = api.normalize_validation_curves(
+        {"valid_level": _level_term(), "duplicate_numeric": term},
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "unique" in capture.reason
+    assert capture.points == ()
+
+
+@pytest.mark.parametrize("location", ["domain", "support", "link_curve"])
+@pytest.mark.parametrize(
+    "invalid_vector",
+    [
+        [True, False, True],
+        ["10", "20", "30"],
+        np.array([10.0, 20.0, 30.0], dtype=object),
+        np.array([10.0 + 1.0j, 20.0 + 2.0j, 30.0 + 3.0j]),
+    ],
+    ids=("bool", "string", "object", "complex"),
+)
+def test_non_real_numeric_vector_dtypes_are_atomically_unavailable(
+    location,
+    invalid_vector,
+):
+    api = _api()
+    term = _continuous_term()
+    if location == "domain":
+        term["domain"]["x"] = invalid_vector
+    elif location == "support":
+        term["support"]["density"] = invalid_vector
+    else:
+        term["curves"]["link"]["fold_0"] = invalid_vector
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": term},
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert capture.reason
+    assert capture.points == ()
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         lambda term: term["domain"].__setitem__("levels", ["low", "low", "high"]),
@@ -575,12 +635,41 @@ def test_differently_configured_custom_fold_links_are_still_unavailable():
 
 
 @pytest.mark.parametrize(
-    "link",
-    [PowerLink(power=float("inf")), NegativeBinomialLink(theta=float("inf"))],
-    ids=("power", "negative-binomial"),
+    ("link", "parameter_name", "invalid_value"),
+    [
+        (PowerLink(power=0.5), "power", True),
+        (PowerLink(power=0.5), "power", "0.5"),
+        (PowerLink(power=0.5), "power", 0.5 + 0.0j),
+        (PowerLink(power=0.5), "power", 0.0),
+        (PowerLink(power=0.5), "power", float("inf")),
+        (NegativeBinomialLink(theta=2.0), "theta", True),
+        (NegativeBinomialLink(theta=2.0), "theta", "2.0"),
+        (NegativeBinomialLink(theta=2.0), "theta", 2.0 + 0.0j),
+        (NegativeBinomialLink(theta=2.0), "theta", 0.0),
+        (NegativeBinomialLink(theta=2.0), "theta", -1.0),
+        (NegativeBinomialLink(theta=2.0), "theta", float("inf")),
+    ],
+    ids=(
+        "power-bool",
+        "power-string",
+        "power-complex",
+        "power-zero",
+        "power-infinite",
+        "negative-binomial-bool",
+        "negative-binomial-string",
+        "negative-binomial-complex",
+        "negative-binomial-zero",
+        "negative-binomial-negative",
+        "negative-binomial-infinite",
+    ),
 )
-def test_nonfinite_pinned_link_parameters_are_unavailable(link):
+def test_invalid_mutated_pinned_link_parameters_are_unavailable(
+    link,
+    parameter_name,
+    invalid_value,
+):
     api = _api()
+    setattr(link, parameter_name, invalid_value)
 
     capture = api.normalize_validation_curves(
         {"numeric_term": _one_fold_continuous_term()},

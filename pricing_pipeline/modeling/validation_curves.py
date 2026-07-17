@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from numbers import Integral
+from numbers import Integral, Real
 from typing import Any, Literal
 
 import numpy as np
@@ -249,14 +249,26 @@ def _link_semantic_signature(link: Any) -> tuple[Any, ...]:
             f"unsupported resolved link class {link_type.__module__}.{link_type.__qualname__}"
         )
     try:
-        parameter_value = float(getattr(link, parameter_name))
-    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raw_parameter = getattr(link, parameter_name)
+    except AttributeError as exc:
         raise ValidationCurvePayloadError(
-            f"resolved {link_type.__name__} link parameter {parameter_name} must be finite"
+            f"resolved {link_type.__name__} link parameter {parameter_name} is required"
         ) from exc
+    if isinstance(raw_parameter, bool) or not isinstance(raw_parameter, Real):
+        raise ValidationCurvePayloadError(
+            f"resolved {link_type.__name__} link parameter {parameter_name} must be a "
+            "non-bool real number"
+        )
+    parameter_value = float(raw_parameter)
     if not math.isfinite(parameter_value):
         raise ValidationCurvePayloadError(
             f"resolved {link_type.__name__} link parameter {parameter_name} must be finite"
+        )
+    if link_type is PowerLink and parameter_value == 0.0:
+        raise ValidationCurvePayloadError("resolved PowerLink link parameter power must be nonzero")
+    if link_type is NegativeBinomialLink and parameter_value <= 0.0:
+        raise ValidationCurvePayloadError(
+            "resolved NegativeBinomialLink link parameter theta must be positive"
         )
     return (link_type, parameter_name, parameter_value)
 
@@ -281,6 +293,10 @@ def _normalize_term(
             domain_payload[domain_key],
             f"term {term_name!r} domain x",
         )
+        if len(set(domain)) != len(domain):
+            raise ValidationCurvePayloadError(
+                f"term {term_name!r} domain x must contain unique canonical values"
+            )
         support_domain = _finite_numeric_vector(
             support_payload[domain_key],
             f"term {term_name!r} support x",
@@ -357,10 +373,12 @@ def _finite_numeric_vector(value: Any, label: str) -> tuple[float, ...]:
         raw = np.asarray(value)
     except Exception as exc:
         raise ValidationCurvePayloadError(f"{label} must be a one-dimensional vector") from exc
-    if raw.ndim != 1 or raw.size == 0 or np.issubdtype(raw.dtype, np.bool_):
+    if raw.ndim != 1 or raw.size == 0:
         raise ValidationCurvePayloadError(
             f"{label} must be a non-empty one-dimensional numeric vector"
         )
+    if not (np.issubdtype(raw.dtype, np.integer) or np.issubdtype(raw.dtype, np.floating)):
+        raise ValidationCurvePayloadError(f"{label} must have a real integer or floating dtype")
     try:
         numeric = raw.astype(np.float64)
     except (TypeError, ValueError, OverflowError) as exc:

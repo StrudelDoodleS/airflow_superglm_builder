@@ -602,6 +602,42 @@ def test_successful_cv_with_malformed_curves_keeps_metrics_without_retry_or_part
     assert evidence.validation_curve_capture.points == ()
 
 
+def test_successful_cv_with_duplicate_continuous_domain_keeps_valid_metrics():
+    api = _api()
+    calls = []
+    duplicate = _curve_similarity()
+    duplicate["age"]["domain"]["x"] = [20, 20.0, 40]
+    duplicate["age"]["support"]["x"] = [20, 20.0, 40]
+
+    def fake_cross_validate(*args, **kwargs):
+        del args
+        calls.append(kwargs["return_estimators"])
+        return _cv_result(
+            curve_similarity=duplicate,
+            estimators=_fold_estimators(),
+        )
+
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    evidence = api.run_cross_validation(
+        object(),
+        inputs,
+        split_indices=_folds(),
+        fit_mode="fit_reml",
+        scoring=("deviance",),
+        cross_validate_fn=fake_cross_validate,
+    )
+
+    assert calls == [True]
+    assert evidence.metrics["cv_mean_deviance"] == pytest.approx(0.45)
+    assert evidence.validation_curve_capture.status == "UNAVAILABLE"
+    assert "unique" in evidence.validation_curve_capture.reason
+    assert evidence.validation_curve_capture.points == ()
+
+
 def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_points():
     from importlib.metadata import distribution, version
 
@@ -1538,13 +1574,14 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     superglm_model = _FakeModel()
     cv_models = []
     final_models = []
+    curve_payload = _curve_similarity()
 
     def fake_cross_validate(model, *args, **kwargs):
         del args
         cv_models.append(model)
         assert kwargs["return_estimators"] is True
         return _cv_result(
-            curve_similarity=_curve_similarity(),
+            curve_similarity=curve_payload,
             estimators=_fold_estimators(),
         )
 
@@ -1560,8 +1597,8 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         Path(output_path).write_bytes(b"canonical workbook")
         return Path(output_path)
 
-    manifest_ids = iter(("manifest-1", "manifest-2"))
-    manifest_digests = iter(("a" * 64, "b" * 64))
+    manifest_ids = iter(("manifest-1", "manifest-2", "manifest-3"))
+    manifest_digests = iter(("a" * 64, "b" * 64, "c" * 64))
 
     def fake_manifest(engine, **kwargs):
         captured["manifest"] = kwargs
@@ -1688,14 +1725,18 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     }
     first_bytes = {name: path.read_bytes() for name, path in first_paths.items()}
     second_result = api.run_standard_superglm_build(object(), **build_kwargs)
+    curve_payload = _curve_similarity()
+    curve_payload["age"]["domain"]["x"] = [20, 20.0, 40]
+    curve_payload["age"]["support"]["x"] = [20, 20.0, 40]
+    malformed_result = api.run_standard_superglm_build(object(), **build_kwargs)
 
     assert [test.tolist() for _, test in captured["manifest"]["split_indices"]] == [
         [2],
         [0],
     ]
     assert captured["manifest"]["validation_split"] == validation_split
-    assert len(cv_models) == 2
-    assert len(final_models) == 2
+    assert len(cv_models) == 3
+    assert len(final_models) == 3
     assert all(model is not superglm_model for model in cv_models)
     assert all(model is not superglm_model for model in final_models)
     assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))
@@ -1719,6 +1760,13 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert result.split_set_id == "manifest-1-split"
     assert second_result.manifest_id == "manifest-2"
     assert second_result.model_frame_sha256 == "b" * 64
+    assert isinstance(malformed_result, ApprovedModelBuild)
+    assert malformed_result.manifest_id == "manifest-3"
+    assert malformed_result.model_frame_sha256 == "c" * 64
+    assert malformed_result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
+    assert malformed_result.validation_curve_status == "UNAVAILABLE"
+    assert "unique" in malformed_result.validation_curve_reason
+    assert malformed_result.validation_curve_points == ()
     second_paths = {
         "workbook": Path(second_result.rating_workbook_path),
         "receipt": Path(second_result.publication_receipt_path),

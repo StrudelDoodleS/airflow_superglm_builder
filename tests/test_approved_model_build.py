@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,7 +127,7 @@ def _level_curve_point(**overrides):
         "x_numeric": None,
         "level_text": "North",
         "eta_contribution": -0.2,
-        "relativity": 0.8,
+        "relativity": math.exp(-0.2),
         "support_value": 7.0,
         "reference_value": None,
         "reference_level": "South",
@@ -167,7 +168,7 @@ def _complete_curve_payload(tmp_path: Path):
                     point_no=1,
                     x_numeric=0.0,
                     eta_contribution=0.2 + eta_shift,
-                    relativity=1.2 + eta_shift,
+                    relativity=math.exp(0.2 + eta_shift),
                     support_value=4.0,
                     reference_value=5.0,
                 ),
@@ -185,7 +186,7 @@ def _complete_curve_payload(tmp_path: Path):
                     point_no=1,
                     level_text="North",
                     eta_contribution=-0.2 + eta_shift,
-                    relativity=0.8 + eta_shift,
+                    relativity=math.exp(-0.2 + eta_shift),
                     support_value=7.0,
                     reference_level="South",
                 ),
@@ -309,6 +310,17 @@ def test_complete_curve_points_match_all_validation_splits_and_grids(tmp_path: P
     assert {point.term_name for point in build.validation_curve_points} == {"vehicle_age", "region"}
 
 
+def test_complete_curve_capture_accepts_global_null_relativity_mode(tmp_path: Path):
+    payload = _complete_curve_payload(tmp_path)
+    payload["validation_curve_points"] = tuple(
+        {**point, "relativity": None} for point in payload["validation_curve_points"]
+    )
+
+    build = ApprovedModelBuild(**payload)
+
+    assert all(point.relativity is None for point in build.validation_curve_points)
+
+
 @pytest.mark.parametrize(
     ("corruption", "match"),
     [
@@ -327,6 +339,9 @@ def test_complete_curve_points_match_all_validation_splits_and_grids(tmp_path: P
         ("repeated_reference", "reference must occur exactly once in its domain"),
         ("reference_eta", "reference point must have zero eta_contribution"),
         ("reference_relativity", "reference point relativity must equal 1"),
+        ("mixed_relativity_mode", "relativity values must be all null or all non-null"),
+        ("relativity_mismatch", "relativity must equal exp.*eta_contribution"),
+        ("relativity_overflow", "relativity cannot represent exp.*eta_contribution"),
     ],
 )
 def test_complete_curve_deserialization_rejects_relational_corruption(
@@ -389,7 +404,7 @@ def test_complete_curve_deserialization_rejects_relational_corruption(
                 point_no=3,
                 x_numeric=duplicate_x,
                 eta_contribution=0.3,
-                relativity=1.3,
+                relativity=math.exp(0.3),
                 support_value=1.0,
                 reference_value=5.0,
             )
@@ -407,6 +422,12 @@ def test_complete_curve_deserialization_rejects_relational_corruption(
         for index, point in enumerate(points):
             if point["term_name"] == "vehicle_age" and point["point_no"] == 2:
                 points[index] = {**point, "relativity": 1.1}
+    elif corruption == "mixed_relativity_mode":
+        points[0] = {**points[0], "relativity": None}
+    elif corruption == "relativity_mismatch":
+        points[0] = {**points[0], "relativity": 9.0}
+    elif corruption == "relativity_overflow":
+        points[0] = {**points[0], "eta_contribution": 1000.0, "relativity": 1.0}
 
     payload["validation_curve_points"] = tuple(points)
 
@@ -423,6 +444,7 @@ def test_complete_curve_deserialization_rejects_relational_corruption(
         ({"x_numeric": [1.0]}, "must be a finite scalar"),
         ({"eta_contribution": float("nan")}, "must be a finite scalar"),
         ({"relativity": float("inf")}, "must be a finite scalar"),
+        ({"relativity": -0.1}, "relativity.*nonnegative"),
         ({"support_value": -1.0}, "must be nonnegative"),
         ({"reference_value": None}, "NUMERIC.*reference_value"),
         ({"level_text": "unexpected"}, "NUMERIC.*level_text"),

@@ -136,6 +136,13 @@ class ValidationCurvePoint(BaseModel):
             raise ValueError("must be nonnegative")
         return value
 
+    @field_validator("relativity")
+    @classmethod
+    def _nonnegative_relativity(cls, value: float | None) -> float | None:
+        if value is not None and value < 0.0:
+            raise ValueError("relativity must be nonnegative")
+        return value
+
     @model_validator(mode="after")
     def _point_shape_matches_kind(self) -> "ValidationCurvePoint":
         if self.point_kind == "NUMERIC" and (
@@ -568,6 +575,25 @@ class ApprovedModelBuild(BaseModel):
                     raise ValueError(
                         "COMPLETE validation curve grid, reference, and support must "
                         "match across splits for every term"
+                    )
+
+        has_relativity = [point.relativity is not None for point in self.validation_curve_points]
+        if any(has_relativity) and not all(has_relativity):
+            raise ValueError(
+                "COMPLETE validation curve relativity values must be all null or all non-null"
+            )
+        if all(has_relativity):
+            for point in self.validation_curve_points:
+                try:
+                    expected_relativity = math.exp(point.eta_contribution)
+                except OverflowError as exc:
+                    raise ValueError(
+                        "COMPLETE validation curve relativity cannot represent "
+                        "exp(eta_contribution)"
+                    ) from exc
+                if point.relativity != expected_relativity:
+                    raise ValueError(
+                        "COMPLETE validation curve relativity must equal exp(eta_contribution)"
                     )
         return self
 
