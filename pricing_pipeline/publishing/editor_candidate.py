@@ -34,6 +34,7 @@ from pricing_pipeline.workbench.artifacts import (
     CandidateArtifactError,
     CandidateArtifactMetadata,
     CandidateBundle,
+    load_completed_build_candidate_bundle,
     load_candidate_bundle,
     save_candidate_bundle,
 )
@@ -153,7 +154,7 @@ def publish_editor_submission(
         _remove_unpublished_editor_attempts(submission_dir)
         attempt = _new_editor_publication_attempt(submission_dir)
         try:
-            return _publish_new_editor_submission(
+            result = _publish_new_editor_submission(
                 engine,
                 submission=submission,
                 allowed_root=settings.workbench_artifact_root,
@@ -163,8 +164,17 @@ def publish_editor_submission(
                 created_by=publisher_identity,
                 model_config=model_config,
             )
-        finally:
-            _remove_path(attempt.staging_dir)
+        except BaseException as exc:
+            _remove_path_preserving(
+                attempt.staging_dir,
+                allowed_root=submission_dir,
+                original=exc,
+            )
+            _remove_empty_attempt_roots(attempt, original=exc)
+            raise
+        _remove_path(attempt.staging_dir, allowed_root=submission_dir)
+        _remove_empty_attempt_roots(attempt)
+        return result
 
 
 def _editor_export_id(submission: EditorSubmission) -> str:
@@ -387,7 +397,7 @@ def _remove_unpublished_editor_attempts(submission_dir: Path) -> None:
         if not root.is_dir():
             continue
         for child in root.iterdir():
-            _remove_path(child)
+            _remove_path(child, allowed_root=published_root)
 
 
 def _new_editor_publication_attempt(submission_dir: Path) -> EditorPublicationAttempt:
@@ -403,11 +413,82 @@ def _new_editor_publication_attempt(submission_dir: Path) -> EditorPublicationAt
     return EditorPublicationAttempt(staging_dir=staging_dir, final_dir=final_dir)
 
 
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
+def _remove_path(path: Path, *, allowed_root: str | Path) -> None:
+    root = Path(allowed_root).expanduser().resolve()
+    target = Path(os.path.abspath(Path(path).expanduser()))
+    resolved_parent = target.parent.resolve()
+    if target == root or not resolved_parent.is_relative_to(root):
+        raise EditorSubmissionError(
+            f"refusing cleanup outside the editor attempt root {root}: {target}"
+        )
+    if target.is_symlink():
+        target.unlink(missing_ok=True)
+        return
+    resolved_target = target.resolve()
+    if not resolved_target.is_relative_to(root):
+        raise EditorSubmissionError(
+            f"refusing cleanup outside the editor attempt root {root}: {resolved_target}"
+        )
+    if resolved_target.is_file():
+        resolved_target.unlink(missing_ok=True)
+    elif resolved_target.is_dir():
+        shutil.rmtree(resolved_target)
+
+
+def _remove_path_preserving(
+    path: Path,
+    *,
+    allowed_root: str | Path,
+    original: BaseException,
+) -> None:
+    try:
+        _remove_path(path, allowed_root=allowed_root)
+    except BaseException as cleanup_exc:
+        original.add_note(f"failed to remove editor attempt path {path}: {cleanup_exc!r}")
+
+
+def _remove_empty_attempt_roots(
+    attempt: EditorPublicationAttempt,
+    *,
+    original: BaseException | None = None,
+) -> None:
+    roots = (attempt.staging_dir.parent, attempt.final_dir.parent)
+    for root in roots:
+        _remove_empty_directory(root, original=original)
+    published_root = attempt.staging_dir.parent.parent
+    if (
+        published_root.name == "published"
+        and attempt.final_dir.parent.parent == published_root
+    ):
+        _remove_empty_directory(published_root, original=original)
+
+
+def _remove_empty_directory(
+    path: Path,
+    *,
+    original: BaseException | None,
+) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return
+    except OSError as cleanup_exc:
+        try:
+            is_non_empty = any(path.iterdir())
+        except BaseException as inspect_exc:
+            if original is None:
+                raise
+            original.add_note(
+                f"failed to inspect editor attempt directory {path}: {inspect_exc!r}"
+            )
+            return
+        if is_non_empty:
+            return
+        if original is None:
+            raise
+        original.add_note(
+            f"failed to remove empty editor attempt directory {path}: {cleanup_exc!r}"
+        )
 
 
 def load_parent_candidate(
@@ -1116,6 +1197,12 @@ def _publish_new_editor_submission(
     build = exported.completed_build
     os.rename(attempt.staging_dir, attempt.final_dir)
     try:
+        verified_bundle = _verify_edited_export_artifacts(
+            exported,
+            parent=parent,
+            submission=submission,
+            allowed_root=allowed_root,
+        )
         if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook SHA-256 changed before staging")
         content_sha256 = stage_rating_export(
@@ -1146,7 +1233,7 @@ def _publish_new_editor_submission(
                 connection,
                 rate_package_id=rate_package_id,
                 edited_model=exported.edited_model,
-                bundle=exported.bundle,
+                bundle=verified_bundle,
                 publication_receipt=exported.publication_receipt,
             )
 
@@ -1191,10 +1278,14 @@ def _publish_new_editor_submission(
                 raise EditorSubmissionError(
                     "existing editor package changed before lineage validation"
                 )
-            _remove_path(attempt.final_dir)
+            _remove_path(attempt.final_dir, allowed_root=allowed_root)
             return existing
-    except BaseException:
-        _remove_path(attempt.final_dir)
+    except BaseException as exc:
+        _remove_path_preserving(
+            attempt.final_dir,
+            allowed_root=allowed_root,
+            original=exc,
+        )
         raise
     if published.model_run_id is None:
         raise RuntimeError("package publication did not record editor lineage")
@@ -1208,3 +1299,115 @@ def _publish_new_editor_submission(
         package_status=published.package_status,
         was_existing=published.was_existing,
     )
+
+
+def _verify_edited_export_artifacts(
+    exported: EditorExport,
+    *,
+    parent: ParentCandidate,
+    submission: EditorSubmission,
+    allowed_root: str | Path,
+) -> CandidateBundle:
+    build = exported.completed_build
+    root = Path(allowed_root).expanduser().resolve()
+    workbook_path = _verify_edited_file(
+        build.rating_workbook_path,
+        expected_sha256=build.rating_workbook_sha256,
+        root=root,
+        label="edited rating workbook",
+    )
+    receipt_path = _verify_edited_file(
+        build.publication_receipt_path,
+        expected_sha256=build.publication_receipt_sha256,
+        root=root,
+        label="edited publication receipt",
+    )
+    try:
+        bundle = load_completed_build_candidate_bundle(
+            build,
+            allowed_root=root,
+        )
+    except CandidateArtifactError as exc:
+        raise EditorSubmissionError(
+            f"edited candidate artifact failed verification: {exc}"
+        ) from exc
+
+    artifact_path = Path(build.candidate_artifact_path).expanduser().resolve()
+    if {workbook_path.parent, receipt_path.parent, artifact_path.parent} != {
+        artifact_path.parent
+    }:
+        raise EditorSubmissionError(
+            "edited candidate artifact files do not share one verified attempt directory"
+        )
+
+    build_lineage = {
+        "model_id": parent.model_id,
+        "model_name": parent.model_name,
+        "model_version": parent.model_version,
+        "model_type": parent.config.model_type,
+        "target_name": parent.config.target_name,
+        "deployment_slot": submission.deployment_slot,
+        "export_id": _editor_export_id(submission),
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        "model_source_sha256": submission.model_source_sha256,
+    }
+    build_mismatches = [
+        field_name
+        for field_name, expected in build_lineage.items()
+        if getattr(build, field_name) != expected
+    ]
+    if build_mismatches:
+        raise EditorSubmissionError(
+            "edited candidate artifact build/SQL lineage mismatch: "
+            + ", ".join(build_mismatches)
+        )
+
+    row_count = len(parent.bundle.X)
+    row_roles = {
+        "X": bundle.X,
+        "y": bundle.y,
+        "sample_weight": bundle.sample_weight,
+        "offset": bundle.offset,
+        "offset_source": bundle.offset_source,
+        "export_weight": bundle.export_weight,
+    }
+    bad_lengths = [
+        role
+        for role, values in row_roles.items()
+        if values is not None and len(values) != row_count
+    ]
+    if bad_lengths:
+        raise EditorSubmissionError(
+            "edited candidate artifact row count mismatch: " + ", ".join(bad_lengths)
+        )
+    if list(bundle.X.columns) != list(parent.bundle.X.columns):
+        raise EditorSubmissionError(
+            "edited candidate artifact feature columns do not match the verified parent"
+        )
+    if bundle.pk_columns != parent.bundle.pk_columns:
+        raise EditorSubmissionError(
+            "edited candidate artifact primary-key columns do not match the verified parent"
+        )
+    if bundle.offset_contract != parent.bundle.offset_contract:
+        raise EditorSubmissionError(
+            "edited candidate artifact offset contract does not match the verified parent"
+        )
+    return bundle
+
+
+def _verify_edited_file(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+    root: Path,
+    label: str,
+) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_relative_to(root):
+        raise EditorSubmissionError(f"{label} is outside configured artifact root {root}")
+    if not resolved.is_file():
+        raise EditorSubmissionError(f"{label} does not exist: {resolved}")
+    if sha256_file(resolved) != expected_sha256:
+        raise EditorSubmissionError(f"{label} SHA-256 verification failed")
+    return resolved

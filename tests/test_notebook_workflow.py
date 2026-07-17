@@ -260,6 +260,36 @@ def test_pricing_model_spec_requires_complete_offset_contract(override):
         api.PricingModelSpec(**values)
 
 
+def test_pricing_model_spec_rejects_unsupported_fit_mode_before_reservation(
+    monkeypatch,
+):
+    from pricing_pipeline import notebook as api
+
+    reservation_calls = []
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: reservation_calls.append((args, kwargs)),
+    )
+    values = {
+        "name": "CLAIM_FREQUENCY",
+        "label": "Claim frequency",
+        "target": "claim_count",
+        "model_type": "superglm_poisson",
+        "deployment_slot": "PRODUCTION",
+        "features": ("age",),
+        "dataset_name": "claim_frequency_frame",
+        "source_system": "pricing_sql",
+        "pk_columns": ("policy_id",),
+        "fit_mode": "predict",
+    }
+
+    with pytest.raises(ValueError, match="fit_mode.*fit_reml"):
+        api.PricingModelSpec(**values)
+
+    assert reservation_calls == []
+
+
 def test_pricing_model_spec_allows_one_operational_column_for_multiple_roles():
     from pricing_pipeline import notebook as api
 
@@ -817,6 +847,68 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
     assert identity_calls[0]["model_config"] is model.config
     assert identity_calls[0]["superglm_model"] is identity_calls[1]["superglm_model"]
     assert identity_calls[0]["scoring"] == ("deviance", "nll", "gini")
+
+
+@pytest.mark.parametrize("analyst_name", ["../escaped", "x" * 500])
+def test_build_candidate_uses_bounded_model_id_artifact_paths(
+    monkeypatch,
+    tmp_path,
+    analyst_name,
+):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    model = replace(
+        model,
+        config=replace(model.config, model_name=analyst_name),
+        spec=replace(model.spec, name=analyst_name),
+    )
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    captured = {}
+    monkeypatch.setattr(
+        api,
+        "validation_split_indices",
+        lambda frame, split: [
+            (np.array([0, 1]), np.array([2, 3])),
+            (np.array([2, 3]), np.array([0, 1])),
+        ],
+    )
+    monkeypatch.setattr(api, "create_build_identity", lambda **kwargs: _build_identity())
+    monkeypatch.setattr(
+        api,
+        "resolve_model_version_for_export",
+        lambda *args, **kwargs: "v7",
+    )
+
+    def run_build(engine, **kwargs):
+        del engine
+        captured.update(kwargs)
+        return _approved_build(tmp_path)
+
+    monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
+
+    api.build_candidate(
+        context,
+        model=model,
+        frame=frame,
+        superglm_model=object(),
+        data_as_of="2026-06-30",
+    )
+
+    root = Path(context.settings.workbench_artifact_root).resolve()
+    output_dir = Path(captured["output_dir"]).resolve()
+    assert output_dir.is_relative_to(root)
+    assert output_dir.relative_to(root).parts[0] == "model_17"
+    assert analyst_name not in str(output_dir)
+    assert max(map(len, output_dir.relative_to(root).parts)) < 80
 
 
 def test_build_candidate_identity_failure_happens_before_version_reservation(

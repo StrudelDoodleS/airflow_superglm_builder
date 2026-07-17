@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from pricing_pipeline.models.spec import BUILD_IDENTITY_SHA256_FIELDS
+from pricing_pipeline.models.spec import ApprovedModelBuild, BUILD_IDENTITY_SHA256_FIELDS
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
@@ -289,7 +289,12 @@ def load_candidate_bundle(
             f"expected={expected_sha256}, actual={actual_sha256}"
         )
 
-    envelope = joblib.load(io.BytesIO(artifact_bytes))
+    try:
+        envelope = joblib.load(io.BytesIO(artifact_bytes))
+    except Exception as exc:
+        raise CandidateArtifactError(
+            f"candidate artifact could not be deserialized: {artifact_path}"
+        ) from exc
     if not isinstance(envelope, dict) or envelope.get("format") != BUNDLE_FORMAT:
         raise CandidateArtifactError("candidate artifact envelope has an invalid format")
     if envelope.get("python_version") != expected_python_version:
@@ -306,4 +311,44 @@ def load_candidate_bundle(
         value = getattr(bundle, field_name, None)
         if not isinstance(value, str) or not value.strip() or value != value.strip():
             raise CandidateArtifactError(f"candidate artifact has no valid {field_name} identity")
+    return bundle
+
+
+def load_completed_build_candidate_bundle(
+    build: ApprovedModelBuild,
+    *,
+    allowed_root: str | Path,
+) -> CandidateBundle:
+    """Load a candidate artifact and bind its identity to a completed build."""
+    bundle = load_candidate_bundle(
+        build.candidate_artifact_path,
+        expected_sha256=build.candidate_artifact_sha256,
+        expected_size_bytes=build.candidate_artifact_size_bytes,
+        expected_format=build.candidate_artifact_format,
+        expected_python_version=build.candidate_python_version,
+        expected_superglm_version=build.candidate_superglm_version,
+        expected_superglm_git_sha=build.candidate_superglm_git_sha,
+        allowed_root=allowed_root,
+    )
+    expected_lineage = {
+        "model_name": build.model_name,
+        "model_version": build.model_version,
+        "export_id": build.export_id,
+        "manifest_id": build.manifest_id,
+        "split_set_id": build.split_set_id,
+        **{
+            field_name: getattr(build, field_name)
+            for field_name in BUILD_IDENTITY_SHA256_FIELDS
+        },
+    }
+    mismatches = [
+        field_name
+        for field_name, expected in expected_lineage.items()
+        if getattr(bundle, field_name) != expected
+    ]
+    if mismatches:
+        raise CandidateArtifactError(
+            "candidate artifact does not match completed-build lineage: "
+            + ", ".join(mismatches)
+        )
     return bundle

@@ -1952,8 +1952,47 @@ def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
             created_by="pytest",
         )
 
-    assert not (tmp_path / "run" / "manifest-failure").exists()
+    assert not (tmp_path / "run").exists()
     assert split_evidence.read_bytes() == b"durable split evidence"
+
+
+def test_standard_runner_cleanup_failure_preserves_original_base_exception(
+    tmp_path,
+    monkeypatch,
+):
+    api = _api()
+    build = _minimal_standard_build(api, tmp_path)
+    monkeypatch.setattr(
+        api,
+        "exact_superglm_cross_validate",
+        lambda *args, **kwargs: _cv_result(),
+    )
+    monkeypatch.setattr(
+        api,
+        "create_model_frame_manifest_with_split",
+        lambda *args, **kwargs: SimpleNamespace(
+            manifest_id="manifest-interrupted",
+            split_set_id="split-interrupted",
+            model_frame_sha256="2" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "export_rating_tables",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            KeyboardInterrupt("original interruption")
+        ),
+    )
+    monkeypatch.setattr(
+        api.shutil,
+        "rmtree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("cleanup failed")),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original interruption") as exc_info:
+        api.run_standard_superglm_build(object(), **build)
+
+    assert any("cleanup failed" in note for note in exc_info.value.__notes__)
 
 
 def test_standard_runner_uses_model_config_and_returns_approved_build(

@@ -14,12 +14,11 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
     ApprovedModelBuild,
     ApprovedModelBuildError,
-    BUILD_IDENTITY_SHA256_FIELDS,
 )
 from pricing_pipeline.orchestration.pipeline import publish_model_export
 from pricing_pipeline.publishing.model_registry import validate_registered_model
 from pricing_pipeline.publishing.lifecycle import CompletedModelPublishResult
-from pricing_pipeline.workbench.artifacts import load_candidate_bundle
+from pricing_pipeline.workbench.artifacts import load_completed_build_candidate_bundle
 
 
 @dataclass(frozen=True)
@@ -184,37 +183,12 @@ def _verify_candidate_artifact(
     allowed_root: str | Path,
 ) -> None:
     try:
-        bundle = load_candidate_bundle(
-            build.candidate_artifact_path,
-            expected_sha256=build.candidate_artifact_sha256,
-            expected_size_bytes=build.candidate_artifact_size_bytes,
-            expected_format=build.candidate_artifact_format,
-            expected_python_version=build.candidate_python_version,
-            expected_superglm_version=build.candidate_superglm_version,
-            expected_superglm_git_sha=build.candidate_superglm_git_sha,
+        bundle = load_completed_build_candidate_bundle(
+            build,
             allowed_root=allowed_root,
         )
     except Exception as exc:
         raise ApprovedModelBuildError(f"candidate artifact verification failed: {exc}") from exc
-
-    expected_lineage = {
-        "model_name": build.model_name,
-        "model_version": build.model_version,
-        "export_id": build.export_id,
-        "manifest_id": build.manifest_id,
-        "split_set_id": build.split_set_id,
-        **{
-            field_name: getattr(build, field_name)
-            for field_name in BUILD_IDENTITY_SHA256_FIELDS
-        },
-    }
-    for field_name, expected_value in expected_lineage.items():
-        actual_value = getattr(bundle, field_name)
-        if actual_value != expected_value:
-            raise ApprovedModelBuildError(
-                f"candidate artifact {field_name} does not match completed-build "
-                f"lineage: expected={expected_value!r}, actual={actual_value!r}"
-            )
     if build.model_frame_sha256 != sql_lineage.model_frame_sha256:
         raise ApprovedModelBuildError(
             "completed-build model_frame_sha256 does not match SQL manifest lineage: "

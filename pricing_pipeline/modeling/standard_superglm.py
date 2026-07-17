@@ -309,10 +309,10 @@ def run_standard_superglm_build(
             validation_curve_points=evidence.validation_curve_capture.points,
         )
         return completed_build
-    except BaseException:
+    except BaseException as exc:
         # The manifest/split was committed first and remains durable frame evidence.
         # Only the incomplete, retry-local artifact directory is disposable here.
-        shutil.rmtree(run_dir)
+        _cleanup_failed_run_directory(run_dir, original=exc)
         raise
 
 
@@ -1093,6 +1093,37 @@ def _manifest_attempt_directory(output_dir: str | Path, manifest_id: str) -> Pat
             f"manifest attempt directory already exists; refusing to overwrite: {attempt_dir}"
         ) from exc
     return attempt_dir
+
+
+def _cleanup_failed_run_directory(run_dir: Path, *, original: BaseException) -> None:
+    try:
+        shutil.rmtree(run_dir)
+    except FileNotFoundError:
+        pass
+    except BaseException as cleanup_exc:
+        original.add_note(
+            f"failed to remove incomplete build directory {run_dir}: {cleanup_exc!r}"
+        )
+        return
+
+    output_root = run_dir.parent
+    try:
+        output_root.rmdir()
+    except FileNotFoundError:
+        return
+    except OSError as cleanup_exc:
+        try:
+            is_non_empty = any(output_root.iterdir())
+        except BaseException as inspect_exc:
+            original.add_note(
+                f"failed to inspect build attempt directory {output_root}: {inspect_exc!r}"
+            )
+            return
+        if not is_non_empty:
+            original.add_note(
+                f"failed to remove empty build attempt directory {output_root}: "
+                f"{cleanup_exc!r}"
+            )
 
 
 def hash_file_sha256(path: str | Path) -> str:

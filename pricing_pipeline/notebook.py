@@ -9,7 +9,7 @@ from __future__ import annotations
 import getpass
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -113,6 +113,8 @@ class PricingModelSpec:
             "deployment_slot",
             _required_text(self.deployment_slot, "deployment_slot").upper(),
         )
+        if self.fit_mode not in {"fit", "fit_reml"}:
+            raise ValueError("fit_mode must be 'fit' or 'fit_reml'")
         object.__setattr__(
             self,
             "features",
@@ -448,6 +450,21 @@ def _resolve_data_as_of(
     return resolved
 
 
+def _new_build_attempt_directory(
+    artifact_root: str | Path,
+    *,
+    model_id: int,
+) -> Path:
+    if isinstance(model_id, bool) or not isinstance(model_id, int) or model_id <= 0:
+        raise ValueError("model_id must be a positive integer for artifact paths")
+    root = Path(artifact_root).expanduser().resolve()
+    model_root = (root / f"model_{model_id}").resolve()
+    attempt_dir = (model_root / f"attempt_{uuid4().hex}").resolve()
+    if not model_root.is_relative_to(root) or not attempt_dir.is_relative_to(root):
+        raise ValueError(f"candidate artifact path is outside WORKBENCH_ARTIFACT_ROOT {root}")
+    return attempt_dir
+
+
 def build_candidate(
     pricing: NotebookContext,
     *,
@@ -552,8 +569,10 @@ def build_candidate(
         model_source_root=model.source_root,
     )
     export_id = stable_build_export_id(build_identity)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    attempt_key = f"attempt_{timestamp}_{uuid4().hex[:8]}"
+    output_dir = _new_build_attempt_directory(
+        pricing.settings.workbench_artifact_root,
+        model_id=model.model_id,
+    )
     if pricing.mode == "local":
         model_version = resolve_sqlite_model_version(
             pricing.engine,
@@ -575,7 +594,7 @@ def build_candidate(
         expected_build_identity=build_identity,
         fit_mode=spec.fit_mode,
         scoring=spec.scoring,
-        output_dir=(Path(pricing.settings.workbench_artifact_root) / model.name / attempt_key),
+        output_dir=output_dir,
         model_id=model.model_id,
         model_config=model.config,
         model_version=model_version,

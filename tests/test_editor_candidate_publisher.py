@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -166,6 +167,11 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", fake_load_parent_candidate)
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export_edited_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "_verify_edited_export_artifacts",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(
         editor_candidate,
         "_resolve_existing_editor_publication",
@@ -707,6 +713,11 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         lambda *args, **kwargs: parent,
     )
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export)
+    monkeypatch.setattr(
+        editor_candidate,
+        "_verify_edited_export_artifacts",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(editor_candidate, "stage_rating_export", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         editor_candidate,
@@ -732,7 +743,32 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
     for write_dir, published_dir in attempt_paths:
         assert not write_dir.exists()
         assert not published_dir.exists()
+    assert not (submission_path.parent / "published" / ".staging").exists()
+    assert not (submission_path.parent / "published" / "attempts").exists()
     assert committed_artifact.read_bytes() == b"committed bytes"
+
+
+@pytest.mark.parametrize("target_location", ["inside", "outside"])
+def test_editor_cleanup_unlinks_symlinks_without_deleting_their_targets(
+    tmp_path,
+    target_location,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    root = tmp_path / "published"
+    root.mkdir()
+    target_root = root if target_location == "inside" else tmp_path
+    target = target_root / f"committed-{target_location}"
+    target.mkdir()
+    committed = target / "candidate_bundle.joblib"
+    committed.write_bytes(b"committed bytes")
+    attempt_link = root / "attempt-link"
+    attempt_link.symlink_to(target, target_is_directory=True)
+
+    editor_candidate._remove_path(attempt_link, allowed_root=root)
+
+    assert not attempt_link.is_symlink()
+    assert committed.read_bytes() == b"committed bytes"
 
 
 def test_editor_publication_rejects_workbook_mutated_during_staging(
@@ -773,6 +809,11 @@ def test_editor_publication_rejects_workbook_mutated_during_staging(
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: parent)
     monkeypatch.setattr(editor_candidate, "export_edited_model", export_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "_verify_edited_export_artifacts",
+        lambda *args, **kwargs: None,
+    )
     monkeypatch.setattr(editor_candidate, "stage_rating_export", mutate_workbook)
     monkeypatch.setattr(
         editor_candidate,
@@ -781,6 +822,141 @@ def test_editor_publication_rejects_workbook_mutated_during_staging(
     )
 
     with pytest.raises(editor_candidate.EditorSubmissionError, match="changed during staging"):
+        editor_candidate._publish_new_editor_submission(
+            object(),
+            submission=submission,
+            allowed_root=tmp_path,
+            attempt=editor_candidate.EditorPublicationAttempt(staging_dir, final_dir),
+            dag_id="pricing_publish_editor_candidate",
+            airflow_run_id="manual__submission-1",
+            created_by="publisher@example.test",
+            model_config=EDITOR_CONFIG,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["corrupt", "corrupt_with_matching_metadata", "delete", "lineage"],
+)
+def test_editor_candidate_artifact_is_verified_before_staging_or_sql(
+    monkeypatch,
+    tmp_path,
+    tamper,
+):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.publishing.superglm_publication_receipt import (
+        OffsetExportContract,
+    )
+    from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+
+    staging_dir = tmp_path / ".staging" / "attempt"
+    final_dir = tmp_path / "attempts" / "attempt"
+    staging_dir.mkdir(parents=True)
+    final_dir.parent.mkdir(parents=True)
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
+    )
+    bundle = CandidateBundle(
+        fitted_model={"model": "edited"},
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        **_ROOT_BUILD_IDENTITY,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        export_id="editor__submission_1",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        pk_columns=("policy_id",),
+        row_order_sha256="6" * 64,
+        model_source_sha256="b" * 64,
+        model_frame_sha256="f" * 64,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+    parent = SimpleNamespace(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        effective_from=None,
+        effective_to=None,
+        config=SimpleNamespace(
+            target_name="claim_count",
+            model_type="superglm_poisson",
+        ),
+        bundle=replace(bundle, export_id="parent-export"),
+    )
+
+    def export_model(*args, **kwargs):
+        write_dir = Path(kwargs["write_dir"])
+        published_dir = Path(kwargs["published_dir"])
+        workbook = write_dir / "rating_tables.xlsx"
+        workbook.write_bytes(b"verified workbook")
+        receipt = write_dir / "publication_receipt.json"
+        receipt.write_bytes(b"verified receipt")
+        artifact_path = write_dir / "candidate_bundle.joblib"
+        artifact = save_candidate_bundle(bundle, artifact_path)
+        build_overrides = {}
+        artifact_sha256 = artifact.sha256
+        artifact_size_bytes = artifact.size_bytes
+        if tamper in {"corrupt", "corrupt_with_matching_metadata"}:
+            artifact_path.write_bytes(b"corrupt candidate")
+        elif tamper == "delete":
+            artifact_path.unlink()
+        elif tamper == "lineage":
+            build_overrides["model_frame_sha256"] = "e" * 64
+        if tamper == "corrupt_with_matching_metadata":
+            artifact_sha256 = editor_candidate.sha256_file(artifact_path)
+            artifact_size_bytes = artifact_path.stat().st_size
+        build = _editor_build(
+            tmp_path,
+            workbook_path=published_dir / "rating_tables.xlsx",
+            rating_workbook_sha256=editor_candidate.sha256_file(workbook),
+            publication_receipt_path=str(published_dir / "publication_receipt.json"),
+            publication_receipt_sha256=editor_candidate.sha256_file(receipt),
+            candidate_artifact_path=str(published_dir / "candidate_bundle.joblib"),
+            candidate_artifact_sha256=artifact_sha256,
+            candidate_artifact_format=artifact.format,
+            candidate_artifact_size_bytes=artifact_size_bytes,
+            candidate_python_version=artifact.python_version,
+            candidate_superglm_version=artifact.superglm_version,
+            candidate_superglm_git_sha=artifact.superglm_git_sha,
+            **build_overrides,
+        )
+        return SimpleNamespace(
+            completed_build=build,
+            publication_receipt=object(),
+            revision_metadata={},
+            edited_model=object(),
+            bundle=bundle,
+        )
+
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: parent)
+    monkeypatch.setattr(editor_candidate, "export_edited_model", export_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "stage_rating_export",
+        lambda *args, **kwargs: pytest.fail("unverified candidate reached staging"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "publish_rating_package",
+        lambda *args, **kwargs: pytest.fail("unverified candidate reached SQL"),
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="candidate artifact"):
         editor_candidate._publish_new_editor_submission(
             object(),
             submission=submission,
