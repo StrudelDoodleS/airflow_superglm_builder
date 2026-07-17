@@ -117,6 +117,97 @@ def _numeric_curve_point(**overrides):
     return values
 
 
+def _level_curve_point(**overrides):
+    values = {
+        "validation_split_no": 1,
+        "term_name": "region",
+        "point_no": 1,
+        "point_kind": "LEVEL",
+        "x_numeric": None,
+        "level_text": "North",
+        "eta_contribution": -0.2,
+        "relativity": 0.8,
+        "support_value": 7.0,
+        "reference_value": None,
+        "reference_level": "South",
+    }
+    values.update(overrides)
+    return values
+
+
+def _add_validation_splits(payload, metric_values=(0.4,)):
+    payload["validation_splits"] = tuple(
+        {
+            "validation_split_no": split_no,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": metric_value},
+        }
+        for split_no, metric_value in enumerate(metric_values, start=1)
+    )
+    payload["fold_metrics"] = tuple(
+        {
+            "fold_no": split_no,
+            "metric_name": "deviance",
+            "metric_value": metric_value,
+        }
+        for split_no, metric_value in enumerate(metric_values, start=1)
+    )
+
+
+def _complete_curve_payload(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    _add_validation_splits(payload, (0.4, 0.5))
+    points = []
+    for split_no, eta_shift in ((1, 0.0), (2, 0.1)):
+        points.extend(
+            (
+                _numeric_curve_point(
+                    validation_split_no=split_no,
+                    point_no=1,
+                    x_numeric=0.0,
+                    eta_contribution=0.2 + eta_shift,
+                    relativity=1.2 + eta_shift,
+                    support_value=4.0,
+                    reference_value=5.0,
+                ),
+                _numeric_curve_point(
+                    validation_split_no=split_no,
+                    point_no=2,
+                    x_numeric=5.0,
+                    eta_contribution=0.0,
+                    relativity=1.0,
+                    support_value=6.0,
+                    reference_value=5.0,
+                ),
+                _level_curve_point(
+                    validation_split_no=split_no,
+                    point_no=1,
+                    level_text="North",
+                    eta_contribution=-0.2 + eta_shift,
+                    relativity=0.8 + eta_shift,
+                    support_value=7.0,
+                    reference_level="South",
+                ),
+                _level_curve_point(
+                    validation_split_no=split_no,
+                    point_no=2,
+                    level_text="South",
+                    eta_contribution=0.0,
+                    relativity=1.0,
+                    support_value=3.0,
+                    reference_level="South",
+                ),
+            )
+        )
+    payload.update(
+        validation_curve_status="COMPLETE",
+        validation_curve_reason=None,
+        validation_curve_points=tuple(points),
+    )
+    return payload
+
+
 def test_approved_build_curve_capture_is_legacy_safe_and_round_trips(tmp_path: Path):
     legacy = _approved_build(tmp_path)
 
@@ -125,6 +216,7 @@ def test_approved_build_curve_capture_is_legacy_safe_and_round_trips(tmp_path: P
     assert legacy.validation_curve_points == ()
 
     payload = legacy.model_dump()
+    _add_validation_splits(payload)
     payload.update(
         validation_curve_status="COMPLETE",
         validation_curve_points=(_numeric_curve_point(),),
@@ -169,6 +261,7 @@ def test_approved_build_rejects_inconsistent_curve_capture(
 
 def test_approved_build_normalises_bounded_curve_capture_reason(tmp_path: Path):
     payload = _approved_build(tmp_path).model_dump()
+    _add_validation_splits(payload)
     payload.update(
         validation_curve_status="UNAVAILABLE",
         validation_curve_reason="curve capture failed:\n  RuntimeError: broken   payload",
@@ -176,9 +269,149 @@ def test_approved_build_normalises_bounded_curve_capture_reason(tmp_path: Path):
 
     build = ApprovedModelBuild(**payload)
 
-    assert build.validation_curve_reason == (
-        "curve capture failed: RuntimeError: broken payload"
+    assert build.validation_curve_reason == ("curve capture failed: RuntimeError: broken payload")
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "points"),
+    [
+        ("COMPLETE", None, (_numeric_curve_point(),)),
+        ("UNAVAILABLE", "unsupported validation curves", ()),
+    ],
+)
+def test_nonlegacy_curve_capture_requires_validation_splits(
+    tmp_path: Path,
+    status,
+    reason,
+    points,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload.update(
+        validation_curve_status=status,
+        validation_curve_reason=reason,
+        validation_curve_points=points,
     )
+
+    with pytest.raises(
+        ApprovedModelBuildError,
+        match="nonlegacy validation curve capture requires validation_splits",
+    ):
+        ApprovedModelBuild(**payload)
+
+
+def test_complete_curve_points_match_all_validation_splits_and_grids(tmp_path: Path):
+    build = ApprovedModelBuild(**_complete_curve_payload(tmp_path))
+
+    assert {point.validation_split_no for point in build.validation_curve_points} == {
+        1,
+        2,
+    }
+    assert {point.term_name for point in build.validation_curve_points} == {"vehicle_age", "region"}
+
+
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("missing_split", "split numbers must exactly match validation_splits"),
+        ("extra_split", "split numbers must exactly match validation_splits"),
+        ("duplicate_point", "unique by split, term, and point number"),
+        ("gapped_points", "point numbers must be consecutive from 1"),
+        ("missing_term", "same terms in every split"),
+        ("grid_drift", "grid, reference, and support must match across splits"),
+        ("reference_drift", "grid, reference, and support must match across splits"),
+        ("support_drift", "grid, reference, and support must match across splits"),
+        ("mixed_point_kind", "one point_kind for every split and term"),
+        ("inconsistent_reference", "same reference for every point"),
+        ("duplicate_domain", "unique domain values"),
+        ("missing_reference", "reference must occur exactly once in its domain"),
+        ("repeated_reference", "reference must occur exactly once in its domain"),
+        ("reference_eta", "reference point must have zero eta_contribution"),
+        ("reference_relativity", "reference point relativity must equal 1"),
+    ],
+)
+def test_complete_curve_deserialization_rejects_relational_corruption(
+    tmp_path: Path,
+    corruption: str,
+    match: str,
+):
+    payload = _complete_curve_payload(tmp_path)
+    points = list(payload["validation_curve_points"])
+
+    if corruption == "missing_split":
+        points = [point for point in points if point["validation_split_no"] == 1]
+    elif corruption == "extra_split":
+        points.append({**points[0], "validation_split_no": 3})
+    elif corruption == "duplicate_point":
+        points.append(dict(points[0]))
+    elif corruption == "gapped_points":
+        points[5] = {**points[5], "point_no": 3}
+    elif corruption == "missing_term":
+        points = [
+            point
+            for point in points
+            if not (point["validation_split_no"] == 2 and point["term_name"] == "region")
+        ]
+    elif corruption == "grid_drift":
+        points[4] = {**points[4], "x_numeric": 1.0}
+    elif corruption == "reference_drift":
+        for index, point in enumerate(points):
+            if point["validation_split_no"] == 2 and point["term_name"] == "vehicle_age":
+                points[index] = {
+                    **point,
+                    "eta_contribution": (
+                        0.0 if point["point_no"] == 1 else point["eta_contribution"]
+                    ),
+                    "relativity": 1.0 if point["point_no"] == 1 else point["relativity"],
+                    "reference_value": 0.0,
+                }
+    elif corruption == "support_drift":
+        points[4] = {**points[4], "support_value": 5.0}
+    elif corruption == "mixed_point_kind":
+        for index, point in enumerate(points):
+            if point["term_name"] == "vehicle_age" and point["point_no"] == 2:
+                points[index] = {
+                    **point,
+                    "point_kind": "LEVEL",
+                    "x_numeric": None,
+                    "level_text": "five",
+                    "reference_value": None,
+                    "reference_level": "five",
+                }
+    elif corruption == "inconsistent_reference":
+        for index, point in enumerate(points):
+            if point["term_name"] == "vehicle_age" and point["point_no"] == 1:
+                points[index] = {**point, "reference_value": 6.0}
+    elif corruption in {"duplicate_domain", "repeated_reference"}:
+        duplicate_x = 0.0 if corruption == "duplicate_domain" else 5.0
+        points.extend(
+            _numeric_curve_point(
+                validation_split_no=split_no,
+                point_no=3,
+                x_numeric=duplicate_x,
+                eta_contribution=0.3,
+                relativity=1.3,
+                support_value=1.0,
+                reference_value=5.0,
+            )
+            for split_no in (1, 2)
+        )
+    elif corruption == "missing_reference":
+        for index, point in enumerate(points):
+            if point["term_name"] == "vehicle_age":
+                points[index] = {**point, "reference_value": 6.0}
+    elif corruption == "reference_eta":
+        for index, point in enumerate(points):
+            if point["term_name"] == "vehicle_age" and point["point_no"] == 2:
+                points[index] = {**point, "eta_contribution": 0.1}
+    elif corruption == "reference_relativity":
+        for index, point in enumerate(points):
+            if point["term_name"] == "vehicle_age" and point["point_no"] == 2:
+                points[index] = {**point, "relativity": 1.1}
+
+    payload["validation_curve_points"] = tuple(points)
+
+    with pytest.raises(ApprovedModelBuildError, match=match):
+        ApprovedModelBuild(**payload)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +460,26 @@ def test_level_validation_curve_point_has_exact_level_shape():
         point.eta_contribution = 1.0
 
 
+def test_validation_curve_point_preserves_exact_text_identities():
+    point = model_spec.ValidationCurvePoint(
+        validation_split_no=1,
+        term_name=" region ",
+        point_no=1,
+        point_kind="LEVEL",
+        x_numeric=None,
+        level_text=" North ",
+        eta_contribution=0.0,
+        relativity=1.0,
+        support_value=9.0,
+        reference_value=None,
+        reference_level=" North ",
+    )
+
+    assert point.term_name == " region "
+    assert point.level_text == " North "
+    assert point.reference_level == " North "
+
+
 def test_approved_build_holds_ordered_validation_split_results(tmp_path: Path):
     payload = _approved_build(tmp_path).model_dump()
     payload["validation_splits"] = (
@@ -262,9 +515,7 @@ def test_validation_evidence_is_deeply_immutable_and_round_trips(tmp_path: Path)
             "metrics": {"deviance": 0.4},
         },
     )
-    payload["fold_metrics"] = (
-        {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-    )
+    payload["fold_metrics"] = ({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},)
     build = ApprovedModelBuild(**payload)
 
     with pytest.raises(TypeError):

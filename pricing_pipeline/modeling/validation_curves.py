@@ -7,13 +7,39 @@ from numbers import Integral
 from typing import Any, Literal
 
 import numpy as np
-from superglm.links import LogLink, NegativeBinomialLink, PowerLink
+from superglm.links import (
+    CauchitLink,
+    CloglogLink,
+    IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
+    Link,
+    LogLink,
+    LogitLink,
+    NegativeBinomialLink,
+    PowerLink,
+    ProbitLink,
+    SqrtLink,
+)
 
 from pricing_pipeline.models.spec import ValidationCurvePoint
 
 
 _SUPPORTED_FAMILIES = frozenset({"continuous", "level"})
 _UNSUPPORTED_FAMILIES = frozenset({"interaction", "offset", "surface"})
+_STATELESS_LINK_TYPES = frozenset(
+    {
+        CauchitLink,
+        CloglogLink,
+        IdentityLink,
+        InverseLink,
+        InverseSquaredLink,
+        LogLink,
+        LogitLink,
+        ProbitLink,
+        SqrtLink,
+    }
+)
 
 
 class ValidationCurvePayloadError(ValueError):
@@ -98,33 +124,21 @@ def _normalize_validation_curves(
     if isinstance(fold_count, bool) or not isinstance(fold_count, Integral) or fold_count <= 0:
         raise ValidationCurvePayloadError("fold_count must be a positive integer")
     links = _resolved_links(estimators, fold_count=int(fold_count))
-    log_link = isinstance(links[0], LogLink)
+    log_link = type(links[0]) is LogLink
 
     if not isinstance(curve_similarity, Mapping) or not curve_similarity:
         raise ValidationCurvePayloadError("curve_similarity must be a non-empty mapping")
 
     supported_payloads: list[tuple[str, Literal["continuous", "level"], Mapping[str, Any]]] = []
-    normalized_term_names: set[str] = set()
     for raw_term_name, raw_payload in curve_similarity.items():
         if not isinstance(raw_term_name, str) or not raw_term_name.strip():
-            raise ValidationCurvePayloadError(
-                "curve term names must be non-empty strings"
-            )
-        term_name = raw_term_name.strip()
-        if term_name in normalized_term_names:
-            raise ValidationCurvePayloadError(
-                f"normalized curve term name collision for {term_name!r}"
-            )
-        normalized_term_names.add(term_name)
+            raise ValidationCurvePayloadError("curve term names must be non-empty strings")
+        term_name = raw_term_name
         if not isinstance(raw_payload, Mapping):
-            raise ValidationCurvePayloadError(
-                f"term {term_name!r} payload must be a mapping"
-            )
+            raise ValidationCurvePayloadError(f"term {term_name!r} payload must be a mapping")
         family = raw_payload.get("family")
         if not isinstance(family, str):
-            raise ValidationCurvePayloadError(
-                f"term {term_name!r} must declare a string family"
-            )
+            raise ValidationCurvePayloadError(f"term {term_name!r} must declare a string family")
         if family in _UNSUPPORTED_FAMILIES:
             continue
         if family not in _SUPPORTED_FAMILIES:
@@ -177,16 +191,14 @@ def _normalize_validation_curves(
                         point_no=point_index,
                         point_kind="NUMERIC" if numeric else "LEVEL",
                         x_numeric=float(domain_value) if numeric else None,
-                        level_text=None if numeric else str(domain_value),
+                        level_text=None if numeric else domain_value,
                         eta_contribution=rebased_eta,
                         relativity=relativity,
                         support_value=support_value,
                         reference_value=(
                             float(term.domain[term.reference_index]) if numeric else None
                         ),
-                        reference_level=(
-                            None if numeric else str(term.domain[term.reference_index])
-                        ),
+                        reference_level=None if numeric else term.domain[term.reference_index],
                     )
                 )
     return ValidationCurveCapture(status="COMPLETE", reason=None, points=tuple(points))
@@ -221,11 +233,32 @@ def _resolved_links(
 
 
 def _link_semantic_signature(link: Any) -> tuple[Any, ...]:
-    if isinstance(link, PowerLink):
-        return (type(link), "power", float(link.power))
-    if isinstance(link, NegativeBinomialLink):
-        return (type(link), "theta", float(link.theta))
-    return (type(link),)
+    if not isinstance(link, Link):
+        raise ValidationCurvePayloadError(
+            "every resolved _link must satisfy the SuperGLM Link protocol"
+        )
+    link_type = type(link)
+    if link_type in _STATELESS_LINK_TYPES:
+        return (link_type,)
+    if link_type is PowerLink:
+        parameter_name = "power"
+    elif link_type is NegativeBinomialLink:
+        parameter_name = "theta"
+    else:
+        raise ValidationCurvePayloadError(
+            f"unsupported resolved link class {link_type.__module__}.{link_type.__qualname__}"
+        )
+    try:
+        parameter_value = float(getattr(link, parameter_name))
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ValidationCurvePayloadError(
+            f"resolved {link_type.__name__} link parameter {parameter_name} must be finite"
+        ) from exc
+    if not math.isfinite(parameter_value):
+        raise ValidationCurvePayloadError(
+            f"resolved {link_type.__name__} link parameter {parameter_name} must be finite"
+        )
+    return (link_type, parameter_name, parameter_value)
 
 
 def _normalize_term(
@@ -239,13 +272,9 @@ def _normalize_term(
     support_payload = _mapping(payload.get("support"), f"term {term_name!r} support")
     domain_key = "x" if family == "continuous" else "levels"
     if domain_key not in domain_payload:
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} domain is missing {domain_key!r}"
-        )
+        raise ValidationCurvePayloadError(f"term {term_name!r} domain is missing {domain_key!r}")
     if domain_key not in support_payload:
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} support is missing {domain_key!r}"
-        )
+        raise ValidationCurvePayloadError(f"term {term_name!r} support is missing {domain_key!r}")
 
     if family == "continuous":
         domain: tuple[float | str, ...] = _finite_numeric_vector(
@@ -271,9 +300,7 @@ def _normalize_term(
         )
 
     if "density" not in support_payload:
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} support is missing 'density'"
-        )
+        raise ValidationCurvePayloadError(f"term {term_name!r} support is missing 'density'")
     support = _finite_numeric_vector(
         support_payload["density"],
         f"term {term_name!r} support density",
@@ -283,14 +310,10 @@ def _normalize_term(
             f"term {term_name!r} support density length must match its domain"
         )
     if any(value < 0.0 for value in support):
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} support density must be nonnegative"
-        )
+        raise ValidationCurvePayloadError(f"term {term_name!r} support density must be nonnegative")
     curves_payload = _mapping(payload.get("curves"), f"term {term_name!r} curves")
     if "link" not in curves_payload:
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} curves are missing 'link'"
-        )
+        raise ValidationCurvePayloadError(f"term {term_name!r} curves are missing 'link'")
     link_payload = _mapping(
         curves_payload["link"],
         f"term {term_name!r} link curves",
@@ -358,18 +381,11 @@ def _unique_level_vector(value: Any, label: str) -> tuple[str, ...]:
         )
     levels: list[str] = []
     for item in raw:
-        if not np.isscalar(item):
-            raise ValidationCurvePayloadError(
-                f"{label} must contain only scalar levels"
-            )
-        if isinstance(item, (float, np.floating)) and not math.isfinite(float(item)):
-            raise ValidationCurvePayloadError(f"{label} numeric levels must be finite")
-        level_text = str(item).strip()
-        if not level_text:
-            raise ValidationCurvePayloadError(
-                f"{label} must contain only non-empty scalar levels"
-            )
-        levels.append(level_text)
+        if not isinstance(item, str):
+            raise ValidationCurvePayloadError(f"{label} must contain only string levels")
+        if not item.strip():
+            raise ValidationCurvePayloadError(f"{label} must contain only non-empty string levels")
+        levels.append(item)
     if len(set(levels)) != len(levels):
         raise ValidationCurvePayloadError(f"{label} must contain unique levels")
     return tuple(levels)

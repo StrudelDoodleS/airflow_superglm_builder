@@ -7,10 +7,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from superglm.links import (
+    CauchitLink,
+    CloglogLink,
     IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
+    Link,
     LogLink,
+    LogitLink,
     NegativeBinomialLink,
     PowerLink,
+    ProbitLink,
+    SqrtLink,
 )
 
 
@@ -64,6 +72,33 @@ def _estimators(link=None):
     return [SimpleNamespace(_link=resolved_link), SimpleNamespace(_link=type(resolved_link)())]
 
 
+def _one_fold_continuous_term():
+    term = _continuous_term()
+    term["curves"]["link"].pop("fold_1")
+    return term
+
+
+class _CustomLink:
+    def __init__(self, scale: float):
+        self.scale = scale
+
+    def link(self, mu):
+        return np.asarray(mu) * self.scale
+
+    def inverse(self, eta):
+        return np.asarray(eta) / self.scale
+
+    def deriv(self, mu):
+        return np.full_like(np.asarray(mu), self.scale)
+
+    def deriv_inverse(self, eta):
+        return np.full_like(np.asarray(eta), 1.0 / self.scale)
+
+
+class _LogLinkSubclass(LogLink):
+    pass
+
+
 def test_normalizes_all_supported_main_effect_families_atomically_in_stable_order():
     api = _api()
     payload = {
@@ -84,8 +119,7 @@ def test_normalizes_all_supported_main_effect_families_atomically_in_stable_orde
     assert capture.reason is None
     assert len(capture.points) == 30
     assert [
-        (point.validation_split_no, point.term_name, point.point_no)
-        for point in capture.points
+        (point.validation_split_no, point.term_name, point.point_no) for point in capture.points
     ] == [
         (split_no, term_name, point_no)
         for split_no in (1, 2)
@@ -237,7 +271,7 @@ def test_ambiguous_top_level_entry_invalidates_otherwise_valid_capture(
     assert capture.points == ()
 
 
-def test_normalized_top_level_term_name_collisions_are_unavailable():
+def test_top_level_term_names_are_preserved_as_distinct_exact_identities():
     api = _api()
 
     capture = api.normalize_validation_curves(
@@ -249,9 +283,9 @@ def test_normalized_top_level_term_name_collisions_are_unavailable():
         fold_count=2,
     )
 
-    assert capture.status == "UNAVAILABLE"
-    assert "collision" in capture.reason
-    assert capture.points == ()
+    assert capture.status == "COMPLETE"
+    assert capture.reason is None
+    assert {point.term_name for point in capture.points} == {"age", " age "}
 
 
 def _malformed_continuous(case: str):
@@ -377,11 +411,33 @@ def test_malformed_level_domains_are_atomically_unavailable(mutation):
     assert capture.points == ()
 
 
-def test_scalar_levels_are_normalized_to_text_without_losing_reference_identity():
+def test_level_and_reference_text_are_preserved_as_distinct_exact_identities():
     api = _api()
     term = _level_term()
-    term["domain"]["levels"] = ["low", 2, 3.5]
-    term["support"]["levels"] = ["low", 2, 3.5]
+    levels = ["North", " North ", "South "]
+    term["domain"]["levels"] = list(levels)
+    term["support"]["levels"] = list(levels)
+    term["support"]["density"] = [3.0, 9.0, 1.0]
+
+    capture = api.normalize_validation_curves(
+        {" level_term ": term},
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "COMPLETE"
+    first_fold = [point for point in capture.points if point.validation_split_no == 1]
+    assert [point.term_name for point in first_fold] == [" level_term "] * 3
+    assert [point.level_text for point in first_fold] == levels
+    assert [point.reference_level for point in first_fold] == [" North "] * 3
+
+
+@pytest.mark.parametrize("non_string_level", [2, 3.5, True])
+def test_non_string_levels_are_atomically_unavailable(non_string_level):
+    api = _api()
+    term = _level_term()
+    term["domain"]["levels"] = ["low", non_string_level, "high"]
+    term["support"]["levels"] = ["low", non_string_level, "high"]
 
     capture = api.normalize_validation_curves(
         {"level_term": term},
@@ -389,12 +445,9 @@ def test_scalar_levels_are_normalized_to_text_without_losing_reference_identity(
         fold_count=2,
     )
 
-    assert capture.status == "COMPLETE"
-    first_fold = [
-        point for point in capture.points if point.validation_split_no == 1
-    ]
-    assert [point.level_text for point in first_fold] == ["low", "2", "3.5"]
-    assert [point.reference_level for point in first_fold] == ["2", "2", "2"]
+    assert capture.status == "UNAVAILABLE"
+    assert capture.reason
+    assert capture.points == ()
 
 
 def test_all_zero_support_uses_the_first_point_as_the_shared_reference():
@@ -409,9 +462,7 @@ def test_all_zero_support_uses_the_first_point_as_the_shared_reference():
     )
 
     assert capture.status == "COMPLETE"
-    first_fold = [
-        point for point in capture.points if point.validation_split_no == 1
-    ]
+    first_fold = [point for point in capture.points if point.validation_split_no == 1]
     assert [point.reference_value for point in first_fold] == [10.0, 10.0, 10.0]
     assert [point.eta_contribution for point in first_fold] == [0.0, 2.0, 6.0]
 
@@ -428,9 +479,7 @@ def test_large_finite_support_values_do_not_require_a_finite_total():
     )
 
     assert capture.status == "COMPLETE"
-    first_fold = [
-        point for point in capture.points if point.validation_split_no == 1
-    ]
+    first_fold = [point for point in capture.points if point.validation_split_no == 1]
     assert [point.reference_value for point in first_fold] == [10.0, 10.0, 10.0]
     assert [point.support_value for point in first_fold] == [1e308, 1e308, 0.0]
 
@@ -457,6 +506,90 @@ def test_missing_or_mismatched_fold_estimator_links_are_unavailable(estimators):
 
     assert capture.status == "UNAVAILABLE"
     assert capture.reason
+    assert capture.points == ()
+
+
+@pytest.mark.parametrize(
+    "link_class",
+    [
+        CauchitLink,
+        CloglogLink,
+        IdentityLink,
+        InverseLink,
+        InverseSquaredLink,
+        LogLink,
+        LogitLink,
+        ProbitLink,
+        SqrtLink,
+    ],
+)
+def test_exact_pinned_stateless_links_are_supported(link_class):
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _one_fold_continuous_term()},
+        estimators=[SimpleNamespace(_link=link_class())],
+        fold_count=1,
+    )
+
+    assert capture.status == "COMPLETE"
+    assert capture.reason is None
+
+
+@pytest.mark.parametrize(
+    "link",
+    [object(), _CustomLink(scale=1.0), _LogLinkSubclass()],
+    ids=("not-link-protocol", "custom-protocol-link", "builtin-subclass"),
+)
+def test_unknown_custom_or_subclass_link_is_unavailable_with_one_fold(link):
+    api = _api()
+    if isinstance(link, _CustomLink):
+        assert isinstance(link, Link)
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _one_fold_continuous_term()},
+        estimators=[SimpleNamespace(_link=link)],
+        fold_count=1,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "link" in capture.reason
+    assert capture.points == ()
+
+
+def test_differently_configured_custom_fold_links_are_still_unavailable():
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _continuous_term()},
+        estimators=[
+            SimpleNamespace(_link=_CustomLink(scale=1.0)),
+            SimpleNamespace(_link=_CustomLink(scale=2.0)),
+        ],
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "link" in capture.reason
+    assert capture.points == ()
+
+
+@pytest.mark.parametrize(
+    "link",
+    [PowerLink(power=float("inf")), NegativeBinomialLink(theta=float("inf"))],
+    ids=("power", "negative-binomial"),
+)
+def test_nonfinite_pinned_link_parameters_are_unavailable(link):
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _one_fold_continuous_term()},
+        estimators=[SimpleNamespace(_link=link)],
+        fold_count=1,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "link" in capture.reason
     assert capture.points == ()
 
 

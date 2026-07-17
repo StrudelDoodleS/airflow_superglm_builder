@@ -95,7 +95,7 @@ class ValidationCurvePoint(BaseModel):
     def _required_term_name(cls, value: Any) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("is required")
-        return value.strip()
+        return value
 
     @field_validator("level_text", "reference_level", mode="before")
     @classmethod
@@ -104,7 +104,7 @@ class ValidationCurvePoint(BaseModel):
             return None
         if not isinstance(value, str) or not value.strip():
             raise ValueError("must be a non-empty string or null")
-        return value.strip()
+        return value
 
     @field_validator(
         "x_numeric",
@@ -155,8 +155,7 @@ class ValidationCurvePoint(BaseModel):
             or self.reference_level is None
         ):
             raise ValueError(
-                "LEVEL points require level_text/reference_level and null "
-                "x_numeric/reference_value"
+                "LEVEL points require level_text/reference_level and null x_numeric/reference_value"
             )
         return self
 
@@ -451,14 +450,125 @@ class ApprovedModelBuild(BaseModel):
             if self.validation_curve_reason is not None:
                 raise ValueError("COMPLETE validation curve capture requires a null reason")
             if not self.validation_curve_points:
-                raise ValueError(
-                    "COMPLETE validation curve capture requires at least one point"
-                )
+                raise ValueError("COMPLETE validation curve capture requires at least one point")
+        else:
+            if self.validation_curve_reason is None:
+                raise ValueError("UNAVAILABLE validation curve capture requires a reason")
+            if self.validation_curve_points:
+                raise ValueError("UNAVAILABLE validation curve capture requires zero points")
+
+        if not self.validation_splits:
+            raise ValueError("nonlegacy validation curve capture requires validation_splits")
+        if self.validation_curve_status == "UNAVAILABLE":
             return self
-        if self.validation_curve_reason is None:
-            raise ValueError("UNAVAILABLE validation curve capture requires a reason")
-        if self.validation_curve_points:
-            raise ValueError("UNAVAILABLE validation curve capture requires zero points")
+
+        expected_splits = {split.validation_split_no for split in self.validation_splits}
+        actual_splits = {point.validation_split_no for point in self.validation_curve_points}
+        if actual_splits != expected_splits:
+            raise ValueError(
+                "COMPLETE validation curve point split numbers must exactly match validation_splits"
+            )
+
+        points_by_split_term: dict[tuple[int, str], list[ValidationCurvePoint]] = {}
+        point_keys: set[tuple[int, str, int]] = set()
+        for point in self.validation_curve_points:
+            point_key = (
+                point.validation_split_no,
+                point.term_name,
+                point.point_no,
+            )
+            if point_key in point_keys:
+                raise ValueError(
+                    "COMPLETE validation curve points must be unique by split, term, "
+                    "and point number"
+                )
+            point_keys.add(point_key)
+            points_by_split_term.setdefault(point_key[:2], []).append(point)
+
+        for points in points_by_split_term.values():
+            point_numbers = sorted(point.point_no for point in points)
+            if point_numbers != list(range(1, len(points) + 1)):
+                raise ValueError(
+                    "COMPLETE validation curve point numbers must be consecutive from 1 "
+                    "for every split and term"
+                )
+            if len({point.point_kind for point in points}) != 1:
+                raise ValueError(
+                    "COMPLETE validation curves require one point_kind for every split and term"
+                )
+            references = {(point.reference_value, point.reference_level) for point in points}
+            if len(references) != 1:
+                raise ValueError(
+                    "COMPLETE validation curves require the same reference for every "
+                    "point in a split and term"
+                )
+            reference = next(iter(references))
+            domains = [(point.x_numeric, point.level_text) for point in points]
+            reference_points = [
+                point for point, domain in zip(points, domains, strict=True) if domain == reference
+            ]
+            if len(reference_points) != 1:
+                raise ValueError(
+                    "COMPLETE validation curve reference must occur exactly once in its domain"
+                )
+            if len(set(domains)) != len(domains):
+                raise ValueError(
+                    "COMPLETE validation curves require unique domain values for every "
+                    "split and term"
+                )
+            reference_point = reference_points[0]
+            if reference_point.eta_contribution != 0.0:
+                raise ValueError(
+                    "COMPLETE validation curve reference point must have zero eta_contribution"
+                )
+            if reference_point.relativity is not None and reference_point.relativity != 1.0:
+                raise ValueError(
+                    "COMPLETE validation curve reference point relativity must equal 1"
+                )
+
+        terms_by_split = {
+            split_no: {
+                term_name
+                for candidate_split, term_name in points_by_split_term
+                if candidate_split == split_no
+            }
+            for split_no in expected_splits
+        }
+        first_split = self.validation_splits[0].validation_split_no
+        expected_terms = terms_by_split[first_split]
+        if any(terms != expected_terms for terms in terms_by_split.values()):
+            raise ValueError(
+                "COMPLETE validation curve points must contain the same terms in every split"
+            )
+
+        def structural_signature(
+            points: list[ValidationCurvePoint],
+        ) -> tuple[tuple[object, ...], ...]:
+            return tuple(
+                (
+                    point.point_kind,
+                    point.x_numeric,
+                    point.level_text,
+                    point.reference_value,
+                    point.reference_level,
+                    point.support_value,
+                )
+                for point in sorted(points, key=lambda candidate: candidate.point_no)
+            )
+
+        for term_name in expected_terms:
+            expected_signature = structural_signature(
+                points_by_split_term[(first_split, term_name)]
+            )
+            for split_no in expected_splits - {first_split}:
+                if (
+                    structural_signature(points_by_split_term[(split_no, term_name)])
+                    != expected_signature
+                ):
+                    raise ValueError(
+                        "COMPLETE validation curve grid, reference, and support must "
+                        "match across splits for every term"
+                    )
         return self
 
 
