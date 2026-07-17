@@ -190,6 +190,7 @@ def _verify_candidate_artifact(
             expected_format=build.candidate_artifact_format,
             expected_python_version=build.candidate_python_version,
             expected_superglm_version=build.candidate_superglm_version,
+            expected_superglm_git_sha=build.candidate_superglm_git_sha,
             allowed_root=allowed_root,
         )
     except Exception as exc:

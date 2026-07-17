@@ -251,14 +251,26 @@ def test_env_example_does_not_ship_invalid_fernet_placeholder():
 def test_superglm_runtime_dependency_is_pinned_to_commit():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    uv_lock = Path("uv.lock").read_text(encoding="utf-8")
+    git_url = "https://github.com/StrudelDoodleS/superglm.git"
+    git_sha = "25c06fc84b674bb2ee777ea99567772d8d57a17c"
     expected = (
-        "superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@"
-        "1072f7792cf255899fa6ba93579efd49a25ccdb4"
+        f"superglm[editor] @ git+{git_url}@{git_sha}"
     )
 
     assert expected in requirements
     assert f'"{expected}"' in pyproject
     assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
+    assert f'git = "{git_url}?rev={git_sha}"' in uv_lock
+    assert f'source = {{ git = "{git_url}?rev={git_sha}#{git_sha}" }}' in uv_lock
+    assert (
+        'name = "superglm"\n'
+        'version = "0.12.0"\n'
+        f'source = {{ git = "{git_url}?rev={git_sha}#{git_sha}" }}'
+    ) in uv_lock
+    assert "1072f7792cf255899fa6ba93579efd49a25ccdb4" not in requirements
+    assert "1072f7792cf255899fa6ba93579efd49a25ccdb4" not in pyproject
+    assert "1072f7792cf255899fa6ba93579efd49a25ccdb4" not in uv_lock
 
 
 def test_workbench_artifact_dependency_is_direct():

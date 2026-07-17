@@ -1092,6 +1092,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         expected_format=result.candidate_artifact_format,
         expected_python_version=result.candidate_python_version,
         expected_superglm_version=result.candidate_superglm_version,
+        expected_superglm_git_sha=result.candidate_superglm_git_sha,
         allowed_root=tmp_path / "run",
     )
     assert bundle.model_name == "HOME_FREQ"

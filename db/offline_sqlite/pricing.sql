@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     candidate_artifact_size_bytes INTEGER,
     candidate_python_version TEXT,
     candidate_superglm_version TEXT,
+    candidate_superglm_git_sha TEXT,
     model_source_sha256 TEXT,
     effective_from TEXT,
     run_status TEXT NOT NULL DEFAULT 'SUCCEEDED',

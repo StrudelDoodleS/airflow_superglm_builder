@@ -38,10 +38,11 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "publication_receipt_sha256": "c" * 64,
         "candidate_artifact_path": str(tmp_path / "candidate_bundle.joblib"),
         "candidate_artifact_sha256": "d" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "f" * 64,
         "metrics": {"editor_training_deviance_delta": 0.009},
@@ -394,6 +395,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "candidate_artifact_size_bytes": artifact.size_bytes,
         "candidate_python_version": artifact.python_version,
         "candidate_superglm_version": artifact.superglm_version,
+        "candidate_superglm_git_sha": artifact.superglm_git_sha,
         "manifest_id": bundle.manifest_id,
         "split_set_id": bundle.split_set_id,
         "model_source_sha256": bundle.model_source_sha256,
@@ -541,10 +543,11 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "d" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
         **sql_lineage,
     }
 
@@ -1036,10 +1039,11 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "split_set_id": submission.split_set_id,
         "candidate_artifact_path": submission.baseline_candidate_path,
         "candidate_artifact_sha256": submission.baseline_candidate_sha256,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
         "model_source_sha256": submission.model_source_sha256,
         "model_frame_sha256": "d" * 64,
     }
@@ -1353,6 +1357,7 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
                     "candidate_artifact_size_bytes": artifact.size_bytes,
                     "candidate_python_version": artifact.python_version,
                     "candidate_superglm_version": artifact.superglm_version,
+                    "candidate_superglm_git_sha": artifact.superglm_git_sha,
                 }
             ]
 
@@ -1434,10 +1439,11 @@ def test_champion_comparison_rejects_incompatible_offset_contract(
         "run_status": "SUCCESS",
         "candidate_artifact_path": str(tmp_path / "champion.joblib"),
         "candidate_artifact_sha256": "a" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 321,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
     }
 
     class Rows:

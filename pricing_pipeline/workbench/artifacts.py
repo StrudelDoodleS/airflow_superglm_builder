@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import platform
 import tempfile
 from dataclasses import dataclass, replace
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import joblib
 import numpy as np
@@ -17,7 +18,7 @@ import pandas as pd
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
-BUNDLE_FORMAT = "superglm-candidate-joblib-v2"
+BUNDLE_FORMAT = "superglm-candidate-joblib-v3"
 
 
 class CandidateArtifactError(RuntimeError):
@@ -116,6 +117,7 @@ class CandidateArtifactMetadata:
     size_bytes: int
     python_version: str
     superglm_version: str
+    superglm_git_sha: str
 
 
 def _superglm_version() -> str:
@@ -123,6 +125,31 @@ def _superglm_version() -> str:
         return version("superglm")
     except PackageNotFoundError:
         return "unknown"
+
+
+def _is_git_sha(value: object) -> TypeGuard[str]:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and value.lower() == value
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _superglm_git_sha() -> str:
+    try:
+        direct_url_text = distribution("superglm").read_text("direct_url.json")
+        direct_url = json.loads(direct_url_text) if direct_url_text is not None else {}
+    except (PackageNotFoundError, json.JSONDecodeError):
+        direct_url = {}
+    vcs_info = direct_url.get("vcs_info", {}) if isinstance(direct_url, dict) else {}
+    git_sha = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+    if vcs_info.get("vcs") != "git" or not _is_git_sha(git_sha):
+        raise CandidateArtifactError(
+            "installed SuperGLM direct_url.json must contain a 40-character "
+            "lowercase hex git SHA in vcs_info.commit_id"
+        )
+    return git_sha
 
 
 def _sha256(path: Path) -> str:
@@ -144,6 +171,7 @@ def _validate_runtime_versions(
     *,
     expected_python_version: str,
     expected_superglm_version: str,
+    expected_superglm_git_sha: str | None,
 ) -> None:
     actual_python = platform.python_version()
     if _major_minor(expected_python_version) != _major_minor(actual_python):
@@ -158,6 +186,15 @@ def _validate_runtime_versions(
             "candidate SuperGLM version is incompatible: "
             f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"
         )
+
+    if expected_superglm_git_sha is not None:
+        actual_superglm_git_sha = _superglm_git_sha()
+        if expected_superglm_git_sha != actual_superglm_git_sha:
+            raise CandidateArtifactError(
+                "candidate SuperGLM git SHA is incompatible: "
+                f"artifact={expected_superglm_git_sha!r}, "
+                f"runtime={actual_superglm_git_sha!r}"
+            )
 
 
 def save_candidate_bundle(
@@ -174,10 +211,12 @@ def save_candidate_bundle(
     target.parent.mkdir(parents=True, exist_ok=True)
     python_version = platform.python_version()
     superglm_version = _superglm_version()
+    superglm_git_sha = _superglm_git_sha()
     envelope = {
         "format": BUNDLE_FORMAT,
         "python_version": python_version,
         "superglm_version": superglm_version,
+        "superglm_git_sha": superglm_git_sha,
         "bundle": bundle,
     }
 
@@ -201,6 +240,7 @@ def save_candidate_bundle(
         size_bytes=target.stat().st_size,
         python_version=python_version,
         superglm_version=superglm_version,
+        superglm_git_sha=superglm_git_sha,
     )
 
 
@@ -212,6 +252,7 @@ def load_candidate_bundle(
     expected_format: str,
     expected_python_version: str,
     expected_superglm_version: str,
+    expected_superglm_git_sha: str | None,
     allowed_root: str | Path,
 ) -> CandidateBundle:
     artifact_path = Path(path).expanduser().resolve()
@@ -222,10 +263,15 @@ def load_candidate_bundle(
         )
     if expected_format != BUNDLE_FORMAT:
         raise CandidateArtifactError(f"unsupported candidate artifact format {expected_format!r}")
+    if not _is_git_sha(expected_superglm_git_sha):
+        raise CandidateArtifactError(
+            "candidate SuperGLM metadata must include a 40-character lowercase hex git SHA"
+        )
 
     _validate_runtime_versions(
         expected_python_version=expected_python_version,
         expected_superglm_version=expected_superglm_version,
+        expected_superglm_git_sha=expected_superglm_git_sha,
     )
 
     if not artifact_path.is_file():
@@ -256,6 +302,10 @@ def load_candidate_bundle(
         raise CandidateArtifactError("candidate artifact Python metadata is inconsistent")
     if envelope.get("superglm_version") != expected_superglm_version:
         raise CandidateArtifactError("candidate artifact SuperGLM metadata is inconsistent")
+    if envelope.get("superglm_git_sha") != expected_superglm_git_sha:
+        raise CandidateArtifactError(
+            "candidate artifact SuperGLM git SHA metadata is inconsistent"
+        )
     bundle = envelope.get("bundle")
     if not isinstance(bundle, CandidateBundle):
         raise CandidateArtifactError("candidate artifact envelope does not contain a bundle")

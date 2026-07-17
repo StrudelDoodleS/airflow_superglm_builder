@@ -33,6 +33,7 @@ _ARTIFACT_FIELDS = (
     "candidate_artifact_size_bytes",
     "candidate_python_version",
     "candidate_superglm_version",
+    "candidate_superglm_git_sha",
     "model_source_sha256",
 )
 
@@ -145,6 +146,7 @@ class Workbench:
             expected_format=row["candidate_artifact_format"],
             expected_python_version=row["candidate_python_version"],
             expected_superglm_version=row["candidate_superglm_version"],
+            expected_superglm_git_sha=row["candidate_superglm_git_sha"],
             allowed_root=Path(self.settings.workbench_artifact_root),
         )
         if bundle.manifest_id != row.get("manifest_id"):
@@ -219,6 +221,7 @@ class Workbench:
                 mr.candidate_artifact_size_bytes,
                 mr.candidate_python_version,
                 mr.candidate_superglm_version,
+                mr.candidate_superglm_git_sha,
                 mr.model_source_sha256,
                 manifest.model_frame_sha256,
                 manifest.data_as_of_date,

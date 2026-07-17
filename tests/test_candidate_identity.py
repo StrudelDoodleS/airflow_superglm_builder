@@ -63,6 +63,7 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
         candidate_artifact_size_bytes=metadata.size_bytes,
         candidate_python_version=metadata.python_version,
         candidate_superglm_version=metadata.superglm_version,
+        candidate_superglm_git_sha=metadata.superglm_git_sha,
         model_source_sha256="b" * 64,
         model_frame_sha256="c" * 64,
     )
@@ -137,6 +138,7 @@ def test_completed_build_rejects_model_frame_digest_mismatch(
                 "candidate_artifact_size_bytes": metadata.size_bytes,
                 "candidate_python_version": metadata.python_version,
                 "candidate_superglm_version": metadata.superglm_version,
+                "candidate_superglm_git_sha": metadata.superglm_git_sha,
             }
         )
     elif mismatch_source == "build":
@@ -242,6 +244,7 @@ def test_existing_sql_run_rejects_candidate_model_identity_mismatch(
         "candidate_artifact_size_bytes": artifact.size_bytes,
         "candidate_python_version": artifact.python_version,
         "candidate_superglm_version": artifact.superglm_version,
+        "candidate_superglm_git_sha": artifact.superglm_git_sha,
         "model_source_sha256": "b" * 64,
     }
 
@@ -300,6 +303,7 @@ def test_existing_sql_run_rejects_candidate_model_identity_mismatch(
         candidate_artifact_size_bytes=build.candidate_artifact_size_bytes,
         candidate_python_version=build.candidate_python_version,
         candidate_superglm_version=build.candidate_superglm_version,
+        candidate_superglm_git_sha=build.candidate_superglm_git_sha,
         model_source_sha256=build.model_source_sha256,
         model_frame_sha256=build.model_frame_sha256,
     )

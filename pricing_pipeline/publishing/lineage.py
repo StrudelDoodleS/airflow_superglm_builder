@@ -38,6 +38,7 @@ _IMMUTABLE_MODEL_RUN_FIELDS = (
     "candidate_artifact_size_bytes",
     "candidate_python_version",
     "candidate_superglm_version",
+    "candidate_superglm_git_sha",
     "model_source_sha256",
     "parent_model_run_id",
 )
@@ -89,6 +90,7 @@ def record_model_run(
         "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
         "candidate_python_version": build.candidate_python_version,
         "candidate_superglm_version": build.candidate_superglm_version,
+        "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
         "model_source_sha256": build.model_source_sha256,
         "dataset_role": _DATASET_ROLE,
         "split_role": _SPLIT_ROLE,
@@ -123,6 +125,7 @@ def record_model_run(
                         mr.candidate_artifact_size_bytes,
                         mr.candidate_python_version,
                         mr.candidate_superglm_version,
+                        mr.candidate_superglm_git_sha,
                         mr.model_source_sha256,
                         mr.parent_model_run_id
                     FROM pricing.MODEL_RUN AS mr WITH (UPDLOCK, HOLDLOCK)
@@ -342,6 +345,7 @@ def record_model_run(
                         candidate_artifact_size_bytes = :candidate_artifact_size_bytes,
                         candidate_python_version = :candidate_python_version,
                         candidate_superglm_version = :candidate_superglm_version,
+                        candidate_superglm_git_sha = :candidate_superglm_git_sha,
                         model_source_sha256 = :model_source_sha256,
                         parent_model_run_id = :parent_model_run_id,
                         run_status = :run_status,
@@ -368,6 +372,7 @@ def record_model_run(
                         candidate_artifact_size_bytes,
                         candidate_python_version,
                         candidate_superglm_version,
+                        candidate_superglm_git_sha,
                         model_source_sha256,
                         parent_model_run_id,
                         run_status,
@@ -394,6 +399,7 @@ def record_model_run(
                         :candidate_artifact_size_bytes,
                         :candidate_python_version,
                         :candidate_superglm_version,
+                        :candidate_superglm_git_sha,
                         :model_source_sha256,
                         :parent_model_run_id,
                         :run_status,

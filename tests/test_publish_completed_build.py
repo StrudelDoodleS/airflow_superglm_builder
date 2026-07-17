@@ -124,6 +124,7 @@ def _candidate_metadata(
         "candidate_artifact_size_bytes": metadata.size_bytes,
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
+        "candidate_superglm_git_sha": metadata.superglm_git_sha,
         "model_source_sha256": model_source_sha256,
         "model_frame_sha256": model_frame_sha256,
     }

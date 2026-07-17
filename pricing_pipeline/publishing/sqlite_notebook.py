@@ -491,6 +491,7 @@ def _publish_sqlite_candidate_locked(
                     candidate_artifact_size_bytes,
                     candidate_python_version,
                     candidate_superglm_version,
+                    candidate_superglm_git_sha,
                     model_source_sha256,
                     effective_from,
                     run_status,
@@ -519,6 +520,7 @@ def _publish_sqlite_candidate_locked(
                     :candidate_artifact_size_bytes,
                     :candidate_python_version,
                     :candidate_superglm_version,
+                    :candidate_superglm_git_sha,
                     :model_source_sha256,
                     :effective_from,
                     'SUCCESS',
@@ -549,6 +551,7 @@ def _publish_sqlite_candidate_locked(
                 "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
                 "candidate_python_version": build.candidate_python_version,
                 "candidate_superglm_version": build.candidate_superglm_version,
+                "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
                 "model_source_sha256": build.model_source_sha256,
                 "effective_from": build.effective_from,
                 "created_by": created_by,
@@ -678,6 +681,7 @@ def _existing_local_publication(
                     mr.candidate_artifact_size_bytes,
                     mr.candidate_python_version,
                     mr.candidate_superglm_version,
+                    mr.candidate_superglm_git_sha,
                     mr.model_source_sha256,
                     mr.effective_from
                 FROM pricing.PRICING_RATE_PACKAGE AS rp
@@ -794,6 +798,7 @@ def _model_run_evidence_conflicts(
         "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
         "candidate_python_version": build.candidate_python_version,
         "candidate_superglm_version": build.candidate_superglm_version,
+        "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
         "model_source_sha256": build.model_source_sha256,
         "effective_from": build.effective_from,
     }

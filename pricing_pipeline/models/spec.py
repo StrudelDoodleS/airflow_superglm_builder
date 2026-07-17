@@ -39,6 +39,7 @@ class ApprovedModelBuild(BaseModel):
     candidate_artifact_size_bytes: int
     candidate_python_version: str
     candidate_superglm_version: str
+    candidate_superglm_git_sha: str
     model_source_sha256: str
     model_frame_sha256: str
     metrics: dict[str, float] = Field(default_factory=dict)
@@ -145,6 +146,18 @@ class ApprovedModelBuild(BaseModel):
         if size <= 0:
             raise ValueError("must be a positive integer")
         return size
+
+    @field_validator("candidate_superglm_git_sha", mode="before")
+    @classmethod
+    def _superglm_git_sha(cls, value: Any) -> str:
+        digest = str(value).strip()
+        if (
+            len(digest) != 40
+            or digest.lower() != digest
+            or not all(character in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("must be a 40-character lowercase hex git SHA")
+        return digest
 
     @field_validator("metrics", mode="before")
     @classmethod

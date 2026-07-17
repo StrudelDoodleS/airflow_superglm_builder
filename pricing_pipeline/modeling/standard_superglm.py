@@ -259,6 +259,7 @@ def run_standard_superglm_build(
             candidate_artifact_size_bytes=artifact.size_bytes,
             candidate_python_version=artifact.python_version,
             candidate_superglm_version=artifact.superglm_version,
+            candidate_superglm_git_sha=artifact.superglm_git_sha,
             model_source_sha256=source_sha256,
             model_frame_sha256=manifest.model_frame_sha256,
             publication_receipt_path=str(receipt_path),

@@ -57,10 +57,11 @@ def _approved_build() -> ApprovedModelBuild:
         publication_receipt_sha256="b" * 64,
         candidate_artifact_path="/tmp/attempt-2/candidate.joblib",
         candidate_artifact_sha256="c" * 64,
-        candidate_artifact_format="superglm-candidate-joblib-v2",
+        candidate_artifact_format="superglm-candidate-joblib-v3",
         candidate_artifact_size_bytes=321,
         candidate_python_version="3.14.4",
-        candidate_superglm_version="0.11.0",
+        candidate_superglm_version="0.12.0",
+        candidate_superglm_git_sha="f" * 40,
         model_source_sha256="d" * 64,
         model_frame_sha256="e" * 64,
         metrics={"deviance": 0.42},
@@ -91,6 +92,8 @@ def test_record_model_run_derives_audit_evidence_from_approved_build():
     assert model_run_merge[1]["manifest_id"] == build.manifest_id
     assert model_run_merge[1]["split_set_id"] == build.split_set_id
     assert model_run_merge[1]["rating_workbook_sha256"] == build.rating_workbook_sha256
+    assert model_run_merge[1]["candidate_superglm_git_sha"] == build.candidate_superglm_git_sha
+    assert "candidate_superglm_git_sha = :candidate_superglm_git_sha" in model_run_merge[0]
     assert model_run_merge[1]["run_status"] == "SUCCESS"
     assert any("MERGE mlops.MODEL_RUN_METRIC" in sql for sql, _ in connection.events)
     assert any("MERGE pricing.CV_FOLD_METRIC" in sql for sql, _ in connection.events)

@@ -81,6 +81,12 @@ _OFFLINE_COLUMN_UPGRADES = (
     (
         "pricing",
         "MODEL_RUN",
+        "candidate_superglm_git_sha",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
         "model_source_sha256",
         "TEXT",
     ),

@@ -139,6 +139,7 @@ def test_candidates_returns_friendly_columns_and_hides_lineage_ids(monkeypatch):
     assert history.iloc[1]["State"] == "Edited candidate"
     assert history.iloc[1]["Baseline pooled CV deviance"] == "parent: 0.491"
     assert history.iloc[1]["Editor train delta"] == pytest.approx(0.009)
+    assert history["Editor"].tolist() == ["Unavailable", "Unavailable"]
 
 
 def test_candidates_can_return_explicit_technical_view(monkeypatch):
@@ -200,6 +201,7 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "split_link.dataset_role = 'training'" in statements[0][0]
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
+    assert "mr.candidate_superglm_git_sha" in statements[0][0]
     assert "manifest.model_frame_sha256" in statements[0][0]
     assert "rp.package_version = :package_version" in statements[0][0]
     assert statements[0][1]["package_version"] == 7
@@ -229,6 +231,7 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(
         "candidate_artifact_size_bytes": metadata.size_bytes,
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
+        "candidate_superglm_git_sha": metadata.superglm_git_sha,
         "model_source_sha256": "b" * 64,
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
@@ -285,6 +288,7 @@ def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
         "candidate_artifact_size_bytes": metadata.size_bytes,
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
+        "candidate_superglm_git_sha": metadata.superglm_git_sha,
         "model_source_sha256": "b" * 64,
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
@@ -329,6 +333,7 @@ def test_open_rejects_candidate_bundle_model_identity_mismatch(
         "candidate_artifact_size_bytes": metadata.size_bytes,
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
+        "candidate_superglm_git_sha": metadata.superglm_git_sha,
         "model_source_sha256": "b" * 64,
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",

@@ -541,10 +541,11 @@ def _model_run_build(**overrides):
         "publication_receipt_sha256": "c" * 64,
         "candidate_artifact_path": "/tmp/candidate.joblib",
         "candidate_artifact_sha256": "a" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 123,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "d" * 64,
     }
@@ -586,6 +587,7 @@ def _model_run_row():
         "candidate_artifact_size_bytes": build.candidate_artifact_size_bytes,
         "candidate_python_version": build.candidate_python_version,
         "candidate_superglm_version": build.candidate_superglm_version,
+        "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
         "model_source_sha256": build.model_source_sha256,
     }
 
@@ -696,6 +698,7 @@ def test_record_model_run_exact_retry_is_read_only():
         ("manifest_id", "manifest-2"),
         ("model_version", "v2"),
         ("candidate_artifact_sha256", "c" * 64),
+        ("candidate_superglm_git_sha", "e" * 40),
         ("rating_workbook_sha256", "c" * 64),
         ("parent_model_run_id", 410),
     ],
@@ -753,6 +756,7 @@ def _retry_artifact_fields(tmp_path: Path):
             "candidate_artifact_size_bytes": metadata.size_bytes,
             "candidate_python_version": metadata.python_version,
             "candidate_superglm_version": metadata.superglm_version,
+            "candidate_superglm_git_sha": metadata.superglm_git_sha,
             "model_source_sha256": "c" * 64,
             "model_frame_sha256": "e" * 64,
         }
@@ -967,6 +971,7 @@ def test_existing_published_run_verifies_candidate_bundle_identity(tmp_path: Pat
         "candidate_artifact_size_bytes": metadata.size_bytes,
         "candidate_python_version": metadata.python_version,
         "candidate_superglm_version": metadata.superglm_version,
+        "candidate_superglm_git_sha": metadata.superglm_git_sha,
         "model_source_sha256": "c" * 64,
     }
     evidence["row"].update(artifact_fields)

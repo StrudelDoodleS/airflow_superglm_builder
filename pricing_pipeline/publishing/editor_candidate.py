@@ -245,7 +245,8 @@ def _resolve_existing_editor_publication(
             mr.candidate_artifact_format,
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
-            mr.candidate_superglm_version
+            mr.candidate_superglm_version,
+            mr.candidate_superglm_git_sha
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
           ON pm.model_id = rp.model_id
@@ -310,6 +311,7 @@ def _resolve_existing_editor_publication(
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
     )
     if any(row.get(field) is None for field in artifact_fields):
         raise EditorSubmissionError(
@@ -342,6 +344,7 @@ def _resolve_existing_editor_publication(
             expected_format=row["candidate_artifact_format"],
             expected_python_version=row["candidate_python_version"],
             expected_superglm_version=row["candidate_superglm_version"],
+            expected_superglm_git_sha=row["candidate_superglm_git_sha"],
             allowed_root=allowed_root,
         )
     except CandidateArtifactError as exc:
@@ -445,6 +448,7 @@ def load_parent_candidate(
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
             mr.candidate_superglm_version,
+            mr.candidate_superglm_git_sha,
             mr.model_source_sha256
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
@@ -505,6 +509,7 @@ def load_parent_candidate(
         expected_format=row["candidate_artifact_format"],
         expected_python_version=row["candidate_python_version"],
         expected_superglm_version=row["candidate_superglm_version"],
+        expected_superglm_git_sha=row["candidate_superglm_git_sha"],
         allowed_root=allowed_root,
     )
     for field_name, expected_value in (
@@ -575,7 +580,8 @@ def _load_champion_bundle(
             mr.candidate_artifact_format,
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
-            mr.candidate_superglm_version
+            mr.candidate_superglm_version,
+            mr.candidate_superglm_git_sha
         FROM {schemas.pricing}.PRICING_MODEL_DEPLOYMENT AS deployment
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = deployment.rate_package_id
@@ -621,6 +627,7 @@ def _load_champion_bundle(
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
     )
     if any(row.get(name) is None for name in required):
         return ChampionSnapshot(
@@ -637,6 +644,7 @@ def _load_champion_bundle(
             expected_format=row["candidate_artifact_format"],
             expected_python_version=row["candidate_python_version"],
             expected_superglm_version=row["candidate_superglm_version"],
+            expected_superglm_git_sha=row["candidate_superglm_git_sha"],
             allowed_root=allowed_root,
         )
     except CandidateArtifactError as exc:
@@ -953,6 +961,7 @@ def export_edited_model(
         candidate_artifact_size_bytes=artifact.size_bytes,
         candidate_python_version=artifact.python_version,
         candidate_superglm_version=artifact.superglm_version,
+        candidate_superglm_git_sha=artifact.superglm_git_sha,
         model_source_sha256=submission.model_source_sha256,
         model_frame_sha256=edited_bundle.model_frame_sha256,
         metrics=metrics,

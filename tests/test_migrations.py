@@ -98,6 +98,15 @@ def test_dataset_manifest_offset_contract_migration_adds_explicit_audit_columns(
     assert "dm.export_weight_column" in sql
 
 
+def test_clean_validation_workflow_is_the_single_next_migration():
+    names = [path.name for path in migration_files(Path("db/migrations"))]
+
+    assert names[-2:] == [
+        "V034__dataset_manifest_offset_contract.sql",
+        "V035__clean_validation_evidence_workflow.sql",
+    ]
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 
@@ -292,6 +301,21 @@ def test_model_run_parent_lineage_migration_persists_self_reference():
     assert "UPDATE child_run" in source
 
 
+def test_superglm_git_sha_migration_adds_nullable_validated_runtime_identity():
+    path = Path("db/migrations/V035__clean_validation_evidence_workflow.sql")
+
+    assert path.exists()
+    source = path.read_text(encoding="utf-8")
+    assert "COL_LENGTH('pricing.MODEL_RUN', 'candidate_superglm_git_sha')" in source
+    assert "ADD candidate_superglm_git_sha CHAR(40) NULL" in source
+    assert "CK_MODEL_RUN_CANDIDATE_SUPERGLM_GIT_SHA" in source
+    assert "LEN(candidate_superglm_git_sha) = 40" in source
+    assert "candidate_superglm_git_sha COLLATE Latin1_General_BIN2" in source
+    assert "LIKE '%[^0-9a-f]%'" in source
+    assert "candidate_artifact_format <> 'superglm-candidate-joblib-v3'" in source
+    assert "candidate_superglm_git_sha IS NOT NULL" in source
+
+
 def test_rating_workbook_digest_migration_binds_model_run_evidence():
     path = Path("db/migrations/V032__model_run_rating_workbook_digest.sql")
 
@@ -348,6 +372,7 @@ def test_offline_model_run_mirrors_candidate_artifact_columns():
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
         "model_source_sha256",
     ):
         assert column in source
@@ -357,6 +382,12 @@ def test_offline_model_run_mirrors_parent_lineage_column():
     source = Path("db/offline_sqlite/pricing.sql").read_text(encoding="utf-8")
 
     assert "parent_model_run_id" in source
+
+
+def test_offline_model_run_upgrades_superglm_git_sha_column():
+    upgrader = Path("pricing_pipeline/infra/offline_sqlite.py").read_text(encoding="utf-8")
+
+    assert '"candidate_superglm_git_sha"' in upgrader
 
 
 def test_offline_model_run_mirrors_rating_workbook_digest_column():

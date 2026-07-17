@@ -82,10 +82,11 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
         publication_receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
         candidate_artifact_path=str(candidate),
         candidate_artifact_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),
-        candidate_artifact_format="superglm-candidate-joblib-v2",
+        candidate_artifact_format="superglm-candidate-joblib-v3",
         candidate_artifact_size_bytes=candidate.stat().st_size,
         candidate_python_version="3.14.4",
-        candidate_superglm_version="0.11.0",
+        candidate_superglm_version="0.12.0",
+        candidate_superglm_git_sha="a" * 40,
         model_source_sha256="a" * 64,
         model_frame_sha256="b" * 64,
     )
@@ -107,6 +108,7 @@ def test_completed_build_and_export_are_one_record_type():
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
         "model_source_sha256",
         "model_frame_sha256",
     ],
@@ -116,6 +118,18 @@ def test_approved_build_requires_all_audit_artifacts(tmp_path: Path, field_name:
     payload.pop(field_name)
 
     with pytest.raises(CompletedModelBuildError, match=field_name):
+        CompletedModelBuild(**payload)
+
+
+@pytest.mark.parametrize("git_sha", ["", "A" * 40, "a" * 39, "g" * 40])
+def test_approved_build_rejects_invalid_superglm_git_sha(tmp_path: Path, git_sha: str):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["candidate_superglm_git_sha"] = git_sha
+
+    with pytest.raises(
+        CompletedModelBuildError,
+        match="candidate_superglm_git_sha.*40-character lowercase hex git SHA",
+    ):
         CompletedModelBuild(**payload)
 
 

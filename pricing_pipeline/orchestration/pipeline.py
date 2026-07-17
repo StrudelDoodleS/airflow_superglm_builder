@@ -197,6 +197,7 @@ def _resolve_existing_published_run(
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
             mr.candidate_superglm_version,
+            mr.candidate_superglm_git_sha,
             mr.model_source_sha256
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp WITH (UPDLOCK, HOLDLOCK)
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
@@ -340,6 +341,7 @@ def _resolve_existing_published_run(
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
         "model_source_sha256",
     )
     artifact_values = [row.get(field) for field in artifact_fields]
@@ -365,6 +367,7 @@ def _resolve_existing_published_run(
                 expected_format=row["candidate_artifact_format"],
                 expected_python_version=row["candidate_python_version"],
                 expected_superglm_version=row["candidate_superglm_version"],
+                expected_superglm_git_sha=row["candidate_superglm_git_sha"],
                 allowed_root=allowed_artifact_root,
             )
         except CandidateArtifactError as exc:
@@ -472,6 +475,7 @@ def _retry_evidence_conflicts(
         "candidate_artifact_size_bytes": export.candidate_artifact_size_bytes,
         "candidate_python_version": export.candidate_python_version,
         "candidate_superglm_version": export.candidate_superglm_version,
+        "candidate_superglm_git_sha": export.candidate_superglm_git_sha,
         "model_source_sha256": export.model_source_sha256,
     }
     conflicts: list[str] = []

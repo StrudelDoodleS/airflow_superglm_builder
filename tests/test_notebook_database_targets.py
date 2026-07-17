@@ -511,10 +511,11 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         publication_receipt_sha256="b" * 64,
         candidate_artifact_path=str(tmp_path / "candidate.joblib"),
         candidate_artifact_sha256="c" * 64,
-        candidate_artifact_format="superglm-candidate-joblib-v2",
+        candidate_artifact_format="superglm-candidate-joblib-v3",
         candidate_artifact_size_bytes=123,
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),
+        candidate_superglm_git_sha="25c06fc84b674bb2ee777ea99567772d8d57a17c",
         model_source_sha256="e" * 64,
         model_frame_sha256="f" * 64,
         metrics={"cv_mean_deviance": 1.25},
@@ -642,6 +643,13 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                 "WHERE export_id = 'claim-frequency__run-1'"
             )
         ).scalar_one()
+        stored_superglm_git_sha = connection.execute(
+            text(
+                "SELECT candidate_superglm_git_sha "
+                "FROM pricing.MODEL_RUN "
+                "WHERE export_id = 'claim-frequency__run-1'"
+            )
+        ).scalar_one()
         stored_package_status = connection.execute(
             text(
                 "SELECT package_status "
@@ -659,6 +667,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     }
     assert staged_receipt_sha256 == "b" * 64
     assert stored_workbook_sha256 == completed_build.rating_workbook_sha256
+    assert stored_superglm_git_sha == completed_build.candidate_superglm_git_sha
     assert stored_package_status == "LOCAL_AUDIT"
 
     mismatch_export_id = "claim-frequency__mismatch"
@@ -769,6 +778,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
         candidate_artifact_size_bytes=10,
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),
+        candidate_superglm_git_sha="25c06fc84b674bb2ee777ea99567772d8d57a17c",
         model_source_sha256="b" * 64,
         model_frame_sha256="f" * 64,
     )

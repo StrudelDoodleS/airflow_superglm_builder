@@ -119,10 +119,11 @@ def _approved_build(tmp_path: Path, **overrides) -> ApprovedModelBuild:
         "publication_receipt_sha256": "b" * 64,
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "c" * 64,
-        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
         "candidate_artifact_size_bytes": 123,
         "candidate_python_version": "3.14.4",
-        "candidate_superglm_version": "0.11.0",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
         "model_source_sha256": "d" * 64,
         "model_frame_sha256": "e" * 64,
     }

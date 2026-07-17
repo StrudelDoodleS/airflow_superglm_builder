@@ -248,6 +248,7 @@ def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
         "candidate_artifact_size_bytes",
         "candidate_python_version",
         "candidate_superglm_version",
+        "candidate_superglm_git_sha",
         "model_source_sha256",
     }
     engine, paths = open_offline_sqlite(tmp_path)

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
+import platform
 from dataclasses import replace
+from importlib.metadata import distribution, version
 from pathlib import Path
+from types import SimpleNamespace
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -55,8 +61,54 @@ def _load(path: Path, metadata, *, allowed_root: Path):
         expected_format=metadata.format,
         expected_python_version=metadata.python_version,
         expected_superglm_version=metadata.superglm_version,
+        expected_superglm_git_sha=metadata.superglm_git_sha,
         allowed_root=allowed_root,
     )
+
+
+def test_new_candidate_bundle_records_installed_superglm_runtime_identity(tmp_path):
+    _, _, _, save_candidate_bundle = _artifact_api()
+
+    metadata = save_candidate_bundle(_minimal_bundle(), tmp_path / "candidate.joblib")
+    envelope = joblib.load(metadata.path)
+    direct_url = json.loads(distribution("superglm").read_text("direct_url.json"))
+    installed_git_sha = direct_url["vcs_info"]["commit_id"]
+
+    assert metadata.format == "superglm-candidate-joblib-v3"
+    assert metadata.superglm_version == version("superglm")
+    assert metadata.superglm_git_sha == installed_git_sha
+    assert envelope["superglm_version"] == version("superglm")
+    assert envelope["superglm_git_sha"] == installed_git_sha
+
+
+@pytest.mark.parametrize(
+    "direct_url_text",
+    [
+        None,
+        "not-json",
+        "{}",
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": None}}),
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": "A" * 40}}),
+        json.dumps({"vcs_info": {"vcs": "hg", "commit_id": "a" * 40}}),
+    ],
+)
+def test_new_candidate_bundle_requires_auditable_installed_git_commit(
+    tmp_path,
+    monkeypatch,
+    direct_url_text,
+):
+    CandidateArtifactError, _, _, save_candidate_bundle = _artifact_api()
+    fake_distribution = SimpleNamespace(read_text=lambda filename: direct_url_text)
+    monkeypatch.setattr(
+        "pricing_pipeline.workbench.artifacts.distribution",
+        lambda package_name: fake_distribution,
+    )
+
+    with pytest.raises(
+        CandidateArtifactError,
+        match="direct_url.json.*40-character lowercase hex git SHA",
+    ):
+        save_candidate_bundle(_minimal_bundle(), tmp_path / "candidate.joblib")
 
 
 def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
@@ -70,7 +122,7 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
     loaded = _load(Path(metadata.path), metadata, allowed_root=tmp_path)
 
-    assert metadata.format == "superglm-candidate-joblib-v2"
+    assert metadata.format == "superglm-candidate-joblib-v3"
     assert loaded.model_name == "HOME_FREQ"
     assert loaded.model_version == "v1"
     assert loaded.export_id == "export-1"
@@ -82,6 +134,51 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     assert np.array_equal(loaded.y, bundle.y)
     assert loaded.offset_contract == OffsetExportContract(handling="NONE")
     assert not hasattr(loaded, "offset_export_options")
+
+
+def test_legacy_v2_candidate_bundle_is_rejected_before_deserializing(
+    tmp_path,
+    monkeypatch,
+):
+    CandidateArtifactError, _, load_candidate_bundle, _ = _artifact_api()
+    path = tmp_path / "legacy-candidate.joblib"
+    bundle = _minimal_bundle()
+    python_version = platform.python_version()
+    superglm_version = version("superglm")
+    joblib.dump(
+        {
+            "format": "superglm-candidate-joblib-v2",
+            "python_version": python_version,
+            "superglm_version": superglm_version,
+            "bundle": bundle,
+        },
+        path,
+    )
+    deserialized = False
+
+    def fail_if_loaded(source):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {source}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(
+        CandidateArtifactError,
+        match="unsupported candidate artifact format.*joblib-v2",
+    ):
+        load_candidate_bundle(
+            path,
+            expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            expected_size_bytes=path.stat().st_size,
+            expected_format="superglm-candidate-joblib-v2",
+            expected_python_version=python_version,
+            expected_superglm_version=superglm_version,
+            expected_superglm_git_sha=None,
+            allowed_root=tmp_path,
+        )
+
+    assert deserialized is False
 
 
 @pytest.mark.parametrize("digest", ["", "A" * 64, "a" * 63, "g" * 64])
@@ -208,6 +305,81 @@ def test_candidate_bundle_rejects_incompatible_python_before_deserializing(
             expected_format=metadata.format,
             expected_python_version="2.7.18",
             expected_superglm_version=metadata.superglm_version,
+            expected_superglm_git_sha=metadata.superglm_git_sha,
+            allowed_root=tmp_path,
+        )
+
+    assert deserialized is False
+
+
+def test_candidate_bundle_rejects_incompatible_superglm_git_sha_before_deserializing(
+    tmp_path,
+    monkeypatch,
+):
+    CandidateArtifactError, _, load_candidate_bundle, save_candidate_bundle = _artifact_api()
+    metadata = save_candidate_bundle(_minimal_bundle(), tmp_path / "candidate.joblib")
+    incompatible_git_sha = (
+        "0" * 40 if metadata.superglm_git_sha != "0" * 40 else "1" * 40
+    )
+    deserialized = False
+
+    def fail_if_loaded(path):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {path}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(CandidateArtifactError) as exc_info:
+        load_candidate_bundle(
+            metadata.path,
+            expected_sha256=metadata.sha256,
+            expected_size_bytes=metadata.size_bytes,
+            expected_format=metadata.format,
+            expected_python_version=metadata.python_version,
+            expected_superglm_version=metadata.superglm_version,
+            expected_superglm_git_sha=incompatible_git_sha,
+            allowed_root=tmp_path,
+        )
+
+    message = str(exc_info.value)
+    assert f"artifact={incompatible_git_sha!r}" in message
+    assert f"runtime={metadata.superglm_git_sha!r}" in message
+    assert deserialized is False
+
+
+@pytest.mark.parametrize(
+    "invalid_git_sha",
+    [None, "", "A" * 40, "a" * 39, "g" * 40],
+)
+def test_v3_candidate_bundle_rejects_invalid_git_sha_before_deserializing(
+    tmp_path,
+    monkeypatch,
+    invalid_git_sha,
+):
+    CandidateArtifactError, _, load_candidate_bundle, save_candidate_bundle = _artifact_api()
+    metadata = save_candidate_bundle(_minimal_bundle(), tmp_path / "candidate.joblib")
+    deserialized = False
+
+    def fail_if_loaded(path):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {path}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(
+        CandidateArtifactError,
+        match="40-character lowercase hex git SHA",
+    ):
+        load_candidate_bundle(
+            metadata.path,
+            expected_sha256=metadata.sha256,
+            expected_size_bytes=metadata.size_bytes,
+            expected_format=metadata.format,
+            expected_python_version=metadata.python_version,
+            expected_superglm_version=metadata.superglm_version,
+            expected_superglm_git_sha=invalid_git_sha,
             allowed_root=tmp_path,
         )
 
