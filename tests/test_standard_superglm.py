@@ -286,6 +286,44 @@ def test_cv_report_adapter_preserves_mixed_scorer_fold_column_order():
     ] == ["calibration", "ranking", "deviance"]
 
 
+def test_cv_report_adapter_rejects_aggregate_metric_missing_from_fold_columns():
+    api = _api()
+
+    def pricing_scores(*args, **kwargs):
+        del args, kwargs
+        return {"custom": 0.0}
+
+    result = _cv_result()
+    result.mean_scores = {"deviance": 0.45, "custom": 0.25}
+    result.std_scores = {"deviance": 0.05, "custom": 0.05}
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="fold_scores is missing aggregate metrics: custom",
+    ):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=(pricing_scores, "deviance"),
+        )
+
+
+def test_cv_report_adapter_rejects_requested_metric_missing_from_mean_scores():
+    api = _api()
+    result = _cv_result()
+    result.fold_scores["gini"] = [0.7, 0.8]
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="mean_scores is missing requested metrics: gini",
+    ):
+        api.cv_result_to_records(
+            result,
+            oof_coverage=2 / 3,
+            scoring=("deviance", "gini"),
+        )
+
+
 def test_cv_report_adapter_rejects_missing_requested_fold_metric():
     api = _api()
     result = _cv_result()

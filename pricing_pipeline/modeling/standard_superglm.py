@@ -708,11 +708,27 @@ def _requested_metric_names(
     fold_score_columns: Iterable[Any],
 ) -> tuple[str, ...]:
     values = (scoring,) if isinstance(scoring, str) or callable(scoring) else tuple(scoring)
-    if all(isinstance(value, str) for value in values):
-        return tuple(values)
-    return tuple(
+    explicit_metric_names = tuple(value for value in values if isinstance(value, str))
+    missing_mean_metrics = [
+        name for name in explicit_metric_names if name not in mean_scores
+    ]
+    if missing_mean_metrics:
+        raise StandardSuperGLMError(
+            "SuperGLM mean_scores is missing requested metrics: "
+            + ", ".join(missing_mean_metrics)
+        )
+    if len(explicit_metric_names) == len(values):
+        return explicit_metric_names
+    metric_names = tuple(
         str(name) for name in fold_score_columns if str(name) in mean_scores
     )
+    missing_metrics = [name for name in mean_scores if name not in metric_names]
+    if missing_metrics:
+        raise StandardSuperGLMError(
+            "SuperGLM fold_scores is missing aggregate metrics: "
+            + ", ".join(missing_metrics)
+        )
+    return metric_names
 
 
 def _finite_score(value: Any, *, label: str) -> float:
