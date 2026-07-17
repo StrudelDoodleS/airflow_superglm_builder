@@ -610,7 +610,11 @@ def cv_result_to_records(
     metrics.update({f"cv_std_{name}": value for name, value in std_scores.items()})
     metrics["cv_oof_coverage"] = float(oof_coverage)
 
-    metric_names = _requested_metric_names(scoring, mean_scores)
+    metric_names = _requested_metric_names(
+        scoring,
+        mean_scores,
+        result.fold_scores.columns,
+    )
     fold_metrics: list[FoldMetric] = []
     validation_splits: list[ValidationSplitResult] = []
     result_folds = (
@@ -701,11 +705,14 @@ def cv_result_to_records(
 def _requested_metric_names(
     scoring: str | Callable | Sequence[str | Callable],
     mean_scores: dict[str, float],
+    fold_score_columns: Iterable[Any],
 ) -> tuple[str, ...]:
     values = (scoring,) if isinstance(scoring, str) or callable(scoring) else tuple(scoring)
     if all(isinstance(value, str) for value in values):
         return tuple(values)
-    return tuple(mean_scores)
+    return tuple(
+        str(name) for name in fold_score_columns if str(name) in mean_scores
+    )
 
 
 def _finite_score(value: Any, *, label: str) -> float:

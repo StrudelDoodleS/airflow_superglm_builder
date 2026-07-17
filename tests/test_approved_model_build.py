@@ -122,6 +122,32 @@ def test_approved_build_holds_ordered_validation_split_results(tmp_path: Path):
     assert list(split.metrics) == ["deviance", "nll", "gini"]
 
 
+def test_validation_evidence_is_deeply_immutable_and_round_trips(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["validation_splits"] = (
+        {
+            "validation_split_no": 1,
+            "n_train": 80,
+            "n_validation": 20,
+            "metrics": {"deviance": 0.4},
+        },
+    )
+    payload["fold_metrics"] = (
+        {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
+    )
+    build = ApprovedModelBuild(**payload)
+
+    with pytest.raises(TypeError):
+        build.validation_splits[0].metrics["deviance"] = 9.9
+    with pytest.raises(TypeError):
+        build.fold_metrics[0]["metric_value"] = 9.9
+
+    dumped = build.model_dump()
+    assert type(dumped["validation_splits"][0]["metrics"]) is dict
+    assert type(dumped["fold_metrics"][0]) is dict
+    assert ApprovedModelBuild(**dumped).model_dump() == dumped
+
+
 @pytest.mark.parametrize(
     ("override", "match"),
     [

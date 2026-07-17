@@ -243,6 +243,49 @@ def test_cv_report_adapter_uses_actual_keys_from_dict_returning_callable():
     assert all(pricing_scores.__name__ not in split.metrics for split in validation_splits)
 
 
+def test_cv_report_adapter_preserves_mixed_scorer_fold_column_order():
+    api = _api()
+
+    def pricing_scores(*args, **kwargs):
+        del args, kwargs
+        return {"calibration": 0.0, "ranking": 0.0}
+
+    result = _cv_result()
+    non_metric_columns = [
+        name for name in result.fold_scores if name != "deviance"
+    ]
+    result.fold_scores = result.fold_scores[non_metric_columns].assign(
+        calibration=[0.2, 0.3],
+        ranking=[0.7, 0.8],
+        deviance=[0.4, 0.5],
+    )
+    result.mean_scores = {
+        "deviance": 0.45,
+        "calibration": 0.25,
+        "ranking": 0.75,
+    }
+    result.std_scores = {
+        "deviance": 0.05,
+        "calibration": 0.05,
+        "ranking": 0.05,
+    }
+
+    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+        result,
+        oof_coverage=2 / 3,
+        scoring=(pricing_scores, "deviance"),
+    )
+
+    assert list(validation_splits[0].metrics) == [
+        "calibration",
+        "ranking",
+        "deviance",
+    ]
+    assert [
+        metric.metric_name for metric in fold_metrics if metric.fold_no == 1
+    ] == ["calibration", "ranking", "deviance"]
+
+
 def test_cv_report_adapter_rejects_missing_requested_fold_metric():
     api = _api()
     result = _cv_result()

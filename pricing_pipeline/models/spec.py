@@ -3,9 +3,18 @@ from __future__ import annotations
 import math
 from datetime import date, datetime
 from numbers import Real
+from types import MappingProxyType
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 class ApprovedModelBuildError(ValueError):
@@ -20,7 +29,7 @@ class ValidationSplitResult(BaseModel):
     validation_split_no: int
     n_train: int
     n_validation: int
-    metrics: dict[str, float]
+    metrics: Mapping[str, float]
 
     @field_validator("validation_split_no", "n_train", "n_validation", mode="before")
     @classmethod
@@ -46,6 +55,15 @@ class ValidationSplitResult(BaseModel):
                 raise ValueError(f"metric {metric_name!r} must be finite")
             metrics[metric_name] = metric_value
         return metrics
+
+    @field_validator("metrics")
+    @classmethod
+    def _freeze_metrics(cls, value: Mapping[str, float]) -> Mapping[str, float]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("metrics")
+    def _serialise_metrics(self, value: Mapping[str, float]) -> dict[str, float]:
+        return dict(value)
 
 
 class ApprovedModelBuild(BaseModel):
@@ -80,7 +98,7 @@ class ApprovedModelBuild(BaseModel):
     model_frame_sha256: str
     metrics: dict[str, float] = Field(default_factory=dict)
     metric_scopes: dict[str, str] = Field(default_factory=dict)
-    fold_metrics: tuple[dict[str, int | str | float], ...] = ()
+    fold_metrics: tuple[Mapping[str, int | str | float], ...] = ()
     validation_splits: tuple[ValidationSplitResult, ...] = ()
 
     def __init__(self, **data: Any) -> None:
@@ -234,7 +252,7 @@ class ApprovedModelBuild(BaseModel):
 
     @field_validator("fold_metrics", mode="before")
     @classmethod
-    def _fold_metrics(cls, value: Any) -> tuple[dict[str, int | str | float], ...]:
+    def _fold_metrics(cls, value: Any) -> tuple[Mapping[str, int | str | float], ...]:
         if value is None:
             return ()
         records: list[dict[str, int | str | float]] = []
@@ -259,6 +277,21 @@ class ApprovedModelBuild(BaseModel):
                 }
             )
         return tuple(records)
+
+    @field_validator("fold_metrics")
+    @classmethod
+    def _freeze_fold_metrics(
+        cls,
+        value: tuple[Mapping[str, int | str | float], ...],
+    ) -> tuple[Mapping[str, int | str | float], ...]:
+        return tuple(MappingProxyType(dict(record)) for record in value)
+
+    @field_serializer("fold_metrics")
+    def _serialise_fold_metrics(
+        self,
+        value: tuple[Mapping[str, int | str | float], ...],
+    ) -> tuple[dict[str, int | str | float], ...]:
+        return tuple(dict(record) for record in value)
 
     @model_validator(mode="after")
     def _scopes_reference_metrics(self) -> "ApprovedModelBuild":
