@@ -49,10 +49,54 @@ from superglm.features.spline import CardinalCRSpline
 from superglm.types import LambdaPolicy
 
 
+def _function_metadata(value: object) -> tuple[Any, ...]:
+    if value is None:
+        return ("none",)
+    if type(value) is bool:
+        return ("bool", value)
+    if type(value) is int:
+        return ("int", value)
+    if type(value) is float:
+        if math.isnan(value):
+            return ("float", "nan")
+        if math.isinf(value):
+            return ("float", "inf" if value > 0.0 else "-inf")
+        return ("float", value)
+    if type(value) is str:
+        return ("str", value)
+    if type(value) is tuple:
+        return ("tuple", tuple(_function_metadata(item) for item in value))
+    if type(value) is dict and all(type(key) is str for key in value):
+        return (
+            "dict",
+            tuple((key, _function_metadata(value[key])) for key in sorted(value)),
+        )
+    return ("unsupported", type(value).__module__, type(value).__qualname__)
+
+
+def _closure_metadata(value: object) -> tuple[Any, ...]:
+    if value is None:
+        return ("none",)
+    if type(value) is not tuple or not all(type(cell) is types.CellType for cell in value):
+        return ("unsupported",)
+    contents = []
+    for cell in value:
+        try:
+            contents.append(_function_metadata(cell.cell_contents))
+        except ValueError:
+            contents.append(("empty",))
+    return ("closure", tuple(contents))
+
+
 SUPERGLM_VERSION = "0.12.0"
 SUPERGLM_GIT_SHA = "25c06fc84b674bb2ee777ea99567772d8d57a17c"
 _PINNED_CROSS_VALIDATE_CODE = _UPSTREAM_CROSS_VALIDATE.__code__
 _PINNED_CLONE_MODEL = _UPSTREAM_CROSS_VALIDATE.__globals__.get("_clone_model")
+_PINNED_CROSS_VALIDATE_DEFAULTS_METADATA = _function_metadata(_UPSTREAM_CROSS_VALIDATE.__defaults__)
+_PINNED_CROSS_VALIDATE_KWDEFAULTS_METADATA = _function_metadata(
+    _UPSTREAM_CROSS_VALIDATE.__kwdefaults__
+)
+_PINNED_CROSS_VALIDATE_CLOSURE_METADATA = _closure_metadata(_UPSTREAM_CROSS_VALIDATE.__closure__)
 _EXACT_DEEPCOPY = copy.deepcopy
 
 
@@ -154,21 +198,46 @@ def exact_superglm_cross_validate(model: SuperGLM, X, y, **kwargs):
     """Run the pinned upstream CV loop with exact deep-copy model cloning."""
     snapshot, expected_identity = _pristine_superglm_copy(model)
     scoped_cross_validate = _scoped_exact_cross_validate()
-    result = scoped_cross_validate(snapshot, X, y, **kwargs)
-    if canonical_superglm_bytes(snapshot) != expected_identity:
-        raise SuperGLMIdentityError("SuperGLM snapshot changed during cross-validation")
-    if canonical_superglm_bytes(model) != expected_identity:
-        raise SuperGLMIdentityError("SuperGLM changed during cross-validation")
+    try:
+        result = scoped_cross_validate(snapshot, X, y, **kwargs)
+    except Exception as upstream_error:
+        try:
+            _verify_cross_validate_models(snapshot, model, expected_identity)
+        except SuperGLMIdentityError as mutation_error:
+            raise mutation_error from upstream_error
+        raise
+    _verify_cross_validate_models(snapshot, model, expected_identity)
     return result
+
+
+def _verify_cross_validate_models(
+    snapshot: SuperGLM,
+    model: SuperGLM,
+    expected_identity: bytes,
+) -> None:
+    if _model_semantic_bytes(snapshot) != expected_identity:
+        raise SuperGLMIdentityError("SuperGLM snapshot changed during cross-validation")
+    if _model_semantic_bytes(model) != expected_identity:
+        raise SuperGLMIdentityError("SuperGLM changed during cross-validation")
 
 
 def _scoped_exact_cross_validate() -> types.FunctionType:
     """Copy the pinned CV function with only its private clone global replaced."""
     resolve_superglm_runtime_identity()
     upstream = _UPSTREAM_CROSS_VALIDATE
+    if type(upstream) is not types.FunctionType:
+        raise SuperGLMIdentityError(
+            "pinned SuperGLM cross_validate function structure does not match the exact adapter"
+        )
+    defaults = upstream.__defaults__
+    kwdefaults = (
+        upstream.__kwdefaults__.copy()
+        if type(upstream.__kwdefaults__) is dict
+        else upstream.__kwdefaults__
+    )
+    closure = upstream.__closure__
     if (
-        type(upstream) is not types.FunctionType
-        or upstream.__code__ is not _PINNED_CROSS_VALIDATE_CODE
+        upstream.__code__ is not _PINNED_CROSS_VALIDATE_CODE
         or upstream.__name__ != "cross_validate"
         or upstream.__module__ != "superglm.model_selection"
         or "_clone_model" not in upstream.__code__.co_names
@@ -176,6 +245,9 @@ def _scoped_exact_cross_validate() -> types.FunctionType:
         or type(_PINNED_CLONE_MODEL) is not types.FunctionType
         or _PINNED_CLONE_MODEL.__name__ != "_clone_model"
         or _PINNED_CLONE_MODEL.__module__ != "superglm.model_selection"
+        or _function_metadata(defaults) != _PINNED_CROSS_VALIDATE_DEFAULTS_METADATA
+        or _function_metadata(kwdefaults) != _PINNED_CROSS_VALIDATE_KWDEFAULTS_METADATA
+        or _closure_metadata(closure) != _PINNED_CROSS_VALIDATE_CLOSURE_METADATA
     ):
         raise SuperGLMIdentityError(
             "pinned SuperGLM cross_validate function structure does not match the exact adapter"
@@ -187,12 +259,10 @@ def _scoped_exact_cross_validate() -> types.FunctionType:
         upstream.__code__,
         scoped_globals,
         upstream.__name__,
-        upstream.__defaults__,
-        upstream.__closure__,
+        defaults,
+        closure,
     )
-    scoped.__kwdefaults__ = (
-        None if upstream.__kwdefaults__ is None else upstream.__kwdefaults__.copy()
-    )
+    scoped.__kwdefaults__ = kwdefaults
     scoped.__qualname__ = upstream.__qualname__
     scoped.__module__ = upstream.__module__
     scoped.__doc__ = upstream.__doc__
@@ -221,7 +291,18 @@ def _pristine_superglm_copy(model: SuperGLM) -> tuple[SuperGLM, bytes]:
         snapshot._specs[name] is model._specs[name] for name in model._feature_order
     ):
         raise SuperGLMIdentityError("SuperGLM copy retained shared mutable configuration")
-    return snapshot, expected_identity
+    return snapshot, _model_semantic_bytes(model)
+
+
+def _model_semantic_bytes(model: SuperGLM) -> bytes:
+    validate_pristine_superglm(model)
+    return json.dumps(
+        _model_semantic_payload(model),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 _MODEL_FIELDS = frozenset(
@@ -282,17 +363,17 @@ def _model_semantic_payload(model: SuperGLM) -> dict[str, Any]:
         "family": _family_payload(model.family),
         "link": _link_payload(model.link, model.family),
         "features": _feature_plan_payload(model),
-        "interactions": [list(pair) for pair in model._pending_interactions],
+        "interactions": [list(pair) for pair in _pending_interactions(model._pending_interactions)],
         "penalty": _penalty_payload(model.penalty),
         "lambda2": _finite_float(model.lambda2, "lambda2"),
         "solver": {
             "active_set": _bool_value(model._active_set, "active_set"),
-            "direct_solve": model._direct_solve,
+            "direct_solve": _native_string(model._direct_solve, "direct_solve"),
             "discrete": _bool_value(model._discrete, "discrete"),
             "n_bins": _integer_or_mapping(model._n_bins, "n_bins"),
             "tol": _finite_float(model._tol, "tol"),
             "max_iter": _integer(model._max_iter, "max_iter"),
-            "convergence": model._convergence,
+            "convergence": _native_string(model._convergence, "convergence"),
             "retain_fit_state": _bool_value(
                 model._retain_fit_state,
                 "retain_fit_state",
@@ -340,24 +421,24 @@ def _validate_pristine_model_fields(model: SuperGLM) -> None:
 
     if type(model._specs) is not dict or type(model._feature_order) is not list:
         raise SuperGLMIdentityError("SuperGLM feature plan is malformed")
-    if not all(type(name) is str and name for name in model._feature_order):
-        raise SuperGLMIdentityError("SuperGLM feature names must be non-empty strings")
-    if list(model._specs) != model._feature_order or len(set(model._feature_order)) != len(
-        model._feature_order
-    ):
+    feature_order = _native_string_values(model._feature_order, "SuperGLM feature name")
+    spec_order = _native_string_values(model._specs, "SuperGLM feature name")
+    if spec_order != feature_order or len(set(feature_order)) != len(feature_order):
         raise SuperGLMIdentityError("SuperGLM feature order/spec mapping is malformed")
     feature_ids = [id(spec) for spec in model._specs.values()]
     if len(set(feature_ids)) != len(feature_ids):
         raise SuperGLMIdentityError("SuperGLM feature specs must not share object identities")
-    _pending_interactions(model._pending_interactions)
+    pending_interactions = _pending_interactions(model._pending_interactions)
 
-    if type(model._direct_solve) is not str or model._direct_solve not in {
+    direct_solve = _native_string(model._direct_solve, "direct_solve")
+    if direct_solve not in {
         "auto",
         "gram",
         "qr",
     }:
         raise SuperGLMIdentityError("direct_solve must be 'auto', 'gram', or 'qr'")
-    if type(model._convergence) is not str or model._convergence not in {
+    convergence = _native_string(model._convergence, "convergence")
+    if convergence not in {
         "deviance",
         "coefficients",
     }:
@@ -373,26 +454,24 @@ def _validate_pristine_model_fields(model: SuperGLM) -> None:
     _bool_value(model._retain_fit_state, "retain_fit_state")
     _validate_positive_integer_config(model._n_bins, "n_bins")
 
-    if type(model._categorical_base) is not str or not model._categorical_base:
-        raise SuperGLMIdentityError("categorical_base must be a non-empty string")
+    _native_string(model._categorical_base, "categorical_base")
     _validate_positive_integer_or_list(model._n_knots, "n_knots")
     if _integer(model._degree, "degree") < 1:
         raise SuperGLMIdentityError("degree must be positive")
 
     ordered_names = {
-        name for name, spec in model._specs.items() if type(spec) is OrderedCategorical
+        name
+        for name, spec in zip(feature_order, model._specs.values(), strict=True)
+        if type(spec) is OrderedCategorical
     }
     if model._specs and any(
-        left not in model._specs or right not in model._specs
-        for left, right in model._pending_interactions
+        left not in feature_order or right not in feature_order
+        for left, right in pending_interactions
     ):
         raise SuperGLMIdentityError(
             "explicit-feature interactions must reference names in the feature plan"
         )
-    if any(
-        left in ordered_names or right in ordered_names
-        for left, right in model._pending_interactions
-    ):
+    if any(left in ordered_names or right in ordered_names for left, right in pending_interactions):
         raise SuperGLMIdentityError(
             "ordered-categorical interactions are unsupported by the pinned fit dispatch"
         )
@@ -405,7 +484,10 @@ def _feature_plan_payload(model: SuperGLM) -> dict[str, Any]:
         return {
             "mode": "explicit",
             "plan": [
-                {"name": name, "spec": _feature_payload(spec)}
+                {
+                    "name": _native_string(name, "SuperGLM feature name"),
+                    "spec": _feature_payload(spec),
+                }
                 for name, spec in zip(
                     model._feature_order,
                     model._specs.values(),
@@ -415,11 +497,10 @@ def _feature_plan_payload(model: SuperGLM) -> dict[str, Any]:
         }
     if model._splines is None:
         return {"mode": "intercept_only", "plan": []}
-    if type(model._splines) is not list or not all(
-        type(name) is str and name for name in model._splines
-    ):
+    if type(model._splines) is not list:
         raise SuperGLMIdentityError("auto-detect splines must be a list of column names")
-    if len(model._splines) != len(set(model._splines)):
+    spline_names = _native_string_values(model._splines, "auto-detect spline column name")
+    if len(spline_names) != len(set(spline_names)):
         raise SuperGLMIdentityError("auto-detect spline column names must be unique")
     if type(model._n_knots) is list and len(model._n_knots) != len(model._splines):
         raise SuperGLMIdentityError(
@@ -427,10 +508,10 @@ def _feature_plan_payload(model: SuperGLM) -> dict[str, Any]:
         )
     return {
         "mode": "auto_detect",
-        "splines": list(model._splines),
+        "splines": spline_names,
         "n_knots": _integer_or_list(model._n_knots, "n_knots"),
         "degree": _integer(model._degree, "degree"),
-        "categorical_base": model._categorical_base,
+        "categorical_base": _native_string(model._categorical_base, "categorical_base"),
     }
 
 
@@ -440,7 +521,12 @@ def _feature_payload(spec: object) -> dict[str, Any]:
         return {"kind": "numeric"}
     if type(spec) is Polynomial:
         _require_fields(spec, frozenset({"degree", "_lo", "_hi"}), "Polynomial")
-        if spec._lo != 0.0 or spec._hi != 1.0:
+        try:
+            lower_bound = _finite_float(spec._lo, "Polynomial._lo")
+            upper_bound = _finite_float(spec._hi, "Polynomial._hi")
+        except SuperGLMIdentityError as exc:
+            raise SuperGLMIdentityError("Polynomial fitted bounds are malformed") from exc
+        if lower_bound != 0.0 or upper_bound != 1.0:
             raise SuperGLMIdentityError("Polynomial is not pristine: fitted bounds are populated")
         degree = _integer(spec.degree, "Polynomial.degree")
         if degree < 1:
@@ -463,15 +549,14 @@ def _categorical_payload(spec: Categorical) -> dict[str, Any]:
         frozenset({"base", "_grouping", "_levels", "_base_level", "_non_base"}),
         "Categorical",
     )
-    if type(spec.base) is not str or not spec.base:
-        raise SuperGLMIdentityError("Categorical.base must be a non-empty string")
+    base = _native_string(spec.base, "Categorical.base")
     _require_empty_list(spec._levels, "Categorical._levels")
-    if type(spec._base_level) is not str or spec._base_level:
+    if _native_string(spec._base_level, "Categorical._base_level", allow_empty=True):
         raise SuperGLMIdentityError("Categorical is not pristine: fitted base is populated")
     _require_empty_list(spec._non_base, "Categorical._non_base")
     return {
         "kind": "categorical",
-        "base": spec.base,
+        "base": base,
         "grouping": _grouping_payload(spec._grouping),
     }
 
@@ -502,25 +587,26 @@ _ORDERED_CATEGORICAL_FIELDS = frozenset(
 
 def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
     _require_fields(spec, _ORDERED_CATEGORICAL_FIELDS, "OrderedCategorical")
-    if spec.basis not in {"step", "spline"}:
+    basis = _native_string(spec.basis, "OrderedCategorical.basis")
+    if basis not in {"step", "spline"}:
         raise SuperGLMIdentityError("OrderedCategorical has an unsupported basis")
-    if type(spec.base) is not str or not spec.base:
-        raise SuperGLMIdentityError("OrderedCategorical.base must be a non-empty string")
-    if type(spec._ordered_levels) is not list or not all(
-        type(level) is str for level in spec._ordered_levels
-    ):
+    base = _native_string(spec.base, "OrderedCategorical.base")
+    if type(spec._ordered_levels) is not list:
         raise SuperGLMIdentityError("OrderedCategorical ordered levels are malformed")
-    if len(spec._ordered_levels) != len(set(spec._ordered_levels)) or not spec._ordered_levels:
+    ordered_levels = _native_string_values(
+        spec._ordered_levels,
+        "OrderedCategorical ordered level",
+    )
+    if len(ordered_levels) != len(set(ordered_levels)) or not ordered_levels:
         raise SuperGLMIdentityError(
             "OrderedCategorical ordered levels must be non-empty and unique"
         )
-    if _integer(spec._n_levels, "OrderedCategorical._n_levels") != len(spec._ordered_levels):
+    if _integer(spec._n_levels, "OrderedCategorical._n_levels") != len(ordered_levels):
         raise SuperGLMIdentityError("OrderedCategorical level count is malformed")
-    if type(spec._known_levels) is not set or not all(
-        type(level) is str for level in spec._known_levels
-    ):
+    if type(spec._known_levels) is not set:
         raise SuperGLMIdentityError("OrderedCategorical known levels are malformed")
-    if type(spec._base_level) is not str or spec._base_level:
+    known_levels = set(_native_string_values(spec._known_levels, "OrderedCategorical known level"))
+    if _native_string(spec._base_level, "OrderedCategorical._base_level", allow_empty=True):
         raise SuperGLMIdentityError("OrderedCategorical is not pristine: fitted base is populated")
     _require_empty_list(spec._non_base, "OrderedCategorical._non_base")
     if spec._R_inv is not None:
@@ -529,28 +615,33 @@ def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
         )
 
     grouping = _grouping_payload(spec._grouping)
-    level_values = _ordered_level_values(spec._level_to_value, spec._ordered_levels)
+    level_values = _ordered_level_values(spec._level_to_value, ordered_levels)
+    original_level_values = None
     if spec._grouping is None:
         if spec._original_level_to_value is not None:
             raise SuperGLMIdentityError("OrderedCategorical original level state is malformed")
-        if spec._known_levels != set(spec._ordered_levels):
+        if known_levels != set(ordered_levels):
             raise SuperGLMIdentityError("OrderedCategorical known levels are malformed")
     else:
-        if spec._known_levels != set(spec._grouping.all_original_levels):
-            raise SuperGLMIdentityError("OrderedCategorical grouped known levels are malformed")
-        _ordered_level_values(
-            spec._original_level_to_value,
+        original_levels = _native_string_values(
             spec._grouping.all_original_levels,
+            "LevelGrouping original level",
+        )
+        if known_levels != set(original_levels):
+            raise SuperGLMIdentityError("OrderedCategorical grouped known levels are malformed")
+        original_level_values = _grouped_ordered_level_values(
+            spec._original_level_to_value,
+            spec._grouping,
         )
 
     payload: dict[str, Any] = {
         "kind": "ordered_categorical",
-        "basis": spec.basis,
-        "base": spec.base,
-        "ordered_levels": list(spec._ordered_levels),
+        "basis": basis,
+        "base": base,
+        "ordered_levels": ordered_levels,
         "grouping": grouping,
     }
-    if spec.basis == "step":
+    if basis == "step":
         if spec._spline_obj is not None or spec._spline is not None or bool(spec.select):
             raise SuperGLMIdentityError("OrderedCategorical step state is malformed")
         return payload
@@ -565,25 +656,74 @@ def _ordered_categorical_payload(spec: OrderedCategorical) -> dict[str, Any]:
         _spline_payload(spec._spline_obj)
     spline_payload = _spline_payload(spec._spline)
     expected_kind = _SPLINE_KINDS[type(spec._spline)]
+    requested_n_knots = _integer(spec.n_knots, "OrderedCategorical.n_knots")
+    expected_n_knots = (
+        requested_n_knots
+        if spec._spline_obj is not None
+        else min(requested_n_knots, len(ordered_levels) - 1)
+    )
     if (
-        spec.kind != expected_kind
+        _native_string(spec.kind, "OrderedCategorical.kind") != expected_kind
         or bool(spec.select) != bool(spec._spline.select)
-        or spec.penalty != spec._spline.penalty
+        or _native_string(spec.penalty, "OrderedCategorical.penalty")
+        != _native_string(spec._spline.penalty, "OrderedCategorical spline penalty")
         or _integer(spec.degree, "OrderedCategorical.degree") != int(spec._spline.degree)
-        or _integer(spec.n_knots, "OrderedCategorical.n_knots") != int(spec._spline.n_knots)
+        or expected_n_knots != int(spec._spline.n_knots)
     ):
         raise SuperGLMIdentityError("OrderedCategorical spline metadata is malformed")
     payload["level_values"] = level_values
+    if original_level_values is not None:
+        payload["original_level_values"] = original_level_values
     payload["spline"] = spline_payload
     return payload
 
 
 def _ordered_level_values(value: object, levels: list[str]) -> dict[str, float]:
-    if type(value) is not dict or set(value) != set(levels):
+    try:
+        normalized = _string_keyed_mapping(value, "OrderedCategorical level values")
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError("OrderedCategorical level values are malformed") from exc
+    if set(normalized) != set(levels):
         raise SuperGLMIdentityError("OrderedCategorical level values are malformed")
     return {
-        level: _finite_float(value[level], f"OrderedCategorical value {level!r}")
+        level: _finite_float(normalized[level], f"OrderedCategorical value {level!r}")
         for level in levels
+    }
+
+
+def _grouped_ordered_level_values(
+    value: object,
+    grouping: LevelGrouping,
+) -> dict[str, Any]:
+    try:
+        normalized = _string_keyed_mapping(
+            value,
+            "OrderedCategorical original level values",
+        )
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError(
+            "OrderedCategorical original level values are malformed"
+        ) from exc
+    original_levels = _native_string_values(
+        grouping.all_original_levels,
+        "LevelGrouping original level",
+    )
+    grouped_levels = _native_string_values(
+        grouping.grouped_levels,
+        "LevelGrouping grouped level",
+    )
+    value_keys = set(normalized)
+    if value_keys == set(original_levels):
+        scope = "original"
+        levels = original_levels
+    elif value_keys == set(grouped_levels):
+        scope = "grouped"
+        levels = grouped_levels
+    else:
+        raise SuperGLMIdentityError("OrderedCategorical original level values are malformed")
+    return {
+        "scope": scope,
+        "values": _ordered_level_values(normalized, levels),
     }
 
 
@@ -606,41 +746,70 @@ def _grouping_payload(grouping: object) -> dict[str, Any] | None:
     )
     if type(grouping.all_original_levels) is not list or type(grouping.grouped_levels) is not list:
         raise SuperGLMIdentityError("LevelGrouping level order is malformed")
-    originals = grouping.all_original_levels
-    groups = grouping.grouped_levels
+    originals = _native_string_values(
+        grouping.all_original_levels,
+        "LevelGrouping original level",
+    )
+    groups = _native_string_values(
+        grouping.grouped_levels,
+        "LevelGrouping grouped level",
+    )
     if (
         not originals
         or not groups
-        or not all(type(level) is str for level in originals + groups)
         or len(originals) != len(set(originals))
         or len(groups) != len(set(groups))
     ):
         raise SuperGLMIdentityError("LevelGrouping levels must be non-empty unique strings")
-    if type(grouping.original_to_group) is not dict or set(grouping.original_to_group) != set(
-        originals
-    ):
+    try:
+        original_to_group_raw = _string_keyed_mapping(
+            grouping.original_to_group,
+            "LevelGrouping original_to_group",
+        )
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError("LevelGrouping original_to_group is malformed") from exc
+    if set(original_to_group_raw) != set(originals):
         raise SuperGLMIdentityError("LevelGrouping original_to_group is malformed")
-    if type(grouping.group_to_originals) is not dict or set(grouping.group_to_originals) != set(
-        groups
-    ):
+    try:
+        original_to_group = {
+            original: _native_string(group, "LevelGrouping original_to_group value")
+            for original, group in original_to_group_raw.items()
+        }
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError("LevelGrouping original_to_group values are malformed") from exc
+    if any(group not in groups for group in original_to_group.values()):
+        raise SuperGLMIdentityError("LevelGrouping original_to_group values are malformed")
+    try:
+        group_to_originals_raw = _string_keyed_mapping(
+            grouping.group_to_originals,
+            "LevelGrouping group_to_originals",
+        )
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError("LevelGrouping group_to_originals is malformed") from exc
+    if set(group_to_originals_raw) != set(groups):
         raise SuperGLMIdentityError("LevelGrouping group_to_originals is malformed")
+    group_to_originals: dict[str, list[str]] = {}
     for group in groups:
-        members = grouping.group_to_originals[group]
-        if type(members) is not list or not members:
+        raw_members = group_to_originals_raw[group]
+        if type(raw_members) is not list or not raw_members:
             raise SuperGLMIdentityError("LevelGrouping group members are malformed")
+        try:
+            members = _native_string_values(raw_members, "LevelGrouping group member")
+        except SuperGLMIdentityError as exc:
+            raise SuperGLMIdentityError("LevelGrouping group members are malformed") from exc
+        group_to_originals[group] = members
         if any(
-            member not in originals or grouping.original_to_group.get(member) != group
-            for member in members
+            member not in originals or original_to_group.get(member) != group for member in members
         ):
             raise SuperGLMIdentityError("LevelGrouping mappings are inconsistent")
-    flattened = [member for group in groups for member in grouping.group_to_originals[group]]
+    flattened = [member for group in groups for member in group_to_originals[group]]
     if len(flattened) != len(set(flattened)) or set(flattened) != set(originals):
         raise SuperGLMIdentityError("LevelGrouping mappings are inconsistent")
     return {
-        "original_to_group": dict(grouping.original_to_group),
-        "group_to_originals": {group: list(grouping.group_to_originals[group]) for group in groups},
-        "all_original_levels": list(originals),
-        "grouped_levels": list(groups),
+        "original_to_group": original_to_group,
+        "group_to_originals": group_to_originals,
+        "all_original_levels": originals,
+        "grouped_levels": groups,
     }
 
 
@@ -722,7 +891,12 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         raise SuperGLMIdentityError(
             f"{spline_type.__name__} is not pristine: fitted bounds are populated"
         )
-    if spec._knot_strategy_actual != spec.knot_strategy:
+    knot_strategy = _native_string(spec.knot_strategy, f"{spline_type.__name__}.knot_strategy")
+    actual_knot_strategy = _native_string(
+        spec._knot_strategy_actual,
+        f"{spline_type.__name__}._knot_strategy_actual",
+    )
+    if actual_knot_strategy != knot_strategy:
         raise SuperGLMIdentityError(
             f"{spline_type.__name__} is not pristine: fitted knot strategy is populated"
         )
@@ -745,16 +919,21 @@ def _spline_payload(spec: object) -> dict[str, Any]:
     degree = _integer(spec.degree, f"{spline_type.__name__}.degree")
     if n_knots < 1 or degree < 1:
         raise SuperGLMIdentityError("spline n_knots and degree must be positive")
-    if spec.knot_strategy not in {
+    if knot_strategy not in {
         "uniform",
         "quantile",
         "quantile_rows",
         "quantile_tempered",
     }:
         raise SuperGLMIdentityError("spline knot_strategy is unsupported")
-    if spec.penalty not in {"ssp", "none"}:
+    penalty = _native_string(spec.penalty, f"{spline_type.__name__}.penalty")
+    if penalty not in {"ssp", "none"}:
         raise SuperGLMIdentityError("spline penalty must be 'ssp' or 'none'")
-    if spec.extrapolation not in {"clip", "extend", "error"}:
+    extrapolation = _native_string(
+        spec.extrapolation,
+        f"{spline_type.__name__}.extrapolation",
+    )
+    if extrapolation not in {"clip", "extend", "error"}:
         raise SuperGLMIdentityError("spline extrapolation is unsupported")
     knot_alpha = _finite_float(spec.knot_alpha, f"{spline_type.__name__}.knot_alpha")
     if knot_alpha < 0.0:
@@ -782,9 +961,9 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         "kind": _SPLINE_PAYLOAD_KINDS[spline_type],
         "n_knots": n_knots,
         "degree": degree,
-        "knot_strategy": spec.knot_strategy,
+        "knot_strategy": knot_strategy,
         "knot_alpha": knot_alpha,
-        "penalty": spec.penalty,
+        "penalty": penalty,
         "select": _bool_value(spec.select, f"{spline_type.__name__}.select"),
         "knots": explicit_knots,
         "boundary": boundary,
@@ -796,7 +975,7 @@ def _spline_payload(spec: object) -> dict[str, Any]:
         "n_bins": (
             None if spec.n_bins is None else _integer(spec.n_bins, f"{spline_type.__name__}.n_bins")
         ),
-        "extrapolation": spec.extrapolation,
+        "extrapolation": extrapolation,
         "constraint": constraint,
         "m": m_orders,
         "lambda_policy": lambda_policy,
@@ -828,19 +1007,23 @@ def _boundary_payload(value: object) -> list[float] | None:
 def _constraint_payload(spec: object) -> dict[str, str] | None:
     if spec.constraint_kind is None:
         if (
-            spec.constraint_mode != "postfit"
+            _native_string(spec.constraint_mode, "spline constraint mode") != "postfit"
             or spec.monotone is not None
-            or spec.monotone_mode != "postfit"
+            or _native_string(spec.monotone_mode, "spline monotone mode") != "postfit"
         ):
             raise SuperGLMIdentityError("spline constraint state is malformed")
         return None
-    if spec.constraint_kind not in {"increasing", "decreasing", "convex", "concave"}:
+    constraint_kind = _native_string(spec.constraint_kind, "spline constraint kind")
+    constraint_mode = _native_string(spec.constraint_mode, "spline constraint mode")
+    monotone = _native_string(spec.monotone, "spline monotone kind")
+    monotone_mode = _native_string(spec.monotone_mode, "spline monotone mode")
+    if constraint_kind not in {"increasing", "decreasing", "convex", "concave"}:
         raise SuperGLMIdentityError("spline constraint kind is unsupported")
-    if spec.constraint_mode not in {"fit", "postfit"}:
+    if constraint_mode not in {"fit", "postfit"}:
         raise SuperGLMIdentityError("spline constraint mode is unsupported")
-    if spec.monotone != spec.constraint_kind or spec.monotone_mode != spec.constraint_mode:
+    if monotone != constraint_kind or monotone_mode != constraint_mode:
         raise SuperGLMIdentityError("spline constraint state is malformed")
-    return {"kind": spec.constraint_kind, "mode": spec.constraint_mode}
+    return {"kind": constraint_kind, "mode": constraint_mode}
 
 
 def _lambda_policy_payload(value: object) -> dict[str, Any] | None:
@@ -849,9 +1032,8 @@ def _lambda_policy_payload(value: object) -> dict[str, Any] | None:
     if type(value) is LambdaPolicy:
         return _one_lambda_policy_payload(value)
     if type(value) is dict:
-        if not all(type(key) is str and key for key in value):
-            raise SuperGLMIdentityError("lambda policy keys must be non-empty strings")
-        return {key: _one_lambda_policy_payload(policy) for key, policy in value.items()}
+        policies = _string_keyed_mapping(value, "lambda policy")
+        return {key: _one_lambda_policy_payload(policy) for key, policy in policies.items()}
     raise SuperGLMIdentityError("lambda policy must use exact built-in LambdaPolicy values")
 
 
@@ -859,9 +1041,10 @@ def _one_lambda_policy_payload(policy: object) -> dict[str, Any]:
     if type(policy) is not LambdaPolicy:
         raise SuperGLMIdentityError("lambda policy must be the exact built-in LambdaPolicy")
     _require_fields(policy, frozenset({"mode", "value"}), "LambdaPolicy")
-    if policy.mode == "estimate" and policy.value is None:
+    mode = _native_string(policy.mode, "LambdaPolicy.mode")
+    if mode == "estimate" and policy.value is None:
         return {"mode": "estimate", "value": None}
-    if policy.mode == "fixed" and policy.value is not None:
+    if mode == "fixed" and policy.value is not None:
         fixed = _finite_float(policy.value, "fixed lambda policy")
         if fixed < 0.0:
             raise SuperGLMIdentityError("fixed lambda policy must be non-negative")
@@ -925,9 +1108,15 @@ def _flavor_payload(flavor: object, *, allow_adaptive: bool) -> dict[str, Any] |
 def _penalty_targets_payload(value: object) -> list[str] | None:
     if value is None:
         return None
-    if type(value) is not frozenset or not all(type(item) is str and item for item in value):
+    if type(value) is not frozenset:
         raise SuperGLMIdentityError("penalty targets are malformed")
-    return sorted(value)
+    try:
+        targets = _native_string_values(value, "penalty target")
+    except SuperGLMIdentityError as exc:
+        raise SuperGLMIdentityError("penalty targets are malformed") from exc
+    if len(targets) != len(set(targets)):
+        raise SuperGLMIdentityError("penalty targets are malformed")
+    return sorted(targets)
 
 
 def _family_payload(family: object) -> dict[str, Any]:
@@ -937,18 +1126,20 @@ def _family_payload(family: object) -> dict[str, Any]:
         "gamma": Gamma,
         "binomial": Binomial,
     }
-    if type(family) is str:
-        if family not in parameter_free:
+    if type(family) in {str, np.str_}:
+        family_name = _native_string(family, "SuperGLM family")
+        if family_name not in parameter_free:
             raise SuperGLMIdentityError("unsupported SuperGLM family shortcut")
-        return {"kind": family}
+        return {"kind": family_name}
     for kind, family_type in parameter_free.items():
         if type(family) is family_type:
             _require_fields(family, frozenset(), family_type.__name__)
             return {"kind": kind}
     if type(family) is NegativeBinomial:
         _require_fields(family, frozenset({"theta"}), "NegativeBinomial")
-        if type(family.theta) is str:
-            if family.theta != "auto":
+        if type(family.theta) in {str, np.str_}:
+            theta_name = _native_string(family.theta, "NegativeBinomial.theta")
+            if theta_name != "auto":
                 raise SuperGLMIdentityError("NegativeBinomial.theta must be positive or 'auto'")
             theta: float | str = "auto"
         else:
@@ -988,10 +1179,11 @@ def _link_payload(link: object, family: object) -> dict[str, Any]:
             "tweedie": "log",
         }[family_kind]
         return {"kind": default_kind}
-    if type(link) is str:
-        if link not in parameter_free:
+    if type(link) in {str, np.str_}:
+        link_name = _native_string(link, "SuperGLM link")
+        if link_name not in parameter_free:
             raise SuperGLMIdentityError("unsupported SuperGLM link shortcut")
-        return {"kind": link}
+        return {"kind": link_name}
     for kind, link_type in parameter_free.items():
         if type(link) is link_type:
             _require_fields(link, frozenset(), link_type.__name__)
@@ -1011,16 +1203,19 @@ def _link_payload(link: object, family: object) -> dict[str, Any]:
     raise SuperGLMIdentityError("unsupported SuperGLM link")
 
 
-def _pending_interactions(value: object) -> None:
+def _pending_interactions(value: object) -> list[tuple[str, str]]:
     if type(value) is not list:
         raise SuperGLMIdentityError("pending interactions must be a list")
+    normalized: list[tuple[str, str]] = []
     for pair in value:
-        if (
-            type(pair) is not tuple
-            or len(pair) != 2
-            or not all(type(name) is str and name for name in pair)
-        ):
+        if type(pair) is not tuple or len(pair) != 2:
             raise SuperGLMIdentityError("pending interactions must contain name pairs")
+        try:
+            left, right = (_native_string(name, "pending interaction name") for name in pair)
+        except SuperGLMIdentityError as exc:
+            raise SuperGLMIdentityError("pending interactions must contain name pairs") from exc
+        normalized.append((left, right))
+    return normalized
 
 
 def _require_fields(value: object, expected: frozenset[str], label: str) -> None:
@@ -1049,6 +1244,38 @@ def _require_empty_dict(value: object, label: str) -> None:
         raise SuperGLMIdentityError(f"{label} is not pristine: expected an empty mapping")
 
 
+def _native_string(value: object, label: str, *, allow_empty: bool = False) -> str:
+    if type(value) is str:
+        normalized = value
+    elif type(value) is np.str_:
+        normalized = str(value)
+    else:
+        raise SuperGLMIdentityError(f"{label} must be a string scalar")
+    if not allow_empty and not normalized:
+        raise SuperGLMIdentityError(f"{label} must be a non-empty string")
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SuperGLMIdentityError(f"{label} must be UTF-8 encodable") from exc
+    return normalized
+
+
+def _native_string_values(values: object, label: str) -> list[str]:
+    return [_native_string(value, label) for value in values]
+
+
+def _string_keyed_mapping(value: object, label: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise SuperGLMIdentityError(f"{label} must be a mapping")
+    normalized: dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = _native_string(raw_key, f"{label} key")
+        if key in normalized:
+            raise SuperGLMIdentityError(f"{label} contains duplicate string keys")
+        normalized[key] = item
+    return normalized
+
+
 def _validate_positive_integer_or_list(value: object, label: str) -> None:
     values = value if type(value) is list else [value]
     if not values or any(_integer(item, label) < 1 for item in values):
@@ -1057,9 +1284,7 @@ def _validate_positive_integer_or_list(value: object, label: str) -> None:
 
 def _validate_positive_integer_config(value: object, label: str) -> None:
     if type(value) is dict:
-        if not all(type(key) is str and key for key in value):
-            raise SuperGLMIdentityError(f"{label} mapping keys must be non-empty strings")
-        values = value.values()
+        values = _string_keyed_mapping(value, f"{label} mapping").values()
     else:
         values = (value,)
     if any(_integer(item, label) < 1 for item in values):
@@ -1099,9 +1324,8 @@ def _integer_or_list(value: object, label: str) -> int | list[int]:
 
 def _integer_or_mapping(value: object, label: str) -> int | dict[str, int]:
     if type(value) is dict:
-        if not all(type(key) is str for key in value):
-            raise SuperGLMIdentityError(f"{label} mapping keys must be strings")
-        return {key: _integer(item, label) for key, item in value.items()}
+        normalized = _string_keyed_mapping(value, f"{label} mapping")
+        return {key: _integer(item, label) for key, item in normalized.items()}
     return _integer(value, label)
 
 

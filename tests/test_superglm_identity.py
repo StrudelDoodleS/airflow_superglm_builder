@@ -42,7 +42,7 @@ from superglm import (
     SuperGLM,
     Tweedie,
 )
-from superglm.features.constraint import Constraint
+from superglm.features.constraint import Constraint, ConstraintSpec
 from superglm.features.spline import CardinalCRSpline
 from superglm.types import LambdaPolicy
 
@@ -363,6 +363,105 @@ def test_numpy_and_native_constructor_scalars_are_equivalent():
     )
 
 
+def test_numpy_string_scalars_match_native_model_configuration():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        native = SuperGLM(
+            family="gaussian",
+            link="identity",
+            penalty=GroupLasso(features=["x"]),
+            features={"x": Categorical(base="first")},
+            categorical_base="first",
+            interactions=[("x", "x")],
+            direct_solve="qr",
+            n_bins={"x": 32},
+            convergence="coefficients",
+        )
+        numpy_strings = SuperGLM(
+            family=np.str_("gaussian"),
+            link=np.str_("identity"),
+            penalty=GroupLasso(features=[np.str_("x")]),
+            features={np.str_("x"): Categorical(base=np.str_("first"))},
+            categorical_base=np.str_("first"),
+            interactions=[(np.str_("x"), np.str_("x"))],
+            direct_solve=np.str_("qr"),
+            n_bins={np.str_("x"): 32},
+            convergence=np.str_("coefficients"),
+        )
+
+    assert identity.canonical_superglm_bytes(native) == identity.canonical_superglm_bytes(
+        numpy_strings
+    )
+    assert identity.canonical_superglm_bytes(
+        SuperGLM(family=NegativeBinomial(theta="auto"))
+    ) == identity.canonical_superglm_bytes(SuperGLM(family=NegativeBinomial(theta=np.str_("auto"))))
+
+
+def test_numpy_string_scalars_match_native_auto_detect_configuration():
+    native = SuperGLM(
+        splines=["x"],
+        categorical_base="first",
+        n_bins={"x": 32},
+    )
+    numpy_strings = SuperGLM(
+        splines=[np.str_("x")],
+        categorical_base=np.str_("first"),
+        n_bins={np.str_("x"): 32},
+    )
+
+    assert identity.canonical_superglm_bytes(native) == identity.canonical_superglm_bytes(
+        numpy_strings
+    )
+
+
+def test_numpy_string_scalars_match_native_spline_configuration():
+    native = SuperGLM(
+        features={
+            "x": PSpline(
+                knot_strategy="uniform",
+                penalty="ssp",
+                extrapolation="clip",
+                constraint=ConstraintSpec(mode="fit", kind="increasing"),
+                lambda_policy={"m2": LambdaPolicy("fixed", 0.3)},
+            )
+        }
+    )
+    numpy_strings = SuperGLM(
+        features={
+            np.str_("x"): PSpline(
+                knot_strategy=np.str_("uniform"),
+                penalty=np.str_("ssp"),
+                extrapolation=np.str_("clip"),
+                constraint=ConstraintSpec(
+                    mode=np.str_("fit"),
+                    kind=np.str_("increasing"),
+                ),
+                lambda_policy={
+                    np.str_("m2"): LambdaPolicy(np.str_("fixed"), 0.3),
+                },
+            )
+        }
+    )
+
+    assert identity.canonical_superglm_bytes(native) == identity.canonical_superglm_bytes(
+        numpy_strings
+    )
+
+
+def test_hostile_string_subclasses_are_rejected_without_invoking_equality():
+    class HostileString(str):
+        def __eq__(self, other):
+            raise AssertionError(f"unexpected equality with {other!r}")
+
+        __hash__ = str.__hash__
+
+    model = SuperGLM()
+    model._direct_solve = HostileString("auto")
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="direct_solve"):
+        identity.canonical_superglm_payload(model)
+
+
 def test_negative_and_positive_zero_are_canonical_scalar_equivalents():
     assert identity.canonical_superglm_bytes(
         SuperGLM(spline_penalty=-0.0)
@@ -430,6 +529,61 @@ def _grouping(*, reverse_mapping: bool = False) -> LevelGrouping:
     )
 
 
+def _wide_grouping() -> LevelGrouping:
+    return LevelGrouping(
+        original_to_group={
+            "a0": "g0",
+            "a1": "g0",
+            "b": "g1",
+            "c": "g2",
+            "d": "g3",
+            "e": "g4",
+            "f": "g5",
+        },
+        group_to_originals={
+            "g0": ["a0", "a1"],
+            "g1": ["b"],
+            "g2": ["c"],
+            "g3": ["d"],
+            "g4": ["e"],
+            "g5": ["f"],
+        },
+        all_original_levels=["a0", "a1", "b", "c", "d", "e", "f"],
+        grouped_levels=["g0", "g1", "g2", "g3", "g4", "g5"],
+    )
+
+
+def test_numpy_string_scalars_match_native_grouping_configuration():
+    numpy_grouping = LevelGrouping(
+        original_to_group={
+            np.str_("a"): np.str_("low"),
+            np.str_("b"): np.str_("low"),
+            np.str_("c"): np.str_("high"),
+        },
+        group_to_originals={
+            np.str_("low"): [np.str_("a"), np.str_("b")],
+            np.str_("high"): [np.str_("c")],
+        },
+        all_original_levels=[np.str_("a"), np.str_("b"), np.str_("c")],
+        grouped_levels=[np.str_("low"), np.str_("high")],
+    )
+    native = SuperGLM(
+        features={"cat": Categorical(base="first", grouping=_grouping())},
+    )
+    numpy_strings = SuperGLM(
+        features={
+            np.str_("cat"): Categorical(
+                base=np.str_("first"),
+                grouping=numpy_grouping,
+            )
+        },
+    )
+
+    assert identity.canonical_superglm_bytes(native) == identity.canonical_superglm_bytes(
+        numpy_strings
+    )
+
+
 @pytest.mark.parametrize(
     ("feature", "expected_kind"),
     [
@@ -490,6 +644,34 @@ def test_polynomial_categorical_and_full_level_grouping_configuration_is_semanti
     )
 
 
+@pytest.mark.parametrize("bound_name", ["_lo", "_hi"])
+def test_polynomial_non_scalar_fitted_bounds_fail_closed(bound_name):
+    polynomial = Polynomial(degree=3)
+    setattr(polynomial, bound_name, np.array([0.0, 1.0]))
+    model = SuperGLM(features={"poly": polynomial})
+
+    with pytest.raises(identity.SuperGLMIdentityError, match=r"Polynomial.*bounds"):
+        identity.canonical_superglm_payload(model)
+
+
+def test_level_grouping_non_scalar_mapping_values_fail_closed():
+    grouping = _grouping()
+    grouping.original_to_group["a"] = np.array(["low", "high"])
+    model = SuperGLM(features={"cat": Categorical(grouping=grouping)})
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="original_to_group values"):
+        identity.canonical_superglm_payload(model)
+
+
+def test_level_grouping_non_scalar_members_fail_closed():
+    grouping = _grouping()
+    grouping.group_to_originals["low"][0] = np.array(["a", "b"])
+    model = SuperGLM(features={"cat": Categorical(grouping=grouping)})
+
+    with pytest.raises(identity.SuperGLMIdentityError, match="group members"):
+        identity.canonical_superglm_payload(model)
+
+
 def test_ordered_categorical_step_and_spline_semantics_are_recorded():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
@@ -520,6 +702,115 @@ def test_ordered_categorical_step_and_spline_semantics_are_recorded():
     assert spline_payload["basis"] == "spline"
     assert spline_payload["level_values"] == {"a": 1.0, "b": 2.0, "c": 4.0}
     assert step_payload != spline_payload
+
+
+def test_numpy_string_scalars_match_native_ordered_categorical_configuration():
+    levels = ["a", "b", "c", "d", "e", "f"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        native = SuperGLM(
+            features={
+                "band": OrderedCategorical(
+                    order=levels,
+                    basis="spline",
+                    kind="ps",
+                    base="first",
+                    penalty="ssp",
+                )
+            }
+        )
+        numpy_strings = SuperGLM(
+            features={
+                np.str_("band"): OrderedCategorical(
+                    order=[np.str_(level) for level in levels],
+                    basis=np.str_("spline"),
+                    kind=np.str_("ps"),
+                    base=np.str_("first"),
+                    penalty=np.str_("ssp"),
+                )
+            }
+        )
+
+    assert identity.canonical_superglm_bytes(native) == identity.canonical_superglm_bytes(
+        numpy_strings
+    )
+
+
+def test_grouped_ordered_spline_original_coordinates_are_semantic():
+    grouping = _wide_grouping()
+    first_coordinates = {
+        "a0": 0.0,
+        "a1": 2.0,
+        "b": 3.0,
+        "c": 4.0,
+        "d": 5.0,
+        "e": 6.0,
+        "f": 7.0,
+    }
+    second_coordinates = {**first_coordinates, "a0": 0.5, "a1": 1.5}
+    first = SuperGLM(
+        features={
+            "band": OrderedCategorical(values=first_coordinates, grouping=grouping),
+        }
+    )
+    second = SuperGLM(
+        features={
+            "band": OrderedCategorical(values=second_coordinates, grouping=grouping),
+        }
+    )
+
+    first_payload = identity.canonical_superglm_payload(first)["features"]["plan"][0]["spec"]
+
+    assert first_payload["original_level_values"] == {
+        "scope": "original",
+        "values": first_coordinates,
+    }
+    assert identity.canonical_superglm_bytes(first) != identity.canonical_superglm_bytes(second)
+
+
+def test_grouped_ordered_spline_accepts_group_order_coordinate_shape():
+    grouping = _wide_grouping()
+    model = SuperGLM(
+        features={
+            "band": OrderedCategorical(order=grouping.grouped_levels, grouping=grouping),
+        }
+    )
+
+    payload = identity.canonical_superglm_payload(model)["features"]["plan"][0]["spec"]
+
+    assert payload["original_level_values"] == {
+        "scope": "grouped",
+        "values": {
+            "g0": 0.0,
+            "g1": 0.2,
+            "g2": 0.4,
+            "g3": 0.6000000000000001,
+            "g4": 0.8,
+            "g5": 1.0,
+        },
+    }
+
+
+def test_grouped_ordered_spline_accepts_upstream_knot_clamping():
+    grouping = _grouping()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            features={
+                "band": OrderedCategorical(
+                    order=grouping.grouped_levels,
+                    grouping=grouping,
+                ),
+            }
+        )
+
+    payload = identity.canonical_superglm_payload(model)["features"]["plan"][0]["spec"]
+
+    assert payload["spline"]["n_knots"] == 1
+    assert payload["original_level_values"] == {
+        "scope": "grouped",
+        "values": {"low": 0.0, "high": 1.0},
+    }
 
 
 def test_ordered_categorical_interactions_are_rejected():
