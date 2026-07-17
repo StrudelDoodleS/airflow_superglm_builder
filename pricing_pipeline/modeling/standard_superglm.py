@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from superglm import cross_validate
 
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
@@ -28,6 +27,7 @@ from pricing_pipeline.modeling.validation_curves import (
     normalize_validation_curves,
     validation_curve_capture_failure,
 )
+from pricing_pipeline.modeling.superglm_identity import exact_superglm_cross_validate
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
 from pricing_pipeline.publishing.superglm_publication_receipt import (
@@ -95,7 +95,7 @@ def run_standard_superglm_build(
     model_source_root: str | Path,
     created_by: str,
     offset_contract: OffsetExportContract | None = None,
-    cross_validate_fn: Callable[..., Any] = cross_validate,
+    cross_validate_fn: Callable[..., Any] = exact_superglm_cross_validate,
 ) -> ApprovedModelBuild:
     _validate_input_lengths(inputs)
     _validate_canonical_row_ids(
@@ -118,9 +118,7 @@ def run_standard_superglm_build(
         offset_source_name=offset_source_name,
     )
     if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
+        raise StandardSuperGLMError("superglm_model must be an unfitted, copyable SuperGLM model")
     try:
         cv_model = deepcopy(superglm_model)
         final_model = deepcopy(superglm_model)
@@ -211,14 +209,10 @@ def run_standard_superglm_build(
             ),
             offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
             offset_source=(
-                None
-                if inputs.offset_source is None
-                else np.asarray(inputs.offset_source).copy()
+                None if inputs.offset_source is None else np.asarray(inputs.offset_source).copy()
             ),
             export_weight=(
-                None
-                if inputs.export_weight is None
-                else np.asarray(inputs.export_weight).copy()
+                None if inputs.export_weight is None else np.asarray(inputs.export_weight).copy()
             ),
             cv_report=cv_report,
             model_name=model_config.model_name,
@@ -455,7 +449,7 @@ def run_cross_validation(
     split_indices: Iterable[tuple[Any, Any]],
     fit_mode: str,
     scoring: str | Callable | Sequence[str | Callable],
-    cross_validate_fn: Callable[..., Any] = cross_validate,
+    cross_validate_fn: Callable[..., Any] = exact_superglm_cross_validate,
 ) -> CVEvidence:
     _validate_input_lengths(inputs)
     splitter = PrecomputedSplitter(split_indices, row_count=len(inputs.X))
@@ -500,8 +494,7 @@ def run_cross_validation(
         ).folds
     except StandardSuperGLMError as exc:
         raise StandardSuperGLMError(
-            "SuperGLM CV returned fold indices do not exactly match requested "
-            "validation splits"
+            "SuperGLM CV returned fold indices do not exactly match requested validation splits"
         ) from exc
     if len(returned_folds) != len(requested_folds) or any(
         not np.array_equal(returned_train, requested_train)
@@ -512,8 +505,7 @@ def run_cross_validation(
         ) in zip(returned_folds, requested_folds, strict=True)
     ):
         raise StandardSuperGLMError(
-            "SuperGLM CV returned fold indices do not exactly match requested "
-            "validation splits"
+            "SuperGLM CV returned fold indices do not exactly match requested validation splits"
         )
 
     non_converged = result.fold_scores.loc[
@@ -651,9 +643,7 @@ def cv_result_to_records(
     )
     fold_metrics: list[FoldMetric] = []
     validation_splits: list[ValidationSplitResult] = []
-    result_folds = (
-        tuple(result.fold_indices or ()) if fold_indices is None else fold_indices
-    )
+    result_folds = tuple(result.fold_indices or ()) if fold_indices is None else fold_indices
     fold_score_records = result.fold_scores.to_dict("records")
     if len(fold_score_records) != len(result_folds):
         raise StandardSuperGLMError(
@@ -719,8 +709,7 @@ def cv_result_to_records(
         )
 
     fold_index_records = [
-        {"train": train.tolist(), "test": test.tolist()}
-        for train, test in result_folds
+        {"train": train.tolist(), "test": test.tolist()} for train, test in result_folds
     ]
     report = {
         "schema_version": 1,
@@ -743,24 +732,18 @@ def _requested_metric_names(
 ) -> tuple[str, ...]:
     values = (scoring,) if isinstance(scoring, str) or callable(scoring) else tuple(scoring)
     explicit_metric_names = tuple(value for value in values if isinstance(value, str))
-    missing_mean_metrics = [
-        name for name in explicit_metric_names if name not in mean_scores
-    ]
+    missing_mean_metrics = [name for name in explicit_metric_names if name not in mean_scores]
     if missing_mean_metrics:
         raise StandardSuperGLMError(
-            "SuperGLM mean_scores is missing requested metrics: "
-            + ", ".join(missing_mean_metrics)
+            "SuperGLM mean_scores is missing requested metrics: " + ", ".join(missing_mean_metrics)
         )
     if len(explicit_metric_names) == len(values):
         return explicit_metric_names
-    metric_names = tuple(
-        str(name) for name in fold_score_columns if str(name) in mean_scores
-    )
+    metric_names = tuple(str(name) for name in fold_score_columns if str(name) in mean_scores)
     missing_metrics = [name for name in mean_scores if name not in metric_names]
     if missing_metrics:
         raise StandardSuperGLMError(
-            "SuperGLM fold_scores is missing aggregate metrics: "
-            + ", ".join(missing_metrics)
+            "SuperGLM fold_scores is missing aggregate metrics: " + ", ".join(missing_metrics)
         )
     return metric_names
 

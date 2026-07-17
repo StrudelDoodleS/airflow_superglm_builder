@@ -81,6 +81,36 @@ def test_new_candidate_bundle_records_installed_superglm_runtime_identity(tmp_pa
     assert envelope["superglm_git_sha"] == installed_git_sha
 
 
+def test_candidate_artifact_consumes_the_shared_runtime_resolver(tmp_path, monkeypatch):
+    module = importlib.import_module("pricing_pipeline.workbench.artifacts")
+    from pricing_pipeline.modeling import superglm_identity
+
+    calls = 0
+
+    def resolve_runtime():
+        nonlocal calls
+        calls += 1
+        return superglm_identity.SuperGLMRuntimeIdentity(
+            version="0.12.0",
+            git_sha="a" * 40,
+        )
+
+    monkeypatch.setattr(
+        superglm_identity,
+        "resolve_superglm_runtime_identity",
+        resolve_runtime,
+    )
+
+    metadata = module.save_candidate_bundle(
+        _minimal_bundle(),
+        tmp_path / "candidate.joblib",
+    )
+
+    assert calls == 1
+    assert metadata.superglm_version == "0.12.0"
+    assert metadata.superglm_git_sha == "a" * 40
+
+
 @pytest.mark.parametrize(
     "direct_url_text",
     [
@@ -98,9 +128,17 @@ def test_new_candidate_bundle_requires_auditable_installed_git_commit(
     direct_url_text,
 ):
     CandidateArtifactError, _, _, save_candidate_bundle = _artifact_api()
+    from pricing_pipeline.modeling import superglm_identity
+
     fake_distribution = SimpleNamespace(read_text=lambda filename: direct_url_text)
     monkeypatch.setattr(
-        "pricing_pipeline.workbench.artifacts.distribution",
+        superglm_identity.metadata,
+        "version",
+        lambda package_name: superglm_identity.SUPERGLM_VERSION,
+    )
+    monkeypatch.setattr(
+        superglm_identity.metadata,
+        "distribution",
         lambda package_name: fake_distribution,
     )
 
@@ -318,9 +356,7 @@ def test_candidate_bundle_rejects_incompatible_superglm_git_sha_before_deseriali
 ):
     CandidateArtifactError, _, load_candidate_bundle, save_candidate_bundle = _artifact_api()
     metadata = save_candidate_bundle(_minimal_bundle(), tmp_path / "candidate.joblib")
-    incompatible_git_sha = (
-        "0" * 40 if metadata.superglm_git_sha != "0" * 40 else "1" * 40
-    )
+    incompatible_git_sha = "0" * 40 if metadata.superglm_git_sha != "0" * 40 else "1" * 40
     deserialized = False
 
     def fail_if_loaded(path):

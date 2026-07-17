@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import platform
 import tempfile
 from dataclasses import dataclass, replace
-from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -79,9 +77,7 @@ class CandidateBundle:
                     raise CandidateArtifactError(f"{role}_name was supplied without {role}")
                 continue
             if not isinstance(values, pd.Series | np.ndarray):
-                raise CandidateArtifactError(
-                    f"{role} must be a pandas Series or numpy array"
-                )
+                raise CandidateArtifactError(f"{role} must be a pandas Series or numpy array")
             if isinstance(values, np.ndarray) and values.ndim != 1:
                 raise CandidateArtifactError(f"{role} must be one-dimensional")
             series = pd.Series(values).reset_index(drop=True)
@@ -120,11 +116,16 @@ class CandidateArtifactMetadata:
     superglm_git_sha: str
 
 
-def _superglm_version() -> str:
+def _superglm_runtime_identity():
+    from pricing_pipeline.modeling.superglm_identity import (
+        SuperGLMIdentityError,
+        resolve_superglm_runtime_identity,
+    )
+
     try:
-        return version("superglm")
-    except PackageNotFoundError:
-        return "unknown"
+        return resolve_superglm_runtime_identity()
+    except SuperGLMIdentityError as exc:
+        raise CandidateArtifactError(str(exc)) from exc
 
 
 def _is_git_sha(value: object) -> TypeGuard[str]:
@@ -134,22 +135,6 @@ def _is_git_sha(value: object) -> TypeGuard[str]:
         and value.lower() == value
         and all(character in "0123456789abcdef" for character in value)
     )
-
-
-def _superglm_git_sha() -> str:
-    try:
-        direct_url_text = distribution("superglm").read_text("direct_url.json")
-        direct_url = json.loads(direct_url_text) if direct_url_text is not None else {}
-    except (PackageNotFoundError, json.JSONDecodeError):
-        direct_url = {}
-    vcs_info = direct_url.get("vcs_info", {}) if isinstance(direct_url, dict) else {}
-    git_sha = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
-    if vcs_info.get("vcs") != "git" or not _is_git_sha(git_sha):
-        raise CandidateArtifactError(
-            "installed SuperGLM direct_url.json must contain a 40-character "
-            "lowercase hex git SHA in vcs_info.commit_id"
-        )
-    return git_sha
 
 
 def _sha256(path: Path) -> str:
@@ -180,20 +165,19 @@ def _validate_runtime_versions(
             f"artifact={expected_python_version!r}, runtime={actual_python!r}"
         )
 
-    actual_superglm = _superglm_version()
-    if expected_superglm_version != actual_superglm:
+    runtime = _superglm_runtime_identity()
+    if expected_superglm_version != runtime.version:
         raise CandidateArtifactError(
             "candidate SuperGLM version is incompatible: "
-            f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"
+            f"artifact={expected_superglm_version!r}, runtime={runtime.version!r}"
         )
 
     if expected_superglm_git_sha is not None:
-        actual_superglm_git_sha = _superglm_git_sha()
-        if expected_superglm_git_sha != actual_superglm_git_sha:
+        if expected_superglm_git_sha != runtime.git_sha:
             raise CandidateArtifactError(
                 "candidate SuperGLM git SHA is incompatible: "
                 f"artifact={expected_superglm_git_sha!r}, "
-                f"runtime={actual_superglm_git_sha!r}"
+                f"runtime={runtime.git_sha!r}"
             )
 
 
@@ -210,8 +194,9 @@ def save_candidate_bundle(
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     python_version = platform.python_version()
-    superglm_version = _superglm_version()
-    superglm_git_sha = _superglm_git_sha()
+    runtime = _superglm_runtime_identity()
+    superglm_version = runtime.version
+    superglm_git_sha = runtime.git_sha
     envelope = {
         "format": BUNDLE_FORMAT,
         "python_version": python_version,
@@ -303,9 +288,7 @@ def load_candidate_bundle(
     if envelope.get("superglm_version") != expected_superglm_version:
         raise CandidateArtifactError("candidate artifact SuperGLM metadata is inconsistent")
     if envelope.get("superglm_git_sha") != expected_superglm_git_sha:
-        raise CandidateArtifactError(
-            "candidate artifact SuperGLM git SHA metadata is inconsistent"
-        )
+        raise CandidateArtifactError("candidate artifact SuperGLM git SHA metadata is inconsistent")
     bundle = envelope.get("bundle")
     if not isinstance(bundle, CandidateBundle):
         raise CandidateArtifactError("candidate artifact envelope does not contain a bundle")
