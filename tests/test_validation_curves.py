@@ -6,7 +6,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from superglm.links import IdentityLink, LogLink
+from superglm.links import (
+    IdentityLink,
+    LogLink,
+    NegativeBinomialLink,
+    PowerLink,
+)
 
 
 def _api():
@@ -188,6 +193,7 @@ def test_unsupported_entries_are_skipped_without_weakening_supported_capture():
             "support": None,
             "curves": None,
         },
+        "interaction": {"family": "interaction"},
         "numeric_term": _continuous_term(),
         "offset": {"family": "offset"},
     }
@@ -200,6 +206,52 @@ def test_unsupported_entries_are_skipped_without_weakening_supported_capture():
 
     assert capture.status == "COMPLETE"
     assert {point.term_name for point in capture.points} == {"numeric_term"}
+
+
+@pytest.mark.parametrize(
+    "ambiguous_entry",
+    [
+        None,
+        {},
+        {"domain": {"x": [1.0]}},
+        {"family": "mystery"},
+    ],
+    ids=("null", "empty", "missing-family", "unknown-family"),
+)
+def test_ambiguous_top_level_entry_invalidates_otherwise_valid_capture(
+    ambiguous_entry,
+):
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {
+            "numeric_term": _continuous_term(),
+            "ambiguous_term": ambiguous_entry,
+        },
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert capture.reason
+    assert capture.points == ()
+
+
+def test_normalized_top_level_term_name_collisions_are_unavailable():
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {
+            "age": _continuous_term(),
+            " age ": _continuous_term(),
+        },
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "collision" in capture.reason
+    assert capture.points == ()
 
 
 def _malformed_continuous(case: str):
@@ -364,6 +416,25 @@ def test_all_zero_support_uses_the_first_point_as_the_shared_reference():
     assert [point.eta_contribution for point in first_fold] == [0.0, 2.0, 6.0]
 
 
+def test_large_finite_support_values_do_not_require_a_finite_total():
+    api = _api()
+    term = _continuous_term()
+    term["support"]["density"] = [1e308, 1e308, 0.0]
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": term},
+        estimators=_estimators(),
+        fold_count=2,
+    )
+
+    assert capture.status == "COMPLETE"
+    first_fold = [
+        point for point in capture.points if point.validation_split_no == 1
+    ]
+    assert [point.reference_value for point in first_fold] == [10.0, 10.0, 10.0]
+    assert [point.support_value for point in first_fold] == [1e308, 1e308, 0.0]
+
+
 @pytest.mark.parametrize(
     "estimators",
     [
@@ -386,6 +457,49 @@ def test_missing_or_mismatched_fold_estimator_links_are_unavailable(estimators):
 
     assert capture.status == "UNAVAILABLE"
     assert capture.reason
+    assert capture.points == ()
+
+
+@pytest.mark.parametrize(
+    "links",
+    [
+        (PowerLink(power=0.5), PowerLink(power=0.5)),
+        (NegativeBinomialLink(theta=2.0), NegativeBinomialLink(theta=2.0)),
+    ],
+    ids=("power", "negative-binomial"),
+)
+def test_equal_parameterized_fold_links_are_semantically_compatible(links):
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _continuous_term()},
+        estimators=[SimpleNamespace(_link=link) for link in links],
+        fold_count=2,
+    )
+
+    assert capture.status == "COMPLETE"
+    assert all(point.relativity is None for point in capture.points)
+
+
+@pytest.mark.parametrize(
+    "links",
+    [
+        (PowerLink(power=0.5), PowerLink(power=2.0)),
+        (NegativeBinomialLink(theta=1.0), NegativeBinomialLink(theta=2.0)),
+    ],
+    ids=("power", "negative-binomial"),
+)
+def test_different_parameterized_fold_links_are_semantically_incompatible(links):
+    api = _api()
+
+    capture = api.normalize_validation_curves(
+        {"numeric_term": _continuous_term()},
+        estimators=[SimpleNamespace(_link=link) for link in links],
+        fold_count=2,
+    )
+
+    assert capture.status == "UNAVAILABLE"
+    assert "link" in capture.reason
     assert capture.points == ()
 
 

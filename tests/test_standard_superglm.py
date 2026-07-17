@@ -121,6 +121,30 @@ def _fold_estimators():
     return [SimpleNamespace(_link=LogLink()), SimpleNamespace(_link=LogLink())]
 
 
+def _real_curve_data():
+    row_count = 60
+    rng = np.random.default_rng(20260717)
+    age = np.linspace(18.0, 78.0, row_count)
+    region = np.resize(np.array(["north", "central", "south"]), row_count)
+    region_eta = pd.Series(region).map(
+        {"north": -0.2, "central": 0.0, "south": 0.3}
+    ).to_numpy()
+    y = rng.poisson(np.exp(-0.6 + 0.012 * (age - 40.0) + region_eta))
+    return pd.DataFrame({"age": age, "region": region}), y
+
+
+def _real_curve_model():
+    from superglm import Categorical, Numeric, SuperGLM
+
+    return SuperGLM(
+        features={
+            "age": Numeric(),
+            "region": Categorical(base="first"),
+        },
+        selection_penalty=0.0,
+    )
+
+
 def test_precomputed_splitter_replays_exact_folds():
     api = _api()
     splitter = api.PrecomputedSplitter(_folds(), row_count=3)
@@ -582,8 +606,6 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     from importlib.metadata import distribution, version
 
     from sklearn.model_selection import KFold
-    from superglm import Categorical, Numeric, SuperGLM
-
     api = _api()
     assert version("superglm") == "0.12.0"
     direct_url = json.loads(distribution("superglm").read_text("direct_url.json"))
@@ -591,28 +613,13 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
         "25c06fc84b674bb2ee777ea99567772d8d57a17c"
     )
 
-    row_count = 60
-    rng = np.random.default_rng(20260717)
-    age = np.linspace(18.0, 78.0, row_count)
-    region = np.resize(np.array(["north", "central", "south"]), row_count)
-    region_eta = pd.Series(region).map(
-        {"north": -0.2, "central": 0.0, "south": 0.3}
-    ).to_numpy()
-    y = rng.poisson(np.exp(-0.6 + 0.012 * (age - 40.0) + region_eta))
-    X = pd.DataFrame({"age": age, "region": region})
+    X, y = _real_curve_data()
     folds = list(
-        KFold(n_splits=3, shuffle=True, random_state=20260717).split(X, y)
-    )
-    model = SuperGLM(
-        features={
-            "age": Numeric(),
-            "region": Categorical(base="first"),
-        },
-        selection_penalty=0.0,
+        KFold(n_splits=5, shuffle=True, random_state=20260717).split(X, y)
     )
 
     evidence = api.run_cross_validation(
-        model,
+        _real_curve_model(),
         api.ModelInputs(X=X, y=y),
         split_indices=folds,
         fit_mode="fit",
@@ -622,15 +629,28 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     capture = evidence.validation_curve_capture
     assert capture.status == "COMPLETE"
     assert capture.reason is None
-    assert {point.validation_split_no for point in capture.points} == {1, 2, 3}
+    assert [
+        split.validation_split_no for split in evidence.validation_splits
+    ] == [1, 2, 3, 4, 5]
+    assert len(evidence.fold_metrics) == 5
+    assert [
+        (metric.fold_no, metric.metric_name) for metric in evidence.fold_metrics
+    ] == [(split_no, "deviance") for split_no in range(1, 6)]
+    for split, metric in zip(
+        evidence.validation_splits,
+        evidence.fold_metrics,
+        strict=True,
+    ):
+        assert metric.metric_value == pytest.approx(split.metrics["deviance"])
+    assert {point.validation_split_no for point in capture.points} == {1, 2, 3, 4, 5}
     assert {point.term_name for point in capture.points} == {"age", "region"}
     assert len(
         [point for point in capture.points if point.term_name == "age"]
-    ) == 3 * 200
+    ) == 5 * 200
     assert len(
         [point for point in capture.points if point.term_name == "region"]
-    ) == 3 * 3
-    for split_no in (1, 2, 3):
+    ) == 5 * 3
+    for split_no in (1, 2, 3, 4, 5):
         for term_name in ("age", "region"):
             term_points = [
                 point
@@ -652,6 +672,45 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
             assert reference_points[0].relativity == 1.0
     assert "estimators" not in evidence.report
     assert "curve_similarity" not in evidence.report
+
+
+def test_real_pinned_superglm_one_shot_captures_one_metric_row_and_curve_split():
+    from superglm import cross_validate as real_cross_validate
+
+    api = _api()
+    X, y = _real_curve_data()
+    calls = []
+
+    def recording_cross_validate(*args, **kwargs):
+        calls.append(kwargs["return_estimators"])
+        return real_cross_validate(*args, **kwargs)
+
+    evidence = api.run_cross_validation(
+        _real_curve_model(),
+        api.ModelInputs(X=X, y=y),
+        split_indices=[(np.arange(45), np.arange(45, 60))],
+        fit_mode="fit",
+        scoring=("deviance",),
+        cross_validate_fn=recording_cross_validate,
+    )
+
+    assert calls == [True]
+    assert len(evidence.validation_splits) == 1
+    split = evidence.validation_splits[0]
+    assert (split.validation_split_no, split.n_train, split.n_validation) == (
+        1,
+        45,
+        15,
+    )
+    assert list(split.metrics) == ["deviance"]
+    assert len(evidence.fold_metrics) == 1
+    metric = evidence.fold_metrics[0]
+    assert (metric.fold_no, metric.metric_name) == (1, "deviance")
+    assert metric.metric_value == pytest.approx(split.metrics["deviance"])
+    capture = evidence.validation_curve_capture
+    assert capture.status == "COMPLETE"
+    assert {point.validation_split_no for point in capture.points} == {1}
+    assert {point.term_name for point in capture.points} == {"age", "region"}
 
 
 @pytest.mark.parametrize(

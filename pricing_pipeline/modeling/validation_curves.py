@@ -7,9 +7,13 @@ from numbers import Integral
 from typing import Any, Literal
 
 import numpy as np
-from superglm.links import LogLink
+from superglm.links import LogLink, NegativeBinomialLink, PowerLink
 
 from pricing_pipeline.models.spec import ValidationCurvePoint
+
+
+_SUPPORTED_FAMILIES = frozenset({"continuous", "level"})
+_UNSUPPORTED_FAMILIES = frozenset({"interaction", "offset", "surface"})
 
 
 class ValidationCurvePayloadError(ValueError):
@@ -100,17 +104,34 @@ def _normalize_validation_curves(
         raise ValidationCurvePayloadError("curve_similarity must be a non-empty mapping")
 
     supported_payloads: list[tuple[str, Literal["continuous", "level"], Mapping[str, Any]]] = []
+    normalized_term_names: set[str] = set()
     for raw_term_name, raw_payload in curve_similarity.items():
-        if not isinstance(raw_payload, Mapping):
-            continue
-        family = raw_payload.get("family")
-        if family not in {"continuous", "level"}:
-            continue
         if not isinstance(raw_term_name, str) or not raw_term_name.strip():
             raise ValidationCurvePayloadError(
-                "supported curve term names must be non-empty strings"
+                "curve term names must be non-empty strings"
             )
-        supported_payloads.append((raw_term_name.strip(), family, raw_payload))
+        term_name = raw_term_name.strip()
+        if term_name in normalized_term_names:
+            raise ValidationCurvePayloadError(
+                f"normalized curve term name collision for {term_name!r}"
+            )
+        normalized_term_names.add(term_name)
+        if not isinstance(raw_payload, Mapping):
+            raise ValidationCurvePayloadError(
+                f"term {term_name!r} payload must be a mapping"
+            )
+        family = raw_payload.get("family")
+        if not isinstance(family, str):
+            raise ValidationCurvePayloadError(
+                f"term {term_name!r} must declare a string family"
+            )
+        if family in _UNSUPPORTED_FAMILIES:
+            continue
+        if family not in _SUPPORTED_FAMILIES:
+            raise ValidationCurvePayloadError(
+                f"term {term_name!r} declares unknown family {family!r}"
+            )
+        supported_payloads.append((term_name, family, raw_payload))
 
     if not supported_payloads:
         raise ValidationCurvePayloadError("no supported main-effect entries were returned")
@@ -191,9 +212,20 @@ def _resolved_links(
     links = tuple(getattr(estimator, "_link", None) for estimator in estimator_values)
     if any(link is None for link in links):
         raise ValidationCurvePayloadError("every fold estimator must expose a resolved _link")
-    if len({type(link) for link in links}) != 1:
-        raise ValidationCurvePayloadError("all fold estimator link classes must agree")
+    signatures = tuple(_link_semantic_signature(link) for link in links)
+    if any(signature != signatures[0] for signature in signatures[1:]):
+        raise ValidationCurvePayloadError(
+            "all fold estimator link classes and parameters must agree"
+        )
     return links
+
+
+def _link_semantic_signature(link: Any) -> tuple[Any, ...]:
+    if isinstance(link, PowerLink):
+        return (type(link), "power", float(link.power))
+    if isinstance(link, NegativeBinomialLink):
+        return (type(link), "theta", float(link.theta))
+    return (type(link),)
 
 
 def _normalize_term(
@@ -254,17 +286,6 @@ def _normalize_term(
         raise ValidationCurvePayloadError(
             f"term {term_name!r} support density must be nonnegative"
         )
-    try:
-        support_total = math.fsum(support)
-    except OverflowError as exc:
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} support density total must be finite"
-        ) from exc
-    if not math.isfinite(support_total):
-        raise ValidationCurvePayloadError(
-            f"term {term_name!r} support density total must be finite"
-        )
-
     curves_payload = _mapping(payload.get("curves"), f"term {term_name!r} curves")
     if "link" not in curves_payload:
         raise ValidationCurvePayloadError(
