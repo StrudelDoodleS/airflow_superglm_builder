@@ -1533,7 +1533,7 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
             "Term",
             "log(Term / 12)",
             "frame",
-            "offset_column.*ModelInputs.offset",
+            "ModelInputs.offset values",
         ),
         (
             "EXPORTED_FACTOR",
@@ -1541,7 +1541,7 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
             "Term",
             "log(Term / 12)",
             "wrong",
-            "offset_source_column values.*ModelInputs.offset_source",
+            "ModelInputs.offset_source values",
         ),
         (
             "NONE",
@@ -1549,7 +1549,7 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
             None,
             None,
             "frame",
-            "ModelInputs.offset_source.*handling NONE",
+            "ModelInputs.offset_source.*manifest has no offset_source column",
         ),
         (
             "ALREADY_APPLIED_SQL_EXPOSURE",
@@ -1557,11 +1557,11 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
             None,
             "log(Term / 12)",
             "frame",
-            "ModelInputs.offset_source.*ALREADY_APPLIED_SQL_EXPOSURE",
+            "ModelInputs.offset_source.*manifest has no offset_source column",
         ),
     ],
 )
-def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
+def test_standard_runner_rejects_offset_contract_or_input_role_mismatch_before_cv(
     tmp_path,
     handling,
     manifest_offset,
@@ -1648,7 +1648,6 @@ def test_standard_runner_rejects_manifest_offset_contract_mismatch_before_cv(
 
 def test_manifest_offset_contract_accepts_already_applied_sql_exposure():
     api = _api()
-    frame = pd.DataFrame({"LogExposure": [0.0, np.log(2.0)]})
     manifest_spec = ModelFrameManifestSpec(
         dataset_name="home_freq_frame",
         source_system="pytest",
@@ -1664,19 +1663,11 @@ def test_manifest_offset_contract_accepts_already_applied_sql_exposure():
         label="log(Exposure)",
     )
 
-    api._validate_manifest_offset_contract(
-        frame,
-        manifest_spec,
-        contract,
-        offset=frame["LogExposure"],
-        offset_source=None,
-        offset_source_name=None,
-    )
+    api._validate_manifest_offset_contract(manifest_spec, contract)
 
 
 def test_manifest_offset_contract_accepts_identity_offset_source():
     api = _api()
-    frame = pd.DataFrame({"Term": [12.0, 36.0]})
     manifest_spec = ModelFrameManifestSpec(
         dataset_name="home_freq_frame",
         source_system="pytest",
@@ -1695,14 +1686,7 @@ def test_manifest_offset_contract_accepts_identity_offset_source():
         label="identity(Term)",
     )
 
-    api._validate_manifest_offset_contract(
-        frame,
-        manifest_spec,
-        contract,
-        offset=frame["Term"],
-        offset_source=frame["Term"],
-        offset_source_name="Term",
-    )
+    api._validate_manifest_offset_contract(manifest_spec, contract)
 
 
 def test_canonical_validation_rejects_reversed_then_reset_feature_frame():
