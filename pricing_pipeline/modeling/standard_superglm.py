@@ -23,6 +23,11 @@ from pricing_pipeline.data.manifest import (
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild, ValidationSplitResult
+from pricing_pipeline.modeling.validation_curves import (
+    ValidationCurveCapture,
+    normalize_validation_curves,
+    validation_curve_capture_failure,
+)
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
 from pricing_pipeline.publishing.superglm_publication_receipt import (
@@ -67,6 +72,7 @@ class CVEvidence:
     metrics: dict[str, float]
     fold_metrics: tuple[FoldMetric, ...]
     validation_splits: tuple[ValidationSplitResult, ...]
+    validation_curve_capture: ValidationCurveCapture
 
 
 def run_standard_superglm_build(
@@ -270,6 +276,9 @@ def run_standard_superglm_build(
             metric_scopes={name: "cv" for name in evidence.metrics},
             fold_metrics=fold_metric_records,
             validation_splits=evidence.validation_splits,
+            validation_curve_status=evidence.validation_curve_capture.status,
+            validation_curve_reason=evidence.validation_curve_capture.reason,
+            validation_curve_points=evidence.validation_curve_capture.points,
         )
         return completed_build
     except BaseException:
@@ -450,19 +459,37 @@ def run_cross_validation(
 ) -> CVEvidence:
     _validate_input_lengths(inputs)
     splitter = PrecomputedSplitter(split_indices, row_count=len(inputs.X))
-    result = cross_validate_fn(
-        model,
-        inputs.X,
-        inputs.y,
-        cv=splitter,
-        sample_weight=inputs.sample_weight,
-        offset=inputs.offset,
-        fit_mode=fit_mode,
-        scoring=scoring,
-        return_estimators=False,
-        return_oof=True,
-        error_score="raise",
-    )
+    cv_options = {
+        "cv": splitter,
+        "sample_weight": inputs.sample_weight,
+        "offset": inputs.offset,
+        "fit_mode": fit_mode,
+        "scoring": scoring,
+        "return_oof": True,
+        "error_score": "raise",
+    }
+    try:
+        result = cross_validate_fn(
+            model,
+            inputs.X,
+            inputs.y,
+            return_estimators=True,
+            **cv_options,
+        )
+    except Exception as capture_exc:
+        try:
+            result = cross_validate_fn(
+                model,
+                inputs.X,
+                inputs.y,
+                return_estimators=False,
+                **cv_options,
+            )
+        except Exception as fallback_exc:
+            raise fallback_exc from capture_exc
+        curve_capture = validation_curve_capture_failure(capture_exc)
+    else:
+        curve_capture = None
     if result.fold_indices is None:
         raise StandardSuperGLMError("SuperGLM CV did not return fold indices")
     requested_folds = splitter.folds
@@ -504,12 +531,19 @@ def run_cross_validation(
         scoring=scoring,
         fold_indices=returned_folds,
     )
+    if curve_capture is None:
+        curve_capture = normalize_validation_curves(
+            getattr(result, "curve_similarity", None),
+            estimators=getattr(result, "estimators", None),
+            fold_count=len(returned_folds),
+        )
     return CVEvidence(
         fold_indices=returned_folds,
         report=report,
         metrics=metrics,
         fold_metrics=fold_metrics,
         validation_splits=validation_splits,
+        validation_curve_capture=curve_capture,
     )
 
 

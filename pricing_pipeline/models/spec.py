@@ -4,7 +4,7 @@ import math
 from datetime import date, datetime
 from numbers import Real
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from pydantic import (
     BaseModel,
@@ -66,6 +66,101 @@ class ValidationSplitResult(BaseModel):
         return dict(value)
 
 
+class ValidationCurvePoint(BaseModel):
+    """One normalized validation-split main-effect curve point."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    validation_split_no: int
+    term_name: str
+    point_no: int
+    point_kind: Literal["NUMERIC", "LEVEL"]
+    x_numeric: float | None
+    level_text: str | None
+    eta_contribution: float
+    relativity: float | None
+    support_value: float
+    reference_value: float | None
+    reference_level: str | None
+
+    @field_validator("validation_split_no", "point_no", mode="before")
+    @classmethod
+    def _positive_integer(cls, value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("must be a positive integer")
+        return value
+
+    @field_validator("term_name", mode="before")
+    @classmethod
+    def _required_term_name(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("is required")
+        return value.strip()
+
+    @field_validator("level_text", "reference_level", mode="before")
+    @classmethod
+    def _optional_level_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("must be a non-empty string or null")
+        return value.strip()
+
+    @field_validator(
+        "x_numeric",
+        "eta_contribution",
+        "relativity",
+        "support_value",
+        "reference_value",
+        mode="before",
+    )
+    @classmethod
+    def _finite_scalar(cls, value: Any, info) -> float | None:
+        if value is None and info.field_name in {
+            "x_numeric",
+            "relativity",
+            "reference_value",
+        }:
+            return None
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("must be a finite scalar number")
+        scalar = float(value)
+        if not math.isfinite(scalar):
+            raise ValueError("must be a finite scalar number")
+        return scalar
+
+    @field_validator("support_value")
+    @classmethod
+    def _nonnegative_support(cls, value: float) -> float:
+        if value < 0.0:
+            raise ValueError("must be nonnegative")
+        return value
+
+    @model_validator(mode="after")
+    def _point_shape_matches_kind(self) -> "ValidationCurvePoint":
+        if self.point_kind == "NUMERIC" and (
+            self.x_numeric is None
+            or self.reference_value is None
+            or self.level_text is not None
+            or self.reference_level is not None
+        ):
+            raise ValueError(
+                "NUMERIC points require x_numeric/reference_value and null "
+                "level_text/reference_level"
+            )
+        if self.point_kind == "LEVEL" and (
+            self.x_numeric is not None
+            or self.reference_value is not None
+            or self.level_text is None
+            or self.reference_level is None
+        ):
+            raise ValueError(
+                "LEVEL points require level_text/reference_level and null "
+                "x_numeric/reference_value"
+            )
+        return self
+
+
 class ApprovedModelBuild(BaseModel):
     """Immutable notebook output passed unchanged into local or remote publication."""
 
@@ -100,6 +195,9 @@ class ApprovedModelBuild(BaseModel):
     metric_scopes: dict[str, str] = Field(default_factory=dict)
     fold_metrics: tuple[Mapping[str, int | str | float], ...] = ()
     validation_splits: tuple[ValidationSplitResult, ...] = ()
+    validation_curve_status: Literal["COMPLETE", "UNAVAILABLE"] | None = None
+    validation_curve_reason: str | None = None
+    validation_curve_points: tuple[ValidationCurvePoint, ...] = ()
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -143,6 +241,20 @@ class ApprovedModelBuild(BaseModel):
         if value is None:
             return None
         return str(value).strip() or None
+
+    @field_validator("validation_curve_reason", mode="before")
+    @classmethod
+    def _bounded_curve_reason(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("must be a string or null")
+        reason = " ".join(value.split())
+        if not reason:
+            raise ValueError("must be non-empty when supplied")
+        if len(reason) > 500:
+            raise ValueError("must contain at most 500 characters")
+        return reason
 
     @field_validator("model_id", mode="before")
     @classmethod
@@ -325,6 +437,28 @@ class ApprovedModelBuild(BaseModel):
                 actual_fold_metrics[key] = float(metric["metric_value"])
             if duplicate_key or actual_fold_metrics != expected_fold_metrics:
                 raise ValueError("fold_metrics must exactly match validation_splits")
+        return self
+
+    @model_validator(mode="after")
+    def _validation_curve_capture_is_consistent(self) -> "ApprovedModelBuild":
+        if self.validation_curve_status is None:
+            if self.validation_curve_reason is not None or self.validation_curve_points:
+                raise ValueError(
+                    "legacy validation curve capture requires null reason and zero points"
+                )
+            return self
+        if self.validation_curve_status == "COMPLETE":
+            if self.validation_curve_reason is not None:
+                raise ValueError("COMPLETE validation curve capture requires a null reason")
+            if not self.validation_curve_points:
+                raise ValueError(
+                    "COMPLETE validation curve capture requires at least one point"
+                )
+            return self
+        if self.validation_curve_reason is None:
+            raise ValueError("UNAVAILABLE validation curve capture requires a reason")
+        if self.validation_curve_points:
+            raise ValueError("UNAVAILABLE validation curve capture requires zero points")
         return self
 
 

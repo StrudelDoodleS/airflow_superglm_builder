@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
+from pricing_pipeline.models import spec as model_spec
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
@@ -95,6 +97,134 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
 def test_completed_build_and_export_are_one_record_type():
     assert ApprovedModelBuild is CompletedModelBuild is ModelExportResult
     assert ApprovedModelBuildError is CompletedModelBuildError
+
+
+def _numeric_curve_point(**overrides):
+    values = {
+        "validation_split_no": 1,
+        "term_name": "vehicle_age",
+        "point_no": 1,
+        "point_kind": "NUMERIC",
+        "x_numeric": 0.0,
+        "level_text": None,
+        "eta_contribution": 0.0,
+        "relativity": 1.0,
+        "support_value": 4.0,
+        "reference_value": 0.0,
+        "reference_level": None,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_approved_build_curve_capture_is_legacy_safe_and_round_trips(tmp_path: Path):
+    legacy = _approved_build(tmp_path)
+
+    assert legacy.validation_curve_status is None
+    assert legacy.validation_curve_reason is None
+    assert legacy.validation_curve_points == ()
+
+    payload = legacy.model_dump()
+    payload.update(
+        validation_curve_status="COMPLETE",
+        validation_curve_points=(_numeric_curve_point(),),
+    )
+    build = ApprovedModelBuild(**payload)
+
+    assert isinstance(build.validation_curve_points[0], model_spec.ValidationCurvePoint)
+    assert build.validation_curve_points[0].eta_contribution == 0.0
+    assert ApprovedModelBuild(**build.model_dump()).model_dump() == build.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "points", "match"),
+    [
+        (None, "capture failed", (), "legacy validation curve capture"),
+        (None, None, (_numeric_curve_point(),), "legacy validation curve capture"),
+        ("COMPLETE", "capture failed", (_numeric_curve_point(),), "COMPLETE.*reason"),
+        ("COMPLETE", None, (), "COMPLETE.*at least one point"),
+        ("UNAVAILABLE", None, (), "UNAVAILABLE.*reason"),
+        ("UNAVAILABLE", "capture failed", (_numeric_curve_point(),), "UNAVAILABLE.*zero points"),
+        ("UNAVAILABLE", "x" * 501, (), "at most 500 characters"),
+        ("PARTIAL", None, (), "validation_curve_status"),
+    ],
+)
+def test_approved_build_rejects_inconsistent_curve_capture(
+    tmp_path: Path,
+    status,
+    reason,
+    points,
+    match,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload.update(
+        validation_curve_status=status,
+        validation_curve_reason=reason,
+        validation_curve_points=points,
+    )
+
+    with pytest.raises(ApprovedModelBuildError, match=match):
+        ApprovedModelBuild(**payload)
+
+
+def test_approved_build_normalises_bounded_curve_capture_reason(tmp_path: Path):
+    payload = _approved_build(tmp_path).model_dump()
+    payload.update(
+        validation_curve_status="UNAVAILABLE",
+        validation_curve_reason="curve capture failed:\n  RuntimeError: broken   payload",
+    )
+
+    build = ApprovedModelBuild(**payload)
+
+    assert build.validation_curve_reason == (
+        "curve capture failed: RuntimeError: broken payload"
+    )
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"validation_split_no": 0}, "must be a positive integer"),
+        ({"term_name": "  "}, "is required"),
+        ({"point_no": True}, "must be a positive integer"),
+        ({"x_numeric": [1.0]}, "must be a finite scalar"),
+        ({"eta_contribution": float("nan")}, "must be a finite scalar"),
+        ({"relativity": float("inf")}, "must be a finite scalar"),
+        ({"support_value": -1.0}, "must be nonnegative"),
+        ({"reference_value": None}, "NUMERIC.*reference_value"),
+        ({"level_text": "unexpected"}, "NUMERIC.*level_text"),
+        ({"reference_level": "A"}, "NUMERIC.*reference_level"),
+    ],
+)
+def test_validation_curve_point_rejects_invalid_or_mismatched_shapes(
+    override,
+    match,
+):
+    payload = _numeric_curve_point(**override)
+
+    with pytest.raises(ValueError, match=match):
+        model_spec.ValidationCurvePoint(**payload)
+
+
+def test_level_validation_curve_point_has_exact_level_shape():
+    point = model_spec.ValidationCurvePoint(
+        validation_split_no=2,
+        term_name="region",
+        point_no=3,
+        point_kind="LEVEL",
+        x_numeric=None,
+        level_text="North",
+        eta_contribution=-0.2,
+        relativity=None,
+        support_value=9.0,
+        reference_value=None,
+        reference_level="Central",
+    )
+
+    assert point.level_text == "North"
+    assert point.reference_level == "Central"
+    with pytest.raises(ValidationError):
+        point.eta_contribution = 1.0
 
 
 def test_approved_build_holds_ordered_validation_split_results(tmp_path: Path):

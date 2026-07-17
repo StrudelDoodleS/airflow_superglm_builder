@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from superglm.links import LogLink
 
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
@@ -65,7 +66,13 @@ def _model_config() -> ModelBuildConfig:
     )
 
 
-def _cv_result(*, converged=(True, True), oof_predictions=None):
+def _cv_result(
+    *,
+    converged=(True, True),
+    oof_predictions=None,
+    curve_similarity=None,
+    estimators=None,
+):
     return SimpleNamespace(
         fold_scores=pd.DataFrame(
             {
@@ -84,12 +91,34 @@ def _cv_result(*, converged=(True, True), oof_predictions=None):
         pooled_scores={"deviance": np.float64(0.42)},
         std_scores={"deviance": np.float64(0.05)},
         fold_indices=_folds(),
-        curve_similarity=None,
+        curve_similarity=curve_similarity,
         oof_predictions=(
             np.array([0.25, np.nan, 0.75]) if oof_predictions is None else oof_predictions
         ),
-        estimators=None,
+        estimators=estimators,
     )
+
+
+def _curve_similarity():
+    x = np.array([20.0, 30.0, 40.0])
+    return {
+        "age": {
+            "family": "continuous",
+            "domain": {"x": x.copy()},
+            "support": {"x": x.copy(), "density": np.array([1.0, 3.0, 2.0])},
+            "curves": {
+                "response": object(),
+                "link": {
+                    "fold_0": np.array([-0.2, 0.1, 0.4]),
+                    "fold_1": np.array([0.3, 0.2, -0.1]),
+                },
+            },
+        }
+    }
+
+
+def _fold_estimators():
+    return [SimpleNamespace(_link=LogLink()), SimpleNamespace(_link=LogLink())]
 
 
 def test_precomputed_splitter_replays_exact_folds():
@@ -412,7 +441,10 @@ def test_run_cross_validation_passes_strict_superglm_options():
 
     def fake_cross_validate(model, X, y, **kwargs):
         captured.update({"model": model, "X": X, "y": y, **kwargs})
-        return _cv_result()
+        return _cv_result(
+            curve_similarity=_curve_similarity(),
+            estimators=_fold_estimators(),
+        )
 
     inputs = api.ModelInputs(
         X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
@@ -429,10 +461,197 @@ def test_run_cross_validation_passes_strict_superglm_options():
 
     assert captured["error_score"] == "raise"
     assert captured["return_oof"] is True
-    assert captured["return_estimators"] is False
+    assert captured["return_estimators"] is True
     assert captured["fit_mode"] == "fit_reml"
     assert evidence.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert evidence.fold_indices[0][1].tolist() == [2]
+    assert evidence.validation_curve_capture.status == "COMPLETE"
+    assert len(evidence.validation_curve_capture.points) == 6
+    assert "estimators" not in evidence.report
+    assert "curve_similarity" not in evidence.report
+
+
+def test_curve_capture_exception_retries_once_without_estimators_and_keeps_fallback_metrics():
+    api = _api()
+    calls = []
+
+    def fake_cross_validate(model, X, y, **kwargs):
+        calls.append((model, X, y, dict(kwargs)))
+        if kwargs["return_estimators"]:
+            raise RuntimeError("curve comparison\n  exploded " + "x" * 700)
+        return _cv_result()
+
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    evidence = api.run_cross_validation(
+        object(),
+        inputs,
+        split_indices=_folds(),
+        fit_mode="fit_reml",
+        scoring=("deviance",),
+        cross_validate_fn=fake_cross_validate,
+    )
+
+    assert len(calls) == 2
+    assert [call[3]["return_estimators"] for call in calls] == [True, False]
+    assert calls[0][0] is calls[1][0]
+    assert calls[0][1] is calls[1][1]
+    assert calls[0][2] is calls[1][2]
+    assert calls[0][3]["cv"] is calls[1][3]["cv"]
+    assert calls[0][3]["return_oof"] is calls[1][3]["return_oof"] is True
+    assert calls[0][3]["error_score"] == calls[1][3]["error_score"] == "raise"
+    assert evidence.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
+    assert evidence.validation_curve_capture.status == "UNAVAILABLE"
+    assert evidence.validation_curve_capture.points == ()
+    assert evidence.validation_curve_capture.reason.startswith(
+        "validation curve capture failed: RuntimeError: curve comparison exploded"
+    )
+    assert "\n" not in evidence.validation_curve_capture.reason
+    assert len(evidence.validation_curve_capture.reason) == 500
+
+
+def test_curve_capture_fallback_failure_surfaces_with_first_failure_as_cause():
+    api = _api()
+    calls = []
+
+    def fake_cross_validate(*args, **kwargs):
+        del args
+        calls.append(kwargs["return_estimators"])
+        if kwargs["return_estimators"]:
+            raise ValueError("curve comparison failed")
+        raise RuntimeError("fallback scoring failed")
+
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(RuntimeError, match="fallback scoring failed") as caught:
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            cross_validate_fn=fake_cross_validate,
+        )
+
+    assert calls == [True, False]
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert str(caught.value.__cause__) == "curve comparison failed"
+
+
+def test_successful_cv_with_malformed_curves_keeps_metrics_without_retry_or_partial_points():
+    api = _api()
+    calls = []
+    malformed = _curve_similarity()
+    malformed["age"]["domain"] = None
+
+    def fake_cross_validate(*args, **kwargs):
+        del args
+        calls.append(kwargs["return_estimators"])
+        return _cv_result(
+            curve_similarity=malformed,
+            estimators=_fold_estimators(),
+        )
+
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    evidence = api.run_cross_validation(
+        object(),
+        inputs,
+        split_indices=_folds(),
+        fit_mode="fit_reml",
+        scoring=("deviance",),
+        cross_validate_fn=fake_cross_validate,
+    )
+
+    assert calls == [True]
+    assert evidence.metrics["cv_mean_deviance"] == pytest.approx(0.45)
+    assert evidence.validation_curve_capture.status == "UNAVAILABLE"
+    assert evidence.validation_curve_capture.points == ()
+
+
+def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_points():
+    from importlib.metadata import distribution, version
+
+    from sklearn.model_selection import KFold
+    from superglm import Categorical, Numeric, SuperGLM
+
+    api = _api()
+    assert version("superglm") == "0.12.0"
+    direct_url = json.loads(distribution("superglm").read_text("direct_url.json"))
+    assert direct_url["vcs_info"]["commit_id"] == (
+        "25c06fc84b674bb2ee777ea99567772d8d57a17c"
+    )
+
+    row_count = 60
+    rng = np.random.default_rng(20260717)
+    age = np.linspace(18.0, 78.0, row_count)
+    region = np.resize(np.array(["north", "central", "south"]), row_count)
+    region_eta = pd.Series(region).map(
+        {"north": -0.2, "central": 0.0, "south": 0.3}
+    ).to_numpy()
+    y = rng.poisson(np.exp(-0.6 + 0.012 * (age - 40.0) + region_eta))
+    X = pd.DataFrame({"age": age, "region": region})
+    folds = list(
+        KFold(n_splits=3, shuffle=True, random_state=20260717).split(X, y)
+    )
+    model = SuperGLM(
+        features={
+            "age": Numeric(),
+            "region": Categorical(base="first"),
+        },
+        selection_penalty=0.0,
+    )
+
+    evidence = api.run_cross_validation(
+        model,
+        api.ModelInputs(X=X, y=y),
+        split_indices=folds,
+        fit_mode="fit",
+        scoring=("deviance",),
+    )
+
+    capture = evidence.validation_curve_capture
+    assert capture.status == "COMPLETE"
+    assert capture.reason is None
+    assert {point.validation_split_no for point in capture.points} == {1, 2, 3}
+    assert {point.term_name for point in capture.points} == {"age", "region"}
+    assert len(
+        [point for point in capture.points if point.term_name == "age"]
+    ) == 3 * 200
+    assert len(
+        [point for point in capture.points if point.term_name == "region"]
+    ) == 3 * 3
+    for split_no in (1, 2, 3):
+        for term_name in ("age", "region"):
+            term_points = [
+                point
+                for point in capture.points
+                if point.validation_split_no == split_no
+                and point.term_name == term_name
+            ]
+            reference_points = [
+                point
+                for point in term_points
+                if (
+                    point.x_numeric == point.reference_value
+                    if point.point_kind == "NUMERIC"
+                    else point.level_text == point.reference_level
+                )
+            ]
+            assert len(reference_points) == 1
+            assert reference_points[0].eta_contribution == 0.0
+            assert reference_points[0].relativity == 1.0
+    assert "estimators" not in evidence.report
+    assert "curve_similarity" not in evidence.report
 
 
 @pytest.mark.parametrize(
@@ -1262,9 +1481,13 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     final_models = []
 
     def fake_cross_validate(model, *args, **kwargs):
-        del args, kwargs
+        del args
         cv_models.append(model)
-        return _cv_result()
+        assert kwargs["return_estimators"] is True
+        return _cv_result(
+            curve_similarity=_curve_similarity(),
+            estimators=_fold_estimators(),
+        )
 
     real_fit_full_model = api.fit_full_model
 
@@ -1380,6 +1603,9 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     from pricing_pipeline.workbench.artifacts import load_candidate_bundle
 
     assert isinstance(result, ApprovedModelBuild)
+    assert result.validation_curve_status == "COMPLETE"
+    assert result.validation_curve_reason is None
+    assert len(result.validation_curve_points) == 6
     bundle = load_candidate_bundle(
         result.candidate_artifact_path,
         expected_sha256=result.candidate_artifact_sha256,
@@ -1394,6 +1620,8 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert bundle.model_version == "v1"
     assert bundle.export_id == "export-1"
     assert bundle.model_frame_sha256 == "a" * 64
+    assert "estimators" not in bundle.cv_report
+    assert "curve_similarity" not in bundle.cv_report
     first_paths = {
         "workbook": Path(result.rating_workbook_path),
         "receipt": Path(result.publication_receipt_path),
