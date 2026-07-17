@@ -465,6 +465,29 @@ def run_cross_validation(
     )
     if result.fold_indices is None:
         raise StandardSuperGLMError("SuperGLM CV did not return fold indices")
+    requested_folds = splitter.folds
+    try:
+        returned_folds = PrecomputedSplitter(
+            result.fold_indices,
+            row_count=len(inputs.X),
+        ).folds
+    except StandardSuperGLMError as exc:
+        raise StandardSuperGLMError(
+            "SuperGLM CV returned fold indices do not exactly match requested "
+            "validation splits"
+        ) from exc
+    if len(returned_folds) != len(requested_folds) or any(
+        not np.array_equal(returned_train, requested_train)
+        or not np.array_equal(returned_validation, requested_validation)
+        for (returned_train, returned_validation), (
+            requested_train,
+            requested_validation,
+        ) in zip(returned_folds, requested_folds, strict=True)
+    ):
+        raise StandardSuperGLMError(
+            "SuperGLM CV returned fold indices do not exactly match requested "
+            "validation splits"
+        )
 
     non_converged = result.fold_scores.loc[
         ~result.fold_scores["converged"].astype(bool), "fold"
@@ -479,12 +502,10 @@ def run_cross_validation(
         result,
         oof_coverage=splitter.oof_coverage,
         scoring=scoring,
+        fold_indices=returned_folds,
     )
     return CVEvidence(
-        fold_indices=tuple(
-            (np.asarray(train).copy(), np.asarray(test).copy())
-            for train, test in result.fold_indices
-        ),
+        fold_indices=returned_folds,
         report=report,
         metrics=metrics,
         fold_metrics=fold_metrics,
@@ -565,6 +586,7 @@ def cv_result_to_records(
     *,
     oof_coverage: float,
     scoring: str | Callable | Sequence[str | Callable],
+    fold_indices: tuple[tuple[np.ndarray, np.ndarray], ...] | None = None,
 ) -> tuple[
     dict[str, Any],
     dict[str, float],
@@ -591,7 +613,9 @@ def cv_result_to_records(
     metric_names = _requested_metric_names(scoring, mean_scores)
     fold_metrics: list[FoldMetric] = []
     validation_splits: list[ValidationSplitResult] = []
-    result_folds = tuple(result.fold_indices or ())
+    result_folds = (
+        tuple(result.fold_indices or ()) if fold_indices is None else fold_indices
+    )
     fold_score_records = result.fold_scores.to_dict("records")
     if len(fold_score_records) != len(result_folds):
         raise StandardSuperGLMError(
@@ -656,9 +680,9 @@ def cv_result_to_records(
             )
         )
 
-    fold_indices = [
+    fold_index_records = [
         {"train": train.tolist(), "test": test.tolist()}
-        for train, test in (result.fold_indices or [])
+        for train, test in result_folds
     ]
     report = {
         "schema_version": 1,
@@ -667,7 +691,7 @@ def cv_result_to_records(
         "mean_scores": mean_scores,
         "pooled_scores": pooled_scores,
         "std_scores": std_scores,
-        "fold_indices": fold_indices,
+        "fold_indices": fold_index_records,
         "oof_coverage": float(oof_coverage),
         "oof_predictions": _json_primitive(result.oof_predictions),
     }

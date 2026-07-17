@@ -214,6 +214,35 @@ def test_cv_report_adapter_does_not_fabricate_omitted_custom_metrics():
     assert all("nll" not in split.metrics for split in validation_splits)
 
 
+def test_cv_report_adapter_uses_actual_keys_from_dict_returning_callable():
+    api = _api()
+
+    def pricing_scores(*args, **kwargs):
+        del args, kwargs
+        return {"calibration": 0.0, "ranking": 0.0}
+
+    result = _cv_result()
+    result.fold_scores = result.fold_scores.drop(columns="deviance")
+    result.fold_scores["calibration"] = [0.2, 0.3]
+    result.fold_scores["ranking"] = [0.7, 0.8]
+    result.mean_scores = {"calibration": 0.25, "ranking": 0.75}
+    result.pooled_scores = {}
+    result.std_scores = {"calibration": 0.05, "ranking": 0.05}
+
+    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+        result,
+        oof_coverage=2 / 3,
+        scoring=(pricing_scores,),
+    )
+
+    assert list(validation_splits[0].metrics) == ["calibration", "ranking"]
+    assert {metric.metric_name for metric in fold_metrics} == {
+        "calibration",
+        "ranking",
+    }
+    assert all(pricing_scores.__name__ not in split.metrics for split in validation_splits)
+
+
 def test_cv_report_adapter_rejects_missing_requested_fold_metric():
     api = _api()
     result = _cv_result()
@@ -323,6 +352,43 @@ def test_run_cross_validation_passes_strict_superglm_options():
     assert captured["fit_mode"] == "fit_reml"
     assert evidence.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert evidence.fold_indices[0][1].tolist() == [2]
+
+
+@pytest.mark.parametrize(
+    "returned_folds",
+    [
+        _folds()[:1],
+        [
+            (np.array([0, 2]), np.array([1])),
+            (np.array([1, 2]), np.array([0])),
+        ],
+        list(reversed(_folds())),
+    ],
+)
+def test_run_cross_validation_rejects_returned_folds_that_differ_from_request(
+    returned_folds,
+):
+    api = _api()
+    result = _cv_result()
+    result.fold_indices = returned_folds
+    result.fold_scores = result.fold_scores.iloc[: len(returned_folds)].copy()
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match="returned fold indices do not exactly match requested validation splits",
+    ):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            cross_validate_fn=lambda *args, **kwargs: result,
+        )
 
 
 def test_run_cross_validation_rejects_non_converged_fold():
