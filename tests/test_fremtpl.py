@@ -111,9 +111,7 @@ def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
 
     assert inserted == len(source)
     with engine.connect() as connection:
-        count = connection.execute(
-            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
-        ).scalar_one()
+        count = connection.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
     assert count == len(source)
 
 
@@ -165,9 +163,7 @@ def test_load_fremtpl_raw_partial_store_survives_fetch_failure(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -197,9 +193,7 @@ def test_load_fremtpl_raw_wrong_fetched_count_does_not_clear_partial_store(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -234,6 +228,17 @@ def test_open_offline_sqlite_adds_digest_columns_to_existing_store(tmp_path):
     assert "staging_content_sha256" in staging_columns
 
 
+def _drop_clean_validation_views(connection) -> None:
+    for view_name in (
+        "V_MODEL_VALIDATION_SUMMARY",
+        "V_MODEL_VALIDATION_SPLIT_RELATIVITY",
+        "V_MODEL_VALIDATION_SPLIT",
+        "V_FINAL_MODEL_RELATIVITY",
+        "V_CURRENT_DATASET_VALIDATION_SPLIT",
+    ):
+        connection.execute(f"DROP VIEW IF EXISTS {view_name}")
+
+
 def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
     tmp_path,
 ):
@@ -254,6 +259,7 @@ def test_open_offline_sqlite_adds_model_run_candidate_columns_to_existing_store(
     engine, paths = open_offline_sqlite(tmp_path)
     engine.dispose()
     with sqlite3.connect(paths["pricing"]) as connection:
+        _drop_clean_validation_views(connection)
         drop_order = [
             "candidate_superglm_git_sha",
             *sorted(candidate_columns - {"candidate_superglm_git_sha"}),
@@ -278,6 +284,7 @@ def test_open_offline_sqlite_adds_parent_model_run_id_to_existing_store(tmp_path
     engine, paths = open_offline_sqlite(tmp_path)
     engine.dispose()
     with sqlite3.connect(paths["pricing"]) as connection:
+        _drop_clean_validation_views(connection)
         existing_columns = {row[1] for row in connection.execute("PRAGMA table_info('MODEL_RUN')")}
         if "parent_model_run_id" in existing_columns:
             connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
@@ -301,6 +308,7 @@ def test_open_offline_sqlite_backfills_parent_model_run_id_from_package_lineage(
     engine, paths = open_offline_sqlite(tmp_path)
     engine.dispose()
     with sqlite3.connect(paths["pricing"]) as connection:
+        _drop_clean_validation_views(connection)
         connection.executemany(
             """
             INSERT INTO PRICING_RATE_PACKAGE (
@@ -350,6 +358,170 @@ def test_open_offline_sqlite_backfills_parent_model_run_id_from_package_lineage(
         ).scalar_one()
 
     assert parent_model_run_id == "501"
+
+
+def test_open_offline_sqlite_clean_validation_upgrade_is_lossless_and_idempotent(
+    tmp_path,
+):
+    from pricing_pipeline.infra import offline_sqlite
+
+    paths = offline_sqlite.offline_database_paths(tmp_path)
+    legacy_engine = offline_sqlite.sqlite_engine_with_offline_schemas(paths)
+    connection = legacy_engine.raw_connection()
+    try:
+        clean_validation_columns = (
+            "build_fingerprint_sha256",
+            "builder_source_sha256",
+            "materialized_split_sha256",
+            "runtime_sha256",
+            "candidate_superglm_sha256",
+            "validation_curve_reason",
+            "validation_curve_status",
+            "validation_source_model_run_id",
+        )
+        current_ddl = (offline_sqlite.OFFLINE_DDL_DIR / "pricing.sql").read_text(encoding="utf-8")
+        legacy_ddl = "\n".join(
+            line
+            for line in current_ddl.splitlines()
+            if not any(column in line for column in clean_validation_columns)
+        )
+        connection.executescript(legacy_ddl)
+        connection.execute(
+            """
+            INSERT INTO pricing.DATASET_MANIFEST (
+                manifest_id,
+                dataset_name,
+                data_as_of_date,
+                row_count,
+                pk_columns_json,
+                model_frame_sha256,
+                frame_hash_metadata_json,
+                created_by
+            ) VALUES (
+                'manifest-legacy', 'FREMTPL', '2026-01-01', 100, '["IDpol"]',
+                ?, '{}', 'legacy-test'
+            )
+            """,
+            ("c" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO pricing.CV_SPLIT_SET (
+                split_set_id,
+                manifest_id,
+                split_mode,
+                splitter_class,
+                splitter_params_json,
+                row_order_sha256,
+                row_count,
+                fold_count,
+                created_by
+            ) VALUES (
+                'split-legacy', 'manifest-legacy', 'REPLAYABLE',
+                'sklearn.model_selection.KFold', '{"n_splits": 2}', ?, 100, 2,
+                'legacy-test'
+            )
+            """,
+            ("d" * 64,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                rate_package_id,
+                parent_rate_package_id,
+                model_id,
+                model_name,
+                package_version,
+                base_rate,
+                package_status,
+                created_by
+            ) VALUES (?, ?, 17, 'HOME_FREQ', ?, 1.0, 'PUBLISHED', 'legacy-test')
+            """,
+            [(41, None, 1), (42, 41, 2)],
+        )
+        connection.executemany(
+            """
+            INSERT INTO pricing.MODEL_RUN (
+                model_run_id,
+                model_id,
+                model_version,
+                export_id,
+                manifest_id,
+                split_set_id,
+                rate_package_id,
+                rating_workbook_path,
+                rating_workbook_sha256,
+                run_status,
+                created_by
+            ) VALUES (?, 17, ?, ?, 'manifest-legacy', ?, ?, '/tmp/rating.xlsx',
+                      ?, 'SUCCESS', 'legacy-test')
+            """,
+            [
+                ("legacy-root-run", "v1", "export-root", "split-legacy", 41, "a" * 64),
+                ("legacy-child-run", "v2", "export-child", None, 42, "b" * 64),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+        legacy_engine.dispose()
+
+    first, _paths = offline_sqlite.open_offline_sqlite(tmp_path)
+    first.dispose()
+    second, _paths = offline_sqlite.open_offline_sqlite(tmp_path)
+    with second.connect() as connection:
+        package_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA pricing.table_info('PRICING_RATE_PACKAGE')"
+            )
+        }
+        model_run_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA pricing.table_info('MODEL_RUN')")
+        }
+        rows = connection.exec_driver_sql(
+            """
+            SELECT model_run_id, parent_model_run_id, validation_source_model_run_id
+            FROM pricing.MODEL_RUN
+            ORDER BY model_run_id
+            """
+        ).all()
+        views = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM pricing.sqlite_master WHERE type = 'view'"
+            )
+        }
+        curve_table_count = connection.exec_driver_sql(
+            """
+            SELECT COUNT(*)
+            FROM pricing.sqlite_master
+            WHERE type = 'table' AND name = 'CV_SPLIT_CURVE_POINT'
+            """
+        ).scalar_one()
+
+    assert "build_fingerprint_sha256" in package_columns
+    assert {
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+        "validation_curve_reason",
+        "validation_curve_status",
+        "validation_source_model_run_id",
+    } <= model_run_columns
+    assert rows == [
+        ("legacy-child-run", "legacy-root-run", "legacy-root-run"),
+        ("legacy-root-run", None, "legacy-root-run"),
+    ]
+    assert views == {
+        "V_FINAL_MODEL_RELATIVITY",
+        "V_MODEL_VALIDATION_SPLIT",
+        "V_MODEL_VALIDATION_SUMMARY",
+        "V_MODEL_VALIDATION_SPLIT_RELATIVITY",
+        "V_CURRENT_DATASET_VALIDATION_SPLIT",
+    }
+    assert curve_table_count == 1
 
 
 def _create_legacy_effective_date_store(offline_sqlite, tmp_path):
@@ -425,6 +597,18 @@ def test_open_offline_sqlite_relaxes_legacy_effective_date_constraints(tmp_path)
                 "PRAGMA pricing.table_info('PRICING_RATE_PACKAGE')"
             )
         }
+        assert list(connection.exec_driver_sql("PRAGMA pricing.foreign_key_check")) == []
+        foreign_key_targets = {
+            row[2]
+            for table_name in ("MODEL_RUN", "CV_SPLIT_CURVE_POINT")
+            for row in connection.exec_driver_sql(
+                f"PRAGMA pricing.foreign_key_list('{table_name}')"
+            )
+        }
+        assert not {
+            target for target in foreign_key_targets if target.startswith("__offline_upgrade_")
+        }
+        assert {"MODEL_RUN", "CV_FOLD"} <= foreign_key_targets
         assert model_run_columns["effective_from"][3] == 0
         assert package_columns["effective_from_date"][3] == 0
         assert (
@@ -710,9 +894,11 @@ def test_bulk_insert_fremtpl_raw_sqlite_replace_deletes_existing_rows(tmp_path):
 
     assert inserted == len(replacement)
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol")
-        ).scalars().all()
+        ids = (
+            connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol"))
+            .scalars()
+            .all()
+        )
     assert ids == [2, 3]
 
 

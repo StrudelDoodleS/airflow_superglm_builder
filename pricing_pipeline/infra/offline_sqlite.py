@@ -101,6 +101,86 @@ _OFFLINE_COLUMN_UPGRADES = (
     ),
     (
         "pricing",
+        "MODEL_RUN",
+        "builder_source_sha256",
+        (
+            "TEXT CHECK (builder_source_sha256 IS NULL OR "
+            "(length(builder_source_sha256) = 64 "
+            "AND builder_source_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "materialized_split_sha256",
+        (
+            "TEXT CHECK (materialized_split_sha256 IS NULL OR "
+            "(length(materialized_split_sha256) = 64 "
+            "AND materialized_split_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "runtime_sha256",
+        (
+            "TEXT CHECK (runtime_sha256 IS NULL OR "
+            "(length(runtime_sha256) = 64 "
+            "AND runtime_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "candidate_superglm_sha256",
+        (
+            "TEXT CHECK (candidate_superglm_sha256 IS NULL OR "
+            "(length(candidate_superglm_sha256) = 64 "
+            "AND candidate_superglm_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "validation_curve_reason",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "validation_curve_status",
+        (
+            "TEXT CHECK ("
+            "(validation_curve_status IS NULL AND validation_curve_reason IS NULL) "
+            "OR (validation_curve_status IS NOT NULL "
+            "AND validation_curve_status = 'COMPLETE' "
+            "AND validation_curve_reason IS NULL) "
+            "OR (validation_curve_status IS NOT NULL "
+            "AND validation_curve_status = 'UNAVAILABLE' "
+            "AND validation_curve_reason IS NOT NULL "
+            "AND length(trim(validation_curve_reason)) > 0)"
+            ")"
+        ),
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "validation_source_model_run_id",
+        "TEXT REFERENCES MODEL_RUN(model_run_id)",
+    ),
+    (
+        "pricing",
+        "PRICING_RATE_PACKAGE",
+        "build_fingerprint_sha256",
+        (
+            "TEXT CHECK (build_fingerprint_sha256 IS NULL OR "
+            "(parent_rate_package_id IS NULL "
+            "AND length(build_fingerprint_sha256) = 64 "
+            "AND build_fingerprint_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        ),
+    ),
+    (
+        "pricing",
         "PRICING_RATE_PACKAGE",
         "staging_content_sha256",
         "TEXT",
@@ -162,6 +242,7 @@ def sqlite_engine_with_offline_schemas(
 
     @event.listens_for(engine, "connect")
     def _attach_pricing_schemas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
         dbapi_connection.execute("PRAGMA main.journal_mode=DELETE")
         for schema, path in resolved_paths.items():
             dbapi_connection.execute(
@@ -265,6 +346,61 @@ def apply_offline_ddl(engine: Engine) -> None:
               )
             """
         )
+        connection.execute(
+            """
+            WITH RECURSIVE package_lineage (
+                candidate_model_run_id,
+                rate_package_id,
+                parent_rate_package_id,
+                lineage_depth
+            ) AS (
+                SELECT
+                    candidate_run.model_run_id,
+                    candidate_package.rate_package_id,
+                    candidate_package.parent_rate_package_id,
+                    0
+                FROM pricing.MODEL_RUN AS candidate_run
+                JOIN pricing.PRICING_RATE_PACKAGE AS candidate_package
+                  ON candidate_package.rate_package_id = candidate_run.rate_package_id
+
+                UNION ALL
+
+                SELECT
+                    package_lineage.candidate_model_run_id,
+                    parent_package.rate_package_id,
+                    parent_package.parent_rate_package_id,
+                    package_lineage.lineage_depth + 1
+                FROM package_lineage
+                JOIN pricing.PRICING_RATE_PACKAGE AS parent_package
+                  ON parent_package.rate_package_id = package_lineage.parent_rate_package_id
+                WHERE package_lineage.lineage_depth < 100
+            ),
+            provable_validation_source AS (
+                SELECT
+                    package_lineage.candidate_model_run_id,
+                    source_run.model_run_id
+                FROM package_lineage
+                JOIN pricing.MODEL_RUN AS source_run
+                  ON source_run.rate_package_id = package_lineage.rate_package_id
+                JOIN pricing.CV_SPLIT_SET AS source_split
+                  ON source_split.split_set_id = source_run.split_set_id
+                 AND source_split.manifest_id = source_run.manifest_id
+                WHERE package_lineage.parent_rate_package_id IS NULL
+            )
+            UPDATE pricing.MODEL_RUN AS candidate_run
+            SET validation_source_model_run_id = (
+                SELECT source_run.model_run_id
+                FROM provable_validation_source AS source_run
+                WHERE source_run.candidate_model_run_id = candidate_run.model_run_id
+            )
+            WHERE candidate_run.validation_source_model_run_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM provable_validation_source AS source_run
+                  WHERE source_run.candidate_model_run_id = candidate_run.model_run_id
+              )
+            """
+        )
         connection.commit()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -287,6 +423,9 @@ def apply_offline_ddl(engine: Engine) -> None:
                     WHERE rate_package_id IS NOT NULL
                     """
                 )
+            connection.commit()
+            post_upgrade_path = OFFLINE_DDL_DIR / "pricing_post_upgrade.sql"
+            connection.executescript(post_upgrade_path.read_text(encoding="utf-8"))
             connection.commit()
         except BaseException:
             connection.rollback()

@@ -8,6 +8,7 @@ def test_reset_sql_deletes_dependent_pricing_tables_before_parent_tables():
         "DELETE FROM mlops.MODEL_RUN_SPLIT_SET",
         "DELETE FROM mlops.MODEL_RUN_DATASET",
         "DELETE FROM mlops.MODEL_RUN_METRIC",
+        "DELETE FROM pricing.CV_SPLIT_CURVE_POINT",
         "DELETE FROM pricing.CV_FOLD_METRIC",
         "DELETE FROM pricing.MODEL_RUN",
         "DELETE FROM pricing.PRICING_MODEL_DEPLOYMENT",
@@ -29,6 +30,7 @@ def test_reset_sql_deletes_dependent_pricing_tables_before_parent_tables():
         "DELETE FROM pricing_stg.STG_CELL_LEVEL",
         "DELETE FROM pricing_stg.STG_RATE_CELL",
         "DELETE FROM pricing_stg.STG_RATING_EXPORT",
+        "DELETE FROM pricing.PRICING_MODEL_VERSION_RESERVATION",
         "DELETE FROM pricing.PRICING_MODEL",
     ]
 

@@ -13,6 +13,216 @@ from pricing_pipeline.infra.migrations import (
 from pricing_pipeline.infra.schema import SchemaNames
 
 
+_FINAL_MODEL_RELATIVITY_COLUMNS = [
+    "model_id",
+    "model_name",
+    "model_label",
+    "target_name",
+    "model_type",
+    "rate_package_id",
+    "parent_rate_package_id",
+    "model_version",
+    "package_version",
+    "parent_package_version",
+    "package_kind",
+    "package_status",
+    "base_rate",
+    "effective_from_date",
+    "effective_to_date",
+    "family",
+    "family_params_json",
+    "link",
+    "edit_reason",
+    "model_fit_scope",
+    "term_id",
+    "term_sequence_no",
+    "term_name",
+    "term_type",
+    "term_level",
+    "level_sort_order",
+    "lower_bound",
+    "upper_bound",
+    "representative_value",
+    "eta_contribution",
+    "relativity",
+    "exposure_weight",
+    "record_count",
+    "is_default",
+    "is_reference",
+    "relativity_source",
+]
+
+_VALIDATION_IDENTITY_COLUMNS = [
+    "model_id",
+    "model_name",
+    "model_label",
+    "target_name",
+    "model_type",
+    "rate_package_id",
+    "parent_rate_package_id",
+    "model_version",
+    "package_version",
+    "parent_package_version",
+    "package_kind",
+    "package_status",
+    "edit_reason",
+    "model_run_id",
+    "parent_model_run_id",
+    "validation_source_model_run_id",
+    "validation_source_rate_package_id",
+    "validation_source_package_version",
+    "validation_evidence",
+    "build_fingerprint_sha256",
+    "builder_source_sha256",
+    "materialized_split_sha256",
+    "runtime_sha256",
+    "candidate_superglm_sha256",
+    "model_source_sha256",
+    "candidate_python_version",
+    "candidate_superglm_version",
+    "candidate_superglm_git_sha",
+]
+
+_MODEL_VALIDATION_SPLIT_COLUMNS = [
+    *_VALIDATION_IDENTITY_COLUMNS,
+    "manifest_id",
+    "dataset_name",
+    "source_system",
+    "data_as_of_date",
+    "data_as_of_column",
+    "dataset_row_count",
+    "model_frame_sha256",
+    "frame_hash_metadata_json",
+    "split_set_id",
+    "split_mode",
+    "split_method",
+    "splitter_class",
+    "splitter_params_json",
+    "row_order_sha256",
+    "split_row_count",
+    "fold_count",
+    "artifact_uri",
+    "artifact_sha256",
+    "runtime_metadata_json",
+    "validation_split_no",
+    "n_train",
+    "n_validation",
+    "deviance",
+    "nll",
+    "gini",
+    "family",
+    "family_params_json",
+    "link",
+    "validation_curve_status",
+    "validation_curve_reason",
+]
+
+_MODEL_VALIDATION_SUMMARY_COLUMNS = [
+    *_VALIDATION_IDENTITY_COLUMNS,
+    "manifest_id",
+    "dataset_name",
+    "source_system",
+    "data_as_of_date",
+    "data_as_of_column",
+    "dataset_row_count",
+    "model_frame_sha256",
+    "frame_hash_metadata_json",
+    "split_set_id",
+    "split_mode",
+    "split_method",
+    "splitter_class",
+    "splitter_params_json",
+    "row_order_sha256",
+    "split_row_count",
+    "fold_count",
+    "artifact_uri",
+    "artifact_sha256",
+    "runtime_metadata_json",
+    "family",
+    "family_params_json",
+    "link",
+    "validation_split_count",
+    "mean_deviance",
+    "sd_deviance",
+    "mean_nll",
+    "sd_nll",
+    "mean_gini",
+    "sd_gini",
+    "validation_prediction_coverage",
+    "validation_curve_status",
+    "validation_curve_reason",
+]
+
+_MODEL_VALIDATION_SPLIT_RELATIVITY_COLUMNS = [
+    *_VALIDATION_IDENTITY_COLUMNS,
+    "split_set_id",
+    "split_method",
+    "validation_split_no",
+    "n_train",
+    "n_validation",
+    "family",
+    "family_params_json",
+    "link",
+    "model_fit_scope",
+    "term_name",
+    "point_no",
+    "point_kind",
+    "x_numeric",
+    "level_text",
+    "eta_contribution",
+    "relativity",
+    "support_value",
+    "reference_value",
+    "reference_level",
+]
+
+_CURRENT_DATASET_VALIDATION_SPLIT_COLUMNS = [
+    "dataset_name",
+    "manifest_id",
+    "source_system",
+    "data_as_of_date",
+    "data_as_of_column",
+    "dataset_row_count",
+    "pk_columns_json",
+    "target_column",
+    "weight_column",
+    "offset_column",
+    "offset_source_column",
+    "offset_label",
+    "export_weight_column",
+    "model_frame_sha256",
+    "frame_hash_metadata_json",
+    "manifest_created_ts",
+    "manifest_created_by",
+    "split_set_id",
+    "split_mode",
+    "split_method",
+    "splitter_class",
+    "splitter_params_json",
+    "row_order_sha256",
+    "split_row_count",
+    "fold_count",
+    "groups_column",
+    "stratify_column",
+    "artifact_uri",
+    "artifact_sha256",
+    "runtime_metadata_json",
+    "split_created_ts",
+    "split_created_by",
+    "validation_split_no",
+    "n_train",
+    "n_validation",
+]
+
+_CLEAN_VALIDATION_VIEW_COLUMNS = {
+    "pricing.V_FINAL_MODEL_RELATIVITY": _FINAL_MODEL_RELATIVITY_COLUMNS,
+    "pricing.V_MODEL_VALIDATION_SPLIT": _MODEL_VALIDATION_SPLIT_COLUMNS,
+    "pricing.V_MODEL_VALIDATION_SUMMARY": _MODEL_VALIDATION_SUMMARY_COLUMNS,
+    "pricing.V_MODEL_VALIDATION_SPLIT_RELATIVITY": (_MODEL_VALIDATION_SPLIT_RELATIVITY_COLUMNS),
+    "pricing.V_CURRENT_DATASET_VALIDATION_SPLIT": (_CURRENT_DATASET_VALIDATION_SPLIT_COLUMNS),
+}
+
+
 def test_candidate_effective_date_becomes_nullable():
     path = Path("db/migrations/V026__nullable_candidate_effective_date.sql")
 
@@ -204,16 +414,9 @@ def _create_table_foreign_keys(
     return foreign_keys
 
 
-def _view_columns(ddl: str, view_name: str) -> list[str]:
-    view_pattern = re.compile(
-        rf"CREATE OR ALTER VIEW {re.escape(view_name)} AS\nSELECT\n(?P<select>.*?)\nFROM ",
-        re.S,
-    )
-    match = view_pattern.search(ddl)
-    assert match is not None, f"Missing view {view_name}"
-
+def _select_columns(select_sql: str) -> list[str]:
     columns = []
-    for line in match.group("select").splitlines():
+    for line in select_sql.splitlines():
         stripped = line.strip().rstrip(",")
         if not stripped:
             continue
@@ -222,6 +425,16 @@ def _view_columns(ddl: str, view_name: str) -> list[str]:
         columns.append(alias.group(1) if alias else stripped.split(".")[-1])
 
     return columns
+
+
+def _view_columns(ddl: str, view_name: str) -> list[str]:
+    view_pattern = re.compile(
+        rf"CREATE OR ALTER VIEW {re.escape(view_name)} AS\nSELECT\n(?P<select>.*?)\nFROM ",
+        re.S,
+    )
+    match = view_pattern.search(ddl)
+    assert match is not None, f"Missing view {view_name}"
+    return _select_columns(match.group("select"))
 
 
 def test_split_sql_server_batches_handles_go_lines():
@@ -314,6 +527,178 @@ def test_superglm_git_sha_migration_adds_nullable_validated_runtime_identity():
     assert "LIKE '%[^0-9a-f]%'" in source
     assert "candidate_artifact_format <> 'superglm-candidate-joblib-v3'" in source
     assert "candidate_superglm_git_sha IS NOT NULL" in source
+
+
+def test_clean_validation_migration_adds_root_build_fingerprint_contract():
+    source = Path("db/migrations/V035__clean_validation_evidence_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ADD build_fingerprint_sha256 CHAR(64) NULL" in source
+    assert "CK_PRICING_RATE_PACKAGE_BUILD_FINGERPRINT_SHA256" in source
+    assert "parent_rate_package_id IS NULL" in source
+    assert "LEN(build_fingerprint_sha256) = 64" in source
+    assert "build_fingerprint_sha256 COLLATE Latin1_General_BIN2" in source
+    assert "NOT LIKE '%[^0-9a-f]%'" in source
+    assert re.search(
+        r"CREATE UNIQUE INDEX UX_PRICING_RATE_PACKAGE_MODEL_BUILD_FINGERPRINT\s+"
+        r"ON pricing\.PRICING_RATE_PACKAGE\(model_id, build_fingerprint_sha256\)\s+"
+        r"WHERE parent_rate_package_id IS NULL\s+"
+        r"AND build_fingerprint_sha256 IS NOT NULL",
+        source,
+    )
+
+
+def test_clean_validation_migration_adds_model_run_evidence_and_lineage_contract():
+    source = Path("db/migrations/V035__clean_validation_evidence_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for column in (
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+    ):
+        assert f"ADD {column} CHAR(64) NULL" in source
+        assert f"LEN({column}) = 64" in source
+        assert f"{column} COLLATE Latin1_General_BIN2" in source
+    assert "ADD validation_curve_reason NVARCHAR(500) NULL" in source
+    assert "ADD validation_curve_status NVARCHAR(32) NULL" in source
+    assert "ADD validation_source_model_run_id BIGINT NULL" in source
+    assert "CK_MODEL_RUN_VALIDATION_CURVE_STATUS" in source
+    assert "validation_curve_status IS NULL AND validation_curve_reason IS NULL" in source
+    assert "validation_curve_status = 'COMPLETE'" in source
+    assert "validation_curve_status = 'UNAVAILABLE'" in source
+    assert source.count("validation_curve_status IS NOT NULL") >= 2
+    assert "LEN(LTRIM(RTRIM(validation_curve_reason))) > 0" in source
+    assert "FK_MODEL_RUN_VALIDATION_SOURCE" in source
+    assert "FOREIGN KEY (validation_source_model_run_id)" in source
+    assert "REFERENCES pricing.MODEL_RUN(model_run_id)" in source
+    assert "CREATE INDEX IX_MODEL_RUN_VALIDATION_SOURCE" in source
+    assert "ON pricing.MODEL_RUN(validation_source_model_run_id)" in source
+    assert "WHERE validation_source_model_run_id IS NOT NULL" in source
+    assert "split_role = 'validation'" in source
+    assert "WITH package_lineage AS" in source
+    assert "validation_source_model_run_id = source_run.model_run_id" in source
+
+
+def test_clean_validation_curve_point_table_has_exact_key_fks_and_checks():
+    source = Path("db/migrations/V035__clean_validation_evidence_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"CREATE TABLE pricing\.CV_SPLIT_CURVE_POINT \((.*?)\n\);",
+        source,
+        re.S,
+    )
+    assert match is not None
+    body = match.group(1)
+
+    expected_columns = {
+        "model_run_id": "BIGINT NOT NULL",
+        "split_set_id": "NVARCHAR(128) NOT NULL",
+        "split_no": "INT NOT NULL",
+        "term_name": "NVARCHAR(256) NOT NULL",
+        "point_no": "INT NOT NULL",
+        "point_kind": "NVARCHAR(16) NOT NULL",
+        "x_numeric": "FLOAT NULL",
+        "level_text": "NVARCHAR(512) NULL",
+        "eta_contribution": "FLOAT NOT NULL",
+        "relativity": "FLOAT NULL",
+        "support_value": "FLOAT NULL",
+        "reference_value": "FLOAT NULL",
+        "reference_level": "NVARCHAR(512) NULL",
+    }
+    for column, sql_type in expected_columns.items():
+        assert re.search(rf"\b{column}\s+{re.escape(sql_type)}\b", body)
+    assert "PRIMARY KEY (model_run_id, split_set_id, split_no, term_name, point_no)" in body
+    assert "FOREIGN KEY (model_run_id)" in body
+    assert "REFERENCES pricing.MODEL_RUN(model_run_id)" in body
+    assert "FOREIGN KEY (split_set_id, split_no)" in body
+    assert "REFERENCES pricing.CV_FOLD(split_set_id, fold_no)" in body
+    assert "split_no > 0" in body
+    assert "point_no > 0" in body
+    assert "LEN(LTRIM(RTRIM(term_name))) > 0" in body
+    assert "point_kind IN ('NUMERIC', 'LEVEL')" in body
+    assert "support_value IS NULL OR support_value >= 0" in body
+    assert "relativity IS NULL OR relativity >= 0" in body
+    assert "CREATE INDEX IX_CV_SPLIT_CURVE_POINT_SPLIT" in source
+    assert "ON pricing.CV_SPLIT_CURVE_POINT(split_set_id, split_no)" in source
+    assert "TRIGGER" not in source.upper()
+
+
+def test_clean_validation_migration_replaces_old_views_with_exact_public_contracts():
+    source = Path("db/migrations/V035__clean_validation_evidence_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+
+    for old_view in (
+        "V_PUBLISHED_MODEL_RELATIVITY",
+        "V_MODEL_RELATIVITY",
+        "V_CURRENT_DATASET_CV_FOLD",
+    ):
+        assert f"DROP VIEW pricing.{old_view}" in source
+
+    created_views = re.findall(r"CREATE OR ALTER VIEW (pricing\.V_[A-Z_]+) AS", source)
+    assert created_views == list(_CLEAN_VALIDATION_VIEW_COLUMNS)
+    for view_name, expected_columns in _CLEAN_VALIDATION_VIEW_COLUMNS.items():
+        assert len(expected_columns) == len(set(expected_columns))
+        assert _view_columns(source, view_name) == expected_columns
+
+    final_view_body = source.split(
+        "CREATE OR ALTER VIEW pricing.V_FINAL_MODEL_RELATIVITY AS\n", maxsplit=1
+    )[1].split("\nGO\n", maxsplit=1)[0]
+    final_branches = final_view_body.split("\nUNION ALL\n")
+    assert len(final_branches) == 2
+    for branch in final_branches:
+        select_match = re.search(r"^SELECT\n(?P<select>.*?)\nFROM ", branch.strip(), re.S)
+        assert select_match is not None
+        assert _select_columns(select_match.group("select")) == _FINAL_MODEL_RELATIVITY_COLUMNS
+
+
+def test_clean_validation_views_keep_final_and_held_out_evidence_unambiguous():
+    source = Path("db/migrations/V035__clean_validation_evidence_workflow.sql").read_text(
+        encoding="utf-8"
+    )
+    final_view, validation_views = source.split(
+        "CREATE OR ALTER VIEW pricing.V_MODEL_VALIDATION_SPLIT AS", maxsplit=1
+    )
+
+    assert "'PACKAGE_FINAL_MODEL' AS model_fit_scope" in final_view
+    assert "feature_name" not in final_view
+    assert "PRICING_COMPILED_1D_RATE_BAND" in final_view
+    assert "PRICING_COMPILED_RATE_CELL" in final_view
+    assert "JSON_VALUE(rp.package_metadata_json, '$.model.family')" in final_view
+    assert "JSON_QUERY(rp.package_metadata_json, '$.model.family_params')" in final_view
+    assert "JSON_VALUE(rp.revision_metadata_json, '$.reason')" in final_view
+    assert (
+        "LEFT(cell.cell_key_text, LEN(cell.term_name) + 1) = CONCAT(cell.term_name, '=')"
+        in final_view
+    )
+    assert "REPLACE(cell.cell_key_text" not in final_view
+    assert "package_model_name" not in source
+    assert "validation_source_model_version" not in source
+
+    assert "COALESCE(final_run.validation_source_model_run_id, final_run.model_run_id)" in (
+        validation_views
+    )
+    assert "'DIRECT'" in validation_views
+    assert "'INHERITED_FROM_PARENT'" in validation_views
+    assert "run_split.split_role = 'validation'" in validation_views
+    assert "LOWER(fold_metric.metric_name) = 'deviance'" in validation_views
+    assert "LOWER(fold_metric.metric_name) = 'nll'" in validation_views
+    assert "LOWER(fold_metric.metric_name) = 'gini'" in validation_views
+    assert "STDEVP" in validation_views
+    assert "SUM(CAST(held_out.n_validation AS FLOAT))" in validation_views
+    assert "'VALIDATION_TRAINING_SPLIT_MODEL' AS model_fit_scope" in validation_views
+    assert "point.eta_contribution" in validation_views
+    assert "train_folds_json" not in validation_views
+    assert "test_fold_no" not in validation_views
+    assert "POOLED" not in validation_views.upper()
+    assert "OUT_OF_FOLD" not in validation_views.upper()
+    assert "OOF" not in validation_views.upper()
+    assert "JSON_VALUE(split_set.splitter_params_json, '$.method')" in validation_views
 
 
 def test_rating_workbook_digest_migration_binds_model_run_evidence():
