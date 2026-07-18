@@ -32,6 +32,7 @@ def resolve_model_version_for_export(
     model_name: str,
     export_id: str,
     build_fingerprint_sha256: str,
+    expected_database: str,
 ) -> str:
     model_name = _required_text(model_name, "model_name")
     export_id = _required_text(export_id, "export_id")
@@ -42,6 +43,7 @@ def resolve_model_version_for_export(
     schemas = schema_names_from_connectable(engine)
 
     with engine.begin() as con:
+        _verify_expected_database(con, expected_database)
         model_id = con.execute(
             text(
                 f"""
@@ -153,3 +155,17 @@ def resolve_model_version_for_export(
             },
         )
         return reserved
+
+
+def _verify_expected_database(connection, expected_database: str) -> None:
+    expected = _required_text(expected_database, "expected_database")
+    actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one_or_none()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}; "
+            "model-version reservation transaction aborted before writes"
+        )

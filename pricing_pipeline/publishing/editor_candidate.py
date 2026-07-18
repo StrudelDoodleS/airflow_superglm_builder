@@ -242,6 +242,9 @@ def _resolve_existing_editor_publication(
             rp.parent_rate_package_id,
             mr.model_run_id,
             mr.parent_model_run_id,
+            mr.validation_source_model_run_id,
+            COALESCE(parent.validation_source_model_run_id, parent.model_run_id)
+                AS expected_validation_source_model_run_id,
             mr.run_status,
             mr.model_version,
             mr.export_id,
@@ -263,6 +266,8 @@ def _resolve_existing_editor_publication(
           ON pm.model_id = rp.model_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = rp.rate_package_id
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS parent
+          ON parent.model_run_id = mr.parent_model_run_id
         LEFT JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
           ON manifest.manifest_id = mr.manifest_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
@@ -335,9 +340,16 @@ def _resolve_existing_editor_publication(
         "split_set_id": submission.split_set_id,
         "model_source_sha256": submission.model_source_sha256,
     }
+    expected_validation_source = row.get("expected_validation_source_model_run_id")
+    if expected_validation_source is None:
+        raise EditorSubmissionError(
+            "existing editor publication SQL lineage does not resolve an inherited "
+            "validation_source_model_run_id"
+        )
     expected_sql_lineage = {
         **expected_lineage,
         "parent_model_run_id": submission.parent_model_run_id,
+        "validation_source_model_run_id": expected_validation_source,
     }
     sql_mismatches = [
         field for field, expected in expected_sql_lineage.items() if row.get(field) != expected

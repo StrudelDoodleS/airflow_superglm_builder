@@ -100,6 +100,7 @@ def run_standard_superglm_build(
     model_source_root: str | Path,
     created_by: str,
     offset_contract: OffsetExportContract | None = None,
+    expected_database: str | None = None,
 ) -> ApprovedModelBuild:
     frame, inputs, folds = _trusted_build_snapshot(
         frame,
@@ -173,6 +174,7 @@ def run_standard_superglm_build(
         validation_split_artifact_root=Path(split_artifact_root),
         split_indices=list(evidence.fold_indices),
         created_by=created_by,
+        expected_database=expected_database,
     )
     if manifest.model_frame_sha256 != expected_build_identity.model_frame_sha256:
         raise StandardSuperGLMError(
@@ -414,8 +416,7 @@ def _validate_final_frame_roles(
     if isinstance(inputs.y, pd.Series):
         if inputs.y.name != target_name:
             raise StandardSuperGLMError(
-                "ModelInputs.y name must exactly match the declared target column "
-                f"{target_name!r}"
+                f"ModelInputs.y name must exactly match the declared target column {target_name!r}"
             )
         actual_target = inputs.y.to_frame(name=target_name)
     elif isinstance(inputs.y, pd.DataFrame) and list(inputs.y.columns) == [target_name]:
@@ -464,8 +465,7 @@ def _validate_frame_columns(frame: pd.DataFrame, columns: list[str], *, role: st
     missing = [column for column in columns if column not in frame.columns]
     if missing:
         raise StandardSuperGLMError(
-            f"{role} declared columns are missing from the final model frame: "
-            + ", ".join(missing)
+            f"{role} declared columns are missing from the final model frame: " + ", ".join(missing)
         )
 
 
@@ -1065,9 +1065,7 @@ def _cleanup_failed_run_directory(run_dir: Path, *, original: BaseException) -> 
     except FileNotFoundError:
         pass
     except BaseException as cleanup_exc:
-        original.add_note(
-            f"failed to remove incomplete build directory {run_dir}: {cleanup_exc!r}"
-        )
+        original.add_note(f"failed to remove incomplete build directory {run_dir}: {cleanup_exc!r}")
         return
 
     output_root = run_dir.parent
@@ -1085,8 +1083,7 @@ def _cleanup_failed_run_directory(run_dir: Path, *, original: BaseException) -> 
             return
         if not is_non_empty:
             original.add_note(
-                f"failed to remove empty build attempt directory {output_root}: "
-                f"{cleanup_exc!r}"
+                f"failed to remove empty build attempt directory {output_root}: {cleanup_exc!r}"
             )
 
 

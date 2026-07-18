@@ -497,7 +497,20 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
     source_root = tmp_path / "pricing_models" / "claim_frequency"
     source_root.mkdir(parents=True)
     context = _context(api, tmp_path)
-    connection = object()
+
+    class ScalarResult:
+        def scalar_one(self):
+            return "PricingLab"
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(str(statement))
+            return ScalarResult()
+
+    connection = Connection()
 
     class Engine:
         @contextmanager
@@ -561,6 +574,59 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
         model.config,
         "analyst@example.test",
     )
+    assert connection.statements == ["SELECT DB_NAME()"]
+
+
+def test_register_model_rechecks_remote_database_before_registry_write(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    source_root = tmp_path / "pricing_models" / "claim_frequency"
+    source_root.mkdir(parents=True)
+    context = _context(api, tmp_path)
+    statements = []
+
+    class ScalarResult:
+        def scalar_one(self):
+            return "OtherDb"
+
+    class Connection:
+        def execute(self, statement):
+            statements.append(str(statement))
+            return ScalarResult()
+
+    class Engine:
+        @contextmanager
+        def begin(self):
+            yield Connection()
+
+    context = replace(context, engine=Engine())
+    monkeypatch.setattr(
+        api,
+        "register_pricing_model",
+        lambda *args, **kwargs: pytest.fail("registry write must not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="expected 'PricingLab'.*connected to 'OtherDb'"):
+        api.register_model(
+            context,
+            api.PricingModelSpec(
+                name="CLAIM_FREQUENCY",
+                label="Claim frequency",
+                target="claim_count",
+                model_type="superglm_poisson",
+                deployment_slot="PRODUCTION",
+                features=("age",),
+                dataset_name="claim_frequency_frame",
+                source_system="pricing_sql",
+                pk_columns=("policy_id",),
+            ),
+            source_root=source_root,
+        )
+
+    assert statements == ["SELECT DB_NAME()"]
 
 
 def test_build_candidate_rejects_invalid_model_identity_before_version_or_artifact_work(
@@ -703,7 +769,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",
-        lambda engine, *, model_name, export_id, build_fingerprint_sha256: "v7",
+        lambda engine, *, model_name, export_id, build_fingerprint_sha256, expected_database: "v7",
     )
 
     completed_build = _approved_build(
@@ -800,6 +866,7 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
     identity_calls = []
     reservations = []
     attempts = []
+    build_databases = []
 
     monkeypatch.setattr(
         api,
@@ -815,16 +882,24 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
         identity_calls.append(kwargs)
         return _build_identity()
 
-    def reserve(engine, *, model_name, export_id, build_fingerprint_sha256):
+    def reserve(
+        engine,
+        *,
+        model_name,
+        export_id,
+        build_fingerprint_sha256,
+        expected_database,
+    ):
         del engine
         events.append("reserve")
-        reservations.append((model_name, export_id, build_fingerprint_sha256))
+        reservations.append((model_name, export_id, build_fingerprint_sha256, expected_database))
         return "v7"
 
     def run_build(engine, **kwargs):
         del engine
         events.append("run")
         attempts.append(Path(kwargs["output_dir"]))
+        build_databases.append(kwargs["expected_database"])
         return _approved_build(tmp_path)
 
     monkeypatch.setattr(api, "create_build_identity", build_identity)
@@ -843,12 +918,13 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
 
     assert events == ["identity", "reserve", "run"] * 2
     assert reservations == [
-        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64),
-        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64),
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64, "PricingLab"),
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64, "PricingLab"),
     ]
     assert attempts[0] != attempts[1]
     assert all(path.name.startswith("attempt_") for path in attempts)
     assert all("1" * 64 not in str(path) for path in attempts)
+    assert build_databases == ["PricingLab", "PricingLab"]
     assert identity_calls[0]["frame"] is frame
     assert identity_calls[0]["model_config"] is model.config
     assert identity_calls[0]["superglm_model"] is identity_calls[1]["superglm_model"]
@@ -1062,7 +1138,7 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",
-        lambda engine, *, model_name, export_id, build_fingerprint_sha256: "v7",
+        lambda engine, *, model_name, export_id, build_fingerprint_sha256, expected_database: "v7",
     )
 
     def run_build(engine, **kwargs):

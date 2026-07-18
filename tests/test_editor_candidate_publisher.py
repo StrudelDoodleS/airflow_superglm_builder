@@ -405,6 +405,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "parent_rate_package_id": 107,
         "model_run_id": 908,
         "parent_model_run_id": 907,
+        "validation_source_model_run_id": 807,
+        "expected_validation_source_model_run_id": 807,
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
@@ -432,6 +434,10 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         def execute(self, statement, params):
             assert "manifest.model_frame_sha256" in str(statement)
             assert "DATASET_MANIFEST AS manifest" in str(statement)
+            assert "mr.validation_source_model_run_id" in str(statement)
+            assert "COALESCE(parent.validation_source_model_run_id, parent.model_run_id)" in str(
+                statement
+            )
             return Rows()
 
     class Begin:
@@ -489,6 +495,26 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             allowed_root=tmp_path,
         )
     row["parent_model_run_id"] = submission.parent_model_run_id
+
+    for actual_source, expected_source in ((999, 807), (None, 807), (None, None)):
+        row["validation_source_model_run_id"] = actual_source
+        row["expected_validation_source_model_run_id"] = expected_source
+        with pytest.raises(EditorSubmissionError, match="validation_source_model_run_id"):
+            editor_candidate._resolve_existing_editor_publication(
+                Engine(),
+                submission,
+                allowed_root=tmp_path,
+            )
+    row["validation_source_model_run_id"] = submission.parent_model_run_id
+    row["expected_validation_source_model_run_id"] = submission.parent_model_run_id
+    assert (
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+        is not None
+    )
 
     workbook.write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="rating workbook"):
@@ -557,6 +583,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "parent_rate_package_id": 107,
         "model_run_id": 908,
         "parent_model_run_id": 907,
+        "validation_source_model_run_id": 807,
+        "expected_validation_source_model_run_id": 807,
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),

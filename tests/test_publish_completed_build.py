@@ -13,6 +13,7 @@ import pytest
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import CompletedModelBuild, CompletedModelBuildError
+from pricing_pipeline.notebook import _new_build_attempt_directory
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.orchestration.publish_completed_build import (
     CandidateSQLLineage,
@@ -346,7 +347,8 @@ def test_model_export_publisher_returns_existing_result_unchanged(
 
 def test_redundant_attempt_cleanup_protects_canonical_candidate_path(tmp_path):
     artifact_root = tmp_path / "workbench"
-    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    attempt_dir = attempt_root / "manifest-incoming"
     attempt_dir.mkdir(parents=True)
     workbook = attempt_dir / "rating_tables.xlsx"
     workbook.write_bytes(b"incoming workbook")
@@ -355,7 +357,8 @@ def test_redundant_attempt_cleanup_protects_canonical_candidate_path(tmp_path):
         workbook=workbook,
         candidate_metadata=_candidate_metadata(attempt_dir),
     )
-    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    canonical_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    canonical_dir = canonical_root / "manifest-canonical"
     canonical_dir.mkdir(parents=True)
     canonical_workbook = canonical_dir / "rating_tables.xlsx"
     canonical_workbook.write_bytes(b"canonical workbook")
@@ -375,13 +378,14 @@ def test_redundant_attempt_cleanup_protects_canonical_candidate_path(tmp_path):
         artifact_root=artifact_root,
     )
 
-    assert attempt_dir.is_dir()
+    assert attempt_root.is_dir()
     assert Path(build.candidate_artifact_path).is_file()
 
 
 def test_redundant_attempt_cleanup_removes_whole_contained_attempt(tmp_path):
     artifact_root = tmp_path / "workbench"
-    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    attempt_dir = attempt_root / "manifest-incoming"
     attempt_dir.mkdir(parents=True)
     workbook = attempt_dir / "rating_tables.xlsx"
     workbook.write_bytes(b"incoming workbook")
@@ -390,8 +394,9 @@ def test_redundant_attempt_cleanup_removes_whole_contained_attempt(tmp_path):
         workbook=workbook,
         candidate_metadata=_candidate_metadata(attempt_dir),
     )
-    (attempt_dir / "extra-intermediate.tmp").write_bytes(b"redundant")
-    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    (attempt_root / "extra-intermediate.tmp").write_bytes(b"redundant")
+    canonical_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    canonical_dir = canonical_root / "manifest-canonical"
     canonical_dir.mkdir(parents=True)
     canonical_workbook = canonical_dir / "rating_tables.xlsx"
     canonical_workbook.write_bytes(b"canonical workbook")
@@ -413,12 +418,38 @@ def test_redundant_attempt_cleanup_removes_whole_contained_attempt(tmp_path):
         artifact_root=artifact_root,
     )
 
-    assert not attempt_dir.exists()
+    assert not attempt_root.exists()
+
+
+def test_redundant_attempt_cleanup_rejects_another_models_attempt_directory(tmp_path):
+    artifact_root = tmp_path / "workbench"
+    attempt_root = _new_build_attempt_directory(artifact_root, model_id=18)
+    attempt_dir = attempt_root / "manifest-incoming"
+    attempt_dir.mkdir(parents=True)
+    build = _approved_build(attempt_dir)
+    canonical_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    canonical_dir = canonical_root / "manifest-canonical"
+    result = _completed_publish_result(
+        build,
+        was_existing=True,
+        rating_workbook_path=str(canonical_dir / "rating_tables.xlsx"),
+        publication_receipt_path=str(canonical_dir / "publication_receipt.json"),
+        candidate_artifact_path=str(canonical_dir / "candidate.joblib"),
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=result,
+        artifact_root=artifact_root,
+    )
+
+    assert attempt_root.is_dir()
 
 
 def test_attempt_cleanup_requires_proven_existing_equivalence(tmp_path):
     artifact_root = tmp_path / "workbench"
-    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    attempt_dir = attempt_root / "manifest-incoming"
     attempt_dir.mkdir(parents=True)
     workbook = attempt_dir / "rating_tables.xlsx"
     workbook.write_bytes(b"incoming workbook")
@@ -434,7 +465,7 @@ def test_attempt_cleanup_requires_proven_existing_equivalence(tmp_path):
         artifact_root=artifact_root,
     )
 
-    assert attempt_dir.is_dir()
+    assert attempt_root.is_dir()
 
 
 def test_redundant_attempt_cleanup_failure_warns_after_success(
@@ -442,7 +473,8 @@ def test_redundant_attempt_cleanup_failure_warns_after_success(
     tmp_path,
 ):
     artifact_root = tmp_path / "workbench"
-    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    attempt_dir = attempt_root / "manifest-incoming"
     attempt_dir.mkdir(parents=True)
     workbook = attempt_dir / "rating_tables.xlsx"
     workbook.write_bytes(b"incoming workbook")
@@ -451,7 +483,8 @@ def test_redundant_attempt_cleanup_failure_warns_after_success(
         workbook=workbook,
         candidate_metadata=_candidate_metadata(attempt_dir),
     )
-    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    canonical_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    canonical_dir = canonical_root / "manifest-canonical"
     canonical_dir.mkdir(parents=True)
     result = _completed_publish_result(
         build,
@@ -475,14 +508,15 @@ def test_redundant_attempt_cleanup_failure_warns_after_success(
             artifact_root=artifact_root,
         )
 
-    assert attempt_dir.is_dir()
+    assert attempt_root.is_dir()
 
 
 def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
     tmp_path,
 ):
     artifact_root = tmp_path / "workbench"
-    target_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-target"
+    target_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    target_dir = target_root / "manifest-incoming"
     target_dir.mkdir(parents=True)
     workbook = target_dir / "rating_tables.xlsx"
     workbook.write_bytes(b"incoming workbook")
@@ -491,8 +525,10 @@ def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
         workbook=workbook,
         candidate_metadata=_candidate_metadata(target_dir),
     )
-    link_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-link"
-    link_dir.symlink_to(target_dir, target_is_directory=True)
+    link_suffix = "f" * 32 if target_root.name != f"attempt_{'f' * 32}" else "e" * 32
+    link_root = artifact_root / "model_17" / f"attempt_{link_suffix}"
+    link_root.symlink_to(target_root, target_is_directory=True)
+    link_dir = link_root / target_dir.name
     build = build.model_copy(
         update={
             "rating_workbook_path": str(link_dir / Path(build.rating_workbook_path).name),
@@ -500,7 +536,8 @@ def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
             "candidate_artifact_path": str(link_dir / Path(build.candidate_artifact_path).name),
         }
     )
-    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-canonical"
+    canonical_root = _new_build_attempt_directory(artifact_root, model_id=17)
+    canonical_dir = canonical_root / "manifest-canonical"
     result = _completed_publish_result(
         build,
         was_existing=True,
@@ -515,8 +552,8 @@ def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
         artifact_root=artifact_root,
     )
 
-    assert link_dir.is_symlink()
-    assert target_dir.is_dir()
+    assert link_root.is_symlink()
+    assert target_root.is_dir()
 
 
 def test_completed_publication_requires_prebuilt_manifest_evidence():

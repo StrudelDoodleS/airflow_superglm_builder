@@ -4,8 +4,10 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +75,39 @@ def sha256_file(path: str | Path) -> str:
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+_GENERATED_XLSX_CORE_TIMESTAMPS = tuple(
+    re.compile(
+        rb"(<dcterms:" + field + rb"\b[^>]*>).*?(</dcterms:" + field + rb">)",
+        re.DOTALL,
+    )
+    for field in (b"created", b"modified")
+)
+
+
+def xlsx_semantic_sha256(path: str | Path) -> str:
+    """Hash XLSX member content while ignoring generated container timestamps."""
+    try:
+        digest = hashlib.sha256()
+        with zipfile.ZipFile(Path(path)) as archive:
+            members = archive.infolist()
+            member_names = [member.filename for member in members]
+            if len(member_names) != len(set(member_names)):
+                raise ValueError("XLSX contains duplicate ZIP member names")
+            for member in sorted(members, key=lambda item: item.filename):
+                name = member.filename.encode("utf-8")
+                content = archive.read(member)
+                if member.filename == "docProps/core.xml":
+                    for pattern in _GENERATED_XLSX_CORE_TIMESTAMPS:
+                        content = pattern.sub(rb"\1<generated-timestamp>\2", content)
+                digest.update(len(name).to_bytes(8, "big"))
+                digest.update(name)
+                digest.update(len(content).to_bytes(8, "big"))
+                digest.update(content)
+    except (zipfile.BadZipFile, OSError, KeyError, RuntimeError) as exc:
+        raise ValueError(f"unable to read XLSX archive: {path}") from exc
     return digest.hexdigest()
 
 

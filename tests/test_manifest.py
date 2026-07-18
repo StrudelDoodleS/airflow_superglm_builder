@@ -434,7 +434,6 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
         ("CV_SPLIT_SET", "pricing"),
         ("CV_FOLD", "pricing"),
     ]
-
     manifest_row = to_sql_calls[0]["frame"].iloc[0]
     assert manifest_row["manifest_id"] == "manifest_frame_1"
     assert manifest_row["dataset_name"] == "work_loss_cost_frame"
@@ -478,6 +477,56 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
         frame,
         pk_columns=("PolicyID",),
     )
+
+
+def test_manifest_transaction_rechecks_database_before_any_sql_write(monkeypatch):
+    frame = pd.DataFrame({"PolicyID": [1], "LossCost": [0.0]})
+    to_sql_calls = []
+
+    class ScalarResult:
+        def scalar_one(self):
+            return "OtherDb"
+
+    class Connection:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(str(statement))
+            return ScalarResult()
+
+    connection = Connection()
+
+    class Engine:
+        _execution_options = {}
+
+        def begin(self):
+            return FakeBegin(connection)
+
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda *args, **kwargs: to_sql_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="expected 'PricingLab'.*connected to 'OtherDb'"):
+        create_model_frame_manifest_with_split(
+            Engine(),
+            frame=frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="claim_frame",
+                source_system="pricing_sql",
+                data_as_of_date="2026-06-30",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+            ),
+            manifest_id="manifest-wrong-db",
+            validation_split=NO_VALIDATION,
+            expected_database="PricingLab",
+        )
+
+    assert connection.statements == ["SELECT DB_NAME()"]
+    assert to_sql_calls == []
 
 
 def test_create_model_frame_manifest_records_supplied_custom_split_indices(

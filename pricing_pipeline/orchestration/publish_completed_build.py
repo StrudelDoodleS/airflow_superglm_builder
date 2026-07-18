@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import warnings
 from dataclasses import dataclass
@@ -235,16 +236,30 @@ def _discard_redundant_completed_build_attempt(
     ]
     if not incoming_paths:
         return
-    attempt_dir = incoming_paths[0].parent
-    if any(path.parent != attempt_dir for path in incoming_paths):
+    try:
+        relative_paths = [path.relative_to(root) for path in incoming_paths]
+    except ValueError:
         return
-    if attempt_dir.is_symlink():
+    first_relative = relative_paths[0]
+    if len(first_relative.parts) < 3:
         return
-    resolved_attempt = attempt_dir.resolve()
+    model_component, attempt_component = first_relative.parts[:2]
+    if (
+        model_component != f"model_{int(build.model_id)}"
+        or re.fullmatch(r"model_[1-9][0-9]*", model_component) is None
+        or re.fullmatch(r"attempt_[0-9a-f]{32}", attempt_component) is None
+        or any(
+            len(relative.parts) < 3 or relative.parts[:2] != (model_component, attempt_component)
+            for relative in relative_paths
+        )
+    ):
+        return
+    model_root = root / model_component
+    attempt_root = model_root / attempt_component
+    if model_root.is_symlink() or attempt_root.is_symlink():
+        return
+    resolved_attempt = attempt_root.resolve()
     if not resolved_attempt.is_relative_to(root):
-        return
-    relative_attempt = resolved_attempt.relative_to(root)
-    if len(relative_attempt.parts) < 3:
         return
     canonical_values = [
         publish_result.rating_workbook_path,
@@ -261,14 +276,14 @@ def _discard_redundant_completed_build_attempt(
         for path in canonical_paths
     ):
         return
-    if not attempt_dir.is_dir():
+    if not attempt_root.is_dir():
         return
     try:
-        shutil.rmtree(attempt_dir)
+        shutil.rmtree(attempt_root)
     except Exception as exc:
         warnings.warn(
             "publication succeeded; redundant attempt cleanup failed: "
-            f"{attempt_dir.as_posix()}: {exc}",
+            f"{attempt_root.as_posix()}: {exc}",
             RuntimeWarning,
             stacklevel=2,
         )

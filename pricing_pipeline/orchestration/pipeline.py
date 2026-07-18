@@ -17,7 +17,7 @@ from pricing_pipeline.publishing.model_registry import (
 )
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.staging import stage_rating_export
-from pricing_pipeline.workbench.submission import sha256_file
+from pricing_pipeline.workbench.submission import sha256_file, xlsx_semantic_sha256
 
 
 class PublishedRunIntegrityError(RuntimeError):
@@ -202,6 +202,12 @@ def _resolve_existing_published_run(
     rate_package_id: int | None = None,
     allowed_artifact_root: str | Path | None = None,
 ) -> CompletedModelPublishResult | None:
+    incoming_workbook = _verify_incoming_publication_artifact(
+        export.rating_workbook_path,
+        expected_sha256=export.rating_workbook_sha256,
+        label="rating workbook",
+        allowed_artifact_root=allowed_artifact_root,
+    )
     schemas = schema_names_from_connectable(engine)
     query = text(
         f"""
@@ -475,6 +481,16 @@ def _resolve_existing_published_run(
     committed_sha256 = str(row.get("rating_workbook_sha256") or "")
     if sha256_file(committed_workbook) != committed_sha256:
         raise PublishedRunIntegrityError("existing rating workbook SHA-256 verification failed")
+    if committed_sha256 != export.rating_workbook_sha256:
+        try:
+            canonical_semantic_sha256 = xlsx_semantic_sha256(committed_workbook)
+            incoming_semantic_sha256 = xlsx_semantic_sha256(incoming_workbook)
+        except (OSError, ValueError) as exc:
+            raise PublishedRunIntegrityError(
+                "rating workbook semantic verification failed"
+            ) from exc
+        if canonical_semantic_sha256 != incoming_semantic_sha256:
+            raise PublishedRunIntegrityError("rating workbook semantic content differs")
 
     resolved_manifest_id = canonical_manifest_id
     resolved_split_set_id = canonical_split_set_id
@@ -750,7 +766,6 @@ def _retry_evidence_conflicts(
         "package_publication_receipt_sha256": export.publication_receipt_sha256,
         "run_model_name": export.model_name,
         "run_model_version": export.model_version,
-        "rating_workbook_sha256": export.rating_workbook_sha256,
         "publication_receipt_sha256": export.publication_receipt_sha256,
         "candidate_artifact_format": export.candidate_artifact_format,
         "candidate_python_version": export.candidate_python_version,

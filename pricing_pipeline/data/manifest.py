@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, train_test_split
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
@@ -177,6 +178,7 @@ def create_model_frame_manifest_with_split(
     validation_split_artifact_root: Path | None = None,
     split_indices: list[tuple[object, object]] | None = None,
     created_by: str = "airflow",
+    expected_database: str | None = None,
 ) -> DatasetManifestResult:
     _validate_model_frame(frame, spec=spec, validation_split=validation_split)
     supplied_split_indices = (
@@ -266,6 +268,7 @@ def create_model_frame_manifest_with_split(
     )
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
+        _verify_expected_database(con, expected_database)
         manifest_df.to_sql(
             "DATASET_MANIFEST",
             con,
@@ -304,6 +307,24 @@ def create_model_frame_manifest_with_split(
         split_set_id=split_set_id,
         split_artifact_uri=split_artifact_uri,
     )
+
+
+def _verify_expected_database(connection, expected_database: str | None) -> None:
+    if expected_database is None:
+        return
+    expected = str(expected_database).strip()
+    if not expected:
+        raise ValueError("expected_database must be a non-empty database name or None")
+    actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}; "
+            "manifest transaction aborted before writes"
+        )
 
 
 def _validate_model_frame(
@@ -558,14 +579,11 @@ def build_column_metadata(
             existing_roles = roles_by_column.setdefault(column, [])
             if existing_roles and not ({*existing_roles, role} <= combinable_roles):
                 raise ValueError(
-                    f"column {column!r} is declared as both "
-                    f"{'+'.join(existing_roles)} and {role}"
+                    f"column {column!r} is declared as both {'+'.join(existing_roles)} and {role}"
                 )
             existing_roles.append(role)
 
-    role_by_column = {
-        column: "+".join(roles) for column, roles in roles_by_column.items()
-    }
+    role_by_column = {column: "+".join(roles) for column, roles in roles_by_column.items()}
 
     column_df = pd.DataFrame(
         {

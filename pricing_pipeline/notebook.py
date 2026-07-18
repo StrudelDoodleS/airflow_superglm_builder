@@ -305,6 +305,22 @@ def _connect_local(local_root: str | Path | None) -> NotebookContext:
     )
 
 
+def _verify_remote_database(connection, expected_database: str | None) -> str:
+    expected = str(expected_database or "").strip()
+    if not expected:
+        raise ValueError("expected_remote_database is required when mode='remote'")
+    actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}. Writes remain disabled."
+        )
+    return actual
+
+
 def _connect_remote(
     runtime_module: str | None,
     *,
@@ -314,19 +330,10 @@ def _connect_remote(
     expected = str(expected_database or "").strip()
     if not expected:
         raise ValueError("expected_remote_database is required when mode='remote'")
-
     runtime = runtime_from_env_or_module(runtime_module)
     engine = runtime.get_engine()
     with engine.connect() as connection:
-        actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
-    actual = str(actual_value or "").strip()
-    if not actual:
-        raise RuntimeError("Remote connection did not report a database name")
-    if actual.casefold() != expected.casefold():
-        raise RuntimeError(
-            "Remote database mismatch: "
-            f"expected {expected!r}, connected to {actual!r}. Writes remain disabled."
-        )
+        actual = _verify_remote_database(connection, expected)
     return NotebookContext(
         engine=engine,
         settings=runtime.settings,
@@ -392,6 +399,7 @@ def register_model(
         )
 
     with pricing.engine.begin() as connection:
+        _verify_remote_database(connection, pricing.settings.pricing_database)
         record = register_pricing_model(
             connection,
             config,
@@ -583,6 +591,7 @@ def build_candidate(
             model_name=model.name,
             export_id=export_id,
             build_fingerprint_sha256=build_identity.build_fingerprint_sha256,
+            expected_database=pricing.settings.pricing_database,
         )
     completed_build = run_standard_superglm_build(
         pricing.engine,
@@ -604,6 +613,7 @@ def build_candidate(
         model_source_root=model.source_root,
         created_by=_created_by(created_by),
         offset_contract=offset_contract,
+        expected_database=(None if pricing.mode == "local" else pricing.settings.pricing_database),
     )
     return BuiltCandidate(model=model, completed_build=completed_build)
 

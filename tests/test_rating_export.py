@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -951,6 +952,17 @@ def _retry_export(tmp_path: Path) -> ModelExportResult:
     )
 
 
+def _write_timestamped_xlsx(path: Path, *, value: str, year: int) -> None:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active["A1"] = value
+    workbook.properties.created = datetime(year, 1, 1, tzinfo=UTC)
+    workbook.properties.modified = datetime(year, 1, 2, tzinfo=UTC)
+    workbook.save(path)
+    workbook.close()
+
+
 def _retry_evidence(tmp_path: Path):
     workbook = (tmp_path / "rating_tables.xlsx").resolve()
     if not workbook.exists():
@@ -1161,6 +1173,100 @@ def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path)
 
     evidence["row"]["model_run_id"] = None
     with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
+def test_existing_published_run_accepts_workbook_with_only_generated_timestamp_changes(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    incoming_workbook = Path(export.rating_workbook_path)
+    _write_timestamped_xlsx(incoming_workbook, value="same rating data", year=2025)
+    export = export.model_copy(
+        update={"rating_workbook_sha256": pipeline.sha256_file(incoming_workbook)}
+    )
+    evidence = _retry_evidence(tmp_path)
+    canonical_workbook = tmp_path / "canonical-rating.xlsx"
+    _write_timestamped_xlsx(canonical_workbook, value="same rating data", year=2026)
+    evidence["row"].update(
+        source_file=str(canonical_workbook),
+        rating_workbook_path=str(canonical_workbook),
+        rating_workbook_sha256=pipeline.sha256_file(canonical_workbook),
+    )
+    assert evidence["row"]["rating_workbook_sha256"] != export.rating_workbook_sha256
+
+    result = pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        allowed_artifact_root=tmp_path,
+    )
+
+    assert result.rating_workbook_path == str(canonical_workbook)
+
+
+def test_existing_published_run_rejects_semantically_different_workbook(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    incoming_workbook = Path(export.rating_workbook_path)
+    _write_timestamped_xlsx(incoming_workbook, value="incoming rating data", year=2025)
+    export = export.model_copy(
+        update={"rating_workbook_sha256": pipeline.sha256_file(incoming_workbook)}
+    )
+    evidence = _retry_evidence(tmp_path)
+    canonical_workbook = tmp_path / "canonical-rating.xlsx"
+    _write_timestamped_xlsx(canonical_workbook, value="different rating data", year=2026)
+    evidence["row"].update(
+        source_file=str(canonical_workbook),
+        rating_workbook_path=str(canonical_workbook),
+        rating_workbook_sha256=pipeline.sha256_file(canonical_workbook),
+    )
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="rating workbook semantic content differs",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("corrupt_side", ["canonical", "incoming"])
+def test_existing_published_run_wraps_corrupt_workbook_semantic_verification(
+    tmp_path: Path,
+    corrupt_side: str,
+):
+    export = _retry_export(tmp_path)
+    incoming_workbook = Path(export.rating_workbook_path)
+    if corrupt_side == "incoming":
+        incoming_workbook.write_bytes(b"corrupt incoming workbook")
+    else:
+        _write_timestamped_xlsx(incoming_workbook, value="rating data", year=2025)
+    export = export.model_copy(
+        update={"rating_workbook_sha256": pipeline.sha256_file(incoming_workbook)}
+    )
+    evidence = _retry_evidence(tmp_path)
+    canonical_workbook = tmp_path / "canonical-rating.xlsx"
+    if corrupt_side == "canonical":
+        canonical_workbook.write_bytes(b"corrupt canonical workbook")
+    else:
+        _write_timestamped_xlsx(canonical_workbook, value="rating data", year=2026)
+    evidence["row"].update(
+        source_file=str(canonical_workbook),
+        rating_workbook_path=str(canonical_workbook),
+        rating_workbook_sha256=pipeline.sha256_file(canonical_workbook),
+    )
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="rating workbook semantic verification failed",
+    ):
         pipeline._resolve_existing_published_run(
             _Engine(_EvidenceConnection(evidence)),
             export,

@@ -31,10 +31,12 @@ class FakeConnection:
         existing_version=None,
         versions=(),
         canonical_fingerprint_version=None,
+        actual_database="PricingLab",
     ):
         self.existing_version = existing_version
         self.versions = versions
         self.canonical_fingerprint_version = canonical_fingerprint_version
+        self.actual_database = actual_database
         self.reservations: dict[str, str] = {}
         self.calls: list[tuple[str, dict[str, object]]] = []
 
@@ -42,6 +44,8 @@ class FakeConnection:
         sql = str(statement)
         values = dict(params or {})
         self.calls.append((sql, values))
+        if "DB_NAME()" in sql:
+            return FakeScalarResult(self.actual_database)
         if (
             "FROM pricing.PRICING_MODEL AS pm" in sql
             or "FROM python_pricing.PRICING_MODEL AS pm" in sql
@@ -81,11 +85,13 @@ class FakeEngine:
         versions=(),
         canonical_fingerprint_version=None,
         pricing_schema="pricing",
+        actual_database="PricingLab",
     ):
         self.connection = FakeConnection(
             existing_version=existing_version,
             versions=versions,
             canonical_fingerprint_version=canonical_fingerprint_version,
+            actual_database=actual_database,
         )
         self._execution_options = {"pricing_schema": pricing_schema}
 
@@ -101,9 +107,10 @@ def test_model_version_queries_respect_configured_pricing_schema():
         model_name="MY_MODEL",
         export_id="my_model__run_1",
         build_fingerprint_sha256="a" * 64,
+        expected_database="PricingLab",
     )
 
-    sql, params = engine.connection.calls[0]
+    sql, params = engine.connection.calls[1]
     assert "FROM python_pricing.PRICING_MODEL AS pm" in sql
     assert "WITH (UPDLOCK, HOLDLOCK)" in sql
     assert params == {"model_name": "MY_MODEL"}
@@ -118,10 +125,11 @@ def test_resolve_model_version_for_export_reuses_existing_export_version():
             model_name="MY_MODEL",
             export_id="my_model__run_1",
             build_fingerprint_sha256="a" * 64,
+            expected_database="PricingLab",
         )
         == "v7"
     )
-    assert len(engine.connection.calls) == 3
+    assert len(engine.connection.calls) == 4
 
 
 def test_resolve_model_version_for_export_allocates_next_version_for_new_export():
@@ -133,11 +141,12 @@ def test_resolve_model_version_for_export_allocates_next_version_for_new_export(
             model_name="MY_MODEL",
             export_id="my_model__run_2",
             build_fingerprint_sha256="b" * 64,
+            expected_database="PricingLab",
         )
         == "v5"
     )
     assert engine.connection.reservations == {"my_model__run_2": "v5"}
-    assert len(engine.connection.calls) == 5
+    assert len(engine.connection.calls) == 6
 
 
 def test_resolve_model_version_reserves_distinct_versions_before_publication():
@@ -148,18 +157,21 @@ def test_resolve_model_version_reserves_distinct_versions_before_publication():
         model_name="MY_MODEL",
         export_id="my_model__run_1",
         build_fingerprint_sha256="a" * 64,
+        expected_database="PricingLab",
     )
     second = resolve_model_version_for_export(
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_2",
         build_fingerprint_sha256="b" * 64,
+        expected_database="PricingLab",
     )
     retry = resolve_model_version_for_export(
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_1",
         build_fingerprint_sha256="a" * 64,
+        expected_database="PricingLab",
     )
 
     assert (first, second, retry) == ("v1", "v2", "v1")
@@ -177,6 +189,7 @@ def test_resolve_model_version_reuses_canonical_root_fingerprint_before_reservat
         model_name="MY_MODEL",
         export_id="retry-attempt-export",
         build_fingerprint_sha256="c" * 64,
+        expected_database="PricingLab",
     )
 
     assert resolved == "v7"
@@ -186,7 +199,7 @@ def test_resolve_model_version_reuses_canonical_root_fingerprint_before_reservat
         for index, (sql, _params) in enumerate(engine.connection.calls)
         if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql
     )
-    assert fingerprint_query_index == 1
+    assert fingerprint_query_index == 2
 
 
 def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_root():
@@ -201,7 +214,25 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
             model_name="MY_MODEL",
             export_id="retry-attempt-export",
             build_fingerprint_sha256="c" * 64,
+            expected_database="PricingLab",
         )
+
+
+def test_model_version_reservation_rechecks_database_before_lock_or_insert():
+    engine = FakeEngine(actual_database="OtherDb")
+
+    with pytest.raises(RuntimeError, match="expected 'PricingLab'.*connected to 'OtherDb'"):
+        resolve_model_version_for_export(
+            engine,
+            model_name="MY_MODEL",
+            export_id="my_model__run_1",
+            build_fingerprint_sha256="a" * 64,
+            expected_database="PricingLab",
+        )
+
+    assert len(engine.connection.calls) == 1
+    assert "DB_NAME()" in engine.connection.calls[0][0]
+    assert engine.connection.reservations == {}
 
 
 @pytest.mark.parametrize(
@@ -212,6 +243,7 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
                 "model_name": None,
                 "export_id": "export-1",
                 "build_fingerprint_sha256": "a" * 64,
+                "expected_database": "PricingLab",
             },
             "model_name",
         ),
@@ -220,6 +252,7 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
                 "model_name": "",
                 "export_id": "export-1",
                 "build_fingerprint_sha256": "a" * 64,
+                "expected_database": "PricingLab",
             },
             "model_name",
         ),
@@ -228,6 +261,7 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
                 "model_name": "MY_MODEL",
                 "export_id": "   ",
                 "build_fingerprint_sha256": "a" * 64,
+                "expected_database": "PricingLab",
             },
             "export_id",
         ),
@@ -236,6 +270,7 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
                 "model_name": "MY_MODEL",
                 "export_id": None,
                 "build_fingerprint_sha256": "a" * 64,
+                "expected_database": "PricingLab",
             },
             "export_id",
         ),
@@ -244,6 +279,7 @@ def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_ro
                 "model_name": "MY_MODEL",
                 "export_id": "export-1",
                 "build_fingerprint_sha256": "not-a-digest",
+                "expected_database": "PricingLab",
             },
             "build_fingerprint_sha256",
         ),
