@@ -329,7 +329,9 @@ def test_local_register_model_is_idempotent(tmp_path):
     assert count == 1
 
 
-def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_path):
+def test_local_model_version_reuses_root_fingerprint_and_advances_trained_versions(
+    tmp_path,
+):
     from pricing_pipeline import notebook as api
     from pricing_pipeline.publishing.sqlite_notebook import (
         resolve_sqlite_model_version,
@@ -349,24 +351,27 @@ def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_pat
             text(
                 """
                 INSERT INTO pricing.PRICING_RATE_PACKAGE (
-                    model_id, model_name, model_version, package_version,
-                    base_rate, package_status, source_export_id,
-                    offset_handling, created_by
-                ) VALUES (
-                    :model_id, 'CLAIM_FREQUENCY', 'v3', 1,
-                    0.1, 'PUBLISHED', 'existing-export',
-                    'NONE', 'test'
-                )
+                        model_id, model_name, model_version, package_version,
+                        base_rate, package_status, source_export_id,
+                        build_fingerprint_sha256, offset_handling, created_by
+                    ) VALUES (
+                        :model_id, 'CLAIM_FREQUENCY', 'v3', 1,
+                        0.1, 'PUBLISHED', 'existing-export',
+                        :build_fingerprint_sha256, 'NONE', 'test'
+                    )
                 """
             ),
-            {"model_id": model.model_id},
+            {
+                "model_id": model.model_id,
+                "build_fingerprint_sha256": "9" * 64,
+            },
         )
 
     assert (
         resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id="existing-export",
+            build_fingerprint_sha256="9" * 64,
         )
         == "v3"
     )
@@ -374,7 +379,7 @@ def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_pat
         resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id="new-export",
+            build_fingerprint_sha256="a" * 64,
         )
         == "v4"
     )
@@ -382,7 +387,7 @@ def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_pat
         resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id="second-new-export",
+            build_fingerprint_sha256="b" * 64,
         )
         == "v5"
     )
@@ -390,7 +395,7 @@ def test_local_model_version_reuses_export_and_advances_trained_versions(tmp_pat
         resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id="new-export",
+            build_fingerprint_sha256="a" * 64,
         )
         == "v4"
     )
@@ -405,8 +410,19 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
 
     model_root = tmp_path / "pricing_models" / "claim_frequency"
     model_root.mkdir(parents=True)
-    workbook = tmp_path / "rating_tables.xlsx"
+    attempt_root = (
+        model_root
+        / ".local"
+        / "workbench_artifacts"
+        / "claim_frequency"
+        / "v1"
+        / "claim-frequency__run-1"
+    )
+    attempt_root.mkdir(parents=True)
+    workbook = attempt_root / "rating_tables.xlsx"
     workbook.write_bytes(b"local workbook")
+    receipt = attempt_root / "receipt.json"
+    receipt.write_bytes(b'{"status":"complete"}')
     context = api.connect(mode="local", local_root=model_root / ".local")
     model = api.register_model(
         context,
@@ -507,8 +523,8 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         split_set_id="split-1",
         created_by="analyst@example.test",
         mlflow_run_id="mlflow-old",
-        publication_receipt_path=str(tmp_path / "receipt.json"),
-        publication_receipt_sha256="b" * 64,
+        publication_receipt_path=str(receipt),
+        publication_receipt_sha256=sqlite_notebook.sha256_file(receipt),
         candidate_artifact_path=str(tmp_path / "candidate.joblib"),
         candidate_artifact_sha256="c" * 64,
         candidate_artifact_format="superglm-candidate-joblib-v3",
@@ -538,7 +554,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         sqlite_notebook.resolve_sqlite_model_version(
             context.engine,
             model_name=model.name,
-            export_id=completed_build.export_id,
+            build_fingerprint_sha256=completed_build.build_fingerprint_sha256,
         )
         == "v1"
     )
@@ -579,11 +595,9 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     workbook.write_bytes(b"local workbook")
 
     staging_digest["value"] = "e" * 64
-    with pytest.raises(ValueError, match="staging_content_sha256"):
-        api.publish_candidate(
-            context,
-            candidate,
-        )
+    path_independent_retry = api.publish_candidate(context, candidate)
+    assert path_independent_retry.rate_package_id == first.rate_package_id
+    assert path_independent_retry.was_existing is True
     staging_digest["value"] = "d" * 64
 
     changed_run_evidence = completed_build.model_copy(
@@ -602,10 +616,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             changed_run_candidate,
         )
 
+    different_receipt = attempt_root / "different-receipt.json"
+    different_receipt.write_bytes(b'{"status":"different"}')
     conflicting_build = completed_build.model_copy(
         update={
-            "publication_receipt_path": str(tmp_path / "different-receipt.json"),
-            "publication_receipt_sha256": "c" * 64,
+            "publication_receipt_path": str(different_receipt),
+            "publication_receipt_sha256": sqlite_notebook.sha256_file(different_receipt),
         }
     )
     conflicting_candidate = api.BuiltCandidate(
@@ -671,7 +687,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         "mlops.MODEL_RUN_METRIC": 1,
         "pricing.CV_FOLD_METRIC": 1,
     }
-    assert staged_receipt_sha256 == "b" * 64
+    assert staged_receipt_sha256 == completed_build.publication_receipt_sha256
     assert stored_workbook_sha256 == completed_build.rating_workbook_sha256
     assert stored_superglm_git_sha == completed_build.candidate_superglm_git_sha
     assert stored_package_status == "LOCAL_AUDIT"
@@ -680,7 +696,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     mismatch_version = sqlite_notebook.resolve_sqlite_model_version(
         context.engine,
         model_name=model.name,
-        export_id=mismatch_export_id,
+        build_fingerprint_sha256=completed_build.build_fingerprint_sha256,
     )
     mismatch_candidate = api.BuiltCandidate(
         model=model,
@@ -703,6 +719,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             update={
                 "export_id": "claim-frequency__unreserved",
                 "model_version": "v3",
+                "build_fingerprint_sha256": "7" * 64,
             }
         ),
     )
@@ -762,8 +779,11 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     missing_artifact = (
         context.settings.workbench_artifact_root / "CLAIM_FREQUENCY" / "missing.joblib"
     )
-    workbook = tmp_path / "rating_tables.xlsx"
+    workbook = context.settings.workbench_artifact_root / "CLAIM_FREQUENCY" / "rating_tables.xlsx"
+    workbook.parent.mkdir(parents=True)
     workbook.write_bytes(b"rating workbook")
+    receipt = workbook.parent / "receipt.json"
+    receipt.write_bytes(b'{"status":"complete"}')
     completed_build = CompletedModelBuild(
         model_id=model.model_id,
         model_name=model.name,
@@ -776,8 +796,8 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
         export_id="claim-frequency__verify",
         manifest_id="manifest-verify",
         created_by="analyst@example.test",
-        publication_receipt_path=str(tmp_path / "receipt.json"),
-        publication_receipt_sha256="c" * 64,
+        publication_receipt_path=str(receipt),
+        publication_receipt_sha256=sqlite_notebook.sha256_file(receipt),
         candidate_artifact_path=str(missing_artifact),
         candidate_artifact_sha256="a" * 64,
         candidate_artifact_format=BUNDLE_FORMAT,

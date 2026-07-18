@@ -575,7 +575,7 @@ def build_candidate(
         model_version = resolve_sqlite_model_version(
             pricing.engine,
             model_name=model.name,
-            export_id=export_id,
+            build_fingerprint_sha256=build_identity.build_fingerprint_sha256,
         )
     else:
         model_version = resolve_model_version_for_export(
