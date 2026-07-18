@@ -311,7 +311,10 @@ def create_model_frame_manifest_with_split(
 
 def _verify_expected_database(connection, expected_database: str | None) -> None:
     if expected_database is None:
-        return
+        dialect_name = str(getattr(getattr(connection, "dialect", None), "name", "")).casefold()
+        if dialect_name == "sqlite":
+            return
+        raise ValueError("expected_database is required for non-SQLite manifest writes")
     expected = str(expected_database).strip()
     if not expected:
         raise ValueError("expected_database must be a non-empty database name or None")

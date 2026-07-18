@@ -1,6 +1,7 @@
 import json
 import sys
 from datetime import date
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -346,6 +347,7 @@ class FakeBeginConnection:
     def __init__(self, events):
         self.events = events
         self.executed = []
+        self.dialect = SimpleNamespace(name="sqlite")
 
     def execute(self, statement, params=None):
         sql = str(statement).strip()
@@ -526,6 +528,40 @@ def test_manifest_transaction_rechecks_database_before_any_sql_write(monkeypatch
         )
 
     assert connection.statements == ["SELECT DB_NAME()"]
+    assert to_sql_calls == []
+
+
+def test_manifest_requires_expected_database_for_connection_without_sqlite_dialect(monkeypatch):
+    frame = pd.DataFrame({"PolicyID": [1], "LossCost": [0.0]})
+    engine = FakeEngine()
+    del engine.connection.dialect
+    to_sql_calls = []
+
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda *args, **kwargs: to_sql_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="expected_database is required for non-SQLite manifest writes",
+    ):
+        create_model_frame_manifest_with_split(
+            engine,
+            frame=frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="claim_frame",
+                source_system="pricing_sql",
+                data_as_of_date="2026-06-30",
+                pk_columns=("PolicyID",),
+                target_column="LossCost",
+            ),
+            manifest_id="manifest-missing-db-guard",
+            validation_split=NO_VALIDATION,
+        )
+
+    assert engine.connection.executed == []
     assert to_sql_calls == []
 
 
