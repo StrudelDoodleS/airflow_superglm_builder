@@ -193,8 +193,9 @@ The current notebook workflow does not create or log MLflow runs.
 | `pricing.V_MODEL_VALIDATION_SPLIT_RELATIVITY` | One package, validation split, term, and curve point from the model fitted on that split's training rows. `model_fit_scope='VALIDATION_TRAINING_SPLIT_MODEL'`. |
 | `pricing.V_CURRENT_DATASET_VALIDATION_SPLIT` | One latest dataset manifest and split-geometry row; it deliberately contains no model metrics. |
 
-Deviance, negative log-likelihood (`nll`), and Gini are the exact held-out values
-returned by the pinned SuperGLM runtime, not locally reimplemented statistics.
+Deviance and negative log-likelihood (`nll`) are lower-is-better; normalized Gini is
+higher-is-better (`0` means no ranking signal, `1` perfect). Values come from the pinned runtime,
+not a local reimplementation.
 The summary takes the arithmetic mean and population standard deviation across split values;
 one split has SD zero. A metric intentionally omitted from `SCORING` is `NULL` in the views.
 
