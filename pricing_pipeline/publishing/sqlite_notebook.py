@@ -263,17 +263,16 @@ def _publish_sqlite_candidate_locked(
     export_id = str(build.export_id or "").strip()
     if not export_id:
         raise ApprovedModelBuildError("local notebook publication requires an export_id")
-    if build.candidate_artifact_path is not None:
-        sql_lineage = load_candidate_sql_lineage(
-            engine,
-            manifest_id=manifest_id,
-            split_set_id=split_set_id,
-        )
-        _verify_candidate_artifact(
-            build,
-            sql_lineage=sql_lineage,
-            allowed_root=artifact_root,
-        )
+    sql_lineage = load_candidate_sql_lineage(
+        engine,
+        manifest_id=manifest_id,
+        split_set_id=split_set_id,
+    )
+    _verify_candidate_artifact(
+        build,
+        sql_lineage=sql_lineage,
+        allowed_root=artifact_root,
+    )
 
     stage_rating_export(
         engine,
@@ -304,8 +303,19 @@ def _publish_sqlite_candidate_locked(
             f"expected={build.publication_receipt_sha256!r}, "
             f"actual={staged_receipt_sha256!r}"
         )
+    _verify_candidate_artifact(
+        build,
+        sql_lineage=sql_lineage,
+        allowed_root=artifact_root,
+    )
 
     with engine.begin() as connection:
+        registered_model = validate_registered_model(connection, model_config)
+        if registered_model.model_id != model_id:
+            raise ApprovedModelBuildError(
+                "registered model_id does not match the notebook model: "
+                f"registered={registered_model.model_id}, notebook={model_id}"
+            )
         staged = (
             connection.execute(
                 text(
@@ -342,6 +352,30 @@ def _publish_sqlite_candidate_locked(
             build=build,
             split_set_id=split_set_id,
         )
+        reserved_version = connection.execute(
+            text(
+                """
+                SELECT model_version
+                FROM pricing.PRICING_MODEL_VERSION_RESERVATION
+                WHERE model_id = :model_id
+                  AND export_id = :reservation_export_id
+                """
+            ),
+            {
+                "model_id": model_id,
+                "reservation_export_id": f"build_{build.build_fingerprint_sha256}",
+            },
+        ).scalar_one_or_none()
+        if reserved_version is None:
+            raise ApprovedModelBuildError(
+                f"local export {export_id!r} has no reserved model version; "
+                "build it through build_candidate before publication"
+            )
+        if str(reserved_version) != build.model_version:
+            raise ApprovedModelBuildError(
+                f"local export {export_id!r} reserved model version "
+                f"{reserved_version!r}, not {build.model_version!r}"
+            )
         existing = _existing_local_publication(
             connection,
             model_id=model_id,
@@ -385,31 +419,6 @@ def _publish_sqlite_candidate_locked(
                 model_config=model_config,
                 package_row=existing,
                 was_existing=True,
-            )
-
-        reserved_version = connection.execute(
-            text(
-                """
-                SELECT model_version
-                FROM pricing.PRICING_MODEL_VERSION_RESERVATION
-                WHERE model_id = :model_id
-                  AND export_id = :reservation_export_id
-                """
-            ),
-            {
-                "model_id": model_id,
-                "reservation_export_id": f"build_{build.build_fingerprint_sha256}",
-            },
-        ).scalar_one_or_none()
-        if reserved_version is None:
-            raise ApprovedModelBuildError(
-                f"local export {export_id!r} has no reserved model version; "
-                "build it through build_candidate before publication"
-            )
-        if str(reserved_version) != build.model_version:
-            raise ApprovedModelBuildError(
-                f"local export {export_id!r} reserved model version "
-                f"{reserved_version!r}, not {build.model_version!r}"
             )
 
         package_version = int(

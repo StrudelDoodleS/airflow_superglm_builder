@@ -21,6 +21,7 @@ from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild, BUILD_IDENTITY_SHA256_FIELDS
 from pricing_pipeline.publishing.lineage import record_model_run
+from pricing_pipeline.publishing.model_registry import validate_registered_model
 from pricing_pipeline.publishing.package_writer import (
     ExpectedModelIdentity,
     publish_rating_package,
@@ -141,6 +142,12 @@ def publish_editor_submission(
         raise EditorSubmissionError(
             "explicit model config deployment_slot does not match the editor submission"
         )
+    if str(model_config.model_name) != submission.model_name:
+        raise EditorSubmissionError(
+            "explicit model config does not match the editor submission model_name"
+        )
+    with engine.begin() as connection:
+        validate_registered_model(connection, model_config)
 
     submission_dir = _submission_directory(
         submission,
@@ -151,6 +158,7 @@ def publish_editor_submission(
             engine,
             submission,
             allowed_root=settings.workbench_artifact_root,
+            model_config=model_config,
         )
         if existing is not None:
             return existing
@@ -233,6 +241,7 @@ def _resolve_existing_editor_publication(
     submission: EditorSubmission,
     *,
     allowed_root: str | Path,
+    model_config: ModelBuildConfig,
 ) -> EditorPublicationResult | None:
     schemas = schema_names_from_connectable(engine)
     query = text(
@@ -243,6 +252,7 @@ def _resolve_existing_editor_publication(
             rp.package_version,
             rp.package_status,
             rp.parent_rate_package_id,
+            rp.revision_metadata_json,
             mr.model_run_id,
             mr.parent_model_run_id,
             mr.validation_source_model_run_id,
@@ -330,6 +340,45 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             "editor publication requires lineage repair: package/run is incomplete"
         )
+    revision_metadata_json = row.get("revision_metadata_json")
+    if not isinstance(revision_metadata_json, str) or not revision_metadata_json.strip():
+        raise EditorSubmissionError("existing editor publication revision_metadata_json is missing")
+    try:
+        revision_metadata = json.loads(revision_metadata_json)
+    except json.JSONDecodeError as exc:
+        raise EditorSubmissionError(
+            "existing editor publication revision_metadata_json is invalid"
+        ) from exc
+    if not isinstance(revision_metadata, dict):
+        raise EditorSubmissionError(
+            "existing editor publication revision_metadata_json is not a JSON object"
+        )
+    expected_revision_metadata = {
+        "kind": "SUPERGLM_EDITOR",
+        "schema_version": 1,
+        "submission_id": submission.submission_id,
+        "reason": submission.reason,
+        "claimed_identity": submission.claimed_identity,
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "parent_model_run_id": submission.parent_model_run_id,
+        "submission_path": submission.path,
+        "submission_sha256": submission.sha256,
+        "editor_session_path": submission.editor_session_path,
+        "editor_session_sha256": submission.editor_session_sha256,
+        "editor_session_size_bytes": submission.editor_session_size_bytes,
+        "baseline_candidate_sha256": submission.baseline_candidate_sha256,
+    }
+    revision_mismatches = [
+        field_name
+        for field_name, expected_value in expected_revision_metadata.items()
+        if type(revision_metadata.get(field_name)) is not type(expected_value)
+        or revision_metadata.get(field_name) != expected_value
+    ]
+    if revision_mismatches:
+        raise EditorSubmissionError(
+            "existing editor publication immutable revision metadata does not match the "
+            "submission: " + ", ".join(revision_mismatches)
+        )
     root = Path(allowed_root).expanduser().resolve()
     _verify_edited_file(
         str(row.get("rating_workbook_path") or ""),
@@ -414,6 +463,12 @@ def _resolve_existing_editor_publication(
         bundle,
         row.get("model_frame_sha256"),
         context="existing editor publication",
+    )
+    load_parent_candidate(
+        engine,
+        submission,
+        allowed_root=allowed_root,
+        model_config=model_config,
     )
     return EditorPublicationResult(
         submission_id=submission.submission_id,
@@ -704,17 +759,56 @@ def _load_champion_bundle(
         f"""
         SELECT
             deployment.rate_package_id,
+            package.model_id AS package_model_id,
+            model.model_name AS registered_model_name,
+            package.model_version AS package_model_version,
+            package.source_export_id AS package_export_id,
+            mr.model_id AS run_model_id,
+            mr.model_name AS run_model_name,
+            mr.model_version AS run_model_version,
+            mr.export_id AS run_export_id,
             mr.run_status,
+            mr.manifest_id,
+            split_link.split_set_id,
             mr.candidate_artifact_path,
             mr.candidate_artifact_sha256,
             mr.candidate_artifact_format,
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
             mr.candidate_superglm_version,
-            mr.candidate_superglm_git_sha
+            mr.candidate_superglm_git_sha,
+            source_package.build_fingerprint_sha256,
+            mr.model_source_sha256,
+            mr.builder_source_sha256,
+            mr.materialized_split_sha256,
+            mr.runtime_sha256,
+            mr.candidate_superglm_sha256,
+            manifest.model_frame_sha256,
+            split_set.row_order_sha256
         FROM {schemas.pricing}.PRICING_MODEL_DEPLOYMENT AS deployment
+        LEFT JOIN {schemas.pricing}.PRICING_RATE_PACKAGE AS package
+          ON package.rate_package_id = deployment.rate_package_id
+        LEFT JOIN {schemas.pricing}.PRICING_MODEL AS model
+          ON model.model_id = deployment.model_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr
           ON mr.rate_package_id = deployment.rate_package_id
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS source_run
+          ON source_run.model_run_id = COALESCE(
+                mr.validation_source_model_run_id,
+                mr.model_run_id
+             )
+        LEFT JOIN {schemas.pricing}.PRICING_RATE_PACKAGE AS source_package
+          ON source_package.rate_package_id = source_run.rate_package_id
+        LEFT JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
+          ON manifest.manifest_id = mr.manifest_id
+        LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
+          ON split_link.model_run_id = mr.model_run_id
+         AND split_link.manifest_id = mr.manifest_id
+         AND split_link.dataset_role = 'training'
+         AND split_link.split_role = 'validation'
+        LEFT JOIN {schemas.pricing}.CV_SPLIT_SET AS split_set
+          ON split_set.split_set_id = split_link.split_set_id
+         AND split_set.manifest_id = split_link.manifest_id
         WHERE deployment.model_id = :model_id
           AND deployment.deployment_slot = :deployment_slot
           AND deployment.effective_to_ts IS NULL
@@ -783,6 +877,41 @@ def _load_champion_bundle(
             rate_package_id=rate_package_id,
             bundle=None,
             unavailable_reason=f"the deployed champion artifact could not be verified: {exc}",
+        )
+    sql_lineage = {
+        "package_model_id": model_id,
+        "run_model_id": model_id,
+        "run_model_name": row.get("registered_model_name"),
+        "run_model_version": row.get("package_model_version"),
+        "run_export_id": row.get("package_export_id"),
+    }
+    lineage_mismatches = [
+        field_name
+        for field_name, expected_value in sql_lineage.items()
+        if row.get(field_name) != expected_value
+    ]
+    bundle_lineage = {
+        "model_name": row.get("registered_model_name"),
+        "model_version": row.get("package_model_version"),
+        "export_id": row.get("package_export_id"),
+        "manifest_id": row.get("manifest_id"),
+        "split_set_id": row.get("split_set_id"),
+        **{field_name: row.get(field_name) for field_name in BUILD_IDENTITY_SHA256_FIELDS},
+    }
+    lineage_mismatches.extend(
+        field_name
+        for field_name, expected_value in bundle_lineage.items()
+        if getattr(champion, field_name) != expected_value
+    )
+    if lineage_mismatches:
+        detail = ", ".join(dict.fromkeys(lineage_mismatches))
+        return ChampionSnapshot(
+            deployment_slot=deployment_slot,
+            rate_package_id=rate_package_id,
+            bundle=None,
+            unavailable_reason=(
+                "the deployed champion artifact does not match SQL lineage: " + detail
+            )[:500],
         )
     if list(champion.X.columns) != list(parent_bundle.X.columns):
         return ChampionSnapshot(
@@ -1342,6 +1471,7 @@ def _publish_new_editor_submission(
                 engine,
                 submission,
                 allowed_root=allowed_root,
+                model_config=model_config,
             )
             if existing is None or existing.rate_package_id != published.rate_package_id:
                 raise EditorSubmissionError(
@@ -1400,6 +1530,17 @@ def _verify_edited_export_artifacts(
         raise EditorSubmissionError(
             f"edited candidate artifact failed verification: {exc}"
         ) from exc
+    inherited_identity_mismatches = [
+        field_name
+        for field_name in BUILD_IDENTITY_SHA256_FIELDS
+        if getattr(build, field_name) != getattr(parent.bundle, field_name)
+        or getattr(bundle, field_name) != getattr(parent.bundle, field_name)
+    ]
+    if inherited_identity_mismatches:
+        raise EditorSubmissionError(
+            "edited candidate artifact changed inherited build identity: "
+            + ", ".join(inherited_identity_mismatches)
+        )
 
     artifact_path = Path(build.candidate_artifact_path).expanduser().resolve()
     if {workbook_path.parent, receipt_path.parent, artifact_path.parent} != {artifact_path.parent}:

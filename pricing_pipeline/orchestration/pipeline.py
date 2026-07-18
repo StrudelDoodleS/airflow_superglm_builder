@@ -479,6 +479,14 @@ def _resolve_existing_published_run(
         )
 
     committed_workbook = Path(str(row["rating_workbook_path"])).expanduser().resolve()
+    package_source_value = row.get("source_file")
+    if package_source_value is None or not str(package_source_value).strip():
+        raise PublishedRunIntegrityError("existing package source_file is missing")
+    package_source = Path(str(package_source_value)).expanduser().resolve()
+    if package_source != committed_workbook:
+        raise PublishedRunIntegrityError(
+            "existing package source_file does not match model-run rating_workbook_path"
+        )
     if allowed_artifact_root is not None and not committed_workbook.is_relative_to(
         Path(allowed_artifact_root).expanduser().resolve()
     ):

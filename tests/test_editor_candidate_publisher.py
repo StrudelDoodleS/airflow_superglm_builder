@@ -67,6 +67,146 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
     return ApprovedModelBuild(**values)
 
 
+def _candidate_bundle(**overrides):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+
+    values = {
+        "fitted_model": {"model": "candidate"},
+        "X": pd.DataFrame({"age": [20.0, 30.0]}),
+        "y": np.array([0.0, 1.0]),
+        "sample_weight": None,
+        "offset": None,
+        "export_weight": None,
+        "cv_report": {},
+        **_ROOT_BUILD_IDENTITY,
+        "model_name": "HOME_FREQ",
+        "model_version": "v4",
+        "export_id": "candidate-export",
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "pk_columns": ("policy_id",),
+        "row_order_sha256": "6" * 64,
+        "model_source_sha256": "b" * 64,
+        "model_frame_sha256": "f" * 64,
+        "offset_contract": {"handling": "NONE"},
+    }
+    values.update(overrides)
+    return CandidateBundle(**values)
+
+
+def _engine_returning(rows, *, statements=None):
+    captured = [] if statements is None else statements
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class Connection:
+        def execute(self, statement, params):
+            captured.append(str(statement))
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    return Engine()
+
+
+def _editor_submission(tmp_path, **overrides):
+    values = {
+        "submission_id": "submission-1",
+        "model_name": "HOME_FREQ",
+        "deployment_slot": "HOME_FREQ_UAT",
+        "source_package_version": 7,
+        "parent_rate_package_id": 107,
+        "parent_model_run_id": 907,
+        "manifest_id": "manifest-1",
+        "split_set_id": "split-1",
+        "reason": "Market calibration",
+        "claimed_identity": "analyst@example.test",
+        "editor_session_path": str(tmp_path / "editor_session.json"),
+        "editor_session_sha256": "7" * 64,
+        "editor_session_size_bytes": 123,
+        "baseline_candidate_sha256": "8" * 64,
+        "model_source_sha256": "b" * 64,
+        "path": str(tmp_path / "submission.json"),
+        "sha256": "9" * 64,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _editor_revision_metadata(submission, **overrides):
+    values = {
+        "kind": "SUPERGLM_EDITOR",
+        "schema_version": 1,
+        "submission_id": submission.submission_id,
+        "reason": submission.reason,
+        "claimed_identity": submission.claimed_identity,
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "parent_model_run_id": submission.parent_model_run_id,
+        "submission_path": submission.path,
+        "submission_sha256": submission.sha256,
+        "editor_session_path": submission.editor_session_path,
+        "editor_session_sha256": submission.editor_session_sha256,
+        "editor_session_size_bytes": submission.editor_session_size_bytes,
+        "baseline_candidate_sha256": submission.baseline_candidate_sha256,
+    }
+    values.update(overrides)
+    return values
+
+
+def _existing_editor_row(submission):
+    bundle = _candidate_bundle(export_id="editor__submission_1")
+    row = {
+        "model_name": bundle.model_name,
+        "model_version": bundle.model_version,
+        "export_id": bundle.export_id,
+        "rate_package_id": 108,
+        "package_version": 8,
+        "package_status": "PUBLISHED",
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "model_run_id": 908,
+        "parent_model_run_id": submission.parent_model_run_id,
+        "validation_source_model_run_id": submission.parent_model_run_id,
+        "expected_validation_source_model_run_id": submission.parent_model_run_id,
+        "run_status": "SUCCESS",
+        "rating_workbook_path": "/verified/rating_tables.xlsx",
+        "rating_workbook_sha256": "a" * 64,
+        "publication_receipt_path": "/verified/publication_receipt.json",
+        "publication_receipt_sha256": "c" * 64,
+        "candidate_artifact_path": "/verified/candidate_bundle.joblib",
+        "candidate_artifact_sha256": "d" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v3",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.12.0",
+        "candidate_superglm_git_sha": "f" * 40,
+        "manifest_id": bundle.manifest_id,
+        "split_set_id": bundle.split_set_id,
+        "model_source_sha256": bundle.model_source_sha256,
+        "model_frame_sha256": bundle.model_frame_sha256,
+        "row_order_sha256": bundle.row_order_sha256,
+        "revision_metadata_json": json.dumps(_editor_revision_metadata(submission)),
+        **_ROOT_BUILD_IDENTITY,
+    }
+    return row, bundle
+
+
 def test_editor_export_carries_only_completed_build_and_editor_publication_values():
     from dataclasses import fields
 
@@ -137,6 +277,11 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         editor_candidate,
         "load_verified_submission",
         lambda path, digest, **kwargs: submission,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "validate_registered_model",
+        lambda *args, **kwargs: object(),
     )
 
     def fake_load_parent_candidate(
@@ -220,7 +365,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     )
 
     result = editor_candidate.publish_editor_submission(
-        object(),
+        _engine_returning([]),
         settings=Settings(workbench_artifact_root=tmp_path),
         submission_path=submission.path,
         submission_sha256=submission.sha256,
@@ -303,6 +448,11 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
     )
     monkeypatch.setattr(
         editor_candidate,
+        "validate_registered_model",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
         "_resolve_existing_editor_publication",
         lambda *args, **kwargs: existing,
         raising=False,
@@ -319,7 +469,7 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
     )
 
     result = editor_candidate.publish_editor_submission(
-        object(),
+        _engine_returning([]),
         settings=Settings(workbench_artifact_root=tmp_path),
         submission_path=str(submission_path),
         submission_sha256="a" * 64,
@@ -330,6 +480,58 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
     )
 
     assert result == existing
+
+
+@pytest.mark.parametrize("drift_field", ["model_status", "target_name"])
+def test_editor_retry_revalidates_registered_model_before_existing_return(
+    monkeypatch,
+    tmp_path,
+    drift_field,
+):
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.publishing.model_registry import ModelRegistryError
+
+    submission_path = tmp_path / "submission" / "submission.json"
+    submission_path.parent.mkdir()
+    submission = SimpleNamespace(
+        path=str(submission_path),
+        model_name="HOME_FREQ",
+        deployment_slot="HOME_FREQ_UAT",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_verified_submission",
+        lambda *args, **kwargs: submission,
+    )
+
+    def reject_drift(*args, **kwargs):
+        raise ModelRegistryError(f"registered model drift: {drift_field}")
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "validate_registered_model",
+        reject_drift,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "_resolve_existing_editor_publication",
+        lambda *args, **kwargs: pytest.fail(
+            "invalid registered model reached existing-publication lookup"
+        ),
+    )
+
+    with pytest.raises(ModelRegistryError, match=drift_field):
+        editor_candidate.publish_editor_submission(
+            _engine_returning([]),
+            settings=Settings(workbench_artifact_root=tmp_path),
+            submission_path=str(submission_path),
+            submission_sha256="a" * 64,
+            dag_id="pricing_publish_editor_candidate",
+            airflow_run_id="manual__submission-1",
+            created_by="analyst@example.test",
+            model_config=EDITOR_CONFIG,
+        )
 
 
 def test_editor_retry_rejects_submission_slot_mismatch_before_existing_lookup(
@@ -404,6 +606,12 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
     workbook.write_bytes(b"editor workbook")
     receipt = tmp_path / "publication_receipt.json"
     receipt.write_bytes(b"editor receipt")
+    submission = _editor_submission(
+        tmp_path,
+        manifest_id=bundle.manifest_id,
+        split_set_id=bundle.split_set_id,
+        model_source_sha256=bundle.model_source_sha256,
+    )
     row = {
         "model_name": "HOME_FREQ",
         "model_version": "20260603",
@@ -433,6 +641,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "model_source_sha256": bundle.model_source_sha256,
         "model_frame_sha256": bundle.model_frame_sha256,
         "row_order_sha256": bundle.row_order_sha256,
+        "revision_metadata_json": json.dumps(_editor_revision_metadata(submission)),
         **_ROOT_BUILD_IDENTITY,
     }
 
@@ -460,6 +669,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             assert "COALESCE(parent.validation_source_model_run_id, parent.model_run_id)" in str(
                 statement
             )
+            assert "rp.revision_metadata_json" in str(statement)
             return Rows()
 
     class Begin:
@@ -478,25 +688,28 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "schema_names_from_connectable",
         lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
     )
-    submission = SimpleNamespace(
-        submission_id="submission-1",
-        model_name="HOME_FREQ",
-        parent_rate_package_id=107,
-        parent_model_run_id=907,
-        manifest_id=bundle.manifest_id,
-        split_set_id=bundle.split_set_id,
-        model_source_sha256=bundle.model_source_sha256,
+    revalidated_parents = []
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_parent_candidate",
+        lambda *args, **kwargs: revalidated_parents.append((args, kwargs)),
     )
 
     result = editor_candidate._resolve_existing_editor_publication(
         Engine(),
         submission,
         allowed_root=tmp_path,
+        model_config=EDITOR_CONFIG,
     )
 
     assert result is not None
     assert result.model_run_id == 908
     assert result.was_existing is True
+    assert len(revalidated_parents) == 1
+    assert revalidated_parents[0][1] == {
+        "allowed_root": tmp_path,
+        "model_config": EDITOR_CONFIG,
+    }
 
     for field_name in ("model_version", "export_id"):
         original = row[field_name]
@@ -506,15 +719,17 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
                 Engine(),
                 submission,
                 allowed_root=tmp_path,
+                model_config=EDITOR_CONFIG,
             )
         row[field_name] = original
 
     row["parent_model_run_id"] = 999
     with pytest.raises(EditorSubmissionError, match="parent_model_run_id"):
         editor_candidate._resolve_existing_editor_publication(
-            Engine(),
+            _engine_returning([row]),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
     row["parent_model_run_id"] = submission.parent_model_run_id
 
@@ -526,6 +741,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
                 Engine(),
                 submission,
                 allowed_root=tmp_path,
+                model_config=EDITOR_CONFIG,
             )
     row["validation_source_model_run_id"] = submission.parent_model_run_id
     row["expected_validation_source_model_run_id"] = submission.parent_model_run_id
@@ -534,6 +750,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
         is not None
     )
@@ -544,6 +761,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
     workbook.write_bytes(b"editor workbook")
 
@@ -553,6 +771,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
     receipt.write_bytes(b"editor receipt")
 
@@ -564,6 +783,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
     row["publication_receipt_path"] = str(receipt)
     outside_receipt.unlink()
@@ -574,6 +794,7 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
     receipt.write_bytes(b"editor receipt")
 
@@ -583,6 +804,125 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             Engine(),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "different_value"),
+    [
+        ("kind", "OTHER"),
+        ("schema_version", 2),
+        ("submission_id", "different-submission"),
+        ("reason", "Different reason"),
+        ("claimed_identity", "different@example.test"),
+        ("parent_rate_package_id", 999),
+        ("parent_model_run_id", 999),
+        ("submission_path", "/different/submission.json"),
+        ("submission_sha256", "0" * 64),
+        ("editor_session_path", "/different/editor_session.json"),
+        ("editor_session_sha256", "0" * 64),
+        ("editor_session_size_bytes", 999),
+        ("baseline_candidate_sha256", "0" * 64),
+    ],
+)
+def test_existing_editor_publication_rejects_changed_revision_metadata(
+    monkeypatch,
+    tmp_path,
+    field_name,
+    different_value,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission = _editor_submission(tmp_path)
+    row, bundle = _existing_editor_row(submission)
+    row["revision_metadata_json"] = json.dumps(
+        _editor_revision_metadata(submission, **{field_name: different_value})
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(editor_candidate, "_verify_edited_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(editor_candidate, "load_candidate_bundle", lambda *args, **kwargs: bundle)
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: object())
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match=field_name):
+        editor_candidate._resolve_existing_editor_publication(
+            _engine_returning([row]),
+            submission,
+            allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
+        )
+
+
+@pytest.mark.parametrize(
+    ("revision_metadata_json", "expected_error"),
+    [
+        (None, "revision_metadata_json is missing"),
+        ("", "revision_metadata_json is missing"),
+        ("{", "revision_metadata_json is invalid"),
+        ("[]", "revision_metadata_json is not a JSON object"),
+        ("null", "revision_metadata_json is not a JSON object"),
+    ],
+)
+def test_existing_editor_publication_rejects_missing_or_invalid_revision_metadata(
+    monkeypatch,
+    tmp_path,
+    revision_metadata_json,
+    expected_error,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission = _editor_submission(tmp_path)
+    row, bundle = _existing_editor_row(submission)
+    row["revision_metadata_json"] = revision_metadata_json
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(editor_candidate, "_verify_edited_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(editor_candidate, "load_candidate_bundle", lambda *args, **kwargs: bundle)
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: object())
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match=expected_error):
+        editor_candidate._resolve_existing_editor_publication(
+            _engine_returning([row]),
+            submission,
+            allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
+        )
+
+
+def test_existing_editor_publication_propagates_parent_revalidation_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline.publishing import editor_candidate
+
+    submission = _editor_submission(tmp_path)
+    row, bundle = _existing_editor_row(submission)
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(editor_candidate, "_verify_edited_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(editor_candidate, "load_candidate_bundle", lambda *args, **kwargs: bundle)
+
+    def reject_parent(*args, **kwargs):
+        raise editor_candidate.EditorSubmissionError("parent candidate run is not SUCCESS")
+
+    monkeypatch.setattr(editor_candidate, "load_parent_candidate", reject_parent)
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="parent candidate run"):
+        editor_candidate._resolve_existing_editor_publication(
+            _engine_returning([row]),
+            submission,
+            allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
 
 
@@ -662,27 +1002,13 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         **sql_lineage,
     }
 
-    class Rows:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return [row]
-
-    class Connection:
-        def execute(self, statement, params):
-            return Rows()
-
-    class Begin:
-        def __enter__(self):
-            return Connection()
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class Engine:
-        def begin(self):
-            return Begin()
+    submission = _editor_submission(
+        tmp_path,
+        manifest_id=expected["manifest_id"],
+        split_set_id=expected["split_set_id"],
+        model_source_sha256=expected["model_source_sha256"],
+    )
+    row["revision_metadata_json"] = json.dumps(_editor_revision_metadata(submission))
 
     monkeypatch.setattr(
         editor_candidate,
@@ -694,12 +1020,10 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "load_candidate_bundle",
         lambda *args, **kwargs: SimpleNamespace(**bundle_lineage),
     )
-    submission = SimpleNamespace(
-        submission_id="submission-1",
-        model_name="HOME_FREQ",
-        parent_rate_package_id=107,
-        parent_model_run_id=907,
-        **expected,
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_parent_candidate",
+        lambda *args, **kwargs: object(),
     )
 
     expected_layer = (
@@ -713,9 +1037,10 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
     )
     with pytest.raises(EditorSubmissionError, match=expected_layer):
         editor_candidate._resolve_existing_editor_publication(
-            Engine(),
+            _engine_returning([row]),
             submission,
             allowed_root=tmp_path,
+            model_config=EDITOR_CONFIG,
         )
 
 
@@ -795,6 +1120,11 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
     )
     monkeypatch.setattr(
         editor_candidate,
+        "validate_registered_model",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
         "_resolve_existing_editor_publication",
         lambda *args, **kwargs: None,
         raising=False,
@@ -820,7 +1150,7 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
     for _attempt_no in range(2):
         with pytest.raises(RuntimeError, match="injected SQL failure"):
             editor_candidate.publish_editor_submission(
-                object(),
+                _engine_returning([]),
                 settings=Settings(workbench_artifact_root=tmp_path),
                 submission_path=str(submission_path),
                 submission_sha256="a" * 64,
@@ -1060,6 +1390,81 @@ def test_editor_candidate_artifact_is_verified_before_staging_or_sql(
             created_by="publisher@example.test",
             model_config=EDITOR_CONFIG,
             expected_database="PricingLab",
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "build_fingerprint_sha256",
+        "model_frame_sha256",
+        "row_order_sha256",
+        "builder_source_sha256",
+        "materialized_split_sha256",
+        "runtime_sha256",
+        "candidate_superglm_sha256",
+    ],
+)
+def test_edited_candidate_artifact_preserves_parent_build_identity(tmp_path, field_name):
+    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.workbench.artifacts import save_candidate_bundle
+
+    parent_bundle = _candidate_bundle(
+        fitted_model={"model": "parent"},
+        export_id="parent-export",
+    )
+    edited_bundle = replace(
+        parent_bundle,
+        fitted_model={"model": "edited"},
+        export_id="editor__submission_1",
+        **{field_name: "9" * 64},
+    )
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+    workbook = output_dir / "rating_tables.xlsx"
+    receipt = output_dir / "publication_receipt.json"
+    workbook.write_bytes(b"workbook")
+    receipt.write_bytes(b"receipt")
+    artifact = save_candidate_bundle(edited_bundle, output_dir / "candidate_bundle.joblib")
+    build = _editor_build(
+        tmp_path,
+        workbook_path=workbook,
+        rating_workbook_sha256=editor_candidate.sha256_file(workbook),
+        publication_receipt_path=str(receipt),
+        publication_receipt_sha256=editor_candidate.sha256_file(receipt),
+        candidate_artifact_path=artifact.path,
+        candidate_artifact_sha256=artifact.sha256,
+        candidate_artifact_format=artifact.format,
+        candidate_artifact_size_bytes=artifact.size_bytes,
+        candidate_python_version=artifact.python_version,
+        candidate_superglm_version=artifact.superglm_version,
+        candidate_superglm_git_sha=artifact.superglm_git_sha,
+        **{field_name: "9" * 64},
+    )
+    parent = SimpleNamespace(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        config=SimpleNamespace(
+            target_name="claim_count",
+            model_type="superglm_poisson",
+        ),
+        bundle=parent_bundle,
+    )
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        deployment_slot="HOME_FREQ_UAT",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match=field_name):
+        editor_candidate._verify_edited_export_artifacts(
+            SimpleNamespace(completed_build=build, bundle=edited_bundle),
+            parent=parent,
+            submission=submission,
+            allowed_root=tmp_path,
         )
 
 
@@ -1677,46 +2082,39 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
         pk_columns=("id",),
         row_order_sha256="c" * 64,
         model_source_sha256="d" * 64,
+        model_frame_sha256="e" * 64,
         offset_contract={"handling": "NONE"},
     )
     artifact = save_candidate_bundle(champion, tmp_path / "champion.joblib")
-
-    class Rows:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return [
-                {
-                    "rate_package_id": 107,
-                    "run_status": "SUCCESS",
-                    "candidate_artifact_path": artifact.path,
-                    "candidate_artifact_sha256": artifact.sha256,
-                    "candidate_artifact_format": artifact.format,
-                    "candidate_artifact_size_bytes": artifact.size_bytes,
-                    "candidate_python_version": artifact.python_version,
-                    "candidate_superglm_version": artifact.superglm_version,
-                    "candidate_superglm_git_sha": artifact.superglm_git_sha,
-                }
-            ]
-
-    class Connection:
-        def execute(self, statement, params):
-            return Rows()
-
-    class Begin:
-        def __enter__(self):
-            return Connection()
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class Engine:
-        def begin(self):
-            return Begin()
+    statements = []
+    row = {
+        "rate_package_id": 107,
+        "package_model_id": 17,
+        "registered_model_name": champion.model_name,
+        "package_model_version": champion.model_version,
+        "package_export_id": champion.export_id,
+        "run_model_id": 17,
+        "run_model_name": champion.model_name,
+        "run_model_version": champion.model_version,
+        "run_export_id": champion.export_id,
+        "run_status": "SUCCESS",
+        "manifest_id": champion.manifest_id,
+        "split_set_id": champion.split_set_id,
+        "candidate_artifact_path": artifact.path,
+        "candidate_artifact_sha256": artifact.sha256,
+        "candidate_artifact_format": artifact.format,
+        "candidate_artifact_size_bytes": artifact.size_bytes,
+        "candidate_python_version": artifact.python_version,
+        "candidate_superglm_version": artifact.superglm_version,
+        "candidate_superglm_git_sha": artifact.superglm_git_sha,
+        "model_frame_sha256": champion.model_frame_sha256,
+        "row_order_sha256": champion.row_order_sha256,
+        "model_source_sha256": champion.model_source_sha256,
+        **_ROOT_BUILD_IDENTITY,
+    }
 
     snapshot = _load_champion_bundle(
-        Engine(),
+        _engine_returning([row], statements=statements),
         model_id=17,
         deployment_slot="HOME_FREQ_UAT",
         allowed_root=tmp_path,
@@ -1728,6 +2126,70 @@ def test_champion_comparison_scores_parent_rows_even_when_training_rows_differ(t
     assert snapshot.unavailable_reason is None
     assert snapshot.bundle is not None
     assert snapshot.bundle.manifest_id == "champion-manifest"
+    assert "source_package.build_fingerprint_sha256" in statements[0]
+    assert "mr.validation_source_model_run_id" in statements[0]
+    assert "split_link.model_run_id = mr.model_run_id" in statements[0]
+    assert "manifest.model_frame_sha256" in statements[0]
+    assert "split_set.row_order_sha256" in statements[0]
+
+
+def test_champion_comparison_rejects_artifact_from_an_unrelated_sql_run(tmp_path):
+    from pricing_pipeline.publishing.editor_candidate import _load_champion_bundle
+    from pricing_pipeline.workbench.artifacts import save_candidate_bundle
+
+    expected = _candidate_bundle(
+        fitted_model={"model": "champion"},
+        export_id="champion-export",
+        manifest_id="champion-manifest",
+        split_set_id="champion-split",
+    )
+    parent = replace(
+        expected,
+        fitted_model={"model": "parent"},
+        export_id="parent-export",
+    )
+    artifact = save_candidate_bundle(
+        replace(expected, model_name="UNRELATED_MODEL", export_id="unrelated-export"),
+        tmp_path / "champion.joblib",
+    )
+    row = {
+        "rate_package_id": 107,
+        "package_model_id": 17,
+        "registered_model_name": "HOME_FREQ",
+        "package_model_version": expected.model_version,
+        "package_export_id": expected.export_id,
+        "run_model_id": 17,
+        "run_model_name": expected.model_name,
+        "run_model_version": expected.model_version,
+        "run_export_id": expected.export_id,
+        "run_status": "SUCCESS",
+        "manifest_id": expected.manifest_id,
+        "split_set_id": expected.split_set_id,
+        "candidate_artifact_path": artifact.path,
+        "candidate_artifact_sha256": artifact.sha256,
+        "candidate_artifact_format": artifact.format,
+        "candidate_artifact_size_bytes": artifact.size_bytes,
+        "candidate_python_version": artifact.python_version,
+        "candidate_superglm_version": artifact.superglm_version,
+        "candidate_superglm_git_sha": artifact.superglm_git_sha,
+        "model_frame_sha256": expected.model_frame_sha256,
+        "row_order_sha256": expected.row_order_sha256,
+        "model_source_sha256": expected.model_source_sha256,
+        **_ROOT_BUILD_IDENTITY,
+    }
+
+    snapshot = _load_champion_bundle(
+        _engine_returning([row]),
+        model_id=17,
+        deployment_slot="HOME_FREQ_UAT",
+        allowed_root=tmp_path,
+        parent_bundle=parent,
+    )
+
+    assert snapshot.status == "UNAVAILABLE"
+    assert snapshot.bundle is None
+    assert "model_name" in snapshot.unavailable_reason
+    assert len(snapshot.unavailable_reason) <= 500
 
 
 @pytest.mark.parametrize(
@@ -1772,10 +2234,29 @@ def test_champion_comparison_rejects_incompatible_offset_contract(
     champion = SimpleNamespace(
         X=pd.DataFrame({"x": [8.0]}),
         offset_contract=champion_offset_contract,
+        model_name="HOME_FREQ",
+        model_version="v4",
+        export_id="champion-export",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        row_order_sha256="6" * 64,
+        model_source_sha256="b" * 64,
+        model_frame_sha256="f" * 64,
+        **_ROOT_BUILD_IDENTITY,
     )
     row = {
         "rate_package_id": 107,
+        "package_model_id": 17,
+        "registered_model_name": champion.model_name,
+        "package_model_version": champion.model_version,
+        "package_export_id": champion.export_id,
+        "run_model_id": 17,
+        "run_model_name": champion.model_name,
+        "run_model_version": champion.model_version,
+        "run_export_id": champion.export_id,
         "run_status": "SUCCESS",
+        "manifest_id": champion.manifest_id,
+        "split_set_id": champion.split_set_id,
         "candidate_artifact_path": str(tmp_path / "champion.joblib"),
         "candidate_artifact_sha256": "a" * 64,
         "candidate_artifact_format": "superglm-candidate-joblib-v3",
@@ -1783,34 +2264,16 @@ def test_champion_comparison_rejects_incompatible_offset_contract(
         "candidate_python_version": "3.14.4",
         "candidate_superglm_version": "0.12.0",
         "candidate_superglm_git_sha": "f" * 40,
+        "model_frame_sha256": champion.model_frame_sha256,
+        "row_order_sha256": champion.row_order_sha256,
+        "model_source_sha256": champion.model_source_sha256,
+        **_ROOT_BUILD_IDENTITY,
     }
-
-    class Rows:
-        def mappings(self):
-            return self
-
-        def all(self):
-            return [row]
-
-    class Connection:
-        def execute(self, statement, params):
-            return Rows()
-
-    class Begin:
-        def __enter__(self):
-            return Connection()
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class Engine:
-        def begin(self):
-            return Begin()
 
     monkeypatch.setattr(
         editor_candidate,
         "schema_names_from_connectable",
-        lambda engine: SimpleNamespace(pricing="pricing"),
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
     )
     monkeypatch.setattr(
         editor_candidate,
@@ -1819,7 +2282,7 @@ def test_champion_comparison_rejects_incompatible_offset_contract(
     )
 
     snapshot = editor_candidate._load_champion_bundle(
-        Engine(),
+        _engine_returning([row]),
         model_id=17,
         deployment_slot="HOME_FREQ_UAT",
         allowed_root=tmp_path,

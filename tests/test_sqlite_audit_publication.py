@@ -583,6 +583,189 @@ def test_local_root_publication_persists_complete_audit_evidence_and_queries_vie
     assert final_rows == []
 
 
+def test_initial_publication_rejects_model_retired_after_build(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+    from pricing_pipeline.publishing.model_registry import ModelRegistryError
+    from pricing_pipeline.publishing.sqlite_notebook import resolve_sqlite_model_version
+
+    context, model = _local_model(api, tmp_path)
+    _install_staging_stub(monkeypatch)
+    _seed_lineage(
+        context,
+        manifest_id="manifest-retired",
+        split_set_id="split-retired",
+        artifact_uri=str(tmp_path / "retired" / "splits.npz"),
+    )
+    build = _completed_build(
+        tmp_path,
+        model=model,
+        manifest_id="manifest-retired",
+        split_set_id="split-retired",
+    )
+    assert (
+        resolve_sqlite_model_version(
+            context.engine,
+            model_name=model.name,
+            build_fingerprint_sha256=build.build_fingerprint_sha256,
+        )
+        == "v1"
+    )
+    with context.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.PRICING_MODEL
+                SET model_status = 'RETIRED'
+                WHERE model_id = :model_id
+                """
+            ),
+            {"model_id": model.model_id},
+        )
+
+    with pytest.raises(ModelRegistryError, match="model_status"):
+        api.publish_candidate(
+            context,
+            api.BuiltCandidate(model=model, completed_build=build),
+        )
+
+
+def test_initial_publication_rejects_stale_notebook_model_id(
+    monkeypatch,
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from pricing_pipeline import notebook as api
+
+    context, model = _local_model(api, tmp_path)
+    _install_staging_stub(monkeypatch)
+    _seed_lineage(
+        context,
+        manifest_id="manifest-stale-model",
+        split_set_id="split-stale-model",
+        artifact_uri=str(tmp_path / "stale-model" / "splits.npz"),
+    )
+    build = _completed_build(
+        tmp_path,
+        model=model,
+        manifest_id="manifest-stale-model",
+        split_set_id="split-stale-model",
+    )
+    with context.engine.begin() as connection:
+        other_model_id = int(
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO pricing.PRICING_MODEL (
+                        model_name, model_label, target_name, model_type,
+                        model_status, created_by
+                    ) VALUES (
+                        'OTHER_MODEL', 'Other model', 'other_target',
+                        'superglm_poisson', 'ACTIVE', 'pytest'
+                    )
+                    """
+                )
+            ).lastrowid
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_MODEL_VERSION_RESERVATION (
+                    model_id, export_id, model_version
+                ) VALUES (
+                    :model_id, :export_id, 'v1'
+                )
+                """
+            ),
+            {
+                "model_id": other_model_id,
+                "export_id": f"build_{build.build_fingerprint_sha256}",
+            },
+        )
+    stale_model = replace(model, model_id=other_model_id)
+    stale_build = build.model_copy(update={"model_id": other_model_id})
+
+    with pytest.raises(ApprovedModelBuildError, match="registered model_id"):
+        api.publish_candidate(
+            context,
+            api.BuiltCandidate(model=stale_model, completed_build=stale_build),
+        )
+
+
+def test_existing_publication_rejects_model_retired_before_retry(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+    from pricing_pipeline.publishing.model_registry import ModelRegistryError
+
+    context, model = _local_model(api, tmp_path)
+    _install_staging_stub(monkeypatch)
+    _, _, retry_build = _publish_canonical_and_prepare_retry(
+        api,
+        context,
+        model,
+        tmp_path,
+    )
+    with context.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.PRICING_MODEL
+                SET model_status = 'RETIRED'
+                WHERE model_id = :model_id
+                """
+            ),
+            {"model_id": model.model_id},
+        )
+
+    with pytest.raises(ModelRegistryError, match="model_status"):
+        api.publish_candidate(
+            context,
+            api.BuiltCandidate(model=model, completed_build=retry_build),
+        )
+
+
+def test_existing_publication_rejects_model_version_reservation_drift(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+
+    context, model = _local_model(api, tmp_path)
+    _install_staging_stub(monkeypatch)
+    canonical_build, _, retry_build = _publish_canonical_and_prepare_retry(
+        api,
+        context,
+        model,
+        tmp_path,
+    )
+    with context.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.PRICING_MODEL_VERSION_RESERVATION
+                SET model_version = 'v999'
+                WHERE model_id = :model_id
+                  AND export_id = :export_id
+                """
+            ),
+            {
+                "model_id": model.model_id,
+                "export_id": f"build_{canonical_build.build_fingerprint_sha256}",
+            },
+        )
+
+    with pytest.raises(ApprovedModelBuildError, match="reserved model version.*v999"):
+        api.publish_candidate(
+            context,
+            api.BuiltCandidate(model=model, completed_build=retry_build),
+        )
+
+
 def test_identical_fingerprint_reuses_canonical_root_across_attempt_identifiers_and_paths(
     monkeypatch,
     tmp_path,
@@ -810,6 +993,87 @@ def test_incoming_receipt_is_verified_before_staging(
             connection.execute(
                 text("SELECT COUNT(*) FROM pricing.PRICING_RATE_PACKAGE")
             ).scalar_one(),
+        )
+    assert counts == (0, 0)
+
+
+def test_initial_publication_rechecks_candidate_artifact_after_staging(
+    monkeypatch,
+    tmp_path,
+):
+    from pricing_pipeline import notebook as api
+    from pricing_pipeline.publishing import sqlite_notebook
+    from pricing_pipeline.publishing.sqlite_notebook import resolve_sqlite_model_version
+
+    context, model = _local_model(api, tmp_path)
+    _install_staging_stub(monkeypatch)
+    _seed_lineage(
+        context,
+        manifest_id="manifest-candidate-durability",
+        split_set_id="split-candidate-durability",
+        artifact_uri=str(tmp_path / "candidate-durability" / "splits.npz"),
+    )
+    build = _completed_build(
+        tmp_path,
+        model=model,
+        manifest_id="manifest-candidate-durability",
+        split_set_id="split-candidate-durability",
+    )
+    candidate_path = Path(build.candidate_artifact_path)
+    candidate_path.write_bytes(b"verified candidate bytes")
+    build = build.model_copy(
+        update={
+            "candidate_artifact_sha256": sha256(candidate_path.read_bytes()).hexdigest(),
+            "candidate_artifact_size_bytes": candidate_path.stat().st_size,
+        }
+    )
+    assert (
+        resolve_sqlite_model_version(
+            context.engine,
+            model_name=model.name,
+            build_fingerprint_sha256=build.build_fingerprint_sha256,
+        )
+        == "v1"
+    )
+
+    verification_count = 0
+
+    def verify_candidate(candidate_build, **_kwargs):
+        nonlocal verification_count
+        verification_count += 1
+        path = Path(candidate_build.candidate_artifact_path)
+        if not path.is_file():
+            raise ApprovedModelBuildError(
+                "candidate artifact verification failed: candidate artifact does not exist"
+            )
+        if sha256(path.read_bytes()).hexdigest() != candidate_build.candidate_artifact_sha256:
+            raise ApprovedModelBuildError(
+                "candidate artifact verification failed: candidate artifact SHA-256 differs"
+            )
+
+    stage = sqlite_notebook.stage_rating_export
+
+    def stage_then_remove_candidate(*args, **kwargs):
+        result = stage(*args, **kwargs)
+        candidate_path.unlink()
+        return result
+
+    monkeypatch.setattr(sqlite_notebook, "_verify_candidate_artifact", verify_candidate)
+    monkeypatch.setattr(sqlite_notebook, "stage_rating_export", stage_then_remove_candidate)
+
+    with pytest.raises(ApprovedModelBuildError, match="candidate artifact does not exist"):
+        api.publish_candidate(
+            context,
+            api.BuiltCandidate(model=model, completed_build=build),
+        )
+
+    assert verification_count == 2
+    with context.engine.connect() as connection:
+        counts = (
+            connection.execute(
+                text("SELECT COUNT(*) FROM pricing.PRICING_RATE_PACKAGE")
+            ).scalar_one(),
+            connection.execute(text("SELECT COUNT(*) FROM pricing.MODEL_RUN")).scalar_one(),
         )
     assert counts == (0, 0)
 

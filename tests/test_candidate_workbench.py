@@ -391,13 +391,20 @@ def test_open_rejects_candidate_bundle_model_identity_mismatch(
 
 def test_editor_ready_requires_persisted_build_identity():
     api = _api()
-    row = {field: "present" for field in api._ARTIFACT_FIELDS}
+    row = {field: "present" for field in api._ARTIFACT_FIELDS} | {"run_status": "SUCCESS"}
     assert api.Workbench._editor_ready(row)
 
     for field_name in api.BUILD_IDENTITY_SHA256_FIELDS:
         row[field_name] = None
         assert not api.Workbench._editor_ready(row), field_name
         row[field_name] = "present"
+
+
+def test_editor_ready_requires_a_successful_model_run():
+    api = _api()
+    row = {field: "present" for field in api._ARTIFACT_FIELDS} | {"run_status": "FAILED"}
+
+    assert not api.Workbench._editor_ready(row)
 
 
 def test_open_rejects_ambiguous_run_lineage(monkeypatch):

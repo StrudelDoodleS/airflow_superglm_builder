@@ -1230,6 +1230,22 @@ def test_existing_published_run_accepts_workbook_with_only_generated_timestamp_c
     assert result.rating_workbook_path == str(canonical_workbook)
 
 
+def test_existing_published_run_rejects_package_workbook_path_drift(tmp_path: Path):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+    evidence["row"]["source_file"] = str(tmp_path / "different-rating.xlsx")
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="package source_file does not match model-run rating_workbook_path",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
 def test_existing_published_run_rejects_semantically_different_workbook(
     tmp_path: Path,
 ):

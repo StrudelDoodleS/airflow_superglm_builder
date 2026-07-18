@@ -110,7 +110,7 @@ class Workbench:
                 f"found {len(rows)}"
             )
         row = rows[0]
-        if str(row.get("run_status") or "").upper() != "SUCCESS" or not self._editor_ready(row):
+        if not self._editor_ready(row):
             raise CandidateLineageError(
                 f"{model_name} package {version} has no verified candidate artifact"
             )
@@ -276,7 +276,9 @@ class Workbench:
 
     @staticmethod
     def _editor_ready(row: Mapping[str, Any]) -> bool:
-        return all(row.get(field_name) is not None for field_name in _ARTIFACT_FIELDS)
+        return str(row.get("run_status") or "").upper() == "SUCCESS" and all(
+            row.get(field_name) is not None for field_name in _ARTIFACT_FIELDS
+        )
 
     def _friendly_row(
         self,
