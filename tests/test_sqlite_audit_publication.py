@@ -39,9 +39,7 @@ def _write_test_workbook(
 
 
 def test_workbook_semantic_hash_ignores_generated_core_timestamps(tmp_path):
-    from pricing_pipeline.publishing.sqlite_notebook import (
-        _workbook_semantic_sha256,
-    )
+    from pricing_pipeline.workbench.submission import xlsx_semantic_sha256
 
     first = tmp_path / "first.xlsx"
     retry = tmp_path / "retry.xlsx"
@@ -62,8 +60,8 @@ def test_workbook_semantic_hash_ignores_generated_core_timestamps(tmp_path):
         sheet_content=b"<sheet>changed rating table</sheet>",
     )
 
-    assert _workbook_semantic_sha256(first) == _workbook_semantic_sha256(retry)
-    assert _workbook_semantic_sha256(first) != _workbook_semantic_sha256(changed)
+    assert xlsx_semantic_sha256(first) == xlsx_semantic_sha256(retry)
+    assert xlsx_semantic_sha256(first) != xlsx_semantic_sha256(changed)
 
 
 def _model_spec(api):

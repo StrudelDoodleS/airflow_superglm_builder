@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
-import hashlib
 import json
 import re
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -27,14 +25,10 @@ from pricing_pipeline.publishing.model_registry import (
     validate_registered_model,
 )
 from pricing_pipeline.publishing.staging import stage_rating_export
-from pricing_pipeline.workbench.submission import sha256_file
+from pricing_pipeline.workbench.submission import sha256_file, xlsx_semantic_sha256
 
 
 _VERSION_PATTERN = re.compile(r"^v([0-9]+)$")
-_WORKBOOK_CORE_TIMESTAMP_PATTERN = re.compile(
-    rb"<dcterms:(?:created|modified)\b.*?</dcterms:(?:created|modified)>",
-    flags=re.DOTALL,
-)
 
 
 def register_sqlite_model(
@@ -1176,8 +1170,8 @@ def _local_publication_conflicts(
                 f"{field_name} existing={existing_value!r} requested={expected_value!r}"
             )
     if canonical_workbook_sha256 != build.rating_workbook_sha256:
-        canonical_semantic_sha256 = _workbook_semantic_sha256(canonical_workbook_path)
-        requested_semantic_sha256 = _workbook_semantic_sha256(Path(build.rating_workbook_path))
+        canonical_semantic_sha256 = xlsx_semantic_sha256(canonical_workbook_path)
+        requested_semantic_sha256 = xlsx_semantic_sha256(Path(build.rating_workbook_path))
         if canonical_semantic_sha256 != requested_semantic_sha256:
             conflicts.append(
                 "rating_workbook_semantic_sha256 "
@@ -1192,29 +1186,6 @@ def _local_publication_conflicts(
                 f"{field_name} existing={existing_value!r} requested={requested_value!r}"
             )
     return conflicts
-
-
-def _workbook_semantic_sha256(path: Path) -> str:
-    """Hash XLSX member names/content while excluding generated core timestamps."""
-    digest = hashlib.sha256(b"pricing-rating-workbook-semantic-v1\0")
-    try:
-        with zipfile.ZipFile(path) as workbook:
-            for member_name in sorted(workbook.namelist()):
-                if member_name.endswith("/"):
-                    continue
-                content = workbook.read(member_name)
-                if member_name == "docProps/core.xml":
-                    content = _WORKBOOK_CORE_TIMESTAMP_PATTERN.sub(b"", content)
-                encoded_name = member_name.encode("utf-8")
-                digest.update(len(encoded_name).to_bytes(8, "big"))
-                digest.update(encoded_name)
-                digest.update(len(content).to_bytes(8, "big"))
-                digest.update(content)
-    except (OSError, zipfile.BadZipFile, KeyError) as exc:
-        raise ApprovedModelBuildError(
-            f"rating workbook is not a readable XLSX archive: {path.as_posix()}"
-        ) from exc
-    return digest.hexdigest()
 
 
 def _model_run_evidence_conflicts(

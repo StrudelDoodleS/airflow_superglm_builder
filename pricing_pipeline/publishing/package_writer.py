@@ -264,8 +264,7 @@ def publish_rating_package(
             )
         if identity_mismatches:
             raise ModelRegistryError(
-                "registered model changed after build approval: "
-                + "; ".join(identity_mismatches)
+                "registered model changed after build approval: " + "; ".join(identity_mismatches)
             )
 
         if parent_rate_package_id is None:

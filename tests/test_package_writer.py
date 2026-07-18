@@ -572,8 +572,7 @@ def test_package_writer_rejects_staged_model_identity_without_optional_metadata_
         )
 
     assert not any(
-        "FROM pricing.PRICING_MODEL AS pm" in sql
-        for sql, _params in engine.connection.statements
+        "FROM pricing.PRICING_MODEL AS pm" in sql for sql, _params in engine.connection.statements
     )
     assert lineage_calls == []
     assert not any(
