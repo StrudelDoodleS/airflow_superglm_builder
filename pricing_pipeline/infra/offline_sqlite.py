@@ -310,6 +310,93 @@ def _relax_offline_column_nullability(
     return True
 
 
+def _ensure_fold_metric_foreign_keys(connection) -> None:
+    foreign_keys: dict[tuple[int, str], list[tuple[int, str, str]]] = {}
+    for row in connection.execute("PRAGMA pricing.foreign_key_list('CV_FOLD_METRIC')").fetchall():
+        foreign_keys.setdefault((int(row[0]), str(row[2])), []).append(
+            (int(row[1]), str(row[3]), str(row[4]))
+        )
+    contract = {
+        (table, tuple((child, parent) for _, child, parent in sorted(columns)))
+        for (_, table), columns in foreign_keys.items()
+    }
+    expected = {
+        ("MODEL_RUN", (("model_run_id", "model_run_id"),)),
+        (
+            "CV_FOLD",
+            (("split_set_id", "split_set_id"), ("fold_no", "fold_no")),
+        ),
+    }
+    if contract == expected:
+        return
+
+    orphan = connection.execute(
+        """
+        SELECT
+            metric.model_run_id,
+            metric.split_set_id,
+            metric.fold_no,
+            run.model_run_id IS NULL AS missing_run,
+            fold.split_set_id IS NULL AS missing_fold
+        FROM pricing.CV_FOLD_METRIC AS metric
+        LEFT JOIN pricing.MODEL_RUN AS run
+          ON run.model_run_id = metric.model_run_id
+        LEFT JOIN pricing.CV_FOLD AS fold
+          ON fold.split_set_id = metric.split_set_id
+         AND fold.fold_no = metric.fold_no
+        WHERE run.model_run_id IS NULL
+           OR fold.split_set_id IS NULL
+        LIMIT 1
+        """
+    ).fetchone()
+    if orphan is not None:
+        missing = []
+        if bool(orphan[3]):
+            missing.append("missing MODEL_RUN")
+        if bool(orphan[4]):
+            missing.append("missing CV_FOLD")
+        raise RuntimeError(
+            "cannot add CV_FOLD_METRIC foreign keys: orphan evidence "
+            f"({orphan[0]!r}, {orphan[1]!r}, fold {orphan[2]!r}) is " + " and ".join(missing)
+        )
+
+    connection.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        connection.execute(
+            "ALTER TABLE pricing.CV_FOLD_METRIC RENAME TO __offline_upgrade_cv_fold_metric"
+        )
+    finally:
+        connection.execute("PRAGMA legacy_alter_table=OFF")
+    connection.execute(
+        """
+        CREATE TABLE pricing.CV_FOLD_METRIC (
+            model_run_id TEXT NOT NULL,
+            split_set_id TEXT NOT NULL,
+            fold_no INTEGER NOT NULL,
+            metric_name TEXT NOT NULL,
+            metric_value REAL NOT NULL,
+            CONSTRAINT PK_CV_FOLD_METRIC
+                PRIMARY KEY (model_run_id, split_set_id, fold_no, metric_name),
+            CONSTRAINT FK_CV_FOLD_METRIC_MODEL_RUN
+                FOREIGN KEY (model_run_id) REFERENCES MODEL_RUN(model_run_id),
+            CONSTRAINT FK_CV_FOLD_METRIC_FOLD
+                FOREIGN KEY (split_set_id, fold_no)
+                REFERENCES CV_FOLD(split_set_id, fold_no)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO pricing.CV_FOLD_METRIC (
+            model_run_id, split_set_id, fold_no, metric_name, metric_value
+        )
+        SELECT model_run_id, split_set_id, fold_no, metric_name, metric_value
+        FROM pricing.__offline_upgrade_cv_fold_metric
+        """
+    )
+    connection.execute("DROP TABLE pricing.__offline_upgrade_cv_fold_metric")
+
+
 def apply_offline_ddl(engine: Engine) -> None:
     """Create any missing local tables without deleting existing data."""
     connection = engine.raw_connection()
@@ -415,6 +502,7 @@ def apply_offline_ddl(engine: Engine) -> None:
                     )
                     or rebuilt_table
                 )
+            _ensure_fold_metric_foreign_keys(connection)
             if rebuilt_table:
                 connection.execute(
                     """

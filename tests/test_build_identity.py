@@ -442,6 +442,31 @@ def test_numpy_and_native_split_definition_scalars_are_equivalent(tmp_path: Path
     assert create_build_identity(**native_args) == create_build_identity(**numpy_args)
 
 
+def test_builtin_list_and_tuple_split_values_are_equivalent(tmp_path: Path):
+    tuple_args = _identity_args(tmp_path / "tuple")
+    list_args = _identity_args(tmp_path / "list")
+    tuple_args["model_config"] = _model_config(
+        ValidationSplitConfig.column_holdout(
+            column="fold",
+            train_values=(1, 2),
+            test_values=(3,),
+            materialize=True,
+        )
+    )
+    list_args["model_config"] = _model_config(
+        ValidationSplitConfig.column_holdout(
+            column="fold",
+            train_values=[1, 2],
+            test_values=[3],
+            materialize=True,
+        )
+    )
+    tuple_args["split_indices"] = (_splits()[0],)
+    list_args["split_indices"] = (_splits()[0],)
+
+    assert create_build_identity(**tuple_args) == create_build_identity(**list_args)
+
+
 def _identity_with_split_values(tmp_path: Path, *values: object):
     args = _identity_args(tmp_path)
     args["model_config"] = _model_config(

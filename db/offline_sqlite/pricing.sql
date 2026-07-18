@@ -77,7 +77,13 @@ CREATE TABLE IF NOT EXISTS pricing.CV_FOLD_METRIC (
     fold_no INTEGER NOT NULL,
     metric_name TEXT NOT NULL,
     metric_value REAL NOT NULL,
-    PRIMARY KEY (model_run_id, split_set_id, fold_no, metric_name)
+    CONSTRAINT PK_CV_FOLD_METRIC
+        PRIMARY KEY (model_run_id, split_set_id, fold_no, metric_name),
+    CONSTRAINT FK_CV_FOLD_METRIC_MODEL_RUN
+        FOREIGN KEY (model_run_id) REFERENCES MODEL_RUN(model_run_id),
+    CONSTRAINT FK_CV_FOLD_METRIC_FOLD
+        FOREIGN KEY (split_set_id, fold_no)
+        REFERENCES CV_FOLD(split_set_id, fold_no)
 );
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL (

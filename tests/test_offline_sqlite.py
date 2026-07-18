@@ -38,6 +38,19 @@ def _sql_server_view_columns(sql: str, view_name: str) -> list[str]:
     return columns
 
 
+def _foreign_key_contract(rows) -> set[tuple[str, tuple[tuple[str, str], ...]]]:
+    grouped: dict[int, tuple[str, list[tuple[int, str, str]]]] = {}
+    for row in rows:
+        fk_id, sequence, parent_table, child_column, parent_column = row[:5]
+        table, columns = grouped.setdefault(int(fk_id), (str(parent_table), []))
+        assert table == parent_table
+        columns.append((int(sequence), str(child_column), str(parent_column)))
+    return {
+        (table, tuple((child, parent) for _, child, parent in sorted(columns)))
+        for table, columns in grouped.values()
+    }
+
+
 _MODEL_RUN_INSERT = """
     INSERT INTO MODEL_RUN (
         model_run_id,
@@ -259,6 +272,9 @@ def test_fresh_offline_clean_validation_schema_matches_remote_contract(tmp_path)
         curve_foreign_keys = list(
             connection.exec_driver_sql("PRAGMA pricing.foreign_key_list('CV_SPLIT_CURVE_POINT')")
         )
+        fold_metric_foreign_keys = list(
+            connection.exec_driver_sql("PRAGMA pricing.foreign_key_list('CV_FOLD_METRIC')")
+        )
         model_run_foreign_keys = list(
             connection.exec_driver_sql("PRAGMA pricing.foreign_key_list('MODEL_RUN')")
         )
@@ -321,6 +337,13 @@ def test_fresh_offline_clean_validation_schema_matches_remote_contract(tmp_path)
         ("MODEL_RUN", "model_run_id", "model_run_id"),
         ("CV_FOLD", "split_set_id", "split_set_id"),
         ("CV_FOLD", "split_no", "fold_no"),
+    }
+    assert _foreign_key_contract(fold_metric_foreign_keys) == {
+        ("MODEL_RUN", (("model_run_id", "model_run_id"),)),
+        (
+            "CV_FOLD",
+            (("split_set_id", "split_set_id"), ("fold_no", "fold_no")),
+        ),
     }
     assert ("MODEL_RUN", "validation_source_model_run_id", "model_run_id") in {
         (row[2], row[3], row[4]) for row in model_run_foreign_keys
@@ -412,6 +435,168 @@ def _insert_clean_validation_model_run(connection, **overrides) -> None:
         """,
         {**values, "rating_workbook_sha256": "0" * 64},
     )
+
+
+def _replace_fold_metric_with_legacy_table(pricing_path: Path) -> None:
+    with sqlite3.connect(pricing_path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("PRAGMA legacy_alter_table=ON")
+        connection.execute("ALTER TABLE CV_FOLD_METRIC RENAME TO CV_FOLD_METRIC_CURRENT")
+        connection.execute("PRAGMA legacy_alter_table=OFF")
+        connection.execute(
+            """
+            CREATE TABLE CV_FOLD_METRIC (
+                model_run_id TEXT NOT NULL,
+                split_set_id TEXT NOT NULL,
+                fold_no INTEGER NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                PRIMARY KEY (model_run_id, split_set_id, fold_no, metric_name)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO CV_FOLD_METRIC
+            SELECT model_run_id, split_set_id, fold_no, metric_name, metric_value
+            FROM CV_FOLD_METRIC_CURRENT
+            """
+        )
+        connection.execute("DROP TABLE CV_FOLD_METRIC_CURRENT")
+
+
+def test_fresh_offline_fold_metric_foreign_keys_reject_orphans(tmp_path):
+    paths = {
+        "pricing": tmp_path / "pricing.sqlite",
+        "pricing_stg": tmp_path / "pricing_stg.sqlite",
+        "mlops": tmp_path / "mlops.sqlite",
+    }
+    engine = sqlite_engine_with_offline_schemas(paths)
+    apply_offline_ddl(engine)
+    engine.dispose()
+
+    insert_metric = """
+        INSERT INTO CV_FOLD_METRIC (
+            model_run_id, split_set_id, fold_no, metric_name, metric_value
+        ) VALUES (?, ?, ?, ?, 1.0)
+    """
+    with sqlite3.connect(paths["pricing"]) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_clean_validation_model_run(
+            connection,
+            model_run_id="run-metric",
+            rate_package_id=201,
+        )
+        connection.execute(
+            "INSERT INTO CV_FOLD (split_set_id, fold_no, n_train, n_test) "
+            "VALUES ('split-metric', 1, 80, 20)"
+        )
+        connection.execute(
+            insert_metric,
+            ("run-metric", "split-metric", 1, "deviance"),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+            connection.execute(
+                insert_metric,
+                ("run-missing", "split-metric", 1, "deviance"),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+            connection.execute(
+                insert_metric,
+                ("run-metric", "split-missing", 1, "deviance"),
+            )
+
+
+def test_offline_upgrade_adds_fold_metric_foreign_keys_and_preserves_rows(tmp_path):
+    paths = {
+        "pricing": tmp_path / "pricing.sqlite",
+        "pricing_stg": tmp_path / "pricing_stg.sqlite",
+        "mlops": tmp_path / "mlops.sqlite",
+    }
+    engine = sqlite_engine_with_offline_schemas(paths)
+    apply_offline_ddl(engine)
+    engine.dispose()
+    with sqlite3.connect(paths["pricing"]) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_clean_validation_model_run(
+            connection,
+            model_run_id="run-legacy-metric",
+            rate_package_id=202,
+        )
+        connection.execute(
+            "INSERT INTO CV_FOLD (split_set_id, fold_no, n_train, n_test) "
+            "VALUES ('split-legacy-metric', 1, 80, 20)"
+        )
+        connection.execute(
+            """
+            INSERT INTO CV_FOLD_METRIC (
+                model_run_id, split_set_id, fold_no, metric_name, metric_value
+            ) VALUES ('run-legacy-metric', 'split-legacy-metric', 1, 'deviance', 0.25)
+            """
+        )
+    _replace_fold_metric_with_legacy_table(paths["pricing"])
+
+    engine = sqlite_engine_with_offline_schemas(paths)
+    apply_offline_ddl(engine)
+    apply_offline_ddl(engine)
+    with engine.connect() as connection:
+        foreign_keys = list(
+            connection.exec_driver_sql("PRAGMA pricing.foreign_key_list('CV_FOLD_METRIC')")
+        )
+        rows = connection.exec_driver_sql(
+            """
+            SELECT model_run_id, split_set_id, fold_no, metric_name, metric_value
+            FROM pricing.CV_FOLD_METRIC
+            """
+        ).all()
+        violations = connection.exec_driver_sql(
+            "PRAGMA pricing.foreign_key_check('CV_FOLD_METRIC')"
+        ).all()
+
+    assert _foreign_key_contract(foreign_keys) == {
+        ("MODEL_RUN", (("model_run_id", "model_run_id"),)),
+        (
+            "CV_FOLD",
+            (("split_set_id", "split_set_id"), ("fold_no", "fold_no")),
+        ),
+    }
+    assert rows == [("run-legacy-metric", "split-legacy-metric", 1, "deviance", 0.25)]
+    assert violations == []
+
+
+def test_offline_upgrade_rejects_orphan_fold_metric_evidence(tmp_path):
+    paths = {
+        "pricing": tmp_path / "pricing.sqlite",
+        "pricing_stg": tmp_path / "pricing_stg.sqlite",
+        "mlops": tmp_path / "mlops.sqlite",
+    }
+    engine = sqlite_engine_with_offline_schemas(paths)
+    apply_offline_ddl(engine)
+    engine.dispose()
+    _replace_fold_metric_with_legacy_table(paths["pricing"])
+    with sqlite3.connect(paths["pricing"]) as connection:
+        connection.execute(
+            """
+            INSERT INTO CV_FOLD_METRIC (
+                model_run_id, split_set_id, fold_no, metric_name, metric_value
+            ) VALUES ('run-missing', 'split-missing', 99, 'deviance', 1.0)
+            """
+        )
+
+    engine = sqlite_engine_with_offline_schemas(paths)
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "cannot add CV_FOLD_METRIC foreign keys: orphan evidence "
+            ".*missing MODEL_RUN.*missing CV_FOLD"
+        ),
+    ):
+        apply_offline_ddl(engine)
+    engine.dispose()
+
+    with sqlite3.connect(paths["pricing"]) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM CV_FOLD_METRIC").fetchone() == (1,)
+        assert list(connection.execute("PRAGMA foreign_key_list('CV_FOLD_METRIC')")) == []
 
 
 def test_fresh_offline_model_run_sha_curve_and_self_fk_constraints(tmp_path):

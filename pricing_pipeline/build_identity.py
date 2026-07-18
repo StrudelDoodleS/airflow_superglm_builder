@@ -443,11 +443,13 @@ def _canonical_value(value: Any) -> Any:
         normalized.sort(key=lambda item: item["key"]["value"])
         return {"type": "mapping", "items": normalized}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return {
+        encoded = {
             "type": "sequence",
-            "class": f"{type(value).__module__}.{type(value).__qualname__}",
             "items": [_canonical_value(item) for item in value],
         }
+        if type(value) not in (list, tuple):
+            encoded["class"] = f"{type(value).__module__}.{type(value).__qualname__}"
+        return encoded
     raise BuildIdentityError(
         f"unsupported canonical build value {type(value).__module__}.{type(value).__qualname__}"
     )
