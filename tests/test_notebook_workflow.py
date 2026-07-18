@@ -360,6 +360,7 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
     assert tuple(signature(api.publish_edits).parameters) == (
         "pricing",
         "candidate",
+        "editor_session",
         "reason",
         "created_by",
     )
@@ -1191,8 +1192,6 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     candidate = SimpleNamespace(
         model_name=model.name,
         workbench=SimpleNamespace(engine=context.engine, model_config=model.config),
-        editor_session=session,
-        editor_widget=object(),
     )
     submission = SimpleNamespace(
         submission_id="submission-1",
@@ -1223,6 +1222,7 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     result = api.publish_edits(
         context,
         candidate=candidate,
+        editor_session=session,
         reason="Sparse age-band market adjustment",
         created_by="analyst@example.test",
     )
@@ -1256,8 +1256,6 @@ def test_publish_edits_rejects_candidate_opened_with_different_context(monkeypat
             engine=reviewed_context.engine,
             model_config=model.config,
         ),
-        editor_session=object(),
-        editor_widget=object(),
     )
 
     def unexpected_call(*args, **kwargs):
@@ -1270,33 +1268,28 @@ def test_publish_edits_rejects_candidate_opened_with_different_context(monkeypat
         api.publish_edits(
             publishing_context,
             candidate=candidate,
+            editor_session=object(),
             reason="Sparse age-band market adjustment",
             created_by="analyst@example.test",
         )
 
 
-def test_publish_edits_requires_an_open_editor(tmp_path):
+def test_publish_edits_requires_an_explicit_editor_session(tmp_path):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
     model = _registered_model(api, tmp_path)
     candidate = SimpleNamespace(
         model_name=model.name,
-        workbench=SimpleNamespace(model_config=model.config),
-        editor_session=None,
-        editor_widget=None,
+        workbench=SimpleNamespace(engine=context.engine, model_config=model.config),
     )
 
-    try:
+    with pytest.raises(TypeError, match="editor_session"):
         api.publish_edits(
             context,
             candidate=candidate,
             reason="Market adjustment",
         )
-    except RuntimeError as exc:
-        assert "Open the candidate editor" in str(exc)
-    else:
-        raise AssertionError("publish_edits accepted a candidate without an open editor")
 
 
 def test_deploy_package_uses_the_champion_snapshot_seen_during_review(monkeypatch, tmp_path):

@@ -192,6 +192,10 @@ def save_editor_submission(
     cleaned_identity = str(claimed_identity).strip()
     if not cleaned_identity:
         raise ValueError("A non-empty claimed_identity is required")
+    if getattr(editor_session, "reference_model", None) is not candidate.bundle.fitted_model:
+        raise EditorSubmissionError(
+            "editor_session.reference_model must be the opened candidate fitted model"
+        )
 
     root = Path(candidate.workbench.settings.workbench_artifact_root).expanduser().resolve()
     submissions_root = (root / candidate.model_name / "editor_submissions").resolve()

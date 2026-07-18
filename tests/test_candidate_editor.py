@@ -18,22 +18,11 @@ from pricing_pipeline.workbench.submission import (
 )
 
 
-class FakeWidget:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
-
-
 class FakeEditorSession:
-    def __init__(self, *, fail_save: bool = False) -> None:
-        self.widget_value = FakeWidget()
+    def __init__(self, reference_model, *, fail_save: bool = False) -> None:
+        self.reference_model = reference_model
         self.fail_save = fail_save
         self.saved_paths: list[Path] = []
-
-    def widget(self):
-        return self.widget_value
 
     def save(self, path) -> None:
         target = Path(path)
@@ -73,7 +62,7 @@ def _bundle() -> CandidateBundle:
     )
 
 
-def _candidate(tmp_path: Path, session: FakeEditorSession) -> Candidate:
+def _candidate(tmp_path: Path) -> Candidate:
     workbench = Workbench(
         engine=object(),
         settings=Settings(workbench_artifact_root=tmp_path),
@@ -85,7 +74,6 @@ def _candidate(tmp_path: Path, session: FakeEditorSession) -> Candidate:
             deployment_slot="HOME_FREQ_UAT",
         ),
     )
-    workbench.create_editor_session = lambda _bundle: session
     return Candidate(
         workbench=workbench,
         model_name="HOME_FREQ",
@@ -107,12 +95,15 @@ def _save(candidate: Candidate, session: FakeEditorSession, reason: str = "Marke
     )
 
 
-def test_editor_session_is_retained_and_saved_without_a_second_model_artifact(tmp_path):
-    session = FakeEditorSession()
-    candidate = _candidate(tmp_path, session)
+def test_editor_session_is_explicit_and_saved_without_a_second_model_artifact(tmp_path):
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(candidate.bundle.fitted_model)
 
-    assert candidate.editor() is session.widget_value
-    assert candidate.editor() is session.widget_value
+    assert not hasattr(Candidate, "editor")
+    assert not hasattr(Candidate, "close_editor")
+    assert not hasattr(candidate, "editor_session")
+    assert not hasattr(candidate, "editor_widget")
+    assert not hasattr(Workbench, "create_editor_session")
     submission = _save(candidate, session)
 
     payload = json.loads(Path(submission.path).read_text(encoding="utf-8"))
@@ -127,8 +118,9 @@ def test_editor_session_is_retained_and_saved_without_a_second_model_artifact(tm
 
 
 def test_submission_loader_verifies_manifest_and_editor_session_hashes(tmp_path):
-    session = FakeEditorSession()
-    submission = _save(_candidate(tmp_path, session), session)
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(candidate.bundle.fitted_model)
+    submission = _save(candidate, session)
 
     loaded = load_verified_submission(
         submission.path,
@@ -147,8 +139,8 @@ def test_submission_loader_verifies_manifest_and_editor_session_hashes(tmp_path)
 
 
 def test_submission_rejects_blank_reason_and_identity(tmp_path):
-    session = FakeEditorSession()
-    candidate = _candidate(tmp_path, session)
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(candidate.bundle.fitted_model)
 
     with pytest.raises(ValueError, match="reason"):
         save_editor_submission(
@@ -167,8 +159,8 @@ def test_submission_rejects_blank_reason_and_identity(tmp_path):
 
 
 def test_identical_save_reuses_immutable_submission_and_rejects_new_reason(tmp_path):
-    session = FakeEditorSession()
-    candidate = _candidate(tmp_path, session)
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(candidate.bundle.fitted_model)
 
     first = _save(candidate, session)
     retried = _save(candidate, session)
@@ -180,8 +172,8 @@ def test_identical_save_reuses_immutable_submission_and_rejects_new_reason(tmp_p
 
 
 def test_failed_session_save_leaves_no_submission(tmp_path):
-    session = FakeEditorSession(fail_save=True)
-    candidate = _candidate(tmp_path, session)
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(candidate.bundle.fitted_model, fail_save=True)
 
     with pytest.raises(RuntimeError, match="injected save failure"):
         _save(candidate, session)
@@ -191,13 +183,12 @@ def test_failed_session_save_leaves_no_submission(tmp_path):
     assert not list(submission_root.glob(".submission-*"))
 
 
-def test_close_editor_discards_session_and_closes_widget(tmp_path):
-    session = FakeEditorSession()
-    candidate = _candidate(tmp_path, session)
-    candidate.editor()
+def test_submission_rejects_session_from_another_model_before_writing(tmp_path):
+    candidate = _candidate(tmp_path)
+    session = FakeEditorSession(object())
 
-    candidate.close_editor()
+    with pytest.raises(EditorSubmissionError, match="reference_model"):
+        _save(candidate, session)
 
-    assert session.widget_value.closed is True
-    assert candidate.editor_session is None
-    assert candidate.editor_widget is None
+    assert session.saved_paths == []
+    assert not (tmp_path / "HOME_FREQ" / "editor_submissions").exists()

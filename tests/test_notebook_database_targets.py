@@ -274,6 +274,7 @@ def test_connect_rejects_unknown_explicit_mode():
             lambda api, context, root: api.publish_edits(
                 context,
                 candidate=object(),
+                editor_session=object(),
                 reason="blocked",
             ),
         ),
@@ -854,5 +855,6 @@ def test_local_context_explains_that_editor_publication_requires_remote(tmp_path
         api.publish_edits(
             context,
             candidate=object(),
+            editor_session=object(),
             reason="blocked locally",
         )

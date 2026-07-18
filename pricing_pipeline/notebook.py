@@ -657,24 +657,23 @@ def publish_edits(
     pricing: NotebookContext,
     *,
     candidate,
+    editor_session,
     reason: str,
     created_by: str | None = None,
 ):
-    """Persist and synchronously publish one retained editor session."""
+    """Persist and publish the explicit SuperGLM editor session supplied by the analyst."""
     pricing.require_write("publish_edits")
     if pricing.mode == "local":
         raise RuntimeError(
             "Remote mode is required for the editor; local SQLite records "
             "candidate audit evidence but does not publish editor revisions."
         )
-    if candidate.editor_session is None or candidate.editor_widget is None:
-        raise RuntimeError("Open the candidate editor before publishing edits")
     if candidate.workbench.engine is not pricing.engine:
         raise ValueError("candidate was opened with a different notebook context")
     identity = _created_by(created_by)
     submission = save_editor_submission(
         candidate,
-        editor_session=candidate.editor_session,
+        editor_session=editor_session,
         reason=_required_text(reason, "reason"),
         claimed_identity=identity,
     )
