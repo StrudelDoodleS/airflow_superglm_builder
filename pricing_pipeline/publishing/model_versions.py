@@ -19,14 +19,26 @@ def _required_text(value: str, field_name: str) -> str:
     return cleaned
 
 
+def _required_sha256(value: str, field_name: str) -> str:
+    digest = _required_text(value, field_name)
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return digest
+
+
 def resolve_model_version_for_export(
     engine,
     *,
     model_name: str,
     export_id: str,
+    build_fingerprint_sha256: str,
 ) -> str:
     model_name = _required_text(model_name, "model_name")
     export_id = _required_text(export_id, "export_id")
+    build_fingerprint_sha256 = _required_sha256(
+        build_fingerprint_sha256,
+        "build_fingerprint_sha256",
+    )
     schemas = schema_names_from_connectable(engine)
 
     with engine.begin() as con:
@@ -42,6 +54,23 @@ def resolve_model_version_for_export(
         ).scalar_one_or_none()
         if model_id is None:
             raise ValueError(f"pricing model is not registered: {model_name}")
+
+        canonical_version = con.execute(
+            text(
+                f"""
+                SELECT rp.model_version
+                FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+                    WITH (UPDLOCK, HOLDLOCK)
+                WHERE rp.model_id = :model_id
+                  AND rp.parent_rate_package_id IS NULL
+                  AND rp.build_fingerprint_sha256 = :build_fingerprint_sha256
+                """
+            ),
+            {
+                "model_id": int(model_id),
+                "build_fingerprint_sha256": build_fingerprint_sha256,
+            },
+        ).scalar_one_or_none()
 
         existing_versions = list(
             con.execute(
@@ -69,6 +98,14 @@ def resolve_model_version_for_export(
                 "published package and model-version reservation disagree for "
                 f"model={model_name!r}, export_id={export_id!r}"
             )
+        if canonical_version is not None:
+            if existing_versions and str(existing_versions[0]) != str(canonical_version):
+                raise RuntimeError(
+                    "canonical root package and export reservation disagree for "
+                    f"model={model_name!r}, export_id={export_id!r}, "
+                    f"build_fingerprint_sha256={build_fingerprint_sha256!r}"
+                )
+            return str(canonical_version)
         if existing_versions:
             return str(existing_versions[0])
 

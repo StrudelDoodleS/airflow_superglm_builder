@@ -163,6 +163,7 @@ def publish_editor_submission(
                 airflow_run_id=airflow_run_id,
                 created_by=publisher_identity,
                 model_config=model_config,
+                expected_database=settings.pricing_database,
             )
         except BaseException as exc:
             _remove_path_preserving(
@@ -456,10 +457,7 @@ def _remove_empty_attempt_roots(
     for root in roots:
         _remove_empty_directory(root, original=original)
     published_root = attempt.staging_dir.parent.parent
-    if (
-        published_root.name == "published"
-        and attempt.final_dir.parent.parent == published_root
-    ):
+    if published_root.name == "published" and attempt.final_dir.parent.parent == published_root:
         _remove_empty_directory(published_root, original=original)
 
 
@@ -478,9 +476,7 @@ def _remove_empty_directory(
         except BaseException as inspect_exc:
             if original is None:
                 raise
-            original.add_note(
-                f"failed to inspect editor attempt directory {path}: {inspect_exc!r}"
-            )
+            original.add_note(f"failed to inspect editor attempt directory {path}: {inspect_exc!r}")
             return
         if is_non_empty:
             return
@@ -1179,6 +1175,7 @@ def _publish_new_editor_submission(
     airflow_run_id: str,
     created_by: str,
     model_config: ModelBuildConfig,
+    expected_database: str,
 ) -> EditorPublicationResult:
     parent = load_parent_candidate(
         engine,
@@ -1209,6 +1206,7 @@ def _publish_new_editor_submission(
             engine,
             workbook_path=Path(build.rating_workbook_path),
             export_id=build.export_id,
+            expected_database=expected_database,
             model_name=build.model_name,
             model_version=build.model_version,
             target_name=build.target_name,
@@ -1251,6 +1249,7 @@ def _publish_new_editor_submission(
         published = publish_rating_package(
             engine,
             export_id=build.export_id,
+            expected_database=expected_database,
             created_by=build.created_by,
             parent_rate_package_id=submission.parent_rate_package_id,
             revision_metadata=revision_metadata,
@@ -1333,9 +1332,7 @@ def _verify_edited_export_artifacts(
         ) from exc
 
     artifact_path = Path(build.candidate_artifact_path).expanduser().resolve()
-    if {workbook_path.parent, receipt_path.parent, artifact_path.parent} != {
-        artifact_path.parent
-    }:
+    if {workbook_path.parent, receipt_path.parent, artifact_path.parent} != {artifact_path.parent}:
         raise EditorSubmissionError(
             "edited candidate artifact files do not share one verified attempt directory"
         )
@@ -1359,8 +1356,7 @@ def _verify_edited_export_artifacts(
     ]
     if build_mismatches:
         raise EditorSubmissionError(
-            "edited candidate artifact build/SQL lineage mismatch: "
-            + ", ".join(build_mismatches)
+            "edited candidate artifact build/SQL lineage mismatch: " + ", ".join(build_mismatches)
         )
 
     row_count = len(parent.bundle.X)

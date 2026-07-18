@@ -801,6 +801,8 @@ def insert_staging_frames(
     level_df: pd.DataFrame,
     term_metadata_df: pd.DataFrame | None = None,
     staging_content_sha256: str | None = None,
+    *,
+    expected_database: str | None,
 ) -> None:
     if (
         staging_content_sha256 is not None
@@ -809,6 +811,7 @@ def insert_staging_frames(
         raise ValueError("staging_content_sha256 must be a lowercase SHA-256 digest")
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
+        _verify_expected_database(con, expected_database)
         acquire_staging_export_lock(con, args.export_id)
         model_id = _resolve_registered_model_id(con, args)
 
@@ -882,6 +885,7 @@ def stage_rating_export(
     *,
     workbook_path: Path,
     export_id: str,
+    expected_database: str | None,
     model_name: str,
     model_version: str | None,
     effective_from: str | None,
@@ -936,5 +940,27 @@ def stage_rating_export(
         level_df,
         term_metadata_df,
         staging_content_sha256=content_sha256,
+        expected_database=expected_database,
     )
     return content_sha256
+
+
+def _verify_expected_database(connection, expected_database: str | None) -> None:
+    if expected_database is None:
+        dialect_name = str(getattr(getattr(connection, "dialect", None), "name", "")).casefold()
+        if dialect_name == "sqlite":
+            return
+        raise ValueError("expected_database is required for non-SQLite staging writes")
+    expected = str(expected_database).strip()
+    if not expected:
+        raise ValueError("expected_database must be a non-empty database name or None")
+    actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}; "
+            "staging transaction aborted before writes"
+        )

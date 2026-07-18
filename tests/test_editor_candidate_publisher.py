@@ -61,9 +61,7 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "f" * 64,
         "metrics": {"editor_training_deviance_delta": 0.009},
-        "metric_scopes": {
-            "editor_training_deviance_delta": "editor_training_parent"
-        },
+        "metric_scopes": {"editor_training_deviance_delta": "editor_training_parent"},
     }
     values.update(overrides)
     return ApprovedModelBuild(**values)
@@ -831,6 +829,7 @@ def test_editor_publication_rejects_workbook_mutated_during_staging(
             airflow_run_id="manual__submission-1",
             created_by="publisher@example.test",
             model_config=EDITOR_CONFIG,
+            expected_database="PricingLab",
         )
 
 
@@ -966,6 +965,7 @@ def test_editor_candidate_artifact_is_verified_before_staging_or_sql(
             airflow_run_id="manual__submission-1",
             created_by="publisher@example.test",
             model_config=EDITOR_CONFIG,
+            expected_database="PricingLab",
         )
 
 

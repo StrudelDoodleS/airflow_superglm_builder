@@ -101,9 +101,7 @@ def test_export_rating_tables_preserves_raw_offset_levels(tmp_path: Path):
     term = pd.Series(np.resize([12.0, 36.0], row_count), name="Term")
     X = pd.DataFrame({"territory": np.resize(["north", "south"], row_count)})
     offset = np.log(term / 12.0)
-    y = np.random.default_rng(20260716).poisson(
-        np.exp(-1.0 + offset.to_numpy())
-    )
+    y = np.random.default_rng(20260716).poisson(np.exp(-1.0 + offset.to_numpy()))
     model = SuperGLM(
         features={"territory": Categorical(base="first")},
         selection_penalty=0.0,
@@ -127,8 +125,7 @@ def test_export_rating_tables_preserves_raw_offset_levels(tmp_path: Path):
         (row, column)
         for row in range(len(raw))
         for column in range(len(raw.columns) - 1)
-        if raw.iat[row, column] == "Term"
-        and raw.iat[row, column + 1] == "Relativity"
+        if raw.iat[row, column] == "Term" and raw.iat[row, column + 1] == "Relativity"
     ]
     assert len(header_positions) == 1
     header_row, source_column = header_positions[0]
@@ -252,6 +249,7 @@ def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path
         engine,
         workbook_path=workbook_path,
         export_id="export-1",
+        expected_database=None,
         model_name="MTPL_FREQ",
         model_version="20260427",
         effective_from=None,
@@ -302,6 +300,80 @@ def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path
     assert json.loads(metadata_json)["feature_kind"] == "offset"
 
 
+def test_insert_staging_frames_rechecks_database_before_mutation(monkeypatch):
+    class WrongDatabaseConnection:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            self.statements.append((sql, params))
+            if "DB_NAME()" in sql:
+                return _Result(scalar="OtherDb")
+            raise AssertionError("database guard must run before staging SQL")
+
+    class Begin:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self.connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def __init__(self):
+            self.connection = WrongDatabaseConnection()
+
+        def begin(self):
+            return Begin(self.connection)
+
+    engine = Engine()
+    monkeypatch.setattr(
+        staging,
+        "schema_names_from_connectable",
+        lambda _engine: SimpleNamespace(pricing_staging="pricing_stg"),
+    )
+    args = staging.StagingExport(
+        workbook_path=Path("rating.xlsx"),
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        target_name="ClaimNb",
+        model_type="superglm_poisson",
+        model_version="v1",
+        effective_from=None,
+        effective_to=None,
+        interaction_features={},
+        created_by="airflow",
+        replace=False,
+        model_id=17,
+    )
+
+    with pytest.raises(RuntimeError, match="expected 'PricingLab'.*connected to 'OtherDb'"):
+        staging.insert_staging_frames(
+            engine,
+            args,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            expected_database="PricingLab",
+        )
+
+    assert len(engine.connection.statements) == 1
+    assert "DB_NAME()" in engine.connection.statements[0][0]
+
+
+def test_staging_database_guard_allows_missing_target_only_for_sqlite():
+    remote_connection = SimpleNamespace(dialect=SimpleNamespace(name="mssql"))
+    sqlite_connection = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    with pytest.raises(ValueError, match="expected_database is required"):
+        staging._verify_expected_database(remote_connection, None)
+
+    staging._verify_expected_database(sqlite_connection, None)
+
+
 def test_stage_rating_export_requires_publication_receipt(tmp_path: Path):
     workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
     with pytest.raises(TypeError, match="publication_receipt"):
@@ -309,6 +381,7 @@ def test_stage_rating_export_requires_publication_receipt(tmp_path: Path):
             object(),
             workbook_path=workbook_path,
             export_id="export-1",
+            expected_database=None,
             model_name="MTPL_FREQ",
             model_version="v1",
             effective_from=None,
@@ -339,6 +412,7 @@ def test_stage_rating_export_rejects_receipt_term_missing_from_workbook(tmp_path
             object(),
             workbook_path=workbook_path,
             export_id="export-1",
+            expected_database=None,
             model_name="MTPL_FREQ",
             model_version="v1",
             effective_from=None,
@@ -438,6 +512,7 @@ def test_stage_rating_export_parses_categorical_interaction_matrix(
         object(),
         workbook_path=workbook_path,
         export_id="export-1",
+        expected_database=None,
         model_name="MTPL_FREQ",
         model_version="v1",
         effective_from=None,
@@ -484,20 +559,48 @@ class _Result:
 
 
 class _LineageConnection:
-    def __init__(self, *, existing=None, associations=()):
+    def __init__(
+        self,
+        *,
+        existing=None,
+        associations=(),
+        parent_validation_source_model_run_id=409,
+    ):
         self.existing = existing
         self.associations = list(associations)
+        self.parent_validation_source_model_run_id = parent_validation_source_model_run_id
         self.statements = []
 
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append((sql, params))
+        if "FROM pricing.PRICING_RATE_PACKAGE AS package" in sql:
+            return _Result(
+                row={
+                    "model_id": 17,
+                    "model_version": "v1",
+                    "source_export_id": "export-1",
+                    "parent_rate_package_id": 41,
+                    "build_fingerprint_sha256": None,
+                }
+            )
+        if "FROM pricing.CV_SPLIT_SET AS split_set" in sql:
+            return _Result(
+                rows=[
+                    {
+                        "manifest_id": "manifest-1",
+                        "fold_no": 1,
+                        "n_train": 1,
+                        "n_test": 1,
+                    }
+                ]
+            )
         if "FROM pricing.MODEL_RUN AS mr" in sql:
             return _Result(row=self.existing)
         if "lineage_source" in sql:
             return _Result(rows=self.associations)
         if "child_package.parent_rate_package_id" in sql:
-            return _Result(scalar=1)
+            return _Result(scalar=self.parent_validation_source_model_run_id)
         if "SELECT model_run_id" in sql:
             return _Result(scalar=501)
         return _Result()
@@ -595,6 +698,13 @@ def _model_run_row():
         "candidate_superglm_version": build.candidate_superglm_version,
         "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
         "model_source_sha256": build.model_source_sha256,
+        "builder_source_sha256": build.builder_source_sha256,
+        "materialized_split_sha256": build.materialized_split_sha256,
+        "runtime_sha256": build.runtime_sha256,
+        "candidate_superglm_sha256": build.candidate_superglm_sha256,
+        "validation_curve_status": build.validation_curve_status,
+        "validation_curve_reason": build.validation_curve_reason,
+        "validation_source_model_run_id": 409,
     }
 
 
@@ -651,9 +761,7 @@ def test_record_model_run_writes_identity_associations_parent_and_metrics():
     kwargs["build"] = _model_run_build(
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
-        fold_metrics=(
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-        ),
+        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
     )
 
     model_run_id = lineage.record_model_run(
@@ -691,7 +799,31 @@ def test_record_model_run_exact_retry_is_read_only():
     )
 
     assert model_run_id == 501
-    assert len(connection.statements) == 2
+    assert not any(
+        sql.lstrip().startswith(("MERGE", "DELETE", "INSERT", "UPDATE"))
+        for sql, _ in connection.statements
+    )
+
+
+def test_record_model_run_retry_rejects_changed_validation_source():
+    existing = _model_run_row()
+    existing["validation_source_model_run_id"] = 410
+    connection = _LineageConnection(
+        existing=existing,
+        associations=_model_run_associations(),
+        parent_validation_source_model_run_id=409,
+    )
+
+    with pytest.raises(
+        lineage.ModelRunIdentityError,
+        match="validation_source_model_run_id",
+    ):
+        lineage.record_model_run(
+            None,
+            connection=connection,
+            **_model_run_kwargs(),
+        )
+
     assert not any(
         sql.lstrip().startswith(("MERGE", "DELETE", "INSERT", "UPDATE"))
         for sql, _ in connection.statements
@@ -720,7 +852,10 @@ def test_record_model_run_rejects_changed_immutable_retry(field_name, changed_va
     with pytest.raises(lineage.ModelRunIdentityError, match=field_name):
         lineage.record_model_run(None, connection=connection, **kwargs)
 
-    assert len(connection.statements) == 1
+    assert not any(
+        sql.lstrip().startswith(("MERGE", "DELETE", "INSERT", "UPDATE"))
+        for sql, _ in connection.statements
+    )
 
 
 _RETRY_ARTIFACTS = {}
@@ -802,6 +937,16 @@ def _retry_export(tmp_path: Path) -> ModelExportResult:
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
         fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
+        validation_splits=(
+            {
+                "validation_split_no": 1,
+                "n_train": 1,
+                "n_validation": 1,
+                "metrics": {"deviance": 0.4},
+            },
+        ),
+        validation_curve_status="UNAVAILABLE",
+        validation_curve_reason="curve comparison unavailable",
         **_retry_artifact_fields(tmp_path),
     )
 
@@ -839,6 +984,9 @@ def _retry_evidence(tmp_path: Path):
             "rating_workbook_path": workbook_path,
             "rating_workbook_sha256": workbook_sha256,
             "mlflow_run_id": None,
+            "validation_curve_status": "UNAVAILABLE",
+            "validation_curve_reason": "curve comparison unavailable",
+            "validation_source_model_run_id": 501,
             **artifacts,
         },
         "datasets": [{"manifest_id": "manifest-1", "dataset_role": "training"}],
@@ -859,6 +1007,64 @@ def _retry_evidence(tmp_path: Path):
                 "metric_value": 0.4,
             }
         ],
+        "curve_points": [],
+        "manifests": {
+            "manifest-1": {
+                "manifest_id": "manifest-1",
+                "dataset_name": "mtpl",
+                "source_system": "unit-test",
+                "data_as_of_date": "2026-07-12",
+                "row_count": 1,
+                "pk_columns_json": '["policy_id"]',
+                "target_column": "ClaimNb",
+                "weight_column": None,
+                "exposure_column": None,
+                "data_as_of_column": None,
+                "model_frame_sha256": artifacts["model_frame_sha256"],
+                "frame_hash_metadata_json": '{"algorithm":"sha256"}',
+                "offset_column": None,
+                "offset_source_column": None,
+                "offset_label": None,
+                "export_weight_column": None,
+            }
+        },
+        "columns": {
+            "manifest-1": [
+                {
+                    "ordinal_no": 1,
+                    "column_name": "policy_id",
+                    "column_role": "KEY",
+                    "pandas_dtype": "int64",
+                    "null_count": 0,
+                    "distinct_count": 1,
+                },
+                {
+                    "ordinal_no": 2,
+                    "column_name": "ClaimNb",
+                    "column_role": "TARGET",
+                    "pandas_dtype": "float64",
+                    "null_count": 0,
+                    "distinct_count": 1,
+                },
+            ]
+        },
+        "split_sets": {
+            "split-1": {
+                "split_set_id": "split-1",
+                "manifest_id": "manifest-1",
+                "split_mode": "MATERIALIZED",
+                "splitter_class": "unit.Splitter",
+                "splitter_params_json": '{"n_splits":1}',
+                "row_order_sha256": artifacts["row_order_sha256"],
+                "row_count": 1,
+                "fold_count": 1,
+                "groups_column": None,
+                "stratify_column": None,
+                "artifact_sha256": artifacts["materialized_split_sha256"],
+                "runtime_metadata_json": '{"runtime":"test"}',
+            }
+        },
+        "split_geometry": {"split-1": [{"fold_no": 1, "n_train": 1, "n_test": 1}]},
     }
 
 
@@ -878,7 +1084,49 @@ class _EvidenceConnection:
             return _Result(rows=self.evidence["metrics"])
         if "FROM pricing.CV_FOLD_METRIC" in sql:
             return _Result(rows=self.evidence["folds"])
+        if "FROM pricing.CV_SPLIT_CURVE_POINT" in sql:
+            return _Result(rows=self.evidence["curve_points"])
+        if "FROM pricing.DATASET_MANIFEST" in sql:
+            return _Result(row=self.evidence["manifests"].get(str(params["manifest_id"])))
+        if "FROM pricing.DATASET_COLUMN" in sql:
+            return _Result(rows=self.evidence["columns"].get(str(params["manifest_id"]), []))
+        if "FROM pricing.CV_SPLIT_SET" in sql:
+            return _Result(row=self.evidence["split_sets"].get(str(params["split_set_id"])))
+        if "FROM pricing.CV_FOLD AS fold" in sql:
+            return _Result(
+                rows=self.evidence["split_geometry"].get(str(params["split_set_id"]), [])
+            )
         raise AssertionError(f"unexpected evidence query: {sql}")
+
+
+def _change_canonical_manifest_contract(evidence):
+    canonical = deepcopy(evidence["manifests"]["manifest-1"])
+    canonical.update(manifest_id="canonical-manifest", row_count=2)
+    evidence["manifests"]["canonical-manifest"] = canonical
+    evidence["columns"]["canonical-manifest"] = deepcopy(evidence["columns"]["manifest-1"])
+    evidence["row"]["manifest_id"] = "canonical-manifest"
+    evidence["datasets"][0]["manifest_id"] = "canonical-manifest"
+    evidence["splits"][0]["manifest_id"] = "canonical-manifest"
+
+
+def _change_canonical_manifest_columns(evidence):
+    canonical = deepcopy(evidence["manifests"]["manifest-1"])
+    canonical["manifest_id"] = "canonical-manifest"
+    evidence["manifests"]["canonical-manifest"] = canonical
+    canonical_columns = deepcopy(evidence["columns"]["manifest-1"])
+    canonical_columns[0]["null_count"] = 1
+    evidence["columns"]["canonical-manifest"] = canonical_columns
+    evidence["row"]["manifest_id"] = "canonical-manifest"
+    evidence["datasets"][0]["manifest_id"] = "canonical-manifest"
+    evidence["splits"][0]["manifest_id"] = "canonical-manifest"
+
+
+def _change_canonical_split_geometry(evidence):
+    canonical = deepcopy(evidence["split_sets"]["split-1"])
+    canonical["split_set_id"] = "canonical-split"
+    evidence["split_sets"]["canonical-split"] = canonical
+    evidence["split_geometry"]["canonical-split"] = [{"fold_no": 1, "n_train": 1, "n_test": 2}]
+    evidence["splits"][0]["split_set_id"] = "canonical-split"
 
 
 def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path):
@@ -906,8 +1154,10 @@ def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path)
         mlflow_run_id=None,
         publication_receipt_path=export.publication_receipt_path,
         publication_receipt_sha256=export.publication_receipt_sha256,
+        candidate_artifact_path=export.candidate_artifact_path,
         was_existing=True,
     )
+    assert result.candidate_artifact_path == export.candidate_artifact_path
 
     evidence["row"]["model_run_id"] = None
     with pytest.raises(pipeline.PublishedRunIntegrityError, match="manual repair"):
@@ -918,23 +1168,272 @@ def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path)
         )
 
 
+def test_existing_published_run_ignores_attempt_metadata_and_returns_canonical_paths(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+    canonical_attempt = tmp_path / "canonical" / "attempt"
+    canonical_attempt.mkdir(parents=True)
+    canonical_workbook = canonical_attempt / "rating_tables.xlsx"
+    canonical_workbook.write_bytes(Path(export.rating_workbook_path).read_bytes())
+    canonical_receipt = canonical_attempt / "publication_receipt.json"
+    canonical_receipt.write_bytes(Path(export.publication_receipt_path).read_bytes())
+    canonical_candidate = canonical_attempt / "candidate.joblib"
+    canonical_candidate.write_bytes(Path(export.candidate_artifact_path).read_bytes())
+    evidence["row"].update(
+        source_file=str(canonical_workbook),
+        rating_workbook_path=str(canonical_workbook),
+        publication_receipt_path=str(canonical_receipt),
+        candidate_artifact_path=str(canonical_candidate),
+        dag_id="another-dag",
+        airflow_run_id="another-attempt",
+        created_by="another-actor",
+    )
+
+    result = pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        rate_package_id=42,
+        allowed_artifact_root=tmp_path,
+    )
+
+    assert result.rating_workbook_path == str(canonical_workbook)
+    assert result.publication_receipt_path == str(canonical_receipt)
+    assert result.candidate_artifact_path == str(canonical_candidate)
+
+
+@pytest.mark.parametrize("canonical_state", ["missing", "corrupt"])
+def test_existing_published_run_independently_verifies_canonical_candidate_bytes(
+    tmp_path: Path,
+    canonical_state: str,
+):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+    canonical_candidate = tmp_path / "canonical-candidate.joblib"
+    canonical_candidate.write_bytes(Path(export.candidate_artifact_path).read_bytes())
+    evidence["row"]["candidate_artifact_path"] = str(canonical_candidate)
+    if canonical_state == "missing":
+        canonical_candidate.unlink()
+    else:
+        canonical_candidate.write_bytes(canonical_candidate.read_bytes() + b"corrupt")
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="existing candidate artifact failed verification",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            rate_package_id=42,
+            allowed_artifact_root=tmp_path,
+        )
+
+
+def test_existing_published_run_returns_canonical_sql_ids_for_equivalent_retry(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+    canonical_artifact = save_candidate_bundle(
+        CandidateBundle(
+            fitted_model=SimpleNamespace(name="candidate"),
+            X=pd.DataFrame({"age": [42.0]}),
+            y=np.zeros(1),
+            sample_weight=None,
+            offset=None,
+            export_weight=None,
+            cv_report={},
+            model_name="MTPL_FREQ",
+            model_version="v1",
+            export_id="canonical-export",
+            manifest_id="canonical-manifest",
+            split_set_id="canonical-split",
+            pk_columns=("policy_id",),
+            row_order_sha256=export.row_order_sha256,
+            model_source_sha256=export.model_source_sha256,
+            model_frame_sha256=export.model_frame_sha256,
+            build_fingerprint_sha256=export.build_fingerprint_sha256,
+            builder_source_sha256=export.builder_source_sha256,
+            materialized_split_sha256=export.materialized_split_sha256,
+            runtime_sha256=export.runtime_sha256,
+            candidate_superglm_sha256=export.candidate_superglm_sha256,
+            offset_contract={"handling": "NONE"},
+        ),
+        tmp_path / "canonical-candidate.joblib",
+    )
+    canonical_manifest = deepcopy(evidence["manifests"]["manifest-1"])
+    canonical_manifest["manifest_id"] = "canonical-manifest"
+    evidence["manifests"]["canonical-manifest"] = canonical_manifest
+    evidence["columns"]["canonical-manifest"] = deepcopy(evidence["columns"]["manifest-1"])
+    canonical_split = deepcopy(evidence["split_sets"]["split-1"])
+    canonical_split.update(
+        split_set_id="canonical-split",
+        manifest_id="canonical-manifest",
+    )
+    evidence["split_sets"]["canonical-split"] = canonical_split
+    evidence["split_geometry"]["canonical-split"] = deepcopy(evidence["split_geometry"]["split-1"])
+    evidence["row"].update(
+        source_export_id="canonical-export",
+        run_export_id="canonical-export",
+        manifest_id="canonical-manifest",
+        candidate_artifact_path=str(canonical_artifact.path),
+        candidate_artifact_sha256=canonical_artifact.sha256,
+        candidate_artifact_size_bytes=canonical_artifact.size_bytes,
+    )
+    evidence["datasets"][0]["manifest_id"] = "canonical-manifest"
+    evidence["splits"][0].update(
+        manifest_id="canonical-manifest",
+        split_set_id="canonical-split",
+    )
+    evidence["folds"][0]["split_set_id"] = "canonical-split"
+
+    result = pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        rate_package_id=42,
+        allowed_artifact_root=tmp_path,
+    )
+
+    assert result.export_id == "canonical-export"
+    assert result.manifest_id == "canonical-manifest"
+    assert result.split_set_id == "canonical-split"
+    assert result.candidate_artifact_path == str(canonical_artifact.path)
+
+
+def test_existing_published_run_compares_complete_curve_points_exactly(tmp_path: Path):
+    base = _retry_export(tmp_path).model_dump()
+    point = {
+        "validation_split_no": 1,
+        "term_name": "age",
+        "point_no": 1,
+        "point_kind": "NUMERIC",
+        "x_numeric": 0.0,
+        "level_text": None,
+        "eta_contribution": 0.0,
+        "relativity": 1.0,
+        "support_value": 1.0,
+        "reference_value": 0.0,
+        "reference_level": None,
+    }
+    base.update(
+        validation_curve_status="COMPLETE",
+        validation_curve_reason=None,
+        validation_curve_points=(point,),
+    )
+    export = ModelExportResult(**base)
+    evidence = _retry_evidence(tmp_path)
+    evidence["row"].update(
+        validation_curve_status="COMPLETE",
+        validation_curve_reason=None,
+    )
+    evidence["curve_points"] = [
+        {
+            "split_set_id": "split-1",
+            "split_no": 1,
+            **{k: v for k, v in point.items() if k != "validation_split_no"},
+        }
+    ]
+
+    pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        allowed_artifact_root=tmp_path,
+    )
+    evidence["curve_points"][0]["eta_contribution"] = 0.25
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="validation curve points",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
+def test_existing_published_run_rejects_fold_metric_owned_by_another_split(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    evidence = _retry_evidence(tmp_path)
+    evidence["folds"].append({**evidence["folds"][0], "split_set_id": "other-split"})
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="split metrics reference a non-canonical split_set_id",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
+def test_existing_published_run_rejects_curve_point_owned_by_another_split(
+    tmp_path: Path,
+):
+    base = _retry_export(tmp_path).model_dump()
+    point = {
+        "validation_split_no": 1,
+        "term_name": "age",
+        "point_no": 1,
+        "point_kind": "NUMERIC",
+        "x_numeric": 0.0,
+        "level_text": None,
+        "eta_contribution": 0.0,
+        "relativity": 1.0,
+        "support_value": 1.0,
+        "reference_value": 0.0,
+        "reference_level": None,
+    }
+    base.update(
+        validation_curve_status="COMPLETE",
+        validation_curve_reason=None,
+        validation_curve_points=(point,),
+    )
+    export = ModelExportResult(**base)
+    evidence = _retry_evidence(tmp_path)
+    evidence["row"].update(
+        validation_curve_status="COMPLETE",
+        validation_curve_reason=None,
+    )
+    canonical_point = {
+        "split_set_id": "split-1",
+        "split_no": 1,
+        **{k: v for k, v in point.items() if k != "validation_split_no"},
+    }
+    evidence["curve_points"] = [
+        canonical_point,
+        {**canonical_point, "split_set_id": "other-split"},
+    ]
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="validation curve points reference a non-canonical split_set_id",
+    ):
+        pipeline._resolve_existing_published_run(
+            _Engine(_EvidenceConnection(evidence)),
+            export,
+            allowed_artifact_root=tmp_path,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "field_name"),
     [
-        (lambda evidence: evidence["row"].update(dag_id="other"), "dag_id"),
-        (
-            lambda evidence: evidence["datasets"].append(
-                {"manifest_id": "extra", "dataset_role": "training"}
-            ),
-            "dataset links",
-        ),
-        (
-            lambda evidence: evidence["splits"][0].update(split_set_id="other"),
-            "split links",
-        ),
+        (lambda evidence: evidence["row"].update(runtime_sha256="9" * 64), "runtime_sha256"),
+        (_change_canonical_manifest_contract, "manifest contract"),
+        (_change_canonical_manifest_columns, "manifest columns"),
+        (_change_canonical_split_geometry, "split geometry"),
         (
             lambda evidence: evidence["metrics"][0].update(metric_value=9.0),
             "metrics",
+        ),
+        (
+            lambda evidence: evidence["row"].update(validation_curve_reason="different reason"),
+            "validation_curve",
         ),
     ],
 )
@@ -1007,7 +1506,7 @@ def test_existing_published_run_verifies_candidate_bundle_identity(tmp_path: Pat
 
     with pytest.raises(
         pipeline.PublishedRunIntegrityError,
-        match="candidate artifact source hash does not match model-run lineage",
+        match="candidate artifact model_source_sha256 does not match model-run lineage",
     ):
         pipeline._resolve_existing_published_run(
             _Engine(_EvidenceConnection(evidence)),
@@ -1056,6 +1555,8 @@ def test_publish_model_export_stages_packages_and_records_lineage(
         object(),
         export,
         model_config=MODEL_CONFIG,
+        expected_database="PricingLab",
+        allowed_artifact_root=tmp_path,
         validated_model_id=17,
     )
 
@@ -1065,7 +1566,7 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     assert result.was_existing is False
     stage_call = next(call for call in calls if call[0] == "stage")
     assert stage_call[2]["workbook_path"] == Path(export.rating_workbook_path)
-    assert stage_call[2]["publication_receipt_path"] == export.publication_receipt_path
+    assert stage_call[2]["publication_receipt_path"] == Path(export.publication_receipt_path)
     publish_call = next(call for call in calls if call[0] == "publish")
     assert "package_status" not in publish_call[2]
     assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
@@ -1073,6 +1574,85 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     assert lineage_call[1] is connection
     assert lineage_call[2]["build"] is export
     assert lineage_call[2]["rate_package_id"] == 42
+
+
+@pytest.mark.parametrize(
+    ("artifact_state", "match"),
+    [
+        ("outside_workbook", "rating workbook is outside"),
+        ("outside_receipt", "publication receipt is outside"),
+        ("missing_receipt", "publication receipt does not exist"),
+        ("tampered_receipt", "publication receipt SHA-256"),
+    ],
+)
+def test_publish_model_export_preflights_root_artifacts_before_staging(
+    monkeypatch,
+    tmp_path: Path,
+    artifact_state: str,
+    match: str,
+):
+    artifact_root = tmp_path / "workbench"
+    artifact_root.mkdir()
+    export = _retry_export(artifact_root)
+    if artifact_state == "outside_workbook":
+        outside_workbook = tmp_path / "outside-rating.xlsx"
+        outside_workbook.write_bytes(Path(export.rating_workbook_path).read_bytes())
+        export = export.model_copy(update={"rating_workbook_path": str(outside_workbook)})
+    elif artifact_state == "outside_receipt":
+        outside_receipt = tmp_path / "outside-receipt.json"
+        outside_receipt.write_bytes(Path(export.publication_receipt_path).read_bytes())
+        export = export.model_copy(update={"publication_receipt_path": str(outside_receipt)})
+    elif artifact_state == "missing_receipt":
+        Path(export.publication_receipt_path).unlink()
+    else:
+        receipt = Path(export.publication_receipt_path)
+        receipt.write_bytes(receipt.read_bytes() + b"tampered")
+
+    monkeypatch.setattr(
+        pipeline,
+        "stage_rating_export",
+        lambda *args, **kwargs: pytest.fail("untrusted artifact reached staging"),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "publish_rating_package",
+        lambda *args, **kwargs: pytest.fail("untrusted artifact reached packaging"),
+    )
+
+    with pytest.raises(pipeline.PublishedRunIntegrityError, match=match):
+        pipeline.publish_model_export(
+            object(),
+            export,
+            model_config=MODEL_CONFIG,
+            expected_database="PricingLab",
+            validated_model_id=17,
+            allowed_artifact_root=artifact_root,
+        )
+
+
+def test_publish_model_export_requires_artifact_root_before_staging(
+    monkeypatch,
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    monkeypatch.setattr(
+        pipeline,
+        "stage_rating_export",
+        lambda *args, **kwargs: pytest.fail("missing root reached staging"),
+    )
+
+    with pytest.raises(
+        pipeline.PublishedRunIntegrityError,
+        match="allowed_artifact_root is required",
+    ):
+        pipeline.publish_model_export(
+            object(),
+            export,
+            model_config=MODEL_CONFIG,
+            expected_database="PricingLab",
+            allowed_artifact_root=None,
+            validated_model_id=17,
+        )
 
 
 def test_publish_model_export_returns_verified_existing_result_without_rewriting_lineage(
@@ -1121,6 +1701,8 @@ def test_publish_model_export_returns_verified_existing_result_without_rewriting
         object(),
         export,
         model_config=MODEL_CONFIG,
+        expected_database="PricingLab",
+        allowed_artifact_root=tmp_path,
         validated_model_id=17,
     )
 

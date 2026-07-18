@@ -33,6 +33,7 @@ class CompletedModelPublishResult:
     mlflow_run_id: str | None = None
     publication_receipt_path: str | None = None
     publication_receipt_sha256: str | None = None
+    candidate_artifact_path: str | None = None
     was_existing: bool = False
 
 

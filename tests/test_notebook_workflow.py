@@ -567,6 +567,7 @@ def test_build_candidate_rejects_invalid_model_identity_before_version_or_artifa
     tmp_path,
 ):
     from pricing_pipeline import notebook as api
+
     context = replace(
         _context(api, tmp_path),
         mode="local",
@@ -701,7 +702,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",
-        lambda engine, *, model_name, export_id: "v7",
+        lambda engine, *, model_name, export_id, build_fingerprint_sha256: "v7",
     )
 
     completed_build = _approved_build(
@@ -733,8 +734,12 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert inputs.y.name == "claim_count"
     pd.testing.assert_series_equal(inputs.offset, frame.set_index("policy_id")["term_offset"])
     pd.testing.assert_series_equal(inputs.offset_source, frame.set_index("policy_id")["term"])
-    pd.testing.assert_series_equal(inputs.sample_weight, frame.set_index("policy_id")["model_weight"])
-    pd.testing.assert_series_equal(inputs.export_weight, frame.set_index("policy_id")["rating_weight"])
+    pd.testing.assert_series_equal(
+        inputs.sample_weight, frame.set_index("policy_id")["model_weight"]
+    )
+    pd.testing.assert_series_equal(
+        inputs.export_weight, frame.set_index("policy_id")["rating_weight"]
+    )
     assert inputs.offset_source_name == "term"
     assert inputs.sample_weight_name == "model_weight"
     assert inputs.export_weight_name == "rating_weight"
@@ -809,10 +814,10 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
         identity_calls.append(kwargs)
         return _build_identity()
 
-    def reserve(engine, *, model_name, export_id):
+    def reserve(engine, *, model_name, export_id, build_fingerprint_sha256):
         del engine
         events.append("reserve")
-        reservations.append((model_name, export_id))
+        reservations.append((model_name, export_id, build_fingerprint_sha256))
         return "v7"
 
     def run_build(engine, **kwargs):
@@ -837,8 +842,8 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
 
     assert events == ["identity", "reserve", "run"] * 2
     assert reservations == [
-        ("CLAIM_FREQUENCY", "build_" + "1" * 64),
-        ("CLAIM_FREQUENCY", "build_" + "1" * 64),
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64),
+        ("CLAIM_FREQUENCY", "build_" + "1" * 64, "1" * 64),
     ]
     assert attempts[0] != attempts[1]
     assert all(path.name.startswith("attempt_") for path in attempts)
@@ -1056,7 +1061,7 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
     monkeypatch.setattr(
         api,
         "resolve_model_version_for_export",
-        lambda engine, *, model_name, export_id: "v7",
+        lambda engine, *, model_name, export_id, build_fingerprint_sha256: "v7",
     )
 
     def run_build(engine, **kwargs):

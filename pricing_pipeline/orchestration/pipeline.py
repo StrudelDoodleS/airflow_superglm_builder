@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections import Counter
 from pathlib import Path
 
 from sqlalchemy import text
@@ -22,31 +24,64 @@ class PublishedRunIntegrityError(RuntimeError):
     """Raised when an export ID resolves incomplete or ambiguous durable lineage."""
 
 
+def _verify_incoming_publication_artifact(
+    path_value: str | Path | None,
+    *,
+    expected_sha256: str | None,
+    label: str,
+    allowed_artifact_root: str | Path | None,
+) -> Path:
+    if path_value is None or not str(path_value).strip():
+        raise PublishedRunIntegrityError(f"{label} path is missing")
+    artifact_path = Path(path_value).expanduser().resolve()
+    if allowed_artifact_root is not None:
+        root = Path(allowed_artifact_root).expanduser().resolve()
+        if not artifact_path.is_relative_to(root):
+            raise PublishedRunIntegrityError(f"{label} is outside the configured artifact root")
+    if not artifact_path.is_file():
+        raise PublishedRunIntegrityError(f"{label} does not exist: {artifact_path.as_posix()}")
+    expected = str(expected_sha256 or "").strip()
+    if not expected:
+        raise PublishedRunIntegrityError(f"{label} SHA-256 evidence is missing")
+    actual = sha256_file(artifact_path)
+    if actual != expected:
+        raise PublishedRunIntegrityError(
+            f"{label} SHA-256 does not match the export evidence: "
+            f"expected={expected!r}, actual={actual!r}"
+        )
+    return artifact_path
+
+
 def publish_model_export(
     engine,
     export: ApprovedModelBuild,
     *,
     model_config: ModelBuildConfig,
+    expected_database: str,
+    allowed_artifact_root: str | Path,
     validated_model_id: int | None = None,
-    allowed_artifact_root: str | Path | None = None,
 ) -> CompletedModelPublishResult:
-    workbook_path = Path(export.rating_workbook_path)
-    if not workbook_path.is_file():
-        raise PublishedRunIntegrityError(
-            f"rating workbook does not exist: {workbook_path.as_posix()}"
-        )
-    actual_workbook_sha256 = sha256_file(workbook_path)
-    if actual_workbook_sha256 != export.rating_workbook_sha256:
-        raise PublishedRunIntegrityError(
-            "rating workbook SHA-256 does not match the export evidence: "
-            f"expected={export.rating_workbook_sha256!r}, actual={actual_workbook_sha256!r}"
-        )
+    if allowed_artifact_root is None:
+        raise PublishedRunIntegrityError("allowed_artifact_root is required for remote publication")
+    workbook_path = _verify_incoming_publication_artifact(
+        export.rating_workbook_path,
+        expected_sha256=export.rating_workbook_sha256,
+        label="rating workbook",
+        allowed_artifact_root=allowed_artifact_root,
+    )
+    receipt_path = _verify_incoming_publication_artifact(
+        export.publication_receipt_path,
+        expected_sha256=export.publication_receipt_sha256,
+        label="publication receipt",
+        allowed_artifact_root=allowed_artifact_root,
+    )
     if validated_model_id is None:
         with engine.begin() as connection:
             model_id = validate_registered_model(connection, model_config).model_id
     else:
         model_id = int(validated_model_id)
     _validate_export_matches_config(export, model_config, model_id=model_id)
+
     def write_package_lineage(connection, rate_package_id: int) -> int:
         return record_model_run(
             None,
@@ -58,8 +93,9 @@ def publish_model_export(
         )
 
     staging_kwargs = {
-        "workbook_path": Path(export.rating_workbook_path),
+        "workbook_path": workbook_path,
         "export_id": export.export_id,
+        "expected_database": expected_database,
         "model_name": model_config.model_name,
         "model_version": export.model_version,
         "target_name": model_config.target_name,
@@ -68,7 +104,7 @@ def publish_model_export(
         "created_by": export.created_by,
         "replace": True,
         "model_id": model_id,
-        "publication_receipt_path": export.publication_receipt_path,
+        "publication_receipt_path": receipt_path,
         "publication_receipt_sha256": export.publication_receipt_sha256,
     }
     content_sha256 = stage_rating_export(engine, **staging_kwargs)
@@ -81,7 +117,9 @@ def publish_model_export(
     publish_result = publish_rating_package(
         engine,
         export_id=export.export_id,
+        expected_database=expected_database,
         created_by=export.created_by,
+        build_fingerprint_sha256=export.build_fingerprint_sha256,
         package_lineage_writer=write_package_lineage,
         expected_staged_metadata={
             "export_id": export.export_id,
@@ -99,6 +137,7 @@ def publish_model_export(
         existing = _resolve_existing_published_run(
             engine,
             export,
+            rate_package_id=publish_result.rate_package_id,
             allowed_artifact_root=allowed_artifact_root,
         )
         if existing is None:
@@ -129,6 +168,7 @@ def publish_model_export(
         mlflow_run_id=export.mlflow_run_id or None,
         publication_receipt_path=export.publication_receipt_path,
         publication_receipt_sha256=export.publication_receipt_sha256,
+        candidate_artifact_path=export.candidate_artifact_path,
         was_existing=publish_result.was_existing,
     )
 
@@ -159,6 +199,7 @@ def _resolve_existing_published_run(
     engine,
     export: ApprovedModelBuild,
     *,
+    rate_package_id: int | None = None,
     allowed_artifact_root: str | Path | None = None,
 ) -> CompletedModelPublishResult | None:
     schemas = schema_names_from_connectable(engine)
@@ -176,6 +217,7 @@ def _resolve_existing_published_run(
             rp.effective_from_date,
             rp.effective_to_date,
             rp.source_file,
+            rp.build_fingerprint_sha256,
             rp.publication_receipt_sha256 AS package_publication_receipt_sha256,
             mr.model_run_id,
             mr.run_status,
@@ -198,21 +240,35 @@ def _resolve_existing_published_run(
             mr.candidate_python_version,
             mr.candidate_superglm_version,
             mr.candidate_superglm_git_sha,
-            mr.model_source_sha256
+            mr.model_source_sha256,
+            mr.builder_source_sha256,
+            mr.materialized_split_sha256,
+            mr.runtime_sha256,
+            mr.candidate_superglm_sha256,
+            mr.validation_curve_status,
+            mr.validation_curve_reason,
+            mr.validation_source_model_run_id
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp WITH (UPDLOCK, HOLDLOCK)
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
           ON pm.model_id = rp.model_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS mr WITH (UPDLOCK, HOLDLOCK)
           ON mr.rate_package_id = rp.rate_package_id
         WHERE rp.model_id = :model_id
-          AND rp.source_export_id = :export_id
+          AND (
+              (:rate_package_id IS NOT NULL AND rp.rate_package_id = :rate_package_id)
+              OR (:rate_package_id IS NULL AND rp.source_export_id = :export_id)
+          )
         """
     )
     with engine.begin() as connection:
         rows = list(
             connection.execute(
                 query,
-                {"model_id": export.model_id, "export_id": export.export_id},
+                {
+                    "model_id": export.model_id,
+                    "export_id": export.export_id,
+                    "rate_package_id": rate_package_id,
+                },
             )
             .mappings()
             .all()
@@ -233,7 +289,7 @@ def _resolve_existing_published_run(
             raise PublishedRunIntegrityError(
                 f"export_id {export.export_id!r} has no successful model run"
             )
-        if str(row.get("package_status") or "").upper() not in {"DRAFT", "PUBLISHED"}:
+        if str(row.get("package_status") or "").upper() != "PUBLISHED":
             raise PublishedRunIntegrityError(
                 f"export_id {export.export_id!r} has unusable package status"
             )
@@ -304,14 +360,103 @@ def _resolve_existing_published_run(
             .mappings()
             .all()
         ]
+        curve_rows = [
+            dict(item)
+            for item in connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        split_set_id,
+                        split_no,
+                        term_name,
+                        point_no,
+                        point_kind,
+                        x_numeric,
+                        level_text,
+                        eta_contribution,
+                        relativity,
+                        support_value,
+                        reference_value,
+                        reference_level
+                    FROM {schemas.pricing}.CV_SPLIT_CURVE_POINT AS curve
+                        WITH (UPDLOCK, HOLDLOCK)
+                    WHERE curve.model_run_id = :model_run_id
+                    ORDER BY curve.split_no, curve.term_name, curve.point_no
+                    """
+                ),
+                evidence_params,
+            )
+            .mappings()
+            .all()
+        ]
+
+        canonical_manifest_id = str(row["manifest_id"])
+        expected_dataset_links = {(canonical_manifest_id, "training")}
+        actual_dataset_links = {
+            (str(item["manifest_id"]), str(item["dataset_role"])) for item in dataset_rows
+        }
+        if actual_dataset_links != expected_dataset_links:
+            raise PublishedRunIntegrityError(
+                "existing export has incompatible evidence: canonical dataset links "
+                f"stored={sorted(actual_dataset_links)!r}, "
+                f"expected={sorted(expected_dataset_links)!r}"
+            )
+
+        canonical_split_links = [
+            item
+            for item in split_rows
+            if str(item["dataset_role"]) == "training"
+            and str(item["split_role"]) == "validation"
+            and str(item["manifest_id"]) == canonical_manifest_id
+        ]
+        if len(canonical_split_links) != len(split_rows) or len(canonical_split_links) > 1:
+            raise PublishedRunIntegrityError(
+                "existing export has incompatible evidence: canonical split links are "
+                "ambiguous or have unsupported roles"
+            )
+        canonical_split_set_id = (
+            None if not canonical_split_links else str(canonical_split_links[0]["split_set_id"])
+        )
+        if (canonical_split_set_id is None) != (export.split_set_id is None):
+            raise PublishedRunIntegrityError(
+                "existing export has incompatible evidence: validation split presence differs"
+            )
+
+        canonical_manifest, canonical_columns = _load_manifest_evidence(
+            connection,
+            schemas=schemas,
+            manifest_id=canonical_manifest_id,
+        )
+        incoming_manifest, incoming_columns = _load_manifest_evidence(
+            connection,
+            schemas=schemas,
+            manifest_id=export.manifest_id,
+        )
+        canonical_split, canonical_geometry = _load_split_evidence(
+            connection,
+            schemas=schemas,
+            split_set_id=canonical_split_set_id,
+        )
+        incoming_split, incoming_geometry = _load_split_evidence(
+            connection,
+            schemas=schemas,
+            split_set_id=export.split_set_id,
+        )
 
     conflicts = _retry_evidence_conflicts(
         row=row,
         export=export,
-        dataset_rows=dataset_rows,
-        split_rows=split_rows,
         metric_rows=metric_rows,
         fold_rows=fold_rows,
+        curve_rows=curve_rows,
+        canonical_manifest=canonical_manifest,
+        incoming_manifest=incoming_manifest,
+        canonical_columns=canonical_columns,
+        incoming_columns=incoming_columns,
+        canonical_split=canonical_split,
+        incoming_split=incoming_split,
+        canonical_geometry=canonical_geometry,
+        incoming_geometry=incoming_geometry,
     )
     if conflicts:
         raise PublishedRunIntegrityError(
@@ -331,8 +476,24 @@ def _resolve_existing_published_run(
     if sha256_file(committed_workbook) != committed_sha256:
         raise PublishedRunIntegrityError("existing rating workbook SHA-256 verification failed")
 
-    resolved_manifest_id = export.manifest_id
-    resolved_split_set_id = export.split_set_id
+    resolved_manifest_id = canonical_manifest_id
+    resolved_split_set_id = canonical_split_set_id
+
+    committed_receipt_value = row.get("publication_receipt_path")
+    if committed_receipt_value is None:
+        raise PublishedRunIntegrityError("existing publication receipt path is missing")
+    committed_receipt = Path(str(committed_receipt_value)).expanduser().resolve()
+    if allowed_artifact_root is not None and not committed_receipt.is_relative_to(
+        Path(allowed_artifact_root).expanduser().resolve()
+    ):
+        raise PublishedRunIntegrityError(
+            "existing publication receipt is outside the configured artifact root"
+        )
+    if not committed_receipt.is_file():
+        raise PublishedRunIntegrityError("existing publication receipt is missing")
+    committed_receipt_sha256 = str(row.get("publication_receipt_sha256") or "")
+    if sha256_file(committed_receipt) != committed_receipt_sha256:
+        raise PublishedRunIntegrityError("existing publication receipt SHA-256 verification failed")
 
     artifact_fields = (
         "candidate_artifact_path",
@@ -342,7 +503,6 @@ def _resolve_existing_published_run(
         "candidate_python_version",
         "candidate_superglm_version",
         "candidate_superglm_git_sha",
-        "model_source_sha256",
     )
     artifact_values = [row.get(field) for field in artifact_fields]
     if any(value is not None for value in artifact_values):
@@ -378,24 +538,23 @@ def _resolve_existing_published_run(
             "model_name": str(row["run_model_name"]),
             "model_version": str(row["run_model_version"]),
             "export_id": str(row["run_export_id"]),
+            "manifest_id": resolved_manifest_id,
+            "split_set_id": resolved_split_set_id,
+            "build_fingerprint_sha256": str(row["build_fingerprint_sha256"]),
+            "model_source_sha256": str(row["model_source_sha256"]),
+            "builder_source_sha256": str(row["builder_source_sha256"]),
+            "materialized_split_sha256": str(row["materialized_split_sha256"]),
+            "runtime_sha256": str(row["runtime_sha256"]),
+            "candidate_superglm_sha256": str(row["candidate_superglm_sha256"]),
+            "model_frame_sha256": str(canonical_manifest["model_frame_sha256"]),
         }
+        if canonical_split is not None:
+            expected_identity["row_order_sha256"] = str(canonical_split["row_order_sha256"])
         for field_name, expected_value in expected_identity.items():
             if getattr(bundle, field_name) != expected_value:
                 raise PublishedRunIntegrityError(
                     f"existing candidate artifact {field_name} does not match model-run lineage"
                 )
-        if bundle.model_source_sha256 != str(row["model_source_sha256"]):
-            raise PublishedRunIntegrityError(
-                "existing candidate artifact source hash does not match model-run lineage"
-            )
-        if bundle.manifest_id != str(row["manifest_id"]):
-            raise PublishedRunIntegrityError(
-                "existing candidate artifact manifest does not match model-run lineage"
-            )
-        if bundle.split_set_id != resolved_split_set_id:
-            raise PublishedRunIntegrityError(
-                "existing candidate artifact split set does not match model-run lineage"
-            )
 
     return CompletedModelPublishResult(
         model_id=int(row["model_id"]),
@@ -420,142 +579,274 @@ def _resolve_existing_published_run(
             if row.get("publication_receipt_sha256") is None
             else str(row["publication_receipt_sha256"])
         ),
+        candidate_artifact_path=(
+            None
+            if row.get("candidate_artifact_path") is None
+            else str(row["candidate_artifact_path"])
+        ),
         was_existing=True,
     )
+
+
+def _load_manifest_evidence(connection, *, schemas, manifest_id: str) -> tuple[dict, list[dict]]:
+    manifest = (
+        connection.execute(
+            text(
+                f"""
+                SELECT
+                    manifest_id,
+                    dataset_name,
+                    source_system,
+                    data_as_of_date,
+                    row_count,
+                    pk_columns_json,
+                    target_column,
+                    weight_column,
+                    exposure_column,
+                    data_as_of_column,
+                    model_frame_sha256,
+                    frame_hash_metadata_json,
+                    offset_column,
+                    offset_source_column,
+                    offset_label,
+                    export_weight_column
+                FROM {schemas.pricing}.DATASET_MANIFEST WITH (UPDLOCK, HOLDLOCK)
+                WHERE manifest_id = :manifest_id
+                """
+            ),
+            {"manifest_id": manifest_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if manifest is None:
+        raise PublishedRunIntegrityError(
+            f"material manifest {manifest_id!r} is missing during retry validation"
+        )
+    columns = [
+        dict(item)
+        for item in connection.execute(
+            text(
+                f"""
+                SELECT
+                    ordinal_no,
+                    column_name,
+                    column_role,
+                    pandas_dtype,
+                    null_count,
+                    distinct_count
+                FROM {schemas.pricing}.DATASET_COLUMN WITH (UPDLOCK, HOLDLOCK)
+                WHERE manifest_id = :manifest_id
+                ORDER BY ordinal_no
+                """
+            ),
+            {"manifest_id": manifest_id},
+        )
+        .mappings()
+        .all()
+    ]
+    return dict(manifest), columns
+
+
+def _load_split_evidence(connection, *, schemas, split_set_id: str | None):
+    if split_set_id is None:
+        return None, []
+    split = (
+        connection.execute(
+            text(
+                f"""
+                SELECT
+                    split_set_id,
+                    manifest_id,
+                    split_mode,
+                    splitter_class,
+                    splitter_params_json,
+                    row_order_sha256,
+                    row_count,
+                    fold_count,
+                    groups_column,
+                    stratify_column,
+                    artifact_sha256,
+                    runtime_metadata_json
+                FROM {schemas.pricing}.CV_SPLIT_SET WITH (UPDLOCK, HOLDLOCK)
+                WHERE split_set_id = :split_set_id
+                """
+            ),
+            {"split_set_id": split_set_id},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if split is None:
+        raise PublishedRunIntegrityError(
+            f"validation split {split_set_id!r} is missing during retry validation"
+        )
+    geometry = [
+        dict(item)
+        for item in connection.execute(
+            text(
+                f"""
+                SELECT fold.fold_no, fold.n_train, fold.n_test
+                FROM {schemas.pricing}.CV_FOLD AS fold WITH (UPDLOCK, HOLDLOCK)
+                WHERE fold.split_set_id = :split_set_id
+                ORDER BY fold.fold_no
+                """
+            ),
+            {"split_set_id": split_set_id},
+        )
+        .mappings()
+        .all()
+    ]
+    return dict(split), geometry
+
+
+def _normalise_material_row(row: dict, *, ignored: set[str]) -> tuple[tuple[str, object], ...]:
+    normalised: list[tuple[str, object]] = []
+    for field_name in sorted(set(row) - ignored):
+        value = row[field_name]
+        if field_name.endswith("_json") and value is not None:
+            try:
+                value = json.dumps(
+                    json.loads(str(value)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise PublishedRunIntegrityError(f"stored {field_name} is not valid JSON") from exc
+        else:
+            isoformat = getattr(value, "isoformat", None)
+            if callable(isoformat):
+                value = isoformat()
+        normalised.append((field_name, value))
+    return tuple(normalised)
 
 
 def _retry_evidence_conflicts(
     *,
     row: dict,
     export: ApprovedModelBuild,
-    dataset_rows: list[dict],
-    split_rows: list[dict],
     metric_rows: list[dict],
     fold_rows: list[dict],
+    curve_rows: list[dict],
+    canonical_manifest: dict,
+    incoming_manifest: dict,
+    canonical_columns: list[dict],
+    incoming_columns: list[dict],
+    canonical_split: dict | None,
+    incoming_split: dict | None,
+    canonical_geometry: list[dict],
+    incoming_geometry: list[dict],
 ) -> list[str]:
-    expected_manifest_id = export.manifest_id
-    expected_split_set_id = export.split_set_id
-    path_fields = {
-        "source_file",
-        "rating_workbook_path",
-        "publication_receipt_path",
-        "candidate_artifact_path",
-    }
-    date_fields = {"effective_from_date", "effective_to_date"}
-    integer_fields = {
-        "model_id",
-        "run_model_id",
-        "candidate_artifact_size_bytes",
-    }
     expected_scalars = {
         "model_id": export.model_id,
         "model_name": export.model_name,
         "model_version": export.model_version,
-        "source_export_id": export.export_id,
+        "run_model_id": export.model_id,
         "parent_rate_package_id": None,
         "effective_from_date": export.effective_from,
         "effective_to_date": None,
-        "source_file": export.rating_workbook_path,
+        "build_fingerprint_sha256": export.build_fingerprint_sha256,
         "package_publication_receipt_sha256": export.publication_receipt_sha256,
-        "run_export_id": export.export_id,
-        "run_model_id": export.model_id,
         "run_model_name": export.model_name,
         "run_model_version": export.model_version,
-        "dag_id": "notebook",
-        "airflow_run_id": export.export_id,
-        "mlflow_run_id": export.mlflow_run_id,
-        "manifest_id": expected_manifest_id,
-        "rating_workbook_path": export.rating_workbook_path,
         "rating_workbook_sha256": export.rating_workbook_sha256,
-        "publication_receipt_path": export.publication_receipt_path,
         "publication_receipt_sha256": export.publication_receipt_sha256,
-        "candidate_artifact_path": export.candidate_artifact_path,
-        "candidate_artifact_sha256": export.candidate_artifact_sha256,
         "candidate_artifact_format": export.candidate_artifact_format,
-        "candidate_artifact_size_bytes": export.candidate_artifact_size_bytes,
         "candidate_python_version": export.candidate_python_version,
         "candidate_superglm_version": export.candidate_superglm_version,
         "candidate_superglm_git_sha": export.candidate_superglm_git_sha,
         "model_source_sha256": export.model_source_sha256,
+        "builder_source_sha256": export.builder_source_sha256,
+        "materialized_split_sha256": export.materialized_split_sha256,
+        "runtime_sha256": export.runtime_sha256,
+        "candidate_superglm_sha256": export.candidate_superglm_sha256,
+        "validation_curve_status": export.validation_curve_status,
+        "validation_curve_reason": export.validation_curve_reason,
     }
     conflicts: list[str] = []
     for field_name, expected_value in expected_scalars.items():
         actual_value = row.get(field_name)
-        if field_name in path_fields:
-            expected_identity = (
-                None
-                if expected_value is None
-                else str(Path(str(expected_value)).expanduser().resolve())
-            )
-            actual_identity = (
-                None
-                if actual_value is None
-                else str(Path(str(actual_value)).expanduser().resolve())
-            )
-        elif field_name in date_fields:
-            expected_isoformat = getattr(expected_value, "isoformat", None)
-            actual_isoformat = getattr(actual_value, "isoformat", None)
-            expected_identity = (
-                None
-                if expected_value is None
-                else str(expected_isoformat() if callable(expected_isoformat) else expected_value)
-            )
-            actual_identity = (
-                None
-                if actual_value is None
-                else str(actual_isoformat() if callable(actual_isoformat) else actual_value)
-            )
-        elif field_name in integer_fields:
-            expected_identity = None if expected_value is None else int(expected_value)
-            actual_identity = None if actual_value is None else int(actual_value)
-        else:
-            expected_identity = None if expected_value is None else str(expected_value)
-            actual_identity = None if actual_value is None else str(actual_value)
+        expected_identity = None if expected_value is None else str(expected_value)
+        actual_identity = None if actual_value is None else str(actual_value)
         if actual_identity != expected_identity:
             conflicts.append(
                 f"{field_name} expected={expected_identity!r} stored={actual_identity!r}"
             )
+    if int(row.get("validation_source_model_run_id") or -1) != int(row["model_run_id"]):
+        conflicts.append("validation source must self-reference the canonical root run")
+    if str(row.get("source_export_id")) != str(row.get("run_export_id")):
+        conflicts.append("package source_export_id differs from model-run export_id")
 
-    expected_datasets = {(expected_manifest_id, "training")}
-    actual_datasets = {
-        (str(item["manifest_id"]), str(item["dataset_role"])) for item in dataset_rows
-    }
-    if actual_datasets != expected_datasets:
-        conflicts.append(
-            f"dataset links expected={sorted(expected_datasets)!r} "
-            f"stored={sorted(actual_datasets)!r}"
-        )
-
-    expected_splits = (
-        set()
-        if expected_split_set_id is None
-        else {
-            (
-                expected_manifest_id,
-                expected_split_set_id,
-                "training",
-                "validation",
-            )
-        }
+    canonical_manifest_contract = _normalise_material_row(
+        canonical_manifest,
+        ignored={"manifest_id"},
     )
-    actual_splits = {
-        (
-            str(item["manifest_id"]),
-            str(item["split_set_id"]),
-            str(item["dataset_role"]),
-            str(item["split_role"]),
+    incoming_manifest_contract = _normalise_material_row(
+        incoming_manifest,
+        ignored={"manifest_id"},
+    )
+    if canonical_manifest_contract != incoming_manifest_contract:
+        conflicts.append("material manifest contract differs")
+    for label, manifest in (
+        ("canonical", canonical_manifest),
+        ("incoming", incoming_manifest),
+    ):
+        if str(manifest.get("model_frame_sha256") or "") != export.model_frame_sha256:
+            conflicts.append(f"{label} manifest model_frame_sha256 differs")
+
+    canonical_column_contract = tuple(
+        _normalise_material_row(item, ignored=set()) for item in canonical_columns
+    )
+    incoming_column_contract = tuple(
+        _normalise_material_row(item, ignored=set()) for item in incoming_columns
+    )
+    if canonical_column_contract != incoming_column_contract:
+        conflicts.append("material manifest columns differ")
+
+    if (canonical_split is None) != (incoming_split is None):
+        conflicts.append("validation split contract presence differs")
+    elif canonical_split is not None and incoming_split is not None:
+        if str(canonical_split.get("manifest_id")) != str(canonical_manifest["manifest_id"]):
+            conflicts.append("canonical split belongs to a different manifest")
+        if str(incoming_split.get("manifest_id")) != export.manifest_id:
+            conflicts.append("incoming split belongs to a different manifest")
+        canonical_split_contract = _normalise_material_row(
+            canonical_split,
+            ignored={"split_set_id", "manifest_id"},
         )
-        for item in split_rows
+        incoming_split_contract = _normalise_material_row(
+            incoming_split,
+            ignored={"split_set_id", "manifest_id"},
+        )
+        if canonical_split_contract != incoming_split_contract:
+            conflicts.append("validation split contract differs")
+        for label, split in (("canonical", canonical_split), ("incoming", incoming_split)):
+            if str(split.get("row_order_sha256") or "") != export.row_order_sha256:
+                conflicts.append(f"{label} split row_order_sha256 differs")
+
+    canonical_geometry_contract = {
+        (int(item["fold_no"]), int(item["n_train"]), int(item["n_test"]))
+        for item in canonical_geometry
     }
-    if actual_splits != expected_splits:
-        conflicts.append(
-            f"split links expected={sorted(expected_splits)!r} stored={sorted(actual_splits)!r}"
-        )
+    incoming_geometry_contract = {
+        (int(item["fold_no"]), int(item["n_train"]), int(item["n_test"]))
+        for item in incoming_geometry
+    }
+    if canonical_geometry_contract != incoming_geometry_contract:
+        conflicts.append("validation split geometry differs")
+    if export.validation_splits:
+        expected_geometry = {
+            (split.validation_split_no, split.n_train, split.n_validation)
+            for split in export.validation_splits
+        }
+        if incoming_geometry_contract != expected_geometry:
+            conflicts.append("incoming split geometry differs from completed build")
 
     expected_metrics = {
         str(name): (
             float(value),
-            (None if export.metric_scopes.get(name) is None else str(export.metric_scopes[name])),
+            None if export.metric_scopes.get(name) is None else str(export.metric_scopes[name]),
         )
         for name, value in export.metrics.items()
     }
@@ -569,26 +860,58 @@ def _retry_evidence_conflicts(
     if actual_metrics != expected_metrics:
         conflicts.append(f"metrics expected={expected_metrics!r} stored={actual_metrics!r}")
 
-    expected_folds = {
-        (
-            None if expected_split_set_id is None else str(expected_split_set_id),
-            int(item["fold_no"]),
-            str(item["metric_name"]),
-            float(item["metric_value"]),
-        )
+    canonical_split_set_id = (
+        None if canonical_split is None else str(canonical_split["split_set_id"])
+    )
+    if any(str(item.get("split_set_id")) != canonical_split_set_id for item in fold_rows):
+        conflicts.append("split metrics reference a non-canonical split_set_id")
+    expected_folds = Counter(
+        (int(item["fold_no"]), str(item["metric_name"]), float(item["metric_value"]))
         for item in export.fold_metrics
-    }
-    actual_folds = {
-        (
-            None if item["split_set_id"] is None else str(item["split_set_id"]),
-            int(item["fold_no"]),
-            str(item["metric_name"]),
-            float(item["metric_value"]),
-        )
+    )
+    actual_folds = Counter(
+        (int(item["fold_no"]), str(item["metric_name"]), float(item["metric_value"]))
         for item in fold_rows
-    }
+    )
     if actual_folds != expected_folds:
         conflicts.append(
-            f"fold metrics expected={sorted(expected_folds)!r} stored={sorted(actual_folds)!r}"
+            f"split metrics expected={dict(expected_folds)!r} stored={dict(actual_folds)!r}"
         )
+
+    if any(str(item.get("split_set_id")) != canonical_split_set_id for item in curve_rows):
+        conflicts.append("validation curve points reference a non-canonical split_set_id")
+    expected_curves = Counter(
+        (
+            point.validation_split_no,
+            point.term_name,
+            point.point_no,
+            point.point_kind,
+            point.x_numeric,
+            point.level_text,
+            point.eta_contribution,
+            point.relativity,
+            point.support_value,
+            point.reference_value,
+            point.reference_level,
+        )
+        for point in export.validation_curve_points
+    )
+    actual_curves = Counter(
+        (
+            int(item["split_no"]),
+            str(item["term_name"]),
+            int(item["point_no"]),
+            str(item["point_kind"]),
+            None if item["x_numeric"] is None else float(item["x_numeric"]),
+            None if item["level_text"] is None else str(item["level_text"]),
+            float(item["eta_contribution"]),
+            None if item["relativity"] is None else float(item["relativity"]),
+            None if item["support_value"] is None else float(item["support_value"]),
+            None if item["reference_value"] is None else float(item["reference_value"]),
+            None if item["reference_level"] is None else str(item["reference_level"]),
+        )
+        for item in curve_rows
+    )
+    if actual_curves != expected_curves:
+        conflicts.append("validation curve points differ")
     return conflicts

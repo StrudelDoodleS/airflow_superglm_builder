@@ -216,9 +216,7 @@ def _publish_sqlite_candidate_locked(
         )
     manifest_id = str(build.manifest_id or "").strip()
     if not manifest_id:
-        raise ApprovedModelBuildError(
-            "local notebook publication requires an existing manifest_id"
-        )
+        raise ApprovedModelBuildError("local notebook publication requires an existing manifest_id")
     split_set_id = None if build.split_set_id is None else str(build.split_set_id).strip()
     export_id = str(build.export_id or "").strip()
     if not export_id:
@@ -239,6 +237,7 @@ def _publish_sqlite_candidate_locked(
         engine,
         workbook_path=Path(build.rating_workbook_path),
         export_id=export_id,
+        expected_database=None,
         model_name=model_config.model_name,
         model_version=build.model_version,
         effective_from=build.effective_from,
@@ -349,9 +348,7 @@ def _publish_sqlite_candidate_locked(
             {"manifest_id": manifest_id},
         ).scalar_one_or_none()
         if manifest_exists is None:
-            raise ApprovedModelBuildError(
-                f"local manifest_id {manifest_id!r} does not exist"
-            )
+            raise ApprovedModelBuildError(f"local manifest_id {manifest_id!r} does not exist")
         if split_set_id is not None:
             split_exists = connection.execute(
                 text(

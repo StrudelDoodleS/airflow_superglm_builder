@@ -25,9 +25,16 @@ class FakeScalarsResult:
 
 
 class FakeConnection:
-    def __init__(self, *, existing_version=None, versions=()):
+    def __init__(
+        self,
+        *,
+        existing_version=None,
+        versions=(),
+        canonical_fingerprint_version=None,
+    ):
         self.existing_version = existing_version
         self.versions = versions
+        self.canonical_fingerprint_version = canonical_fingerprint_version
         self.reservations: dict[str, str] = {}
         self.calls: list[tuple[str, dict[str, object]]] = []
 
@@ -35,8 +42,13 @@ class FakeConnection:
         sql = str(statement)
         values = dict(params or {})
         self.calls.append((sql, values))
-        if "WITH (UPDLOCK, HOLDLOCK)" in sql:
+        if (
+            "FROM pricing.PRICING_MODEL AS pm" in sql
+            or "FROM python_pricing.PRICING_MODEL AS pm" in sql
+        ):
             return FakeScalarResult(17)
+        if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql:
+            return FakeScalarResult(self.canonical_fingerprint_version)
         if sql.lstrip().startswith("INSERT INTO"):
             self.reservations[str(values["export_id"])] = str(values["model_version"])
             return FakeScalarResult(None)
@@ -67,11 +79,13 @@ class FakeEngine:
         *,
         existing_version=None,
         versions=(),
+        canonical_fingerprint_version=None,
         pricing_schema="pricing",
     ):
         self.connection = FakeConnection(
             existing_version=existing_version,
             versions=versions,
+            canonical_fingerprint_version=canonical_fingerprint_version,
         )
         self._execution_options = {"pricing_schema": pricing_schema}
 
@@ -86,6 +100,7 @@ def test_model_version_queries_respect_configured_pricing_schema():
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_1",
+        build_fingerprint_sha256="a" * 64,
     )
 
     sql, params = engine.connection.calls[0]
@@ -102,10 +117,11 @@ def test_resolve_model_version_for_export_reuses_existing_export_version():
             engine,
             model_name="MY_MODEL",
             export_id="my_model__run_1",
+            build_fingerprint_sha256="a" * 64,
         )
         == "v7"
     )
-    assert len(engine.connection.calls) == 2
+    assert len(engine.connection.calls) == 3
 
 
 def test_resolve_model_version_for_export_allocates_next_version_for_new_export():
@@ -116,11 +132,12 @@ def test_resolve_model_version_for_export_allocates_next_version_for_new_export(
             engine,
             model_name="MY_MODEL",
             export_id="my_model__run_2",
+            build_fingerprint_sha256="b" * 64,
         )
         == "v5"
     )
     assert engine.connection.reservations == {"my_model__run_2": "v5"}
-    assert len(engine.connection.calls) == 4
+    assert len(engine.connection.calls) == 5
 
 
 def test_resolve_model_version_reserves_distinct_versions_before_publication():
@@ -130,16 +147,19 @@ def test_resolve_model_version_reserves_distinct_versions_before_publication():
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_1",
+        build_fingerprint_sha256="a" * 64,
     )
     second = resolve_model_version_for_export(
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_2",
+        build_fingerprint_sha256="b" * 64,
     )
     retry = resolve_model_version_for_export(
         engine,
         model_name="MY_MODEL",
         export_id="my_model__run_1",
+        build_fingerprint_sha256="a" * 64,
     )
 
     assert (first, second, retry) == ("v1", "v2", "v1")
@@ -149,13 +169,84 @@ def test_resolve_model_version_reserves_distinct_versions_before_publication():
     }
 
 
+def test_resolve_model_version_reuses_canonical_root_fingerprint_before_reservation():
+    engine = FakeEngine(canonical_fingerprint_version="v7", versions=["v1", "v6"])
+
+    resolved = resolve_model_version_for_export(
+        engine,
+        model_name="MY_MODEL",
+        export_id="retry-attempt-export",
+        build_fingerprint_sha256="c" * 64,
+    )
+
+    assert resolved == "v7"
+    assert engine.connection.reservations == {}
+    fingerprint_query_index = next(
+        index
+        for index, (sql, _params) in enumerate(engine.connection.calls)
+        if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql
+    )
+    assert fingerprint_query_index == 1
+
+
+def test_resolve_model_version_rejects_reservation_disagreeing_with_canonical_root():
+    engine = FakeEngine(
+        existing_version="v8",
+        canonical_fingerprint_version="v7",
+    )
+
+    with pytest.raises(RuntimeError, match="canonical root package and.*reservation disagree"):
+        resolve_model_version_for_export(
+            engine,
+            model_name="MY_MODEL",
+            export_id="retry-attempt-export",
+            build_fingerprint_sha256="c" * 64,
+        )
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"model_name": None, "export_id": "export-1"}, "model_name"),
-        ({"model_name": "", "export_id": "export-1"}, "model_name"),
-        ({"model_name": "MY_MODEL", "export_id": "   "}, "export_id"),
-        ({"model_name": "MY_MODEL", "export_id": None}, "export_id"),
+        (
+            {
+                "model_name": None,
+                "export_id": "export-1",
+                "build_fingerprint_sha256": "a" * 64,
+            },
+            "model_name",
+        ),
+        (
+            {
+                "model_name": "",
+                "export_id": "export-1",
+                "build_fingerprint_sha256": "a" * 64,
+            },
+            "model_name",
+        ),
+        (
+            {
+                "model_name": "MY_MODEL",
+                "export_id": "   ",
+                "build_fingerprint_sha256": "a" * 64,
+            },
+            "export_id",
+        ),
+        (
+            {
+                "model_name": "MY_MODEL",
+                "export_id": None,
+                "build_fingerprint_sha256": "a" * 64,
+            },
+            "export_id",
+        ),
+        (
+            {
+                "model_name": "MY_MODEL",
+                "export_id": "export-1",
+                "build_fingerprint_sha256": "not-a-digest",
+            },
+            "build_fingerprint_sha256",
+        ),
     ],
 )
 def test_resolve_model_version_for_export_rejects_blank_identity(kwargs, message):

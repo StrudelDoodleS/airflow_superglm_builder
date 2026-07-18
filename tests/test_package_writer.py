@@ -13,12 +13,14 @@ def load_staging_to_rating_package(engine, args):
     result = publish_rating_package(
         engine,
         export_id=args.export_id,
+        expected_database=args.expected_database,
         created_by=args.created_by,
         parent_rate_package_id=getattr(args, "parent_rate_package_id", None),
         revision_metadata=getattr(args, "revision_metadata", None),
         draft_validator=getattr(args, "draft_validator", None),
         package_lineage_writer=getattr(args, "package_lineage_writer", None),
         expected_staged_metadata=getattr(args, "expected_staged_metadata", None),
+        build_fingerprint_sha256=getattr(args, "build_fingerprint_sha256", None),
     )
     args.package_version = result.package_version
     args.package_status = result.package_status
@@ -44,9 +46,7 @@ def test_publish_rating_package_accepts_revision_mapping_without_public_status()
 
 def test_package_writer_canonicalises_revision_metadata_mapping_once():
     engine = _FakeNewPackageEngine()
-    args = _new_package_args(
-        revision_metadata={"unicode": "München", "kind": "SUPERGLM_EDITOR"}
-    )
+    args = _new_package_args(revision_metadata={"unicode": "München", "kind": "SUPERGLM_EDITOR"})
 
     load_staging_to_rating_package(engine, args)
 
@@ -62,9 +62,7 @@ def test_package_writer_canonicalises_revision_metadata_mapping_once():
 
 def test_package_writer_accepts_non_dict_revision_metadata_mapping():
     engine = _FakeNewPackageEngine()
-    args = _new_package_args(
-        revision_metadata=MappingProxyType({"kind": "SUPERGLM_EDITOR"})
-    )
+    args = _new_package_args(revision_metadata=MappingProxyType({"kind": "SUPERGLM_EDITOR"}))
 
     load_staging_to_rating_package(engine, args)
 
@@ -81,6 +79,7 @@ def test_package_writer_rejects_non_mapping_revision_metadata():
         publish_rating_package(
             _FakeNewPackageEngine(),
             export_id="export-1",
+            expected_database="PricingLab",
             revision_metadata='{"kind":"SUPERGLM_EDITOR"}',
         )
 
@@ -91,6 +90,7 @@ def test_package_writer_rejects_non_finite_revision_metadata(value):
         publish_rating_package(
             _FakeNewPackageEngine(),
             export_id="export-1",
+            expected_database="PricingLab",
             revision_metadata={"metric": value},
         )
 
@@ -108,6 +108,7 @@ def test_package_writer_rejects_non_string_revision_metadata_keys(revision_metad
         publish_rating_package(
             _FakeNewPackageEngine(),
             export_id="export-1",
+            expected_database="PricingLab",
             revision_metadata=revision_metadata,
         )
 
@@ -117,6 +118,7 @@ def test_package_writer_rejects_non_json_serializable_revision_metadata():
         publish_rating_package(
             _FakeNewPackageEngine(),
             export_id="export-1",
+            expected_database="PricingLab",
             revision_metadata={"unsupported": object()},
         )
 
@@ -201,6 +203,8 @@ class _FakeMetaResult:
 
 class _FakePublishConnection:
     def execute(self, statement, params=None):
+        if "DB_NAME()" in str(statement):
+            return _FakeScalarResult("PricingLab")
         if "FROM pricing_stg.STG_RATING_EXPORT" in str(statement):
             return _FakeMetaResult()
         raise AssertionError("publish should stop before writing package rows")
@@ -217,6 +221,41 @@ class _FakePublishBegin:
 class _FakePublishEngine:
     def begin(self):
         return _FakePublishBegin()
+
+
+class _WrongDatabaseConnection:
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.statements.append((sql, params))
+        if "DB_NAME()" in sql:
+            return _FakeScalarResult("OtherDb")
+        raise AssertionError("database guard must run before publication SQL")
+
+
+class _WrongDatabaseEngine:
+    def __init__(self):
+        self.connection = _WrongDatabaseConnection()
+
+    def begin(self):
+        return _FakeExistingPackageBegin(self.connection)
+
+
+def test_package_writer_rechecks_database_inside_write_transaction_before_mutation():
+    engine = _WrongDatabaseEngine()
+
+    with pytest.raises(RuntimeError, match="expected 'PricingLab'.*connected to 'OtherDb'"):
+        publish_rating_package(
+            engine,
+            export_id="export-1",
+            expected_database="PricingLab",
+            build_fingerprint_sha256="f" * 64,
+        )
+
+    assert len(engine.connection.statements) == 1
+    assert "DB_NAME()" in engine.connection.statements[0][0]
 
 
 def _staged_meta(**overrides):
@@ -259,6 +298,7 @@ def _existing_package(**overrides):
         "parent_rate_package_id": None,
         "revision_metadata_json": None,
         "staging_content_sha256": "a" * 64,
+        "build_fingerprint_sha256": "f" * 64,
     }
     row.update(overrides)
     return row
@@ -287,16 +327,23 @@ class _FakeMetaWithModelResult:
 
 
 class _FakeExistingPackageConnection:
-    def __init__(self, staged_meta=None, existing_package=None):
+    def __init__(self, staged_meta=None, existing_package=None, canonical_package=None):
         self.statements = []
         self.staged_meta = staged_meta or _staged_meta()
         self.existing_package = existing_package or _existing_package()
+        self.canonical_package = canonical_package
 
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append((sql, params))
+        if "DB_NAME()" in sql:
+            return _FakeScalarResult("PricingLab")
         if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
             return _FakeMetaWithModelResult(self.staged_meta)
+        if "FROM pricing.PRICING_MODEL AS pm" in sql:
+            return _FakeScalarResult(17)
+        if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql:
+            return _FakeExistingPackageResult(self.canonical_package)
         if "source_export_id = :export_id" in sql:
             return _FakeExistingPackageResult(self.existing_package)
         raise AssertionError("existing export publish should stop before package insert")
@@ -314,10 +361,11 @@ class _FakeExistingPackageBegin:
 
 
 class _FakeExistingPackageEngine:
-    def __init__(self, staged_meta=None, existing_package=None):
+    def __init__(self, staged_meta=None, existing_package=None, canonical_package=None):
         self.connection = _FakeExistingPackageConnection(
             staged_meta=staged_meta,
             existing_package=existing_package,
+            canonical_package=canonical_package,
         )
 
     def begin(self):
@@ -347,8 +395,14 @@ class _FakeNewPackageConnection:
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append((sql, params))
+        if "DB_NAME()" in sql:
+            return _FakeScalarResult("PricingLab")
         if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
             return _FakeMetaWithModelResult(_staged_meta())
+        if "FROM pricing.PRICING_MODEL AS pm" in sql:
+            return _FakeScalarResult(17)
+        if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql:
+            return _FakeExistingPackageResult(None)
         if "source_export_id = :export_id" in sql:
             return _FakeExistingPackageResult(None)
         if "FROM pricing.PRICING_MODEL_VERSION_RESERVATION" in sql:
@@ -388,7 +442,9 @@ class _FakeNewPackageEngine:
 def _new_package_args(**overrides):
     values = {
         "export_id": "export-1",
+        "expected_database": "PricingLab",
         "created_by": "airflow",
+        "build_fingerprint_sha256": "f" * 64,
         "set_pointer": None,
     }
     values.update(overrides)
@@ -453,7 +509,9 @@ def test_package_lineage_writer_return_id_is_exposed_from_same_transaction():
     result = publish_rating_package(
         engine,
         export_id="export-1",
+        expected_database="PricingLab",
         created_by="airflow",
+        build_fingerprint_sha256="f" * 64,
         package_lineage_writer=write_lineage,
     )
 
@@ -563,6 +621,56 @@ def test_package_writer_reserves_staged_version_for_direct_root_publication():
     assert engine.connection.statements.index(
         reservation_insert
     ) < engine.connection.statements.index(package_insert)
+    assert package_insert[1]["build_fingerprint_sha256"] == "f" * 64
+
+
+def test_package_writer_locks_model_and_reuses_canonical_root_fingerprint():
+    canonical = _existing_package(
+        source_export_id="canonical-export",
+        source_file="/canonical/rating.xlsx",
+        staging_content_sha256="9" * 64,
+        package_status="PUBLISHED",
+        model_version="v7",
+        package_version=12,
+    )
+    engine = _FakeExistingPackageEngine(
+        staged_meta=_staged_meta(
+            export_id="retry-export",
+            model_version="v7",
+            source_file="/retry/rating.xlsx",
+            staging_content_sha256="8" * 64,
+        ),
+        canonical_package=canonical,
+    )
+
+    result = publish_rating_package(
+        engine,
+        export_id="retry-export",
+        expected_database="PricingLab",
+        build_fingerprint_sha256="f" * 64,
+    )
+
+    assert result.was_existing is True
+    assert result.export_id == "canonical-export"
+    assert result.rate_package_id == 42
+    assert result.package_version == 12
+    statements = engine.connection.statements
+    model_lock_index = next(
+        index
+        for index, (sql, _params) in enumerate(statements)
+        if "FROM pricing.PRICING_MODEL AS pm" in sql
+    )
+    fingerprint_index = next(
+        index
+        for index, (sql, _params) in enumerate(statements)
+        if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql
+    )
+    assert model_lock_index < fingerprint_index
+    assert not any(
+        "SELECT ISNULL(MAX(package_version)" in sql
+        or "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in statements
+    )
 
 
 def test_package_writer_rejects_root_package_with_different_reserved_version():

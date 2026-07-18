@@ -157,8 +157,7 @@ class PricingModelSpec:
             value is not None for value in offset_fields
         ):
             raise ValueError(
-                "offset_column, offset_source_column, and offset_label must be "
-                "configured together"
+                "offset_column, offset_source_column, and offset_label must be configured together"
             )
         if not self.features:
             raise ValueError("features must contain at least one column")
@@ -215,8 +214,7 @@ class PricingModelSpec:
         overlaps = {
             column: assigned_roles
             for column, assigned_roles in roles.items()
-            if len(assigned_roles) > 1
-            and any(role in structural_roles for role in assigned_roles)
+            if len(assigned_roles) > 1 and any(role in structural_roles for role in assigned_roles)
         }
         if overlaps:
             detail = "; ".join(
@@ -584,6 +582,7 @@ def build_candidate(
             pricing.engine,
             model_name=model.name,
             export_id=export_id,
+            build_fingerprint_sha256=build_identity.build_fingerprint_sha256,
         )
     completed_build = run_standard_superglm_build(
         pricing.engine,

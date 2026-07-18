@@ -17,6 +17,7 @@ from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.orchestration.publish_completed_build import (
     CandidateSQLLineage,
     CompletedModelPublishResult,
+    _discard_redundant_completed_build_attempt,
     publish_completed_model_build,
 )
 from pricing_pipeline.publishing.lifecycle import PublishResult
@@ -76,6 +77,7 @@ def _completed_publish_result(export, **overrides):
         "rating_workbook_path": export.rating_workbook_path,
         "publication_receipt_path": export.publication_receipt_path,
         "publication_receipt_sha256": export.publication_receipt_sha256,
+        "candidate_artifact_path": export.candidate_artifact_path,
     }
     values.update(overrides)
     return CompletedModelPublishResult(**values)
@@ -292,6 +294,8 @@ def test_model_export_publisher_returns_typed_result(monkeypatch, tmp_path):
         object(),
         export,
         model_config=_config(),
+        expected_database="PricingLab",
+        allowed_artifact_root=tmp_path,
         validated_model_id=17,
     )
 
@@ -332,10 +336,187 @@ def test_model_export_publisher_returns_existing_result_unchanged(
         object(),
         export,
         model_config=_config(),
+        expected_database="PricingLab",
+        allowed_artifact_root=tmp_path,
         validated_model_id=17,
     )
 
     assert result is existing
+
+
+def test_redundant_attempt_cleanup_protects_canonical_candidate_path(tmp_path):
+    artifact_root = tmp_path / "workbench"
+    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_dir.mkdir(parents=True)
+    workbook = attempt_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"incoming workbook")
+    build = _approved_build(
+        attempt_dir,
+        workbook=workbook,
+        candidate_metadata=_candidate_metadata(attempt_dir),
+    )
+    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    canonical_dir.mkdir(parents=True)
+    canonical_workbook = canonical_dir / "rating_tables.xlsx"
+    canonical_workbook.write_bytes(b"canonical workbook")
+    canonical_receipt = canonical_dir / "publication_receipt.json"
+    canonical_receipt.write_bytes(b"canonical receipt")
+    result = _completed_publish_result(
+        build,
+        was_existing=True,
+        rating_workbook_path=str(canonical_workbook),
+        publication_receipt_path=str(canonical_receipt),
+        candidate_artifact_path=build.candidate_artifact_path,
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=result,
+        artifact_root=artifact_root,
+    )
+
+    assert attempt_dir.is_dir()
+    assert Path(build.candidate_artifact_path).is_file()
+
+
+def test_redundant_attempt_cleanup_removes_whole_contained_attempt(tmp_path):
+    artifact_root = tmp_path / "workbench"
+    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_dir.mkdir(parents=True)
+    workbook = attempt_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"incoming workbook")
+    build = _approved_build(
+        attempt_dir,
+        workbook=workbook,
+        candidate_metadata=_candidate_metadata(attempt_dir),
+    )
+    (attempt_dir / "extra-intermediate.tmp").write_bytes(b"redundant")
+    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    canonical_dir.mkdir(parents=True)
+    canonical_workbook = canonical_dir / "rating_tables.xlsx"
+    canonical_workbook.write_bytes(b"canonical workbook")
+    canonical_receipt = canonical_dir / "publication_receipt.json"
+    canonical_receipt.write_bytes(b"canonical receipt")
+    canonical_candidate = canonical_dir / "candidate.joblib"
+    canonical_candidate.write_bytes(b"canonical candidate")
+    result = _completed_publish_result(
+        build,
+        was_existing=True,
+        rating_workbook_path=str(canonical_workbook),
+        publication_receipt_path=str(canonical_receipt),
+        candidate_artifact_path=str(canonical_candidate),
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=result,
+        artifact_root=artifact_root,
+    )
+
+    assert not attempt_dir.exists()
+
+
+def test_attempt_cleanup_requires_proven_existing_equivalence(tmp_path):
+    artifact_root = tmp_path / "workbench"
+    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_dir.mkdir(parents=True)
+    workbook = attempt_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"incoming workbook")
+    build = _approved_build(
+        attempt_dir,
+        workbook=workbook,
+        candidate_metadata=_candidate_metadata(attempt_dir),
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=_completed_publish_result(build, was_existing=False),
+        artifact_root=artifact_root,
+    )
+
+    assert attempt_dir.is_dir()
+
+
+def test_redundant_attempt_cleanup_failure_warns_after_success(
+    monkeypatch,
+    tmp_path,
+):
+    artifact_root = tmp_path / "workbench"
+    attempt_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-2"
+    attempt_dir.mkdir(parents=True)
+    workbook = attempt_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"incoming workbook")
+    build = _approved_build(
+        attempt_dir,
+        workbook=workbook,
+        candidate_metadata=_candidate_metadata(attempt_dir),
+    )
+    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-1"
+    canonical_dir.mkdir(parents=True)
+    result = _completed_publish_result(
+        build,
+        was_existing=True,
+        rating_workbook_path=str(canonical_dir / "rating_tables.xlsx"),
+        publication_receipt_path=str(canonical_dir / "publication_receipt.json"),
+        candidate_artifact_path=str(canonical_dir / "candidate.joblib"),
+    )
+    monkeypatch.setattr(
+        "pricing_pipeline.orchestration.publish_completed_build.shutil.rmtree",
+        lambda path: (_ for _ in ()).throw(OSError("directory busy")),
+    )
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="publication succeeded; redundant attempt cleanup failed",
+    ):
+        _discard_redundant_completed_build_attempt(
+            build,
+            publish_result=result,
+            artifact_root=artifact_root,
+        )
+
+    assert attempt_dir.is_dir()
+
+
+def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
+    tmp_path,
+):
+    artifact_root = tmp_path / "workbench"
+    target_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-target"
+    target_dir.mkdir(parents=True)
+    workbook = target_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"incoming workbook")
+    build = _approved_build(
+        target_dir,
+        workbook=workbook,
+        candidate_metadata=_candidate_metadata(target_dir),
+    )
+    link_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-link"
+    link_dir.symlink_to(target_dir, target_is_directory=True)
+    build = build.model_copy(
+        update={
+            "rating_workbook_path": str(link_dir / Path(build.rating_workbook_path).name),
+            "publication_receipt_path": str(link_dir / Path(build.publication_receipt_path).name),
+            "candidate_artifact_path": str(link_dir / Path(build.candidate_artifact_path).name),
+        }
+    )
+    canonical_dir = artifact_root / "CLAIM_FREQ" / "export-1" / "attempt-canonical"
+    result = _completed_publish_result(
+        build,
+        was_existing=True,
+        rating_workbook_path=str(canonical_dir / "rating_tables.xlsx"),
+        publication_receipt_path=str(canonical_dir / "publication_receipt.json"),
+        candidate_artifact_path=str(canonical_dir / "candidate.joblib"),
+    )
+
+    _discard_redundant_completed_build_attempt(
+        build,
+        publish_result=result,
+        artifact_root=artifact_root,
+    )
+
+    assert link_dir.is_symlink()
+    assert target_dir.is_dir()
 
 
 def test_completed_publication_requires_prebuilt_manifest_evidence():
@@ -516,9 +697,11 @@ def test_candidate_publication_resolves_omitted_split_against_sql_manifest(
         export,
         *,
         model_config,
+        expected_database,
         validated_model_id,
         allowed_artifact_root=None,
     ):
+        assert expected_database == settings.pricing_database
         publish_calls.append(export)
         return _completed_publish_result(export)
 
@@ -578,9 +761,11 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
         export,
         *,
         model_config,
+        expected_database,
         validated_model_id,
         allowed_artifact_root=None,
     ):
+        assert expected_database == "PricingLab"
         published_exports.append(export)
         return _completed_publish_result(export)
 
@@ -752,12 +937,23 @@ def test_publish_completed_model_build_configures_engine_with_settings_schema_na
             or SimpleNamespace(model_id=17)
         ),
     )
+
+    def fake_publish(
+        engine_arg,
+        export,
+        *,
+        model_config,
+        expected_database,
+        validated_model_id,
+        allowed_artifact_root=None,
+    ):
+        assert expected_database == settings.pricing_database
+        calls.append(("publish", engine_arg, export, model_config))
+        return _completed_publish_result(export)
+
     monkeypatch.setattr(
         "pricing_pipeline.orchestration.publish_completed_build.publish_model_export",
-        lambda engine_arg, export, *, model_config, validated_model_id, allowed_artifact_root=None: (
-            calls.append(("publish", engine_arg, export, model_config))
-            or _completed_publish_result(export)
-        ),
+        fake_publish,
     )
 
     publish_completed_model_build(

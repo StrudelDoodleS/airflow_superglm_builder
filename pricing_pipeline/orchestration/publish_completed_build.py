@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +59,7 @@ def publish_completed_model_build(
         engine,
         build,
         model_config=model_config,
+        expected_database=settings.pricing_database,
         validated_model_id=model_id,
         allowed_artifact_root=settings.workbench_artifact_root,
     )
@@ -140,9 +142,7 @@ def load_candidate_sql_lineage(
     if not isinstance(raw_pk_columns, list) or not all(
         isinstance(column, str) and column for column in raw_pk_columns
     ):
-        raise ApprovedModelBuildError(
-            f"manifest_id {manifest_id!r} has invalid pk_columns_json"
-        )
+        raise ApprovedModelBuildError(f"manifest_id {manifest_id!r} has invalid pk_columns_json")
 
     if split_set_id is not None:
         if split_row is None:
@@ -231,29 +231,44 @@ def _discard_redundant_completed_build_attempt(
         build.candidate_artifact_path,
     ]
     incoming_paths = [
-        Path(value).expanduser().resolve() for value in incoming_values if value is not None
+        Path(value).expanduser().absolute() for value in incoming_values if value is not None
     ]
     if not incoming_paths:
         return
     attempt_dir = incoming_paths[0].parent
     if any(path.parent != attempt_dir for path in incoming_paths):
         return
-    if not attempt_dir.is_relative_to(root):
+    if attempt_dir.is_symlink():
         return
-    relative_attempt = attempt_dir.relative_to(root)
+    resolved_attempt = attempt_dir.resolve()
+    if not resolved_attempt.is_relative_to(root):
+        return
+    relative_attempt = resolved_attempt.relative_to(root)
     if len(relative_attempt.parts) < 3:
         return
     canonical_values = [
         publish_result.rating_workbook_path,
         publish_result.publication_receipt_path,
+        publish_result.candidate_artifact_path,
     ]
     canonical_paths = [
         Path(str(value)).expanduser().resolve()
         for value in canonical_values
         if value is not None and str(value).strip()
     ]
-    if any(path == attempt_dir or path.is_relative_to(attempt_dir) for path in canonical_paths):
+    if any(
+        path == resolved_attempt or path.is_relative_to(resolved_attempt)
+        for path in canonical_paths
+    ):
         return
-    if attempt_dir.is_symlink() or not attempt_dir.is_dir():
+    if not attempt_dir.is_dir():
         return
-    shutil.rmtree(attempt_dir)
+    try:
+        shutil.rmtree(attempt_dir)
+    except Exception as exc:
+        warnings.warn(
+            "publication succeeded; redundant attempt cleanup failed: "
+            f"{attempt_dir.as_posix()}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )

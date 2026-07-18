@@ -40,6 +40,12 @@ _IMMUTABLE_MODEL_RUN_FIELDS = (
     "candidate_superglm_version",
     "candidate_superglm_git_sha",
     "model_source_sha256",
+    "builder_source_sha256",
+    "materialized_split_sha256",
+    "runtime_sha256",
+    "candidate_superglm_sha256",
+    "validation_curve_status",
+    "validation_curve_reason",
     "parent_model_run_id",
 )
 
@@ -92,12 +98,150 @@ def record_model_run(
         "candidate_superglm_version": build.candidate_superglm_version,
         "candidate_superglm_git_sha": build.candidate_superglm_git_sha,
         "model_source_sha256": build.model_source_sha256,
+        "builder_source_sha256": build.builder_source_sha256,
+        "materialized_split_sha256": build.materialized_split_sha256,
+        "runtime_sha256": build.runtime_sha256,
+        "candidate_superglm_sha256": build.candidate_superglm_sha256,
+        "validation_curve_status": build.validation_curve_status,
+        "validation_curve_reason": build.validation_curve_reason,
         "dataset_role": _DATASET_ROLE,
         "split_role": _SPLIT_ROLE,
         "parent_model_run_id": parent_model_run_id,
+        "validation_source_model_run_id": None,
     }
     transaction = engine.begin() if connection is None else nullcontext(connection)
     with transaction as con:
+        if rate_package_id is not None:
+            package_row = (
+                con.execute(
+                    text(
+                        """
+                        SELECT
+                            package.model_id,
+                            package.model_version,
+                            package.source_export_id,
+                            package.parent_rate_package_id,
+                            package.build_fingerprint_sha256
+                        FROM pricing.PRICING_RATE_PACKAGE AS package
+                            WITH (UPDLOCK, HOLDLOCK)
+                        WHERE package.rate_package_id = :rate_package_id
+                        """
+                    ),
+                    {"rate_package_id": rate_package_id},
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if package_row is None:
+                raise ModelRunIdentityError(
+                    f"rate package ownership cannot be validated: {rate_package_id!r} not found"
+                )
+            expected_package = {
+                "model_id": build.model_id,
+                "model_version": build.model_version,
+                "source_export_id": build.export_id,
+            }
+            package_mismatches = [
+                field_name
+                for field_name, expected_value in expected_package.items()
+                if _identity_value(package_row[field_name]) != _identity_value(expected_value)
+            ]
+            if parent_model_run_id is None:
+                if package_row["parent_rate_package_id"] is not None:
+                    package_mismatches.append("parent_rate_package_id")
+                if _identity_value(package_row["build_fingerprint_sha256"]) != _identity_value(
+                    build.build_fingerprint_sha256
+                ):
+                    package_mismatches.append("build_fingerprint_sha256")
+            if package_mismatches:
+                raise ModelRunIdentityError(
+                    "rate package ownership differs from the completed build: "
+                    + ", ".join(package_mismatches)
+                )
+
+        if split_set_id is not None:
+            stored_fold_rows = [
+                dict(row)
+                for row in con.execute(
+                    text(
+                        """
+                        SELECT
+                            split_set.manifest_id,
+                            fold.fold_no,
+                            fold.n_train,
+                            fold.n_test
+                        FROM pricing.CV_SPLIT_SET AS split_set
+                            WITH (UPDLOCK, HOLDLOCK)
+                        LEFT JOIN pricing.CV_FOLD AS fold WITH (UPDLOCK, HOLDLOCK)
+                          ON fold.split_set_id = split_set.split_set_id
+                        WHERE split_set.split_set_id = :split_set_id
+                        ORDER BY fold.fold_no
+                        """
+                    ),
+                    {"split_set_id": split_set_id},
+                )
+                .mappings()
+                .all()
+            ]
+            if not stored_fold_rows:
+                raise ModelRunIdentityError(f"split_set_id {split_set_id!r} does not exist")
+            stored_manifests = {str(row["manifest_id"]) for row in stored_fold_rows}
+            if stored_manifests != {manifest_id}:
+                raise ModelRunIdentityError(
+                    "split_set_id does not belong to completed-build manifest_id"
+                )
+            if build.validation_splits:
+                expected_geometry = {
+                    (
+                        split.validation_split_no,
+                        split.n_train,
+                        split.n_validation,
+                    )
+                    for split in build.validation_splits
+                }
+                actual_geometry = {
+                    (int(row["fold_no"]), int(row["n_train"]), int(row["n_test"]))
+                    for row in stored_fold_rows
+                    if row["fold_no"] is not None
+                }
+                if actual_geometry != expected_geometry:
+                    raise ModelRunIdentityError(
+                        "CV_FOLD geometry differs from completed-build validation splits: "
+                        f"stored={sorted(actual_geometry)!r}, "
+                        f"expected={sorted(expected_geometry)!r}"
+                    )
+
+        if parent_model_run_id is not None:
+            derived_validation_source = con.execute(
+                text(
+                    """
+                    SELECT TOP (1)
+                        COALESCE(
+                            parent_run.validation_source_model_run_id,
+                            parent_run.model_run_id
+                        )
+                    FROM pricing.PRICING_RATE_PACKAGE AS child_package
+                        WITH (UPDLOCK, HOLDLOCK)
+                    JOIN pricing.MODEL_RUN AS parent_run
+                        WITH (UPDLOCK, HOLDLOCK)
+                      ON parent_run.model_run_id = :parent_model_run_id
+                     AND parent_run.rate_package_id = child_package.parent_rate_package_id
+                    WHERE child_package.rate_package_id = :rate_package_id
+                      AND child_package.model_id = :model_id
+                      AND parent_run.model_id = :model_id
+                      AND parent_run.run_status = 'SUCCESS'
+                    """
+                ),
+                params,
+            ).scalar_one_or_none()
+            if derived_validation_source is None:
+                raise ModelRunIdentityError(
+                    "parent_model_run_id does not match the package parent, model, "
+                    "or a successful parent run"
+                )
+            derived_validation_source = int(derived_validation_source)
+            params["validation_source_model_run_id"] = derived_validation_source
+
         existing_successful_run = (
             con.execute(
                 text(
@@ -127,6 +271,13 @@ def record_model_run(
                         mr.candidate_superglm_version,
                         mr.candidate_superglm_git_sha,
                         mr.model_source_sha256,
+                        mr.builder_source_sha256,
+                        mr.materialized_split_sha256,
+                        mr.runtime_sha256,
+                        mr.candidate_superglm_sha256,
+                        mr.validation_curve_status,
+                        mr.validation_curve_reason,
+                        mr.validation_source_model_run_id,
                         mr.parent_model_run_id
                     FROM pricing.MODEL_RUN AS mr WITH (UPDLOCK, HOLDLOCK)
                     WHERE mr.run_status = 'SUCCESS'
@@ -169,6 +320,15 @@ def record_model_run(
                 if _identity_value(existing_successful_run[field_name])
                 != _identity_value(params[field_name])
             ]
+            expected_validation_source = (
+                existing_successful_run["model_run_id"]
+                if parent_model_run_id is None
+                else params["validation_source_model_run_id"]
+            )
+            if _identity_value(
+                existing_successful_run["validation_source_model_run_id"]
+            ) != _identity_value(expected_validation_source):
+                mismatched_fields.append("validation_source_model_run_id")
             if mismatched_fields:
                 raise ModelRunIdentityError(
                     "Existing successful model run has different immutable lineage: "
@@ -287,31 +447,6 @@ def record_model_run(
                 )
             return int(existing_successful_run["model_run_id"])
 
-        if parent_model_run_id is not None:
-            parent_matches_package = con.execute(
-                text(
-                    """
-                    SELECT TOP (1) 1
-                    FROM pricing.PRICING_RATE_PACKAGE AS child_package
-                        WITH (UPDLOCK, HOLDLOCK)
-                    JOIN pricing.MODEL_RUN AS parent_run
-                        WITH (UPDLOCK, HOLDLOCK)
-                      ON parent_run.model_run_id = :parent_model_run_id
-                     AND parent_run.rate_package_id = child_package.parent_rate_package_id
-                    WHERE child_package.rate_package_id = :rate_package_id
-                      AND child_package.model_id = :model_id
-                      AND parent_run.model_id = :model_id
-                      AND parent_run.run_status = 'SUCCESS'
-                    """
-                ),
-                params,
-            ).scalar_one_or_none()
-            if parent_matches_package is None:
-                raise ModelRunIdentityError(
-                    "parent_model_run_id does not match the package parent, model, "
-                    "or a successful parent run"
-                )
-
         con.execute(
             text(
                 """
@@ -347,7 +482,14 @@ def record_model_run(
                         candidate_superglm_version = :candidate_superglm_version,
                         candidate_superglm_git_sha = :candidate_superglm_git_sha,
                         model_source_sha256 = :model_source_sha256,
+                        builder_source_sha256 = :builder_source_sha256,
+                        materialized_split_sha256 = :materialized_split_sha256,
+                        runtime_sha256 = :runtime_sha256,
+                        candidate_superglm_sha256 = :candidate_superglm_sha256,
+                        validation_curve_status = :validation_curve_status,
+                        validation_curve_reason = :validation_curve_reason,
                         parent_model_run_id = :parent_model_run_id,
+                        validation_source_model_run_id = :validation_source_model_run_id,
                         run_status = :run_status,
                         completed_ts = SYSUTCDATETIME(),
                         created_by = :created_by
@@ -374,7 +516,14 @@ def record_model_run(
                         candidate_superglm_version,
                         candidate_superglm_git_sha,
                         model_source_sha256,
+                        builder_source_sha256,
+                        materialized_split_sha256,
+                        runtime_sha256,
+                        candidate_superglm_sha256,
+                        validation_curve_status,
+                        validation_curve_reason,
                         parent_model_run_id,
+                        validation_source_model_run_id,
                         run_status,
                         completed_ts,
                         created_by
@@ -401,7 +550,14 @@ def record_model_run(
                         :candidate_superglm_version,
                         :candidate_superglm_git_sha,
                         :model_source_sha256,
+                        :builder_source_sha256,
+                        :materialized_split_sha256,
+                        :runtime_sha256,
+                        :candidate_superglm_sha256,
+                        :validation_curve_status,
+                        :validation_curve_reason,
                         :parent_model_run_id,
+                        :validation_source_model_run_id,
                         :run_status,
                         SYSUTCDATETIME(),
                         :created_by
@@ -422,6 +578,17 @@ def record_model_run(
             ),
             params,
         ).scalar_one()
+        if parent_model_run_id is None:
+            con.execute(
+                text(
+                    """
+                    UPDATE pricing.MODEL_RUN
+                    SET validation_source_model_run_id = :model_run_id
+                    WHERE model_run_id = :model_run_id
+                    """
+                ),
+                {"model_run_id": model_run_id},
+            )
         split_lineage_params = {
             "model_run_id": model_run_id,
             "manifest_id": manifest_id,
@@ -746,5 +913,69 @@ def record_model_run(
                     "metric_name": str(metric["metric_name"]),
                     "metric_value": float(metric["metric_value"]),
                 },
+            )
+        con.execute(
+            text(
+                """
+                DELETE FROM pricing.CV_SPLIT_CURVE_POINT
+                WHERE model_run_id = :model_run_id;
+                """
+            ),
+            {"model_run_id": model_run_id},
+        )
+        if build.validation_curve_status == "COMPLETE":
+            curve_point_params = [
+                {
+                    "model_run_id": model_run_id,
+                    "split_set_id": split_set_id,
+                    "split_no": point.validation_split_no,
+                    "term_name": point.term_name,
+                    "point_no": point.point_no,
+                    "point_kind": point.point_kind,
+                    "x_numeric": point.x_numeric,
+                    "level_text": point.level_text,
+                    "eta_contribution": point.eta_contribution,
+                    "relativity": point.relativity,
+                    "support_value": point.support_value,
+                    "reference_value": point.reference_value,
+                    "reference_level": point.reference_level,
+                }
+                for point in build.validation_curve_points
+            ]
+            con.execute(
+                text(
+                    """
+                    INSERT INTO pricing.CV_SPLIT_CURVE_POINT (
+                        model_run_id,
+                        split_set_id,
+                        split_no,
+                        term_name,
+                        point_no,
+                        point_kind,
+                        x_numeric,
+                        level_text,
+                        eta_contribution,
+                        relativity,
+                        support_value,
+                        reference_value,
+                        reference_level
+                    ) VALUES (
+                        :model_run_id,
+                        :split_set_id,
+                        :split_no,
+                        :term_name,
+                        :point_no,
+                        :point_kind,
+                        :x_numeric,
+                        :level_text,
+                        :eta_contribution,
+                        :relativity,
+                        :support_value,
+                        :reference_value,
+                        :reference_level
+                    );
+                    """
+                ),
+                curve_point_params,
             )
     return int(model_run_id)

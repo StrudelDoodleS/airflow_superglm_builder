@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 
 from sqlalchemy import text
@@ -38,6 +39,7 @@ def _existing_export_conflicts(
     *,
     parent_rate_package_id: int | None,
     revision_metadata_json: str | None,
+    build_fingerprint_sha256: str | None,
 ) -> list[str]:
     conflicts: list[str] = []
     for field_name in (
@@ -65,6 +67,7 @@ def _existing_export_conflicts(
     requested_identity = {
         "parent_rate_package_id": parent_rate_package_id,
         "revision_metadata_json": revision_metadata_json,
+        "build_fingerprint_sha256": build_fingerprint_sha256,
     }
     for field_name, requested_value in requested_identity.items():
         existing_value = existing_package.get(field_name)
@@ -136,12 +139,14 @@ def publish_rating_package(
     engine,
     *,
     export_id: str,
+    expected_database: str,
     created_by: str = "python",
     parent_rate_package_id: int | None = None,
     revision_metadata: Mapping[str, object] | None = None,
     draft_validator=None,
     package_lineage_writer: Callable[[Connection, int], int | None] | None = None,
     expected_staged_metadata: Mapping[str, object] | None = None,
+    build_fingerprint_sha256: str | None = None,
 ) -> PublishResult:
     revision_metadata_json = _canonical_revision_metadata(revision_metadata)
     if draft_validator is not None and not callable(draft_validator):
@@ -150,6 +155,7 @@ def publish_rating_package(
         raise TypeError("package_lineage_writer must be callable")
     model_run_id: int | None = None
     with engine.begin() as con:
+        _verify_expected_database(con, expected_database)
         acquire_staging_export_lock(con, export_id)
         meta = (
             con.execute(
@@ -198,6 +204,84 @@ def publish_rating_package(
                 f"model before staging export_id={export_id!r}"
             )
 
+        locked_model_id = con.execute(
+            text(
+                """
+                SELECT pm.model_id
+                FROM pricing.PRICING_MODEL AS pm WITH (UPDLOCK, HOLDLOCK)
+                WHERE pm.model_id = :model_id
+                """
+            ),
+            {"model_id": model_id},
+        ).scalar_one_or_none()
+        if locked_model_id is None:
+            raise ModelRegistryError(
+                f"staged rating export refers to unregistered model_id={model_id!r}"
+            )
+
+        if parent_rate_package_id is None:
+            fingerprint = str(build_fingerprint_sha256 or "").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                raise ValueError(
+                    "root package publication requires build_fingerprint_sha256 "
+                    "as a lowercase SHA-256 digest"
+                )
+            build_fingerprint_sha256 = fingerprint
+            canonical_root = (
+                con.execute(
+                    text(
+                        """
+                        SELECT
+                            rate_package_id,
+                            package_version,
+                            model_id,
+                            model_name,
+                            model_version,
+                            effective_from_date,
+                            effective_to_date,
+                            package_status,
+                            source_export_id,
+                            source_file,
+                            publication_receipt_sha256,
+                            staging_content_sha256,
+                            parent_rate_package_id,
+                            revision_metadata_json,
+                            build_fingerprint_sha256
+                        FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
+                        WHERE model_id = :model_id
+                          AND parent_rate_package_id IS NULL
+                          AND build_fingerprint_sha256 = :build_fingerprint_sha256
+                        """
+                    ),
+                    {
+                        "model_id": model_id,
+                        "build_fingerprint_sha256": build_fingerprint_sha256,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if canonical_root is not None:
+                if _identity_text(canonical_root["model_version"]) != _identity_text(
+                    meta["model_version"]
+                ):
+                    raise ValueError(
+                        "canonical root model_version does not match staged model_version: "
+                        f"canonical={canonical_root['model_version']!r}, "
+                        f"staged={meta['model_version']!r}"
+                    )
+                return PublishResult(
+                    mlflow_run_id="",
+                    export_id=str(canonical_root["source_export_id"]),
+                    rate_package_id=int(canonical_root["rate_package_id"]),
+                    package_version=int(canonical_root["package_version"]),
+                    rating_workbook_path="",
+                    package_status=str(canonical_root["package_status"]),
+                    was_existing=True,
+                )
+        elif build_fingerprint_sha256 is not None:
+            raise ValueError("edited child packages cannot carry a root build fingerprint")
+
         existing_package = (
             con.execute(
                 text("""
@@ -215,7 +299,8 @@ def publish_rating_package(
                 publication_receipt_sha256,
                 staging_content_sha256,
                 parent_rate_package_id,
-                revision_metadata_json
+                revision_metadata_json,
+                build_fingerprint_sha256
             FROM pricing.PRICING_RATE_PACKAGE WITH (UPDLOCK, HOLDLOCK)
             WHERE model_id = :model_id
               AND source_export_id = :export_id
@@ -234,6 +319,7 @@ def publish_rating_package(
                 meta,
                 parent_rate_package_id=parent_rate_package_id,
                 revision_metadata_json=revision_metadata_json,
+                build_fingerprint_sha256=build_fingerprint_sha256,
             )
             if conflicts:
                 raise ValueError(
@@ -410,6 +496,7 @@ def publish_rating_package(
                 offset_source_name,
                 offset_label,
                 metadata_origin,
+                build_fingerprint_sha256,
                 created_by
             )
             OUTPUT INSERTED.rate_package_id
@@ -435,6 +522,7 @@ def publish_rating_package(
                 :offset_source_name,
                 :offset_label,
                 :metadata_origin,
+                :build_fingerprint_sha256,
                 :created_by
             )
         """),
@@ -460,6 +548,7 @@ def publish_rating_package(
                 "offset_source_name": meta["offset_source_name"],
                 "offset_label": meta["offset_label"],
                 "metadata_origin": meta["metadata_origin"],
+                "build_fingerprint_sha256": build_fingerprint_sha256,
                 "created_by": created_by,
             },
         ).scalar_one()
@@ -847,3 +936,19 @@ def publish_rating_package(
         was_existing=False,
         model_run_id=model_run_id,
     )
+
+
+def _verify_expected_database(connection: Connection, expected_database: str) -> None:
+    expected = str(expected_database).strip()
+    if not expected:
+        raise ValueError("expected_database must be a non-empty database name")
+    actual_value = connection.execute(text("SELECT DB_NAME()")).scalar_one()
+    actual = str(actual_value or "").strip()
+    if not actual:
+        raise RuntimeError("Remote connection did not report a database name")
+    if actual.casefold() != expected.casefold():
+        raise RuntimeError(
+            "Remote database mismatch: "
+            f"expected {expected!r}, connected to {actual!r}; "
+            "package transaction aborted before writes"
+        )
