@@ -136,13 +136,9 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "DEPLOY = False" in globals_cell
     assert 'SCORING = ("deviance", "nll", "gini")' in globals_cell
     globals_notebook_cell = next(
-        cell
-        for cell in notebook["cells"]
-        if "DATABASE_MODE" in "".join(cell.get("source", []))
+        cell for cell in notebook["cells"] if "DATABASE_MODE" in "".join(cell.get("source", []))
     )
-    assert globals_notebook_cell["metadata"]["tags"] == [
-        "pricing-pipeline-operational-settings"
-    ]
+    assert globals_notebook_cell["metadata"]["tags"] == ["pricing-pipeline-operational-settings"]
     assert "before package publication" in notebook_source
     assert "before any SQL publication" not in notebook_source
     model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)

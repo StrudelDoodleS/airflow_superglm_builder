@@ -151,13 +151,9 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     cells = _code_cells(notebook_path)
     source = "\n".join(cells)
     settings_cell = next(
-        cell
-        for cell in notebook["cells"]
-        if "DATABASE_MODE" in "".join(cell.get("source", []))
+        cell for cell in notebook["cells"] if "DATABASE_MODE" in "".join(cell.get("source", []))
     )
-    assert settings_cell["metadata"]["tags"] == [
-        "pricing-pipeline-operational-settings"
-    ]
+    assert settings_cell["metadata"]["tags"] == ["pricing-pipeline-operational-settings"]
     markdown = "\n".join(
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
