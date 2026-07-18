@@ -314,6 +314,65 @@ def test_notebook_outputs_and_execution_metadata_do_not_change_model_source(
     assert create_build_identity(**args) == baseline
 
 
+def test_tagged_notebook_operations_do_not_change_model_source_identity(
+    tmp_path: Path,
+):
+    args = _identity_args(tmp_path)
+    notebook_path = args["model_source_root"] / "pricing.ipynb"
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["RUN_EDITOR = False\nEDIT_REASON = ''\n"],
+                "metadata": {"tags": ["pricing-pipeline-operational-settings"]},
+            },
+            {
+                "cell_type": "code",
+                "source": ["model = make_model(family='poisson')\n"],
+                "metadata": {},
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    baseline = create_build_identity(**args)
+
+    notebook["cells"][0]["source"] = [
+        "RUN_EDITOR = True\nEDIT_REASON = 'approved market smoothing'\n"
+    ]
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+
+    assert create_build_identity(**args) == baseline
+
+
+def test_untagged_notebook_model_code_changes_model_source_identity(tmp_path: Path):
+    args = _identity_args(tmp_path)
+    notebook_path = args["model_source_root"] / "pricing.ipynb"
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": ["model = make_model(family='poisson')\n"],
+                "metadata": {},
+            }
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    baseline = create_build_identity(**args)
+
+    notebook["cells"][0]["source"] = ["model = make_model(family='tweedie')\n"]
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+
+    changed = create_build_identity(**args)
+    assert changed.model_source_sha256 != baseline.model_source_sha256
+    assert changed.build_fingerprint_sha256 != baseline.build_fingerprint_sha256
+
+
 def test_exact_python_patch_version_is_material(tmp_path: Path, monkeypatch):
     args = _identity_args(tmp_path)
     baseline = create_build_identity(**args)

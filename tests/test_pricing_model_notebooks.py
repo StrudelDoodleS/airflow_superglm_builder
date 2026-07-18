@@ -114,6 +114,7 @@ def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
 
 def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    notebook_source = _source(notebook)
     code_cells = [
         "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
     ]
@@ -134,6 +135,16 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "RUN_EDITOR = False" in globals_cell
     assert "DEPLOY = False" in globals_cell
     assert 'SCORING = ("deviance", "nll", "gini")' in globals_cell
+    globals_notebook_cell = next(
+        cell
+        for cell in notebook["cells"]
+        if "DATABASE_MODE" in "".join(cell.get("source", []))
+    )
+    assert globals_notebook_cell["metadata"]["tags"] == [
+        "pricing-pipeline-operational-settings"
+    ]
+    assert "before package publication" in notebook_source
+    assert "before any SQL publication" not in notebook_source
     model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)
     assert "from superglm import Categorical, Numeric, Spline, SuperGLM" in source
     assert source.count("FEATURES = {") == 1

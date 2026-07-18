@@ -670,7 +670,63 @@ def test_build_candidate_rejects_invalid_model_identity_before_version_or_artifa
             context,
             model=model,
             frame=frame,
-            superglm_model=SimpleNamespace(_result=object()),
+            superglm_model=SimpleNamespace(
+                features={"age": object(), "region": object()},
+                _result=object(),
+            ),
+            data_as_of="2026-06-30",
+        )
+
+    assert not context.settings.workbench_artifact_root.exists()
+    assert not context.settings.validation_split_artifact_root.exists()
+
+
+@pytest.mark.parametrize(
+    "superglm_features",
+    [
+        {"age": object()},
+        {"region": object(), "age": object()},
+        None,
+    ],
+)
+def test_build_candidate_rejects_superglm_feature_plan_mismatch_before_reservation(
+    monkeypatch,
+    tmp_path,
+    superglm_features,
+):
+    from pricing_pipeline import notebook as api
+
+    context = replace(
+        _context(api, tmp_path),
+        mode="local",
+        destination="local SQLite database",
+    )
+    model = _registered_model(api, tmp_path)
+    frame = pd.DataFrame(
+        {
+            "policy_id": [10, 20, 30, 40],
+            "claim_count": [0.0, 1.0, 0.0, 2.0],
+            "age": [25.0, 45.0, 35.0, 52.0],
+            "region": ["N", "S", "N", "S"],
+        }
+    )
+    monkeypatch.setattr(
+        api,
+        "resolve_sqlite_model_version",
+        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+    )
+    monkeypatch.setattr(
+        api,
+        "run_standard_superglm_build",
+        lambda *args, **kwargs: pytest.fail("candidate artifacts were built"),
+    )
+
+    with pytest.raises(ValueError, match="PricingModelSpec.features.*SuperGLM.features"):
+        api.build_candidate(
+            context,
+            model=model,
+            frame=frame,
+            superglm_model=SimpleNamespace(features=superglm_features),
             data_as_of="2026-06-30",
         )
 
@@ -734,7 +790,7 @@ def test_build_candidate_validates_stratifier_before_reserving_model_version(
             context,
             model=model,
             frame=frame,
-            superglm_model=object(),
+            superglm_model=SimpleNamespace(features={"age": object(), "region": object()}),
             data_as_of="2026-06-30",
         )
 
@@ -784,7 +840,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
-    superglm_model = object()
+    superglm_model = SimpleNamespace(features={"age": object(), "region": object()})
     candidate = api.build_candidate(
         context,
         model=model,
@@ -906,7 +962,7 @@ def test_build_candidate_computes_identity_before_reservation_and_separates_atte
     monkeypatch.setattr(api, "resolve_model_version_for_export", reserve)
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
-    superglm_model = object()
+    superglm_model = SimpleNamespace(features={"age": object(), "region": object()})
     for _ in range(2):
         api.build_candidate(
             context,
@@ -981,7 +1037,7 @@ def test_build_candidate_uses_bounded_model_id_artifact_paths(
         context,
         model=model,
         frame=frame,
-        superglm_model=object(),
+        superglm_model=SimpleNamespace(features={"age": object(), "region": object()}),
         data_as_of="2026-06-30",
     )
 
@@ -1025,7 +1081,7 @@ def test_build_candidate_identity_failure_happens_before_version_reservation(
             context,
             model=model,
             frame=frame,
-            superglm_model=object(),
+            superglm_model=SimpleNamespace(features={"age": object(), "region": object()}),
             data_as_of="2026-06-30",
         )
 
@@ -1153,7 +1209,7 @@ def test_build_candidate_aligns_composite_primary_key_inputs(
 
     monkeypatch.setattr(api, "run_standard_superglm_build", run_build)
 
-    superglm_model = object()
+    superglm_model = SimpleNamespace(features={"age": object(), "region": object()})
     api.build_candidate(
         context,
         model=model,

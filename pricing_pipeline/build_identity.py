@@ -25,6 +25,9 @@ class BuildIdentityError(ValueError):
     """Raised when stable build identity cannot be represented or verified."""
 
 
+_OPERATIONAL_NOTEBOOK_TAG = "pricing-pipeline-operational-settings"
+
+
 @dataclass(frozen=True)
 class BuildIdentity:
     """Component hashes and final fingerprint for a publishable root build."""
@@ -320,6 +323,14 @@ def _source_file_bytes(path: Path, *, label: str) -> bytes:
     for cell in cells:
         if not isinstance(cell, dict):
             raise BuildIdentityError(f"invalid model notebook cell: {path}")
+        metadata = cell.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise BuildIdentityError(f"invalid model notebook cell metadata: {path}")
+        tags = metadata.get("tags", [])
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            raise BuildIdentityError(f"invalid model notebook cell tags: {path}")
+        if _OPERATIONAL_NOTEBOOK_TAG in tags:
+            continue
         raw_source = cell.get("source", "")
         if isinstance(raw_source, list):
             if not all(isinstance(line, str) for line in raw_source):

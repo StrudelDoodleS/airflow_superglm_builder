@@ -84,7 +84,13 @@ not fall back to one another.
 
 SQL scoring expects the final transformed feature columns. It does not recreate
 `log1p(density)` from raw density, so production preparation must apply the same visible
-transform. Save the notebook before building because the model source checksum comes from disk.
+transform. `PricingModelSpec.features` must exactly match the ordered keys in
+`SuperGLM.features`; the build stops before reserving a version if they differ.
+Save the notebook before building because the model source checksum comes from disk.
+The scaffold tags its top connection/action-settings cell as operational, so changing
+`RUN_EDITOR`, reasons, or the database destination does not manufacture a new model
+version. Material values from that cell, such as scoring and the data cutoff, remain
+part of their explicit build contracts.
 
 `data_as_of` is the date through which the input data is complete. It can be explicit or
 derived from one constant-valued frame column; it is not a deployment date.
@@ -109,9 +115,11 @@ published = publish_candidate(pricing, candidate)
 
 `build_candidate` fits the final model and creates held-out validation evidence.
 The displayed DataFrame has one row per validation split with training and
-validation counts plus the requested metrics. Inspect it before
-`publish_candidate` writes the immutable package and its audit evidence.
-Publication does not change a live deployment.
+validation counts plus the requested metrics. The build has already reserved the
+stable model version and persisted the dataset manifest and split membership at
+this point. Inspect the metrics before `publish_candidate` writes the immutable
+package, model-run metrics, validation curves, and rating tables. Publication does
+not change a live deployment.
 
 For a market or underwriting edit, publish the baseline first, then use the
 public SuperGLM editor directly:

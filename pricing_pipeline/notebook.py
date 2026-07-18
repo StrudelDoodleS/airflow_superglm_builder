@@ -499,6 +499,14 @@ def build_candidate(
     if missing_columns:
         raise ValueError("model frame is missing declared columns: " + ", ".join(missing_columns))
 
+    configured_features = getattr(superglm_model, "features", None)
+    if not isinstance(configured_features, Mapping) or tuple(configured_features) != spec.features:
+        actual = None if not isinstance(configured_features, Mapping) else tuple(configured_features)
+        raise ValueError(
+            "PricingModelSpec.features must exactly match SuperGLM.features in order: "
+            f"declared={spec.features!r}, SuperGLM.features={actual!r}"
+        )
+
     resolved_data_as_of = _resolve_data_as_of(
         frame,
         explicit=data_as_of,
