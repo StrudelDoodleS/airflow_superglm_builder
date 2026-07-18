@@ -26,6 +26,7 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "load_fremtpl_raw" in source
     assert 'frame["LogDensity"]' in source
     assert "superglm_model = SuperGLM(" in source
+    assert "from superglm.editor import EditorSession" in source
     assert "ValidationSplitConfig.kfold(" in source
     assert "build_candidate(" in source
     assert "publish_candidate(" in source
@@ -35,6 +36,7 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "published.model_run_id" not in source
     assert "published.rate_package_id" not in source
     assert "published.package_version" in source
+    assert "published.model_version" in source
     assert 'DATABASE_MODE = "local"' in source
     assert 'EXPECTED_REMOTE_DATABASE = ""' in source
     assert "ALLOW_REMOTE_WRITES = False" in source
@@ -43,6 +45,7 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in source
     assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in source
     assert "pricing.destination" in source
+    assert "pricing.settings.workbench_artifact_root" in source
 
     source_cell = next(
         cell for cell in notebook["cells"] if "SOURCE_SQL" in "".join(cell.get("source", []))
@@ -98,7 +101,7 @@ def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
     ]
 
     result = subprocess.run(
-        [sys.executable, "-c", "\n\n".join(code_cells[:2])],
+        [sys.executable, "-c", "\n\n".join(code_cells[:3])],
         cwd=NOTEBOOK_PATH.parent.resolve(),
         check=False,
         capture_output=True,
@@ -130,12 +133,14 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
     assert "DATA_AS_OF" in globals_cell
     assert "RUN_EDITOR = False" in globals_cell
     assert "DEPLOY = False" in globals_cell
+    assert 'SCORING = ("deviance", "nll", "gini")' in globals_cell
     model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)
     assert "from superglm import Categorical, Numeric, Spline, SuperGLM" in source
     assert source.count("FEATURES = {") == 1
     assert source.count("superglm_model = SuperGLM(") == 1
     assert "features=FEATURES," in model_cell
     assert "features=tuple(FEATURES)," in model_cell
+    assert "scoring=SCORING," in model_cell
     for feature_declaration in (
         '"VehAge": Spline()',
         '"DrivAge": Spline()',
@@ -196,3 +201,44 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
         "offset_export_options=",
     ):
         assert hidden_argument not in build_cell
+
+    model_index = code_cells.index(model_cell)
+    data_index = next(
+        index for index, cell in enumerate(code_cells) if "raw = pd.read_sql_query" in cell
+    )
+    build_index = code_cells.index(build_cell)
+    validation_index = next(
+        index for index, cell in enumerate(code_cells) if "candidate.validation_metrics" in cell
+    )
+    baseline_publish_index = next(
+        index for index, cell in enumerate(code_cells) if "published = publish_candidate(" in cell
+    )
+    editor_index = next(
+        index for index, cell in enumerate(code_cells) if "EditorSession.from_model(" in cell
+    )
+    materialize_index = next(
+        index
+        for index, cell in enumerate(code_cells)
+        if "edited_model = editor_session.to_model()" in cell
+    )
+    edit_publish_index = next(
+        index for index, cell in enumerate(code_cells) if "edited = publish_edits(" in cell
+    )
+    deploy_index = next(
+        index for index, cell in enumerate(code_cells) if "deployment = deploy_package(" in cell
+    )
+    assert (
+        model_index
+        < data_index
+        < build_index
+        < validation_index
+        < baseline_publish_index
+        < editor_index
+        < materialize_index
+        < edit_publish_index
+        < deploy_index
+    )
+    assert ".editor()" not in source
+    assert "editor_session=editor_session" in code_cells[edit_publish_index]
+    for hidden_side_effect in (".save(", "publish_", "deploy_", "open_candidate("):
+        assert hidden_side_effect not in code_cells[materialize_index]

@@ -35,7 +35,7 @@ def test_scaffold_template_is_checked_in_as_valid_notebook_json():
     assert notebook["cells"]
 
 
-def test_scaffold_separates_editor_open_from_publishing_the_retained_candidate(tmp_path):
+def test_scaffold_orders_visible_model_validation_editor_and_deployment_steps(tmp_path):
     scaffold_pricing_model(
         ScaffoldOptions(
             model_name="MY_MODEL",
@@ -45,18 +45,54 @@ def test_scaffold_separates_editor_open_from_publishing_the_retained_candidate(t
     )
 
     cells = _code_cells(tmp_path / "pricing_models" / "my_model" / "pricing_model.ipynb")
-    editor_index = next(index for index, cell in enumerate(cells) if ".editor()" in cell)
-    publish_index = next(index for index, cell in enumerate(cells) if "publish_edits(" in cell)
-    editor_cell = cells[editor_index]
-    publish_cell = cells[publish_index]
-    before_publish = publish_cell.split("publish_edits(", 1)[0]
+    model_index = next(index for index, cell in enumerate(cells) if "FEATURES = {" in cell)
+    data_index = next(index for index, cell in enumerate(cells) if "frame = pd.DataFrame" in cell)
+    build_index = next(
+        index for index, cell in enumerate(cells) if "candidate = build_candidate(" in cell
+    )
+    validation_index = next(
+        index for index, cell in enumerate(cells) if "candidate.validation_metrics" in cell
+    )
+    baseline_publish_index = next(
+        index for index, cell in enumerate(cells) if "published = publish_candidate(" in cell
+    )
+    editor_index = next(
+        index for index, cell in enumerate(cells) if "EditorSession.from_model(" in cell
+    )
+    materialize_index = next(
+        index
+        for index, cell in enumerate(cells)
+        if "edited_model = editor_session.to_model()" in cell
+    )
+    edit_publish_index = next(
+        index for index, cell in enumerate(cells) if "edited = publish_edits(" in cell
+    )
+    deploy_index = next(
+        index for index, cell in enumerate(cells) if "deployment = deploy_package(" in cell
+    )
 
-    assert editor_index < publish_index
-    assert "publish_edits(" not in editor_cell
+    assert (
+        model_index
+        < data_index
+        < build_index
+        < validation_index
+        < baseline_publish_index
+        < editor_index
+        < materialize_index
+        < edit_publish_index
+        < deploy_index
+    )
+    editor_cell = cells[editor_index]
+    materialize_cell = cells[materialize_index]
+    publish_cell = cells[edit_publish_index]
     assert "reviewed = open_candidate(" in editor_cell
-    assert "reviewed = None" not in before_publish
-    assert "open_candidate(" not in before_publish
+    assert "editor_session = EditorSession.from_model(" in editor_cell
+    assert "display(editor_widget)" in editor_cell
+    assert "publish_edits(" not in editor_cell
+    for hidden_side_effect in (".save(", "publish_", "deploy_", "open_candidate("):
+        assert hidden_side_effect not in materialize_cell
     assert "candidate=reviewed" in publish_cell
+    assert "editor_session=editor_session" in publish_cell
 
 
 def test_scaffold_renders_user_text_without_breaking_json_or_python(tmp_path):
@@ -118,11 +154,14 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert "ALLOW_REMOTE_WRITES = False" in cells[0]
     assert "PricingModelSpec(" in source
     assert "from superglm import Numeric, SuperGLM" in source
+    assert "from superglm.editor import EditorSession" in source
+    assert 'SCORING = ("deviance", "nll", "gini")' in cells[0]
     assert source.count("FEATURES = {") == 1
     assert source.count("superglm_model = SuperGLM(") == 1
     assert '"feature_1": Numeric()' in source
     assert "features=FEATURES," in source
     assert "features=tuple(FEATURES)," in source
+    assert "scoring=SCORING," in source
     assert "offset_column=None" in source
     assert "offset_source_column=None" in source
     assert "offset_label=None" in source
@@ -140,6 +179,9 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert "open_candidate(" in source
     assert "publish_edits(" in source
     assert "deploy_package(" in source
+    assert "candidate.validation_metrics" in source
+    assert '"Model version": published.model_version' in source
+    assert '"Artifact root": str(pricing.settings.workbench_artifact_root)' in source
     assert "runtime_module=RUNTIME_MODULE" in source
     assert "build_pricing_model_dag" not in source
     assert "MODEL_CONFIG" not in source
