@@ -239,6 +239,7 @@ def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
         < deploy_index
     )
     assert ".editor()" not in source
+    assert "from superglm.editor import EditorSession" in code_cells[editor_index]
     assert "editor_session=editor_session" in code_cells[edit_publish_index]
     for hidden_side_effect in (".save(", "publish_", "deploy_", "open_candidate("):
         assert hidden_side_effect not in code_cells[materialize_index]

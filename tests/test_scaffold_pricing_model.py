@@ -85,6 +85,7 @@ def test_scaffold_orders_visible_model_validation_editor_and_deployment_steps(tm
     editor_cell = cells[editor_index]
     materialize_cell = cells[materialize_index]
     publish_cell = cells[edit_publish_index]
+    assert "from superglm.editor import EditorSession" in editor_cell
     assert "reviewed = open_candidate(" in editor_cell
     assert "editor_session = EditorSession.from_model(" in editor_cell
     assert "display(editor_widget)" in editor_cell
