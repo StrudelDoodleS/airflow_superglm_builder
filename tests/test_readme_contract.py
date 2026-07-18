@@ -60,7 +60,7 @@ def test_readme_documents_automatic_audit_evidence_and_lineage():
         "validation method",
         "model source checksum",
         "candidate bundle",
-        "model-run and fold metrics",
+        "model-run and validation-split metrics",
         "edited package parent",
         "champion snapshot",
         "SQL database is the audit source of truth",

@@ -15,8 +15,8 @@ uv run python scripts/scaffold_pricing_model.py --model-name CLAIM_FREQUENCY \
   --target-name claim_count --model-label "Claim frequency"
 ```
 
-This creates `pricing_models/claim_frequency/pricing_model.ipynb` beside a small `__init__.py`.
-The bundled reference is `pricing_models/mtpl_frequency/pricing_model.ipynb`.
+This creates `pricing_models/claim_frequency/pricing_model.ipynb` beside a small `__init__.py`;
+the bundled reference is `pricing_models/mtpl_frequency/pricing_model.ipynb`.
 
 Work through the notebook in order:
 
@@ -29,8 +29,8 @@ Work through the notebook in order:
 7. Optionally call `open_candidate`, edit through a visible `EditorSession`, and call `publish_edits`.
 8. Optionally call `deploy_package` for the exact package reviewed.
 
-There is no generated training module, DAG factory, TOML model factory, or analyst-facing
-metadata form. The notebook is the model definition. Analysts never type a model or package version.
+There is no generated training module, DAG/TOML factory, or analyst-facing metadata form. The
+notebook is the model definition. Analysts never type a model or package version.
 
 ## Keep model decisions visible
 
@@ -82,15 +82,10 @@ with `log(term / 12)` can still publish levels 12 and 36. Sample weight affects
 fitting, while export weight affects rating-table aggregation. These inputs do
 not fall back to one another.
 
-SQL scoring expects the final transformed feature columns. It does not recreate
-`log1p(density)` from raw density, so production preparation must apply the same visible
-transform. `PricingModelSpec.features` must exactly match the ordered keys in
-`SuperGLM.features`; the build stops before reserving a version if they differ.
-Save the notebook before building because the model source checksum comes from disk.
-The scaffold tags its top connection/action-settings cell as operational, so changing
-`RUN_EDITOR`, reasons, or the database destination does not manufacture a new model
-version. Material values from that cell, such as scoring and the data cutoff, remain
-part of their explicit build contracts.
+SQL scoring uses the visible transformed columns; it does not recreate `log1p(density)` from raw
+density. `PricingModelSpec.features` must exactly match ordered `SuperGLM.features`. Save before
+building because the model source checksum comes from disk. The scaffold excludes its tagged
+connection/action cell from model identity, while scoring and cutoff remain explicit build inputs.
 
 `data_as_of` is the date through which the input data is complete. It can be explicit or
 derived from one constant-valued frame column; it is not a deployment date.
@@ -113,13 +108,10 @@ display(candidate.validation_metrics)
 published = publish_candidate(pricing, candidate)
 ```
 
-`build_candidate` fits the final model and creates held-out validation evidence.
-The displayed DataFrame has one row per validation split with training and
-validation counts plus the requested metrics. The build has already reserved the
-stable model version and persisted the dataset manifest and split membership at
-this point. Inspect the metrics before `publish_candidate` writes the immutable
-package, model-run metrics, validation curves, and rating tables. Publication does
-not change a live deployment.
+`build_candidate` fits the final model, reserves its stable version, and persists its dataset and
+split evidence. The displayed DataFrame has one row per held-out split. Inspect it before
+`publish_candidate` writes the package, run metrics, validation curves, and rating tables;
+publication does not change a live deployment.
 
 For a market or underwriting edit, publish the baseline first, then use the
 public SuperGLM editor directly:
@@ -186,8 +178,8 @@ settings require another root build.
 
 The framework automatically records the data-as-of date, primary-key columns,
 ordered frame metadata and SHA-256, validation method and membership, model source checksum,
-candidate bundle and runtime identity, model-run and fold metrics (presented publicly as
-validation splits), curve status, package checksums, edited package parent/reason, and deployment
+candidate bundle and runtime identity, model-run and validation-split metrics, curve status,
+package checksums, edited package parent/reason, and deployment
 history. The SQL database is the audit source of truth for these records.
 The current notebook workflow does not create or log MLflow runs.
 
