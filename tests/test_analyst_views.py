@@ -841,6 +841,36 @@ def test_validation_summary_uses_population_sd_and_prediction_coverage(
     assert summaries[50]["sd_gini"] is None
 
 
+def test_validation_summary_population_sd_is_stable_for_large_metrics(
+    analyst_connection: sqlite3.Connection,
+) -> None:
+    analyst_connection.execute(
+        """
+        UPDATE CV_FOLD_METRIC
+        SET metric_value = CASE fold_no
+            WHEN 1 THEN 1e16
+            WHEN 2 THEN 1e16 + 2.0
+        END
+        WHERE model_run_id = 'run-root'
+          AND metric_name IN ('deviance', 'nll', 'gini')
+        """
+    )
+
+    summary = analyst_connection.execute(
+        """
+        SELECT validation_split_count, sd_deviance, sd_nll, sd_gini
+        FROM V_MODEL_VALIDATION_SUMMARY
+        WHERE rate_package_id = 10
+        """
+    ).fetchone()
+
+    assert summary is not None
+    assert summary["validation_split_count"] == 2
+    assert summary["sd_deviance"] == pytest.approx(1.0)
+    assert summary["sd_nll"] == pytest.approx(1.0)
+    assert summary["sd_gini"] == pytest.approx(1.0)
+
+
 def test_validation_curve_view_is_training_split_evidence_with_link_truth(
     analyst_connection: sqlite3.Connection,
 ) -> None:

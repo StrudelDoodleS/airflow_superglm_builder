@@ -280,6 +280,29 @@ LEFT JOIN (
  AND fold_metrics.fold_no = fold.fold_no;
 
 CREATE VIEW pricing.V_MODEL_VALIDATION_SUMMARY AS
+WITH metric_anchor AS (
+    SELECT
+        rate_package_id,
+        model_run_id,
+        MIN(deviance) AS deviance,
+        MIN(nll) AS nll,
+        MIN(gini) AS gini
+    FROM V_MODEL_VALIDATION_SPLIT
+    GROUP BY
+        rate_package_id,
+        model_run_id
+),
+centered_split AS (
+    SELECT
+        validation_split.*,
+        validation_split.deviance - metric_anchor.deviance AS deviance_delta,
+        validation_split.nll - metric_anchor.nll AS nll_delta,
+        validation_split.gini - metric_anchor.gini AS gini_delta
+    FROM V_MODEL_VALIDATION_SPLIT AS validation_split
+    JOIN metric_anchor
+      ON metric_anchor.rate_package_id = validation_split.rate_package_id
+     AND metric_anchor.model_run_id = validation_split.model_run_id
+)
 SELECT
     validation_split.model_id,
     validation_split.model_name,
@@ -333,15 +356,15 @@ SELECT
     validation_split.link,
     COUNT(*) AS validation_split_count,
     AVG(validation_split.deviance) AS mean_deviance,
-    CASE WHEN COUNT(validation_split.deviance) = 0 THEN NULL WHEN COUNT(validation_split.deviance) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.deviance * validation_split.deviance) - AVG(validation_split.deviance) * AVG(validation_split.deviance), 0.0)) END AS sd_deviance,
+    CASE WHEN COUNT(validation_split.deviance) = 0 THEN NULL WHEN COUNT(validation_split.deviance) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.deviance_delta * validation_split.deviance_delta) - AVG(validation_split.deviance_delta) * AVG(validation_split.deviance_delta), 0.0)) END AS sd_deviance,
     AVG(validation_split.nll) AS mean_nll,
-    CASE WHEN COUNT(validation_split.nll) = 0 THEN NULL WHEN COUNT(validation_split.nll) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.nll * validation_split.nll) - AVG(validation_split.nll) * AVG(validation_split.nll), 0.0)) END AS sd_nll,
+    CASE WHEN COUNT(validation_split.nll) = 0 THEN NULL WHEN COUNT(validation_split.nll) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.nll_delta * validation_split.nll_delta) - AVG(validation_split.nll_delta) * AVG(validation_split.nll_delta), 0.0)) END AS sd_nll,
     AVG(validation_split.gini) AS mean_gini,
-    CASE WHEN COUNT(validation_split.gini) = 0 THEN NULL WHEN COUNT(validation_split.gini) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.gini * validation_split.gini) - AVG(validation_split.gini) * AVG(validation_split.gini), 0.0)) END AS sd_gini,
+    CASE WHEN COUNT(validation_split.gini) = 0 THEN NULL WHEN COUNT(validation_split.gini) = 1 THEN 0.0 ELSE sqrt(max(AVG(validation_split.gini_delta * validation_split.gini_delta) - AVG(validation_split.gini_delta) * AVG(validation_split.gini_delta), 0.0)) END AS sd_gini,
     SUM(CAST(validation_split.n_validation AS REAL)) / NULLIF(MAX(CAST(validation_split.dataset_row_count AS REAL)), 0.0) AS validation_prediction_coverage,
     validation_split.validation_curve_status,
     validation_split.validation_curve_reason
-FROM V_MODEL_VALIDATION_SPLIT AS validation_split
+FROM centered_split AS validation_split
 GROUP BY
     validation_split.model_id,
     validation_split.model_name,
