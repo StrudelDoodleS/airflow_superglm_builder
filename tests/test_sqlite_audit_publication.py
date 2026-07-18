@@ -11,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 import pytest
 from sqlalchemy import event, text
 
-from pricing_pipeline.models.spec import ApprovedModelBuildError, CompletedModelBuild
+from pricing_pipeline.models.spec import ApprovedModelBuild, ApprovedModelBuildError
 
 
 def _write_test_workbook(
@@ -229,7 +229,7 @@ def _completed_build(
     model_version: str = "v1",
     fingerprint: str = "1" * 64,
     curve_status: str = "COMPLETE",
-) -> CompletedModelBuild:
+) -> ApprovedModelBuild:
     attempt = (
         tmp_path
         / "pricing_models"
@@ -260,7 +260,7 @@ def _completed_build(
             "metrics": {"deviance": 1.3, "nll": 0.9, "gini": 0.29},
         },
     )
-    return CompletedModelBuild(
+    return ApprovedModelBuild(
         model_id=model.model_id,
         model_name=model.name,
         rating_workbook_path=str(workbook),
@@ -294,15 +294,6 @@ def _completed_build(
         model_frame_sha256="f" * 64,
         metrics={"cv_mean_deviance": 1.2},
         metric_scopes={"cv_mean_deviance": "validation_summary"},
-        fold_metrics=tuple(
-            {
-                "fold_no": split["validation_split_no"],
-                "metric_name": metric_name,
-                "metric_value": metric_value,
-            }
-            for split in validation_splits
-            for metric_name, metric_value in split["metrics"].items()
-        ),
         validation_splits=validation_splits,
         validation_curve_status=curve_status,
         validation_curve_reason=("curve capture failed" if unavailable else None),
@@ -1233,7 +1224,7 @@ def test_same_fingerprint_rejects_changed_semantic_evidence_without_new_rows(
 
     geometry_payload = build.model_dump()
     geometry_payload["validation_splits"][0]["n_train"] = 7
-    conflicting_geometry = CompletedModelBuild(**geometry_payload)
+    conflicting_geometry = ApprovedModelBuild(**geometry_payload)
     with pytest.raises(ValueError, match="validation split geometry"):
         api.publish_candidate(
             context,

@@ -890,8 +890,9 @@ def _retry_evidence_conflicts(
     if any(str(item.get("split_set_id")) != canonical_split_set_id for item in fold_rows):
         conflicts.append("split metrics reference a non-canonical split_set_id")
     expected_folds = Counter(
-        (int(item["fold_no"]), str(item["metric_name"]), float(item["metric_value"]))
-        for item in export.fold_metrics
+        (split.validation_split_no, metric_name, metric_value)
+        for split in export.validation_splits
+        for metric_name, metric_value in split.metrics.items()
     )
     actual_folds = Counter(
         (int(item["fold_no"]), str(item["metric_name"]), float(item["metric_value"]))

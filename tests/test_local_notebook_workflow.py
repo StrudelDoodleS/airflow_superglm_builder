@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 from superglm import Numeric, SuperGLM
 
-from pricing_pipeline.models.spec import CompletedModelBuildError
+from pricing_pipeline.models.spec import ApprovedModelBuildError
 
 
 def test_real_local_notebook_build_publishes_audit_evidence_to_all_five_views(
@@ -86,7 +86,7 @@ def test_real_local_notebook_build_publishes_audit_evidence_to_all_five_views(
     canonical_candidate_bytes = canonical_candidate_path.read_bytes()
     canonical_candidate_path.unlink()
     with pytest.raises(
-        CompletedModelBuildError,
+        ApprovedModelBuildError,
         match="canonical candidate artifact verification failed",
     ):
         api.publish_candidate(context, retry_candidate)
@@ -94,7 +94,7 @@ def test_real_local_notebook_build_publishes_audit_evidence_to_all_five_views(
     canonical_candidate_path.write_bytes(canonical_candidate_bytes)
     canonical_candidate_path.write_bytes(b"corrupt canonical candidate")
     with pytest.raises(
-        CompletedModelBuildError,
+        ApprovedModelBuildError,
         match="canonical candidate artifact verification failed",
     ):
         api.publish_candidate(context, retry_candidate)

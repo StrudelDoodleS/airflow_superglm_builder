@@ -1,6 +1,5 @@
 from pricing_pipeline.modeling.standard_superglm import (
     CVEvidence,
-    FoldMetric,
     ModelInputs,
     PrecomputedSplitter,
     StandardSuperGLMError,
@@ -11,7 +10,6 @@ from pricing_pipeline.modeling.standard_superglm import (
 
 __all__ = [
     "CVEvidence",
-    "FoldMetric",
     "ModelInputs",
     "PrecomputedSplitter",
     "StandardSuperGLMError",

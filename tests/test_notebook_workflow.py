@@ -1092,14 +1092,6 @@ def test_built_candidate_returns_fresh_wide_validation_metrics(tmp_path):
     model = _registered_model(api, tmp_path)
     completed_build = _approved_build(
         tmp_path,
-        fold_metrics=(
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-            {"fold_no": 1, "metric_name": "gini", "metric_value": 0.7},
-            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
-            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
-            {"fold_no": 2, "metric_name": "gini", "metric_value": 0.8},
-        ),
         validation_splits=(
             {
                 "validation_split_no": 1,

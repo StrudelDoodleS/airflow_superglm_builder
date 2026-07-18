@@ -15,9 +15,6 @@ from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import (
     ApprovedModelBuild,
     ApprovedModelBuildError,
-    CompletedModelBuild,
-    CompletedModelBuildError,
-    ModelExportResult,
 )
 from pricing_pipeline.orchestration.publish_completed_build import (
     publish_completed_model_build,
@@ -59,14 +56,14 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _approved_build(tmp_path: Path) -> CompletedModelBuild:
+def _approved_build(tmp_path: Path) -> ApprovedModelBuild:
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_bytes(b"rating workbook")
     candidate = tmp_path / "candidate.joblib"
     candidate.write_bytes(b"candidate")
     receipt = tmp_path / "publication_receipt.json"
     receipt.write_bytes(b"receipt")
-    return CompletedModelBuild(
+    return ApprovedModelBuild(
         model_id=17,
         model_name="CLAIM_FREQ",
         model_version="v1",
@@ -101,9 +98,14 @@ def _approved_build(tmp_path: Path) -> CompletedModelBuild:
     )
 
 
-def test_completed_build_and_export_are_one_record_type():
-    assert ApprovedModelBuild is CompletedModelBuild is ModelExportResult
-    assert ApprovedModelBuildError is CompletedModelBuildError
+def test_approved_build_is_the_only_public_build_record():
+    assert not hasattr(model_spec, "CompletedModelBuild")
+    assert not hasattr(model_spec, "CompletedModelBuildError")
+    assert not hasattr(model_spec, "ModelExportResult")
+
+
+def test_approved_build_has_one_per_split_metric_representation():
+    assert "fold_" + "metrics" not in ApprovedModelBuild.model_fields
 
 
 def _numeric_curve_point(**overrides):
@@ -149,14 +151,6 @@ def _add_validation_splits(payload, metric_values=(0.4,)):
             "n_train": 80,
             "n_validation": 20,
             "metrics": {"deviance": metric_value},
-        }
-        for split_no, metric_value in enumerate(metric_values, start=1)
-    )
-    payload["fold_metrics"] = tuple(
-        {
-            "fold_no": split_no,
-            "metric_name": "deviance",
-            "metric_value": metric_value,
         }
         for split_no, metric_value in enumerate(metric_values, start=1)
     )
@@ -518,12 +512,6 @@ def test_approved_build_holds_ordered_validation_split_results(tmp_path: Path):
             "metrics": {"deviance": 0.4, "nll": 0.2, "gini": 0.7},
         },
     )
-    payload["fold_metrics"] = (
-        {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-        {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-        {"fold_no": 1, "metric_name": "gini", "metric_value": 0.7},
-    )
-
     build = ApprovedModelBuild(**payload)
 
     split = build.validation_splits[0]
@@ -543,17 +531,12 @@ def test_validation_evidence_is_deeply_immutable_and_round_trips(tmp_path: Path)
             "metrics": {"deviance": 0.4},
         },
     )
-    payload["fold_metrics"] = ({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},)
     build = ApprovedModelBuild(**payload)
 
     with pytest.raises(TypeError):
         build.validation_splits[0].metrics["deviance"] = 9.9
-    with pytest.raises(TypeError):
-        build.fold_metrics[0]["metric_value"] = 9.9
-
     dumped = build.model_dump()
     assert type(dumped["validation_splits"][0]["metrics"]) is dict
-    assert type(dumped["fold_metrics"][0]) is dict
     assert ApprovedModelBuild(**dumped).model_dump() == dumped
 
 
@@ -635,64 +618,6 @@ def test_approved_build_rejects_incomplete_validation_split_metrics(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    "fold_metrics",
-    [
-        (
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
-        ),
-        (
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
-            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
-        ),
-        (
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
-            {"fold_no": 2, "metric_name": "nll", "metric_value": 9.9},
-        ),
-        (
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-            {"fold_no": 1, "metric_name": "nll", "metric_value": 0.2},
-            {"fold_no": 2, "metric_name": "deviance", "metric_value": 0.5},
-            {"fold_no": 2, "metric_name": "nll", "metric_value": 0.3},
-            {"fold_no": 2, "metric_name": "gini", "metric_value": 0.8},
-        ),
-    ],
-)
-def test_approved_build_rejects_fold_metrics_that_disagree_with_validation_splits(
-    tmp_path: Path,
-    fold_metrics,
-):
-    payload = _approved_build(tmp_path).model_dump()
-    payload["validation_splits"] = (
-        {
-            "validation_split_no": 1,
-            "n_train": 80,
-            "n_validation": 20,
-            "metrics": {"deviance": 0.4, "nll": 0.2},
-        },
-        {
-            "validation_split_no": 2,
-            "n_train": 80,
-            "n_validation": 20,
-            "metrics": {"deviance": 0.5, "nll": 0.3},
-        },
-    )
-    payload["fold_metrics"] = fold_metrics
-
-    with pytest.raises(
-        ApprovedModelBuildError,
-        match="fold_metrics must exactly match validation_splits",
-    ):
-        ApprovedModelBuild(**payload)
-
-
-@pytest.mark.parametrize(
     "field_name",
     [
         "publication_receipt_path",
@@ -718,8 +643,8 @@ def test_approved_build_requires_all_audit_artifacts(tmp_path: Path, field_name:
     payload = _approved_build(tmp_path).model_dump()
     payload.pop(field_name)
 
-    with pytest.raises(CompletedModelBuildError, match=field_name):
-        CompletedModelBuild(**payload)
+    with pytest.raises(ApprovedModelBuildError, match=field_name):
+        ApprovedModelBuild(**payload)
 
 
 @pytest.mark.parametrize(
@@ -745,10 +670,10 @@ def test_approved_build_rejects_invalid_identity_sha256(
     payload[field_name] = invalid_digest
 
     with pytest.raises(
-        CompletedModelBuildError,
+        ApprovedModelBuildError,
         match=rf"{field_name}.*64-character lowercase hex SHA-256",
     ):
-        CompletedModelBuild(**payload)
+        ApprovedModelBuild(**payload)
 
 
 @pytest.mark.parametrize("git_sha", ["", "A" * 40, "a" * 39, "g" * 40])
@@ -757,10 +682,10 @@ def test_approved_build_rejects_invalid_superglm_git_sha(tmp_path: Path, git_sha
     payload["candidate_superglm_git_sha"] = git_sha
 
     with pytest.raises(
-        CompletedModelBuildError,
+        ApprovedModelBuildError,
         match="candidate_superglm_git_sha.*40-character lowercase hex git SHA",
     ):
-        CompletedModelBuild(**payload)
+        ApprovedModelBuild(**payload)
 
 
 @pytest.mark.parametrize(
@@ -779,23 +704,23 @@ def test_approved_build_normalises_effective_date(
     payload = _approved_build(tmp_path).model_dump()
     payload["effective_from"] = raw_value
 
-    assert CompletedModelBuild(**payload).effective_from == expected
+    assert ApprovedModelBuild(**payload).effective_from == expected
 
 
 def test_approved_build_rejects_non_finite_metrics(tmp_path: Path):
     payload = _approved_build(tmp_path).model_dump()
     payload["metrics"] = {"deviance": float("nan")}
 
-    with pytest.raises(CompletedModelBuildError, match="finite"):
-        CompletedModelBuild(**payload)
+    with pytest.raises(ApprovedModelBuildError, match="finite"):
+        ApprovedModelBuild(**payload)
 
 
 def test_approved_build_rejects_unknown_fields(tmp_path: Path):
     payload = _approved_build(tmp_path).model_dump()
     payload["unexpected"] = True
 
-    with pytest.raises(CompletedModelBuildError, match="unexpected"):
-        CompletedModelBuild(**payload)
+    with pytest.raises(ApprovedModelBuildError, match="unexpected"):
+        ApprovedModelBuild(**payload)
 
 
 def test_remote_publication_passes_the_approved_record_without_repacking(
@@ -848,7 +773,7 @@ def test_remote_publication_passes_the_approved_record_without_repacking(
 def test_local_publication_rejects_record_from_another_registered_model(tmp_path: Path):
     build = _approved_build(tmp_path)
 
-    with pytest.raises(CompletedModelBuildError, match="model_id"):
+    with pytest.raises(ApprovedModelBuildError, match="model_id"):
         _publish_sqlite_candidate_locked(
             object(),
             model_id=18,

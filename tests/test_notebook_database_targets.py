@@ -12,8 +12,8 @@ from sqlalchemy import text
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.spec import (
-    CompletedModelBuild,
-    CompletedModelBuildError,
+    ApprovedModelBuild,
+    ApprovedModelBuildError,
 )
 
 
@@ -456,11 +456,20 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                     row_count, fold_count, created_by
                 ) VALUES (
                     'split-1', 'manifest-1', 'MATERIALIZED', :sha,
-                    20, 2, 'test'
+                    20, 1, 'test'
                 )
                 """
             ),
             {"sha": "a" * 64},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.CV_FOLD (
+                    split_set_id, fold_no, n_train, n_test
+                ) VALUES ('split-1', 1, 19, 1)
+                """
+            )
         )
 
     staging_digest = {"value": "d" * 64}
@@ -509,7 +518,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         "_verify_candidate_artifact",
         lambda *args, **kwargs: None,
     )
-    completed_build = CompletedModelBuild(
+    completed_build = ApprovedModelBuild(
         model_id=model.model_id,
         model_name=model.name,
         rating_workbook_path=str(workbook),
@@ -543,11 +552,12 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
         model_frame_sha256="f" * 64,
         metrics={"cv_mean_deviance": 1.25},
         metric_scopes={"cv_mean_deviance": "cv"},
-        fold_metrics=(
+        validation_splits=(
             {
-                "fold_no": 1,
-                "metric_name": "deviance",
-                "metric_value": 1.1,
+                "validation_split_no": 1,
+                "n_train": 19,
+                "n_validation": 1,
+                "metrics": {"deviance": 1.1},
             },
         ),
     )
@@ -588,7 +598,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
     assert staged_digests == ["d" * 64, "d" * 64]
 
     workbook.write_bytes(b"mutated local workbook")
-    with pytest.raises(CompletedModelBuildError, match="rating workbook SHA-256"):
+    with pytest.raises(ApprovedModelBuildError, match="rating workbook SHA-256"):
         api.publish_candidate(
             context,
             candidate,
@@ -785,7 +795,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     workbook.write_bytes(b"rating workbook")
     receipt = workbook.parent / "receipt.json"
     receipt.write_bytes(b'{"status":"complete"}')
-    completed_build = CompletedModelBuild(
+    completed_build = ApprovedModelBuild(
         model_id=model.model_id,
         model_name=model.name,
         rating_workbook_path=str(workbook),
@@ -821,7 +831,7 @@ def test_local_publication_verifies_candidate_artifact_before_staging(
     )
 
     with pytest.raises(
-        CompletedModelBuildError,
+        ApprovedModelBuildError,
         match="candidate artifact verification failed",
     ):
         api.publish_candidate(context, candidate)

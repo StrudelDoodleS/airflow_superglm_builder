@@ -7,19 +7,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pricing_pipeline.models.spec import CompletedModelBuild, CompletedModelBuildError
+from pricing_pipeline.models.spec import ApprovedModelBuild, ApprovedModelBuildError
 from pricing_pipeline.orchestration.publish_completed_build import (
     CandidateSQLLineage,
     _verify_candidate_artifact,
 )
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ModelExportResult
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.publishing.sqlite_notebook import _publish_sqlite_candidate_locked
 from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
 
 
-def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
+def _candidate(tmp_path) -> tuple[CandidateBundle, ApprovedModelBuild]:
     bundle = CandidateBundle(
         fitted_model={"coef": [0.1]},
         X=pd.DataFrame({"age": [20.0]}),
@@ -47,7 +46,7 @@ def _candidate(tmp_path) -> tuple[CandidateBundle, CompletedModelBuild]:
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
     receipt = tmp_path / "publication_receipt.json"
     receipt.write_bytes(b"receipt")
-    build = CompletedModelBuild(
+    build = ApprovedModelBuild(
         model_id=17,
         model_name="CLAIM_FREQ",
         rating_workbook_path="rating.xlsx",
@@ -97,7 +96,7 @@ def test_completed_build_rejects_candidate_model_identity_mismatch(
     _, build = _candidate(tmp_path)
     build = build.model_copy(update={identity_field: published_value})
 
-    with pytest.raises(CompletedModelBuildError, match=identity_field):
+    with pytest.raises(ApprovedModelBuildError, match=identity_field):
         _verify_candidate_artifact(
             build,
             sql_lineage=CandidateSQLLineage(
@@ -157,7 +156,7 @@ def test_completed_build_rejects_model_frame_digest_mismatch(
     else:
         sql_digest = "d" * 64
 
-    with pytest.raises(CompletedModelBuildError, match="model_frame_sha256"):
+    with pytest.raises(ApprovedModelBuildError, match="model_frame_sha256"):
         _verify_candidate_artifact(
             build,
             sql_lineage=CandidateSQLLineage(
@@ -201,7 +200,7 @@ def test_local_publication_rejects_model_frame_digest_mismatch_before_staging(
         lambda *args, **kwargs: pytest.fail("staging ran before digest verification"),
     )
 
-    with pytest.raises(CompletedModelBuildError, match="model_frame_sha256"):
+    with pytest.raises(ApprovedModelBuildError, match="model_frame_sha256"):
         _publish_sqlite_candidate_locked(
             object(),
             model_id=17,
@@ -344,7 +343,7 @@ def test_existing_sql_run_rejects_candidate_model_identity_mismatch(
             [],
         ),
     )
-    export = ModelExportResult(
+    export = ApprovedModelBuild(
         model_id=17,
         model_name="CLAIM_FREQ",
         model_version="20260603",

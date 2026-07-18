@@ -16,7 +16,7 @@ from pricing_pipeline.infra.offline_sqlite import (
     sqlite_engine_with_offline_schemas,
 )
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ModelExportResult
+from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.publishing import lineage, rating_export, staging
 from pricing_pipeline.publishing.lifecycle import (
@@ -660,7 +660,7 @@ def _model_run_build(**overrides):
         "model_frame_sha256": "d" * 64,
     }
     values.update(overrides)
-    return ModelExportResult(**values)
+    return ApprovedModelBuild(**values)
 
 
 def _model_run_kwargs():
@@ -762,7 +762,14 @@ def test_record_model_run_writes_identity_associations_parent_and_metrics():
     kwargs["build"] = _model_run_build(
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
-        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
+        validation_splits=(
+            {
+                "validation_split_no": 1,
+                "n_train": 1,
+                "n_validation": 1,
+                "metrics": {"deviance": 0.4},
+            },
+        ),
     )
 
     model_run_id = lineage.record_model_run(
@@ -916,11 +923,11 @@ def _retry_artifact_fields(tmp_path: Path):
     return _RETRY_ARTIFACTS[key]
 
 
-def _retry_export(tmp_path: Path) -> ModelExportResult:
+def _retry_export(tmp_path: Path) -> ApprovedModelBuild:
     workbook_path = (tmp_path / "rating_tables.xlsx").resolve()
     if not workbook_path.exists():
         workbook_path.write_bytes(b"rating workbook")
-    return ModelExportResult(
+    return ApprovedModelBuild(
         model_id=17,
         model_name="MTPL_FREQ",
         model_version="v1",
@@ -937,7 +944,6 @@ def _retry_export(tmp_path: Path) -> ModelExportResult:
         created_by="analyst@example.test",
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
-        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
         validation_splits=(
             {
                 "validation_split_no": 1,
@@ -1427,7 +1433,7 @@ def test_existing_published_run_compares_complete_curve_points_exactly(tmp_path:
         validation_curve_reason=None,
         validation_curve_points=(point,),
     )
-    export = ModelExportResult(**base)
+    export = ApprovedModelBuild(**base)
     evidence = _retry_evidence(tmp_path)
     evidence["row"].update(
         validation_curve_status="COMPLETE",
@@ -1499,7 +1505,7 @@ def test_existing_published_run_rejects_curve_point_owned_by_another_split(
         validation_curve_reason=None,
         validation_curve_points=(point,),
     )
-    export = ModelExportResult(**base)
+    export = ApprovedModelBuild(**base)
     evidence = _retry_evidence(tmp_path)
     evidence["row"].update(
         validation_curve_status="COMPLETE",
@@ -1608,7 +1614,7 @@ def test_existing_published_run_verifies_candidate_bundle_identity(tmp_path: Pat
         "model_source_sha256": "c" * 64,
     }
     evidence["row"].update(artifact_fields)
-    export = ModelExportResult(**{**_retry_export(tmp_path).model_dump(), **artifact_fields})
+    export = ApprovedModelBuild(**{**_retry_export(tmp_path).model_dump(), **artifact_fields})
 
     with pytest.raises(
         pipeline.PublishedRunIntegrityError,

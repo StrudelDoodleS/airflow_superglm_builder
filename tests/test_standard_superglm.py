@@ -177,6 +177,13 @@ def _real_curve_model():
     )
 
 
+def test_cv_evidence_has_one_per_split_metric_representation():
+    api = _api()
+
+    assert not hasattr(api, "Fold" + "Metric")
+    assert "fold_" + "metrics" not in api.CVEvidence.__dataclass_fields__
+
+
 def test_precomputed_splitter_replays_exact_folds():
     api = _api()
     splitter = api.PrecomputedSplitter(_folds(), row_count=3)
@@ -210,7 +217,7 @@ def test_precomputed_splitter_rejects_out_of_range_indices():
 def test_cv_report_adapter_returns_json_primitives_and_stable_metrics():
     api = _api()
 
-    report, metrics, fold_metrics, _ = api.cv_result_to_records(
+    report, metrics, validation_splits = api.cv_result_to_records(
         _cv_result(),
         oof_coverage=2 / 3,
         scoring=("deviance",),
@@ -228,10 +235,7 @@ def test_cv_report_adapter_returns_json_primitives_and_stable_metrics():
         "cv_std_deviance": pytest.approx(0.05),
         "cv_oof_coverage": pytest.approx(2 / 3),
     }
-    assert [(item.fold_no, item.metric_name, item.metric_value) for item in fold_metrics] == [
-        (1, "deviance", pytest.approx(0.4)),
-        (2, "deviance", pytest.approx(0.5)),
-    ]
+    assert [split.metrics["deviance"] for split in validation_splits] == pytest.approx([0.4, 0.5])
 
 
 def test_cv_report_adapter_returns_wide_validation_splits_in_requested_order():
@@ -243,7 +247,7 @@ def test_cv_report_adapter_returns_wide_validation_splits_in_requested_order():
     result.pooled_scores.update(nll=0.64)
     result.std_scores.update(nll=0.05, gini=0.05)
 
-    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+    _, _, validation_splits = api.cv_result_to_records(
         result,
         oof_coverage=2 / 3,
         scoring=("deviance", "nll", "gini"),
@@ -271,14 +275,6 @@ def test_cv_report_adapter_returns_wide_validation_splits_in_requested_order():
             "metrics": {"deviance": 0.5, "nll": 0.7, "gini": 0.9},
         },
     ]
-    assert [(metric.fold_no, metric.metric_name) for metric in fold_metrics] == [
-        (1, "deviance"),
-        (1, "nll"),
-        (1, "gini"),
-        (2, "deviance"),
-        (2, "nll"),
-        (2, "gini"),
-    ]
 
 
 def test_cv_report_adapter_does_not_fabricate_omitted_custom_metrics():
@@ -288,14 +284,13 @@ def test_cv_report_adapter_does_not_fabricate_omitted_custom_metrics():
     result.mean_scores["gini"] = 0.85
     result.std_scores["gini"] = 0.05
 
-    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+    _, _, validation_splits = api.cv_result_to_records(
         result,
         oof_coverage=2 / 3,
         scoring=("deviance", "gini"),
     )
 
     assert list(validation_splits[0].metrics) == ["deviance", "gini"]
-    assert {metric.metric_name for metric in fold_metrics} == {"deviance", "gini"}
     assert all("nll" not in split.metrics for split in validation_splits)
 
 
@@ -314,17 +309,13 @@ def test_cv_report_adapter_uses_actual_keys_from_dict_returning_callable():
     result.pooled_scores = {}
     result.std_scores = {"calibration": 0.05, "ranking": 0.05}
 
-    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+    _, _, validation_splits = api.cv_result_to_records(
         result,
         oof_coverage=2 / 3,
         scoring=(pricing_scores,),
     )
 
     assert list(validation_splits[0].metrics) == ["calibration", "ranking"]
-    assert {metric.metric_name for metric in fold_metrics} == {
-        "calibration",
-        "ranking",
-    }
     assert all(pricing_scores.__name__ not in split.metrics for split in validation_splits)
 
 
@@ -353,18 +344,13 @@ def test_cv_report_adapter_preserves_mixed_scorer_fold_column_order():
         "ranking": 0.05,
     }
 
-    _, _, fold_metrics, validation_splits = api.cv_result_to_records(
+    _, _, validation_splits = api.cv_result_to_records(
         result,
         oof_coverage=2 / 3,
         scoring=(pricing_scores, "deviance"),
     )
 
     assert list(validation_splits[0].metrics) == [
-        "calibration",
-        "ranking",
-        "deviance",
-    ]
-    assert [metric.metric_name for metric in fold_metrics if metric.fold_no == 1] == [
         "calibration",
         "ranking",
         "deviance",
@@ -695,16 +681,7 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     assert capture.status == "COMPLETE"
     assert capture.reason is None
     assert [split.validation_split_no for split in evidence.validation_splits] == [1, 2, 3, 4, 5]
-    assert len(evidence.fold_metrics) == 5
-    assert [(metric.fold_no, metric.metric_name) for metric in evidence.fold_metrics] == [
-        (split_no, "deviance") for split_no in range(1, 6)
-    ]
-    for split, metric in zip(
-        evidence.validation_splits,
-        evidence.fold_metrics,
-        strict=True,
-    ):
-        assert metric.metric_value == pytest.approx(split.metrics["deviance"])
+    assert all(list(split.metrics) == ["deviance"] for split in evidence.validation_splits)
     assert {point.validation_split_no for point in capture.points} == {1, 2, 3, 4, 5}
     assert {point.term_name for point in capture.points} == {"age", "region"}
     assert len([point for point in capture.points if point.term_name == "age"]) == 5 * 200
@@ -761,10 +738,6 @@ def test_real_pinned_superglm_one_shot_captures_one_metric_row_and_curve_split()
         15,
     )
     assert list(split.metrics) == ["deviance"]
-    assert len(evidence.fold_metrics) == 1
-    metric = evidence.fold_metrics[0]
-    assert (metric.fold_no, metric.metric_name) == (1, "deviance")
-    assert metric.metric_value == pytest.approx(split.metrics["deviance"])
     capture = evidence.validation_curve_capture
     assert capture.status == "COMPLETE"
     assert {point.validation_split_no for point in capture.points} == {1}

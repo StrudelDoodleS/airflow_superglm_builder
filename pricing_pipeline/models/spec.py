@@ -217,7 +217,6 @@ class ApprovedModelBuild(BaseModel):
     model_frame_sha256: str
     metrics: dict[str, float] = Field(default_factory=dict)
     metric_scopes: dict[str, str] = Field(default_factory=dict)
-    fold_metrics: tuple[Mapping[str, int | str | float], ...] = ()
     validation_splits: tuple[ValidationSplitResult, ...] = ()
     validation_curve_status: Literal["COMPLETE", "UNAVAILABLE"] | None = None
     validation_curve_reason: str | None = None
@@ -387,49 +386,6 @@ class ApprovedModelBuild(BaseModel):
             scopes[metric_name] = scope
         return scopes
 
-    @field_validator("fold_metrics", mode="before")
-    @classmethod
-    def _fold_metrics(cls, value: Any) -> tuple[Mapping[str, int | str | float], ...]:
-        if value is None:
-            return ()
-        records: list[dict[str, int | str | float]] = []
-        for raw in value:
-            if not isinstance(raw, Mapping):
-                raise ValueError("fold_metrics entries must be mappings")
-            try:
-                fold_no = int(raw["fold_no"])
-                metric_name = str(raw["metric_name"]).strip()
-                metric_value = float(raw["metric_value"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    "fold_metrics entries require fold_no, metric_name, and metric_value"
-                ) from exc
-            if fold_no <= 0 or not metric_name or not math.isfinite(metric_value):
-                raise ValueError("fold_metrics entries must contain valid finite values")
-            records.append(
-                {
-                    "fold_no": fold_no,
-                    "metric_name": metric_name,
-                    "metric_value": metric_value,
-                }
-            )
-        return tuple(records)
-
-    @field_validator("fold_metrics")
-    @classmethod
-    def _freeze_fold_metrics(
-        cls,
-        value: tuple[Mapping[str, int | str | float], ...],
-    ) -> tuple[Mapping[str, int | str | float], ...]:
-        return tuple(MappingProxyType(dict(record)) for record in value)
-
-    @field_serializer("fold_metrics")
-    def _serialise_fold_metrics(
-        self,
-        value: tuple[Mapping[str, int | str | float], ...],
-    ) -> tuple[dict[str, int | str | float], ...]:
-        return tuple(dict(record) for record in value)
-
     @model_validator(mode="after")
     def _scopes_reference_metrics(self) -> "ApprovedModelBuild":
         unknown = sorted(set(self.metric_scopes) - set(self.metrics))
@@ -448,20 +404,6 @@ class ApprovedModelBuild(BaseModel):
                 raise ValueError(
                     "validation_splits must contain the same metrics in requested order"
                 )
-            expected_fold_metrics = {
-                (split.validation_split_no, metric_name): metric_value
-                for split in self.validation_splits
-                for metric_name, metric_value in split.metrics.items()
-            }
-            actual_fold_metrics: dict[tuple[int, str], float] = {}
-            duplicate_key = False
-            for metric in self.fold_metrics:
-                key = (int(metric["fold_no"]), str(metric["metric_name"]))
-                if key in actual_fold_metrics:
-                    duplicate_key = True
-                actual_fold_metrics[key] = float(metric["metric_value"])
-            if duplicate_key or actual_fold_metrics != expected_fold_metrics:
-                raise ValueError("fold_metrics must exactly match validation_splits")
         return self
 
     @model_validator(mode="after")
@@ -615,9 +557,3 @@ class ApprovedModelBuild(BaseModel):
                         "COMPLETE validation curve relativity must equal exp(eta_contribution)"
                     )
         return self
-
-
-# Historical public names remain aliases; there is one record and one validator.
-CompletedModelBuildError = ApprovedModelBuildError
-CompletedModelBuild = ApprovedModelBuild
-ModelExportResult = ApprovedModelBuild

@@ -680,21 +680,18 @@ def _publish_sqlite_candidate_locked(
                 ),
                 metric_params,
             )
-        if build.fold_metrics and split_set_id is None:
-            raise ApprovedModelBuildError(
-                "fold metrics require split_set_id in local notebook publication"
-            )
-        fold_metric_params = [
+        split_metric_params = [
             {
                 "model_run_id": model_run_id,
                 "split_set_id": split_set_id,
-                "fold_no": int(metric["fold_no"]),
-                "metric_name": str(metric["metric_name"]),
-                "metric_value": float(metric["metric_value"]),
+                "fold_no": split.validation_split_no,
+                "metric_name": metric_name,
+                "metric_value": metric_value,
             }
-            for metric in build.fold_metrics
+            for split in build.validation_splits
+            for metric_name, metric_value in split.metrics.items()
         ]
-        if fold_metric_params:
+        if split_metric_params:
             connection.execute(
                 text(
                     """
@@ -707,7 +704,7 @@ def _publish_sqlite_candidate_locked(
                     )
                     """
                 ),
-                fold_metric_params,
+                split_metric_params,
             )
         curve_point_params = [
             {
@@ -1282,7 +1279,7 @@ def _model_run_evidence_conflicts(
         conflicts.append(f"metrics existing={stored_metrics!r} requested={expected_metrics!r}")
 
     canonical_split_set_id = _identity(existing["split_set_id"])
-    stored_fold_metrics = Counter(
+    stored_split_metrics = Counter(
         (_identity(row[0]), int(row[1]), str(row[2]), float(row[3]))
         for row in connection.execute(
             text(
@@ -1295,18 +1292,19 @@ def _model_run_evidence_conflicts(
             {"model_run_id": model_run_id},
         ).all()
     )
-    expected_fold_metrics = Counter(
+    expected_split_metrics = Counter(
         (
             canonical_split_set_id,
-            int(metric["fold_no"]),
-            str(metric["metric_name"]),
-            float(metric["metric_value"]),
+            split.validation_split_no,
+            metric_name,
+            metric_value,
         )
-        for metric in build.fold_metrics
+        for split in build.validation_splits
+        for metric_name, metric_value in split.metrics.items()
     )
-    if stored_fold_metrics != expected_fold_metrics:
+    if stored_split_metrics != expected_split_metrics:
         conflicts.append(
-            f"fold_metrics existing={stored_fold_metrics!r} requested={expected_fold_metrics!r}"
+            f"split metrics existing={stored_split_metrics!r} requested={expected_split_metrics!r}"
         )
     stored_curves = Counter(
         (

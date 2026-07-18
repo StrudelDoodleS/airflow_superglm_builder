@@ -119,7 +119,6 @@ def _approved_build() -> ApprovedModelBuild:
         model_frame_sha256="e" * 64,
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
-        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
         validation_splits=(
             {
                 "validation_split_no": 1,

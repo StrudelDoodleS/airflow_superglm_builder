@@ -12,7 +12,7 @@ import pytest
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
-from pricing_pipeline.models.spec import CompletedModelBuild, CompletedModelBuildError
+from pricing_pipeline.models.spec import ApprovedModelBuild, ApprovedModelBuildError
 from pricing_pipeline.notebook import _new_build_attempt_directory
 from pricing_pipeline.orchestration import pipeline
 from pricing_pipeline.orchestration.publish_completed_build import (
@@ -182,7 +182,7 @@ def _approved_build(
         **candidate_metadata,
     }
     values.update(overrides)
-    return CompletedModelBuild(**values)
+    return ApprovedModelBuild(**values)
 
 
 class _FakeMappingResult:
@@ -558,7 +558,7 @@ def test_redundant_attempt_cleanup_never_follows_attempt_directory_symlink(
 
 def test_completed_publication_requires_prebuilt_manifest_evidence():
     assert "dataset" not in signature(publish_completed_model_build).parameters
-    assert CompletedModelBuild.model_fields["manifest_id"].is_required()
+    assert ApprovedModelBuild.model_fields["manifest_id"].is_required()
 
 
 @pytest.mark.parametrize(
@@ -660,7 +660,7 @@ def test_candidate_publication_rejects_untrusted_sql_lineage_before_publish(
         lambda *args, **kwargs: publish_calls.append((args, kwargs)),
     )
 
-    with pytest.raises(CompletedModelBuildError, match=match):
+    with pytest.raises(ApprovedModelBuildError, match=match):
         publish_completed_model_build(
             engine,
             settings=settings,
@@ -754,7 +754,7 @@ def test_candidate_publication_resolves_omitted_split_against_sql_manifest(
     )
 
     if should_reject:
-        with pytest.raises(CompletedModelBuildError, match="omits split_set_id.*owns"):
+        with pytest.raises(ApprovedModelBuildError, match="omits split_set_id.*owns"):
             publish_completed_model_build(
                 engine,
                 settings=settings,
@@ -824,7 +824,14 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
             publication_receipt_sha256=receipt_sha256,
             metrics={"cv_pooled_deviance": 0.42},
             metric_scopes={"cv_pooled_deviance": "cv"},
-            fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
+            validation_splits=(
+                {
+                    "validation_split_no": 1,
+                    "n_train": 80,
+                    "n_validation": 20,
+                    "metrics": {"deviance": 0.4},
+                },
+            ),
         ),
     )
 
@@ -835,7 +842,7 @@ def test_publish_completed_model_build_carries_publication_receipt_fields(
         == candidate_metadata["candidate_artifact_path"]
     )
     assert published_exports[0].metrics == {"cv_pooled_deviance": 0.42}
-    assert published_exports[0].fold_metrics[0]["metric_name"] == "deviance"
+    assert published_exports[0].validation_splits[0].metrics["deviance"] == 0.4
     assert result.publication_receipt_path == str(receipt_path)
     assert result.publication_receipt_sha256 == receipt_sha256
 
@@ -872,7 +879,7 @@ def test_publish_completed_model_build_rejects_untrusted_candidate_before_publis
         lambda *args, **kwargs: publish_calls.append((args, kwargs)),
     )
 
-    with pytest.raises(CompletedModelBuildError, match="candidate artifact"):
+    with pytest.raises(ApprovedModelBuildError, match="candidate artifact"):
         publish_completed_model_build(
             _ValidationEngine(),
             settings=settings,
@@ -937,12 +944,12 @@ def test_publish_completed_model_build_rejects_candidate_lineage_mismatch(
         lambda *args, **kwargs: publish_calls.append((args, kwargs)),
     )
 
-    with pytest.raises(CompletedModelBuildError, match=lineage_field):
+    with pytest.raises(ApprovedModelBuildError, match=lineage_field):
         publish_completed_model_build(
             _ValidationEngine(),
             settings=settings,
             model_config=_config(),
-            completed_build=CompletedModelBuild(**completed_build),
+            completed_build=ApprovedModelBuild(**completed_build),
         )
 
     assert publish_calls == []

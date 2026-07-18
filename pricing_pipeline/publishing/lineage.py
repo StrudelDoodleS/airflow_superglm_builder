@@ -70,9 +70,9 @@ def record_model_run(
     split_set_id = build.split_set_id
     metrics = build.metrics
     metric_scopes = build.metric_scopes
-    fold_metrics = build.fold_metrics
-    if fold_metrics and split_set_id is None:
-        raise ValueError("fold_metrics require split_set_id")
+    validation_splits = build.validation_splits
+    if validation_splits and split_set_id is None:
+        raise ValueError("validation_splits require split_set_id")
     params = {
         "dag_id": dag_id,
         "airflow_run_id": airflow_run_id,
@@ -871,49 +871,50 @@ def record_model_run(
                     "metric_scope": (metric_scopes or {}).get(metric_name),
                 },
             )
-        for metric in fold_metrics:
-            con.execute(
-                text(
-                    """
-                    MERGE pricing.CV_FOLD_METRIC WITH (HOLDLOCK) AS tgt
-                    USING (
-                        SELECT
-                            :model_run_id AS model_run_id,
-                            :split_set_id AS split_set_id,
-                            :fold_no AS fold_no,
-                            :metric_name AS metric_name
-                    ) AS src
-                    ON tgt.model_run_id = src.model_run_id
-                       AND tgt.split_set_id = src.split_set_id
-                       AND tgt.fold_no = src.fold_no
-                       AND tgt.metric_name = src.metric_name
-                    WHEN MATCHED THEN
-                        UPDATE SET metric_value = :metric_value
-                    WHEN NOT MATCHED THEN
-                        INSERT (
-                            model_run_id,
-                            split_set_id,
-                            fold_no,
-                            metric_name,
-                            metric_value
-                        )
-                        VALUES (
-                            :model_run_id,
-                            :split_set_id,
-                            :fold_no,
-                            :metric_name,
-                            :metric_value
-                        );
-                    """
-                ),
-                {
-                    "model_run_id": model_run_id,
-                    "split_set_id": split_set_id,
-                    "fold_no": int(metric["fold_no"]),
-                    "metric_name": str(metric["metric_name"]),
-                    "metric_value": float(metric["metric_value"]),
-                },
-            )
+        for split in validation_splits:
+            for metric_name, metric_value in split.metrics.items():
+                con.execute(
+                    text(
+                        """
+                        MERGE pricing.CV_FOLD_METRIC WITH (HOLDLOCK) AS tgt
+                        USING (
+                            SELECT
+                                :model_run_id AS model_run_id,
+                                :split_set_id AS split_set_id,
+                                :fold_no AS fold_no,
+                                :metric_name AS metric_name
+                        ) AS src
+                        ON tgt.model_run_id = src.model_run_id
+                           AND tgt.split_set_id = src.split_set_id
+                           AND tgt.fold_no = src.fold_no
+                           AND tgt.metric_name = src.metric_name
+                        WHEN MATCHED THEN
+                            UPDATE SET metric_value = :metric_value
+                        WHEN NOT MATCHED THEN
+                            INSERT (
+                                model_run_id,
+                                split_set_id,
+                                fold_no,
+                                metric_name,
+                                metric_value
+                            )
+                            VALUES (
+                                :model_run_id,
+                                :split_set_id,
+                                :fold_no,
+                                :metric_name,
+                                :metric_value
+                            );
+                        """
+                    ),
+                    {
+                        "model_run_id": model_run_id,
+                        "split_set_id": split_set_id,
+                        "fold_no": split.validation_split_no,
+                        "metric_name": metric_name,
+                        "metric_value": metric_value,
+                    },
+                )
         con.execute(
             text(
                 """

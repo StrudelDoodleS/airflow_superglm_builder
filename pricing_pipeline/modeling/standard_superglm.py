@@ -63,18 +63,10 @@ class ModelInputs:
 
 
 @dataclass(frozen=True)
-class FoldMetric:
-    fold_no: int
-    metric_name: str
-    metric_value: float
-
-
-@dataclass(frozen=True)
 class CVEvidence:
     fold_indices: tuple[tuple[np.ndarray, np.ndarray], ...]
     report: dict[str, Any]
     metrics: dict[str, float]
-    fold_metrics: tuple[FoldMetric, ...]
     validation_splits: tuple[ValidationSplitResult, ...]
     validation_curve_capture: ValidationCurveCapture
 
@@ -259,14 +251,6 @@ def run_standard_superglm_build(
                 "candidate artifact runtime does not match the approved build identity"
             )
         _verify_expected_build_identity(expected_build_identity, identity_inputs)
-        fold_metric_records = tuple(
-            {
-                "fold_no": metric.fold_no,
-                "metric_name": metric.metric_name,
-                "metric_value": metric.metric_value,
-            }
-            for metric in evidence.fold_metrics
-        )
         completed_build = ApprovedModelBuild(
             model_id=model_id,
             model_name=model_config.model_name,
@@ -300,7 +284,6 @@ def run_standard_superglm_build(
             publication_receipt_sha256=receipt_sha256,
             metrics=evidence.metrics,
             metric_scopes={name: "cv" for name in evidence.metrics},
-            fold_metrics=fold_metric_records,
             validation_splits=evidence.validation_splits,
             validation_curve_status=evidence.validation_curve_capture.status,
             validation_curve_reason=evidence.validation_curve_capture.reason,
@@ -706,7 +689,7 @@ def run_cross_validation(
             raise StandardSuperGLMError(f"fold {fold_numbers[0]} did not converge")
         raise StandardSuperGLMError(f"folds {fold_numbers} did not converge")
 
-    report, metrics, fold_metrics, validation_splits = cv_result_to_records(
+    report, metrics, validation_splits = cv_result_to_records(
         result,
         oof_coverage=splitter.oof_coverage,
         scoring=scoring,
@@ -722,7 +705,6 @@ def run_cross_validation(
         fold_indices=returned_folds,
         report=report,
         metrics=metrics,
-        fold_metrics=fold_metrics,
         validation_splits=validation_splits,
         validation_curve_capture=curve_capture,
     )
@@ -805,7 +787,6 @@ def cv_result_to_records(
 ) -> tuple[
     dict[str, Any],
     dict[str, float],
-    tuple[FoldMetric, ...],
     tuple[ValidationSplitResult, ...],
 ]:
     mean_scores = {
@@ -830,7 +811,6 @@ def cv_result_to_records(
         mean_scores,
         result.fold_scores.columns,
     )
-    fold_metrics: list[FoldMetric] = []
     validation_splits: list[ValidationSplitResult] = []
     result_folds = tuple(result.fold_indices or ()) if fold_indices is None else fold_indices
     fold_score_records = result.fold_scores.to_dict("records")
@@ -881,13 +861,6 @@ def cv_result_to_records(
                 label=f"fold {fold_no} score {metric_name!r}",
             )
             split_metrics[metric_name] = metric_value
-            fold_metrics.append(
-                FoldMetric(
-                    fold_no=fold_no,
-                    metric_name=metric_name,
-                    metric_value=metric_value,
-                )
-            )
         validation_splits.append(
             ValidationSplitResult(
                 validation_split_no=fold_no,
@@ -911,7 +884,7 @@ def cv_result_to_records(
         "oof_coverage": float(oof_coverage),
         "oof_predictions": _json_primitive(result.oof_predictions),
     }
-    return report, metrics, tuple(fold_metrics), tuple(validation_splits)
+    return report, metrics, tuple(validation_splits)
 
 
 def _requested_metric_names(
