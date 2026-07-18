@@ -170,9 +170,7 @@ def verify_build_identity(
         if getattr(actual, field.name) != getattr(expected, field.name)
     ]
     if changed:
-        raise BuildIdentityError(
-            "build contract changed during execution: " + ", ".join(changed)
-        )
+        raise BuildIdentityError("build contract changed during execution: " + ", ".join(changed))
     return expected
 
 
@@ -240,9 +238,7 @@ def _materialized_split_payload(
         if np.intersect1d(train, validation).size:
             raise BuildIdentityError(f"validation split {fold_no} train/validation overlap")
         if len(train) + len(validation) != row_count:
-            raise BuildIdentityError(
-                f"validation split {fold_no} must cover every model-frame row"
-            )
+            raise BuildIdentityError(f"validation split {fold_no} must cover every model-frame row")
         validation_rows.extend(int(value) for value in validation)
         payload_folds.append(
             {
@@ -251,9 +247,7 @@ def _materialized_split_payload(
                 "validation": [int(value) for value in validation],
             }
         )
-    if method in {"kfold", "column_kfold"} and sorted(validation_rows) != list(
-        range(row_count)
-    ):
+    if method in {"kfold", "column_kfold"} and sorted(validation_rows) != list(range(row_count)):
         raise BuildIdentityError(
             "validation split folds must validate every model-frame row exactly once"
         )
@@ -263,7 +257,9 @@ def _materialized_split_payload(
 def _split_index_array(value: Any, *, row_count: int, label: str) -> np.ndarray:
     array = np.asarray(value)
     if array.ndim != 1 or not np.issubdtype(array.dtype, np.integer):
-        raise BuildIdentityError(f"validation split {label} indices must be one-dimensional integers")
+        raise BuildIdentityError(
+            f"validation split {label} indices must be one-dimensional integers"
+        )
     normalized = array.astype(np.int64, copy=False)
     if len(normalized) != len(np.unique(normalized)):
         raise BuildIdentityError(f"validation split {label} contains duplicate indices")
@@ -333,9 +329,7 @@ def _source_file_bytes(path: Path, *, label: str) -> bytes:
             source = raw_source
         else:
             raise BuildIdentityError(f"invalid model notebook source: {path}")
-        normalized_cells.append(
-            {"cell_type": str(cell.get("cell_type") or ""), "source": source}
-        )
+        normalized_cells.append({"cell_type": str(cell.get("cell_type") or ""), "source": source})
     return _canonical_json_bytes(normalized_cells)
 
 
@@ -426,9 +420,7 @@ def _canonical_value(value: Any) -> Any:
         normalized = []
         for key, item in value.items():
             if not isinstance(key, str) or not key:
-                raise BuildIdentityError(
-                    "canonical build mappings require non-empty string keys"
-                )
+                raise BuildIdentityError("canonical build mappings require non-empty string keys")
             normalized.append(
                 {
                     "key": _canonical_value(key),
@@ -444,8 +436,7 @@ def _canonical_value(value: Any) -> Any:
             "items": [_canonical_value(item) for item in value],
         }
     raise BuildIdentityError(
-        "unsupported canonical build value "
-        f"{type(value).__module__}.{type(value).__qualname__}"
+        f"unsupported canonical build value {type(value).__module__}.{type(value).__qualname__}"
     )
 
 
@@ -454,9 +445,7 @@ def _canonical_datetime(value: Any) -> dict[str, str]:
         timestamp = pd.Timestamp(value)
         encoded = timestamp.isoformat()
     except (OverflowError, TypeError, ValueError) as exc:
-        raise BuildIdentityError(
-            "canonical build value datetime is not representable"
-        ) from exc
+        raise BuildIdentityError("canonical build value datetime is not representable") from exc
     if pd.isna(timestamp):
         raise BuildIdentityError("canonical build value datetime must not be NaT")
     return {"type": "datetime", "value": encoded}
@@ -467,9 +456,7 @@ def _canonical_timedelta(value: Any) -> dict[str, str]:
         duration = pd.Timedelta(value)
         encoded = duration.isoformat()
     except (OverflowError, TypeError, ValueError) as exc:
-        raise BuildIdentityError(
-            "canonical build value timedelta is not representable"
-        ) from exc
+        raise BuildIdentityError("canonical build value timedelta is not representable") from exc
     if pd.isna(duration):
         raise BuildIdentityError("canonical build value timedelta must not be NaT")
     return {"type": "timedelta", "value": encoded}

@@ -336,10 +336,7 @@ def load_completed_build_candidate_bundle(
         "export_id": build.export_id,
         "manifest_id": build.manifest_id,
         "split_set_id": build.split_set_id,
-        **{
-            field_name: getattr(build, field_name)
-            for field_name in BUILD_IDENTITY_SHA256_FIELDS
-        },
+        **{field_name: getattr(build, field_name) for field_name in BUILD_IDENTITY_SHA256_FIELDS},
     }
     mismatches = [
         field_name
@@ -348,7 +345,6 @@ def load_completed_build_candidate_bundle(
     ]
     if mismatches:
         raise CandidateArtifactError(
-            "candidate artifact does not match completed-build lineage: "
-            + ", ".join(mismatches)
+            "candidate artifact does not match completed-build lineage: " + ", ".join(mismatches)
         )
     return bundle

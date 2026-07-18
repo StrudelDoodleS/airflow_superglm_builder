@@ -160,9 +160,7 @@ def _real_curve_data():
     rng = np.random.default_rng(20260717)
     age = np.linspace(18.0, 78.0, row_count)
     region = np.resize(np.array(["north", "central", "south"]), row_count)
-    region_eta = pd.Series(region).map(
-        {"north": -0.2, "central": 0.0, "south": 0.3}
-    ).to_numpy()
+    region_eta = pd.Series(region).map({"north": -0.2, "central": 0.0, "south": 0.3}).to_numpy()
     y = rng.poisson(np.exp(-0.6 + 0.012 * (age - 40.0) + region_eta))
     return pd.DataFrame({"age": age, "region": region}), y
 
@@ -338,9 +336,7 @@ def test_cv_report_adapter_preserves_mixed_scorer_fold_column_order():
         return {"calibration": 0.0, "ranking": 0.0}
 
     result = _cv_result()
-    non_metric_columns = [
-        name for name in result.fold_scores if name != "deviance"
-    ]
+    non_metric_columns = [name for name in result.fold_scores if name != "deviance"]
     result.fold_scores = result.fold_scores[non_metric_columns].assign(
         calibration=[0.2, 0.3],
         ranking=[0.7, 0.8],
@@ -368,9 +364,11 @@ def test_cv_report_adapter_preserves_mixed_scorer_fold_column_order():
         "ranking",
         "deviance",
     ]
-    assert [
-        metric.metric_name for metric in fold_metrics if metric.fold_no == 1
-    ] == ["calibration", "ranking", "deviance"]
+    assert [metric.metric_name for metric in fold_metrics if metric.fold_no == 1] == [
+        "calibration",
+        "ranking",
+        "deviance",
+    ]
 
 
 def test_cv_report_adapter_rejects_aggregate_metric_missing_from_fold_columns():
@@ -676,17 +674,14 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     from importlib.metadata import distribution, version
 
     from sklearn.model_selection import KFold
+
     api = _api()
     assert version("superglm") == "0.12.0"
     direct_url = json.loads(distribution("superglm").read_text("direct_url.json"))
-    assert direct_url["vcs_info"]["commit_id"] == (
-        "25c06fc84b674bb2ee777ea99567772d8d57a17c"
-    )
+    assert direct_url["vcs_info"]["commit_id"] == ("25c06fc84b674bb2ee777ea99567772d8d57a17c")
 
     X, y = _real_curve_data()
-    folds = list(
-        KFold(n_splits=5, shuffle=True, random_state=20260717).split(X, y)
-    )
+    folds = list(KFold(n_splits=5, shuffle=True, random_state=20260717).split(X, y))
 
     evidence = api.run_cross_validation(
         _real_curve_model(),
@@ -699,13 +694,11 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     capture = evidence.validation_curve_capture
     assert capture.status == "COMPLETE"
     assert capture.reason is None
-    assert [
-        split.validation_split_no for split in evidence.validation_splits
-    ] == [1, 2, 3, 4, 5]
+    assert [split.validation_split_no for split in evidence.validation_splits] == [1, 2, 3, 4, 5]
     assert len(evidence.fold_metrics) == 5
-    assert [
-        (metric.fold_no, metric.metric_name) for metric in evidence.fold_metrics
-    ] == [(split_no, "deviance") for split_no in range(1, 6)]
+    assert [(metric.fold_no, metric.metric_name) for metric in evidence.fold_metrics] == [
+        (split_no, "deviance") for split_no in range(1, 6)
+    ]
     for split, metric in zip(
         evidence.validation_splits,
         evidence.fold_metrics,
@@ -714,19 +707,14 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
         assert metric.metric_value == pytest.approx(split.metrics["deviance"])
     assert {point.validation_split_no for point in capture.points} == {1, 2, 3, 4, 5}
     assert {point.term_name for point in capture.points} == {"age", "region"}
-    assert len(
-        [point for point in capture.points if point.term_name == "age"]
-    ) == 5 * 200
-    assert len(
-        [point for point in capture.points if point.term_name == "region"]
-    ) == 5 * 3
+    assert len([point for point in capture.points if point.term_name == "age"]) == 5 * 200
+    assert len([point for point in capture.points if point.term_name == "region"]) == 5 * 3
     for split_no in (1, 2, 3, 4, 5):
         for term_name in ("age", "region"):
             term_points = [
                 point
                 for point in capture.points
-                if point.validation_split_no == split_no
-                and point.term_name == term_name
+                if point.validation_split_no == split_no and point.term_name == term_name
             ]
             reference_points = [
                 point
@@ -1034,9 +1022,7 @@ def test_standard_runner_rejects_model_source_drift_during_training(
         del kwargs
         verification_calls += 1
         if verification_calls == 2:
-            raise BuildIdentityError(
-                "build contract changed during execution: model_source_sha256"
-            )
+            raise BuildIdentityError("build contract changed during execution: model_source_sha256")
         return expected
 
     monkeypatch.setattr(api, "verify_build_identity", verify_identity)
@@ -1392,9 +1378,7 @@ def test_publishable_standard_runner_rejects_each_final_frame_role_drift_before_
     api = _api()
     build = _complete_role_build(api, tmp_path)
     inputs = build["inputs"]
-    values = {
-        name: getattr(inputs, name) for name in api.ModelInputs.__dataclass_fields__
-    }
+    values = {name: getattr(inputs, name) for name in api.ModelInputs.__dataclass_fields__}
     if mutation.endswith("_values"):
         role = mutation.removesuffix("_values")
         changed = values[role].copy()
@@ -1435,9 +1419,7 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
     expected_frame = caller_frame.copy(deep=True)
     expected_X = caller_inputs.X.copy(deep=True)
     expected_y = caller_inputs.y.copy(deep=True)
-    expected_folds = [
-        (train.copy(), validation.copy()) for train, validation in caller_splits
-    ]
+    expected_folds = [(train.copy(), validation.copy()) for train, validation in caller_splits]
 
     def mutating_exact_cv(model, X, y, **kwargs):
         del model, X, y, kwargs
@@ -1462,9 +1444,7 @@ def test_publishable_runner_uses_deep_snapshots_and_copied_materialized_splits(
     def capture_manifest(engine, **kwargs):
         del engine
         pd.testing.assert_frame_equal(kwargs["frame"], expected_frame)
-        for actual, expected in zip(
-            kwargs["split_indices"], expected_folds, strict=True
-        ):
+        for actual, expected in zip(kwargs["split_indices"], expected_folds, strict=True):
             np.testing.assert_array_equal(actual[0], expected[0])
             np.testing.assert_array_equal(actual[1], expected[1])
         raise RuntimeError("trusted snapshots captured")
@@ -1963,9 +1943,7 @@ def test_standard_runner_cleanup_failure_preserves_original_base_exception(
     monkeypatch.setattr(
         api,
         "export_rating_tables",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            KeyboardInterrupt("original interruption")
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt("original interruption")),
     )
     monkeypatch.setattr(
         api.shutil,
@@ -2171,7 +2149,9 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert len(final_models) == 3
     assert all(model is not superglm_model for model in cv_models)
     assert all(model is not superglm_model for model in final_models)
-    assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))
+    assert all(
+        cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models)
+    )
     assert cv_models[0] is not cv_models[1]
     assert final_models[0] is not final_models[1]
     assert bundle.fitted_model is not superglm_model
@@ -2215,9 +2195,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert Path(result.candidate_artifact_path).exists()
     assert result.candidate_artifact_sha256
     assert result.model_source_sha256
-    assert result.rating_workbook_sha256 == api.hash_file_sha256(
-        first_paths["workbook"]
-    )
+    assert result.rating_workbook_sha256 == api.hash_file_sha256(first_paths["workbook"])
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert [split.model_dump() for split in result.validation_splits] == [
         {

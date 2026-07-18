@@ -188,18 +188,12 @@ def test_every_material_build_contract_change_changes_fingerprint(
     elif change == "source_system":
         changed_args["manifest_spec"] = _manifest_spec(source_system="new_sql_source")
     elif change == "data_as_of":
-        changed_args["manifest_spec"] = _manifest_spec(
-            data_as_of_date=date(2026, 7, 1)
-        )
+        changed_args["manifest_spec"] = _manifest_spec(data_as_of_date=date(2026, 7, 1))
     elif change == "pk_order":
         for args in (baseline_args, changed_args):
             args["frame"]["secondary_id"] = [1, 2, 3, 4]
-        baseline_args["manifest_spec"] = _manifest_spec(
-            pk_columns=("policy_id", "secondary_id")
-        )
-        changed_args["manifest_spec"] = _manifest_spec(
-            pk_columns=("secondary_id", "policy_id")
-        )
+        baseline_args["manifest_spec"] = _manifest_spec(pk_columns=("policy_id", "secondary_id"))
+        changed_args["manifest_spec"] = _manifest_spec(pk_columns=("secondary_id", "policy_id"))
     elif change == "target":
         changed_args["model_config"] = replace(
             changed_args["model_config"],
@@ -215,9 +209,7 @@ def test_every_material_build_contract_change_changes_fingerprint(
     elif change == "sample_weight_column":
         changed_args["manifest_spec"] = _manifest_spec(weight_column="other_weight")
     elif change == "export_weight_column":
-        changed_args["manifest_spec"] = _manifest_spec(
-            export_weight_column="other_export_weight"
-        )
+        changed_args["manifest_spec"] = _manifest_spec(export_weight_column="other_export_weight")
     elif change == "data_as_of_column":
         changed_args["manifest_spec"] = _manifest_spec(data_as_of_column="other_as_at")
     elif change == "validation_definition":
@@ -315,9 +307,7 @@ def test_notebook_outputs_and_execution_metadata_do_not_change_model_source(
     baseline = create_build_identity(**args)
 
     notebook["cells"][0]["execution_count"] = 99
-    notebook["cells"][0]["outputs"] = [
-        {"output_type": "stream", "text": ["different output\n"]}
-    ]
+    notebook["cells"][0]["outputs"] = [{"output_type": "stream", "text": ["different output\n"]}]
     notebook["metadata"] = {"widgets": {"state": {"incidental": "value"}}}
     notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
 
