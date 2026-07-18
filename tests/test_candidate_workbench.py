@@ -55,6 +55,7 @@ def _bundle():
         materialized_split_sha256="e" * 64,
         runtime_sha256="f" * 64,
         candidate_superglm_sha256="0" * 64,
+        model_frame_sha256="1" * 64,
         offset_contract={"handling": "NONE"},
     )
 
@@ -231,13 +232,12 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert statements[0][1]["package_version"] == 7
 
 
-@pytest.mark.parametrize("frame_digest", [None, "c" * 64])
 def test_open_resolves_one_successful_run_and_verifies_bundle_identity(
     tmp_path,
     monkeypatch,
-    frame_digest,
 ):
     api = _api()
+    frame_digest = "c" * 64
     bundle = replace(_bundle(), model_frame_sha256=frame_digest)
     metadata = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
     row = {
@@ -289,11 +289,11 @@ def test_open_resolves_one_successful_run_and_verifies_bundle_identity(
 
 
 @pytest.mark.parametrize(
-    ("bundle_digest", "sql_digest"),
+    ("bundle_digest", "sql_digest", "expected_error"),
     [
-        ("c" * 64, "d" * 64),
-        (None, "d" * 64),
-        ("c" * 64, None),
+        ("c" * 64, "d" * 64, "model_frame_sha256"),
+        (None, "d" * 64, "model_frame_sha256"),
+        ("c" * 64, None, "verified candidate artifact"),
     ],
 )
 def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
@@ -301,6 +301,7 @@ def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
     monkeypatch,
     bundle_digest,
     sql_digest,
+    expected_error,
 ):
     api = _api()
     bundle = replace(_bundle(), model_frame_sha256=bundle_digest)
@@ -338,7 +339,7 @@ def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
         lambda model_name, deployment_slot, *, package_version=None: [row],
     )
 
-    with pytest.raises(api.CandidateLineageError, match="model_frame_sha256"):
+    with pytest.raises(api.CandidateLineageError, match=expected_error):
         workbench.open("HOME_FREQ", package_version=7)
 
 
@@ -393,7 +394,7 @@ def test_editor_ready_requires_persisted_build_identity():
     row = {field: "present" for field in api._ARTIFACT_FIELDS}
     assert api.Workbench._editor_ready(row)
 
-    for field_name in _build_identity(_bundle()):
+    for field_name in api.BUILD_IDENTITY_SHA256_FIELDS:
         row[field_name] = None
         assert not api.Workbench._editor_ready(row), field_name
         row[field_name] = "present"

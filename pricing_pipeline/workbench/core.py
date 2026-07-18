@@ -25,9 +25,6 @@ _FRIENDLY_COLUMNS = [
     "Editor train delta",
     "Editor",
 ]
-_EDITOR_READY_IDENTITY_FIELDS = tuple(
-    field_name for field_name in BUILD_IDENTITY_SHA256_FIELDS if field_name != "model_frame_sha256"
-)
 _ARTIFACT_FIELDS = (
     "model_version",
     "export_id",
@@ -38,7 +35,7 @@ _ARTIFACT_FIELDS = (
     "candidate_python_version",
     "candidate_superglm_version",
     "candidate_superglm_git_sha",
-    *_EDITOR_READY_IDENTITY_FIELDS,
+    *BUILD_IDENTITY_SHA256_FIELDS,
 )
 
 

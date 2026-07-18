@@ -402,6 +402,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
     artifact = save_candidate_bundle(bundle, tmp_path / "candidate_bundle.joblib")
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_bytes(b"editor workbook")
+    receipt = tmp_path / "publication_receipt.json"
+    receipt.write_bytes(b"editor receipt")
     row = {
         "model_name": "HOME_FREQ",
         "model_version": "20260603",
@@ -417,6 +419,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
+        "publication_receipt_path": str(receipt),
+        "publication_receipt_sha256": editor_candidate.sha256_file(receipt),
         "candidate_artifact_path": artifact.path,
         "candidate_artifact_sha256": artifact.sha256,
         "candidate_artifact_format": artifact.format,
@@ -443,6 +447,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         def execute(self, statement, params):
             assert "manifest.model_frame_sha256" in str(statement)
             assert "DATASET_MANIFEST AS manifest" in str(statement)
+            assert "mr.publication_receipt_path" in str(statement)
+            assert "mr.publication_receipt_sha256" in str(statement)
             assert "mr.validation_source_model_run_id" in str(statement)
             assert "source_package.build_fingerprint_sha256" in str(statement)
             assert "source_run.model_run_id = COALESCE(" in str(statement)
@@ -541,6 +547,36 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         )
     workbook.write_bytes(b"editor workbook")
 
+    receipt.unlink()
+    with pytest.raises(EditorSubmissionError, match="publication receipt"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+    receipt.write_bytes(b"editor receipt")
+
+    outside_receipt = tmp_path.parent / f"{tmp_path.name}-outside-receipt.json"
+    outside_receipt.write_bytes(b"editor receipt")
+    row["publication_receipt_path"] = str(outside_receipt)
+    with pytest.raises(EditorSubmissionError, match="outside configured artifact root"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+    row["publication_receipt_path"] = str(receipt)
+    outside_receipt.unlink()
+
+    receipt.write_bytes(b"overwritten")
+    with pytest.raises(EditorSubmissionError, match="publication receipt"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+    receipt.write_bytes(b"editor receipt")
+
     Path(artifact.path).write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="failed verification"):
         editor_candidate._resolve_existing_editor_publication(
@@ -598,6 +634,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         bundle_lineage[field_name] = different_value
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_bytes(b"editor workbook")
+    receipt = tmp_path / "publication_receipt.json"
+    receipt.write_bytes(b"editor receipt")
 
     row = {
         "model_name": "HOME_FREQ",
@@ -612,6 +650,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "run_status": "SUCCESS",
         "rating_workbook_path": str(workbook),
         "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
+        "publication_receipt_path": str(receipt),
+        "publication_receipt_sha256": editor_candidate.sha256_file(receipt),
         "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
         "candidate_artifact_sha256": "d" * 64,
         "candidate_artifact_format": "superglm-candidate-joblib-v3",

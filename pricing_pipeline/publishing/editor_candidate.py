@@ -255,6 +255,8 @@ def _resolve_existing_editor_publication(
             manifest.model_frame_sha256,
             mr.rating_workbook_path,
             mr.rating_workbook_sha256,
+            mr.publication_receipt_path,
+            mr.publication_receipt_sha256,
             split_link.split_set_id,
             mr.model_source_sha256,
             mr.candidate_artifact_path,
@@ -328,17 +330,19 @@ def _resolve_existing_editor_publication(
         raise EditorSubmissionError(
             "editor publication requires lineage repair: package/run is incomplete"
         )
-    workbook_path = Path(str(row.get("rating_workbook_path") or "")).expanduser().resolve()
     root = Path(allowed_root).expanduser().resolve()
-    if not workbook_path.is_relative_to(root) or not workbook_path.is_file():
-        raise EditorSubmissionError(
-            "existing editor publication rating workbook is missing or outside the artifact root"
-        )
-    expected_workbook_sha256 = str(row.get("rating_workbook_sha256") or "")
-    if sha256_file(workbook_path) != expected_workbook_sha256:
-        raise EditorSubmissionError(
-            "existing editor publication rating workbook SHA-256 verification failed"
-        )
+    _verify_edited_file(
+        str(row.get("rating_workbook_path") or ""),
+        expected_sha256=str(row.get("rating_workbook_sha256") or ""),
+        root=root,
+        label="existing editor publication rating workbook",
+    )
+    _verify_edited_file(
+        str(row.get("publication_receipt_path") or ""),
+        expected_sha256=str(row.get("publication_receipt_sha256") or ""),
+        root=root,
+        label="existing editor publication receipt",
+    )
     artifact_fields = (
         "candidate_artifact_path",
         "candidate_artifact_sha256",
