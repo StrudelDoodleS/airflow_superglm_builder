@@ -1675,6 +1675,18 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     assert stage_call[2]["publication_receipt_path"] == Path(export.publication_receipt_path)
     publish_call = next(call for call in calls if call[0] == "publish")
     assert "package_status" not in publish_call[2]
+    expected_model = publish_call[2]["expected_model_identity"]
+    assert (
+        expected_model.model_id,
+        expected_model.model_name,
+        expected_model.target_name,
+        expected_model.model_type,
+    ) == (
+        17,
+        MODEL_CONFIG.model_name,
+        MODEL_CONFIG.target_name,
+        MODEL_CONFIG.model_type,
+    )
     assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
     lineage_call = next(call for call in calls if call[0] == "lineage")
     assert lineage_call[1] is connection

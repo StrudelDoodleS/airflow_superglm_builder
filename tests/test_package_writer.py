@@ -5,7 +5,21 @@ from types import MappingProxyType
 import pytest
 
 from pricing_pipeline.publishing.model_registry import ModelRegistryError
-from pricing_pipeline.publishing.package_writer import publish_rating_package
+from pricing_pipeline.publishing.package_writer import (
+    ExpectedModelIdentity,
+    publish_rating_package,
+)
+
+
+def _expected_model_identity(**overrides):
+    values = {
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "target_name": "claim_count",
+        "model_type": "superglm_poisson",
+    }
+    values.update(overrides)
+    return ExpectedModelIdentity(**values)
 
 
 def load_staging_to_rating_package(engine, args):
@@ -20,6 +34,11 @@ def load_staging_to_rating_package(engine, args):
         draft_validator=getattr(args, "draft_validator", None),
         package_lineage_writer=getattr(args, "package_lineage_writer", None),
         expected_staged_metadata=getattr(args, "expected_staged_metadata", None),
+        expected_model_identity=getattr(
+            args,
+            "expected_model_identity",
+            _expected_model_identity(),
+        ),
         build_fingerprint_sha256=getattr(args, "build_fingerprint_sha256", None),
     )
     args.package_version = result.package_version
@@ -80,6 +99,7 @@ def test_package_writer_rejects_non_mapping_revision_metadata():
             _FakeNewPackageEngine(),
             export_id="export-1",
             expected_database="PricingLab",
+            expected_model_identity=_expected_model_identity(),
             revision_metadata='{"kind":"SUPERGLM_EDITOR"}',
         )
 
@@ -91,6 +111,7 @@ def test_package_writer_rejects_non_finite_revision_metadata(value):
             _FakeNewPackageEngine(),
             export_id="export-1",
             expected_database="PricingLab",
+            expected_model_identity=_expected_model_identity(),
             revision_metadata={"metric": value},
         )
 
@@ -109,6 +130,7 @@ def test_package_writer_rejects_non_string_revision_metadata_keys(revision_metad
             _FakeNewPackageEngine(),
             export_id="export-1",
             expected_database="PricingLab",
+            expected_model_identity=_expected_model_identity(),
             revision_metadata=revision_metadata,
         )
 
@@ -119,6 +141,7 @@ def test_package_writer_rejects_non_json_serializable_revision_metadata():
             _FakeNewPackageEngine(),
             export_id="export-1",
             expected_database="PricingLab",
+            expected_model_identity=_expected_model_identity(),
             revision_metadata={"unsupported": object()},
         )
 
@@ -251,6 +274,7 @@ def test_package_writer_rechecks_database_inside_write_transaction_before_mutati
             engine,
             export_id="export-1",
             expected_database="PricingLab",
+            expected_model_identity=_expected_model_identity(),
             build_fingerprint_sha256="f" * 64,
         )
 
@@ -277,6 +301,18 @@ def _staged_meta(**overrides):
         "offset_label": None,
         "metadata_origin": None,
         "staging_content_sha256": "a" * 64,
+    }
+    row.update(overrides)
+    return row
+
+
+def _registered_model(**overrides):
+    row = {
+        "model_id": 17,
+        "model_name": "MTPL_FREQ",
+        "target_name": "claim_count",
+        "model_type": "superglm_poisson",
+        "model_status": "ACTIVE",
     }
     row.update(overrides)
     return row
@@ -327,11 +363,18 @@ class _FakeMetaWithModelResult:
 
 
 class _FakeExistingPackageConnection:
-    def __init__(self, staged_meta=None, existing_package=None, canonical_package=None):
+    def __init__(
+        self,
+        staged_meta=None,
+        existing_package=None,
+        canonical_package=None,
+        registered_model=None,
+    ):
         self.statements = []
         self.staged_meta = staged_meta or _staged_meta()
         self.existing_package = existing_package or _existing_package()
         self.canonical_package = canonical_package
+        self.registered_model = registered_model or _registered_model()
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -341,7 +384,7 @@ class _FakeExistingPackageConnection:
         if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
             return _FakeMetaWithModelResult(self.staged_meta)
         if "FROM pricing.PRICING_MODEL AS pm" in sql:
-            return _FakeScalarResult(17)
+            return _FakeExistingPackageResult(self.registered_model)
         if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql:
             return _FakeExistingPackageResult(self.canonical_package)
         if "source_export_id = :export_id" in sql:
@@ -361,11 +404,18 @@ class _FakeExistingPackageBegin:
 
 
 class _FakeExistingPackageEngine:
-    def __init__(self, staged_meta=None, existing_package=None, canonical_package=None):
+    def __init__(
+        self,
+        staged_meta=None,
+        existing_package=None,
+        canonical_package=None,
+        registered_model=None,
+    ):
         self.connection = _FakeExistingPackageConnection(
             staged_meta=staged_meta,
             existing_package=existing_package,
             canonical_package=canonical_package,
+            registered_model=registered_model,
         )
 
     def begin(self):
@@ -384,13 +434,15 @@ class _FakeScalarResult:
 
 
 class _FakeNewPackageConnection:
-    def __init__(self, reservation=None):
+    def __init__(self, reservation=None, registered_model=None, staged_meta=None):
         self.statements = []
         self.reservation = reservation or {
             "model_id": 17,
             "export_id": "export-1",
             "model_version": "20260529",
         }
+        self.registered_model = registered_model or _registered_model()
+        self.staged_meta = staged_meta or _staged_meta()
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -398,9 +450,9 @@ class _FakeNewPackageConnection:
         if "DB_NAME()" in sql:
             return _FakeScalarResult("PricingLab")
         if "FROM pricing_stg.STG_RATING_EXPORT" in sql:
-            return _FakeMetaWithModelResult(_staged_meta())
+            return _FakeMetaWithModelResult(self.staged_meta)
         if "FROM pricing.PRICING_MODEL AS pm" in sql:
-            return _FakeScalarResult(17)
+            return _FakeExistingPackageResult(self.registered_model)
         if "build_fingerprint_sha256 = :build_fingerprint_sha256" in sql:
             return _FakeExistingPackageResult(None)
         if "source_export_id = :export_id" in sql:
@@ -431,8 +483,12 @@ class _FakeNewPackageBegin:
 
 
 class _FakeNewPackageEngine:
-    def __init__(self, reservation=None):
-        self.connection = _FakeNewPackageConnection(reservation=reservation)
+    def __init__(self, reservation=None, registered_model=None, staged_meta=None):
+        self.connection = _FakeNewPackageConnection(
+            reservation=reservation,
+            registered_model=registered_model,
+            staged_meta=staged_meta,
+        )
         self.transaction = _FakeNewPackageBegin(self.connection)
 
     def begin(self):
@@ -452,6 +508,78 @@ def _new_package_args(**overrides):
     for name, value in values.items():
         setattr(args, name, value)
     return args
+
+
+@pytest.mark.parametrize(
+    ("registered_model", "message"),
+    [
+        (_registered_model(model_status="RETIRED"), "model_status"),
+        (_registered_model(model_name="MTPL_SEV"), "model_name"),
+        (_registered_model(target_name="loss_amount"), "target_name"),
+        (_registered_model(model_type="superglm_tweedie"), "model_type"),
+    ],
+    ids=["retired", "renamed", "target-changed", "type-changed"],
+)
+def test_package_writer_rejects_locked_model_that_changed_after_staging(
+    registered_model,
+    message,
+):
+    engine = _FakeNewPackageEngine(registered_model=registered_model)
+    lineage_calls = []
+
+    with pytest.raises(ModelRegistryError, match=message):
+        load_staging_to_rating_package(
+            engine,
+            _new_package_args(
+                package_lineage_writer=lambda *args: lineage_calls.append(args),
+            ),
+        )
+
+    lock_sql = next(
+        sql
+        for sql, _params in engine.connection.statements
+        if "FROM pricing.PRICING_MODEL AS pm" in sql
+    )
+    assert "UPDLOCK" in lock_sql
+    assert "HOLDLOCK" in lock_sql
+    assert lineage_calls == []
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
+
+
+@pytest.mark.parametrize(
+    "staged_meta",
+    [
+        _staged_meta(model_id=18),
+        _staged_meta(model_name="MTPL_SEV"),
+    ],
+    ids=["model-id", "model-name"],
+)
+def test_package_writer_rejects_staged_model_identity_without_optional_metadata_guard(
+    staged_meta,
+):
+    engine = _FakeNewPackageEngine(staged_meta=staged_meta)
+    lineage_calls = []
+
+    with pytest.raises(ModelRegistryError, match="staged rating export identity"):
+        load_staging_to_rating_package(
+            engine,
+            _new_package_args(
+                package_lineage_writer=lambda *args: lineage_calls.append(args),
+            ),
+        )
+
+    assert not any(
+        "FROM pricing.PRICING_MODEL AS pm" in sql
+        for sql, _params in engine.connection.statements
+    )
+    assert lineage_calls == []
+    assert not any(
+        "INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql
+        for sql, _params in engine.connection.statements
+    )
 
 
 def test_package_lineage_writer_runs_inside_transaction_before_final_status():
@@ -510,6 +638,7 @@ def test_package_lineage_writer_return_id_is_exposed_from_same_transaction():
         engine,
         export_id="export-1",
         expected_database="PricingLab",
+        expected_model_identity=_expected_model_identity(),
         created_by="airflow",
         build_fingerprint_sha256="f" * 64,
         package_lineage_writer=write_lineage,
@@ -647,6 +776,7 @@ def test_package_writer_locks_model_and_reuses_canonical_root_fingerprint():
         engine,
         export_id="retry-export",
         expected_database="PricingLab",
+        expected_model_identity=_expected_model_identity(),
         build_fingerprint_sha256="f" * 64,
     )
 

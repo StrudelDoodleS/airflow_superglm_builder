@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -25,6 +26,14 @@ _STAGED_IDENTITY_FIELDS = (
     "publication_receipt_sha256",
     "staging_content_sha256",
 )
+
+
+@dataclass(frozen=True)
+class ExpectedModelIdentity:
+    model_id: int
+    model_name: str
+    target_name: str
+    model_type: str
 
 
 def _identity_text(value) -> str | None:
@@ -140,6 +149,7 @@ def publish_rating_package(
     *,
     export_id: str,
     expected_database: str,
+    expected_model_identity: ExpectedModelIdentity,
     created_by: str = "python",
     parent_rate_package_id: int | None = None,
     revision_metadata: Mapping[str, object] | None = None,
@@ -203,20 +213,59 @@ def publish_rating_package(
                 "staged rating export is missing model_id; validate/register the "
                 f"model before staging export_id={export_id!r}"
             )
+        staged_identity_mismatches = []
+        for field_name in ("model_id", "model_name"):
+            staged_value = meta[field_name]
+            expected_value = getattr(expected_model_identity, field_name)
+            if _identity_text(staged_value) != _identity_text(expected_value):
+                staged_identity_mismatches.append(
+                    f"{field_name} staged={staged_value!r} expected={expected_value!r}"
+                )
+        if staged_identity_mismatches:
+            raise ModelRegistryError(
+                "staged rating export identity does not match the approved build: "
+                + "; ".join(staged_identity_mismatches)
+            )
 
-        locked_model_id = con.execute(
-            text(
-                """
-                SELECT pm.model_id
-                FROM pricing.PRICING_MODEL AS pm WITH (UPDLOCK, HOLDLOCK)
-                WHERE pm.model_id = :model_id
-                """
-            ),
-            {"model_id": model_id},
-        ).scalar_one_or_none()
-        if locked_model_id is None:
+        locked_model = (
+            con.execute(
+                text(
+                    """
+                    SELECT
+                        pm.model_id,
+                        pm.model_name,
+                        pm.target_name,
+                        pm.model_type,
+                        pm.model_status
+                    FROM pricing.PRICING_MODEL AS pm WITH (UPDLOCK, HOLDLOCK)
+                    WHERE pm.model_id = :model_id
+                    """
+                ),
+                {"model_id": model_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if locked_model is None:
             raise ModelRegistryError(
                 f"staged rating export refers to unregistered model_id={model_id!r}"
+            )
+        identity_mismatches = []
+        for field_name in ("model_id", "model_name", "target_name", "model_type"):
+            registered_value = locked_model[field_name]
+            expected_value = getattr(expected_model_identity, field_name)
+            if _identity_text(registered_value) != _identity_text(expected_value):
+                identity_mismatches.append(
+                    f"{field_name} db={registered_value!r} expected={expected_value!r}"
+                )
+        if str(locked_model["model_status"]) != "ACTIVE":
+            identity_mismatches.append(
+                f"model_status db={locked_model['model_status']!r} expected='ACTIVE'"
+            )
+        if identity_mismatches:
+            raise ModelRegistryError(
+                "registered model changed after build approval: "
+                + "; ".join(identity_mismatches)
             )
 
         if parent_rate_package_id is None:

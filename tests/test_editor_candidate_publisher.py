@@ -244,6 +244,13 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
     }
     assert "package_status" not in publish_kwargs
     assert callable(publish_kwargs["package_lineage_writer"])
+    expected_model = publish_kwargs["expected_model_identity"]
+    assert (
+        expected_model.model_id,
+        expected_model.model_name,
+        expected_model.target_name,
+        expected_model.model_type,
+    ) == (17, "HOME_FREQ", "claim_count", "superglm_poisson")
     assert publish_kwargs["expected_staged_metadata"] == {
         "export_id": build.export_id,
         "model_id": parent.model_id,

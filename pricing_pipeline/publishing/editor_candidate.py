@@ -21,7 +21,10 @@ from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.lineage import record_model_run
-from pricing_pipeline.publishing.package_writer import publish_rating_package
+from pricing_pipeline.publishing.package_writer import (
+    ExpectedModelIdentity,
+    publish_rating_package,
+)
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.staging import stage_rating_export
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
@@ -1262,6 +1265,12 @@ def _publish_new_editor_submission(
             engine,
             export_id=build.export_id,
             expected_database=expected_database,
+            expected_model_identity=ExpectedModelIdentity(
+                model_id=build.model_id,
+                model_name=build.model_name,
+                target_name=build.target_name,
+                model_type=build.model_type,
+            ),
             created_by=build.created_by,
             parent_rate_package_id=submission.parent_rate_package_id,
             revision_metadata=revision_metadata,

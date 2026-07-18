@@ -15,7 +15,10 @@ from pricing_pipeline.publishing.model_registry import (
     ModelRegistryError,
     validate_registered_model,
 )
-from pricing_pipeline.publishing.package_writer import publish_rating_package
+from pricing_pipeline.publishing.package_writer import (
+    ExpectedModelIdentity,
+    publish_rating_package,
+)
 from pricing_pipeline.publishing.staging import stage_rating_export
 from pricing_pipeline.workbench.submission import sha256_file, xlsx_semantic_sha256
 
@@ -118,6 +121,12 @@ def publish_model_export(
         engine,
         export_id=export.export_id,
         expected_database=expected_database,
+        expected_model_identity=ExpectedModelIdentity(
+            model_id=model_id,
+            model_name=model_config.model_name,
+            target_name=model_config.target_name,
+            model_type=model_config.model_type,
+        ),
         created_by=export.created_by,
         build_fingerprint_sha256=export.build_fingerprint_sha256,
         package_lineage_writer=write_package_lineage,
