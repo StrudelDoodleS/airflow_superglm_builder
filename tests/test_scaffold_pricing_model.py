@@ -143,12 +143,28 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
 
     package_dir = tmp_path / "pricing_models" / "my_model"
     notebook_path = package_dir / "pricing_model.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
     assert result.created_files == (package_dir / "__init__.py", notebook_path)
     assert not (package_dir / "model.toml").exists()
     assert not (tmp_path / "dags" / "pricing_my_model.py").exists()
 
     cells = _code_cells(notebook_path)
     source = "\n".join(cells)
+    settings_cell = next(
+        cell
+        for cell in notebook["cells"]
+        if "DATABASE_MODE" in "".join(cell.get("source", []))
+    )
+    assert settings_cell["metadata"]["tags"] == [
+        "pricing-pipeline-operational-settings"
+    ]
+    markdown = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "markdown"
+    )
+    assert "before package publication" in markdown
+    assert "before any SQL publication" not in markdown
     assert 'DATABASE_MODE = "local"' in cells[0]
     assert "RUNTIME_MODULE = None" in cells[0]
     assert 'EXPECTED_REMOTE_DATABASE = ""' in cells[0]
