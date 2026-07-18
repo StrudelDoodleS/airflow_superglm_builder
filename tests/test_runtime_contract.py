@@ -253,7 +253,7 @@ def test_superglm_runtime_dependency_is_pinned_to_commit():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     uv_lock = Path("uv.lock").read_text(encoding="utf-8")
     git_url = "https://github.com/StrudelDoodleS/superglm.git"
-    git_sha = "25c06fc84b674bb2ee777ea99567772d8d57a17c"
+    git_sha = "e21bbdca98b6b511e189ae6c30f4af60ec09d95b"
     expected = f"superglm[editor] @ git+{git_url}@{git_sha}"
 
     assert expected in requirements

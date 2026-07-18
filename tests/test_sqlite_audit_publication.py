@@ -283,7 +283,7 @@ def _completed_build(
         candidate_artifact_size_bytes=123,
         candidate_python_version=python_version(),
         candidate_superglm_version=version("superglm"),
-        candidate_superglm_git_sha="25c06fc84b674bb2ee777ea99567772d8d57a17c",
+        candidate_superglm_git_sha="e21bbdca98b6b511e189ae6c30f4af60ec09d95b",
         build_fingerprint_sha256=fingerprint,
         builder_source_sha256="2" * 64,
         materialized_split_sha256="3" * 64,

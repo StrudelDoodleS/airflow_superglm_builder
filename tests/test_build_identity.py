@@ -132,7 +132,7 @@ def test_build_identity_is_deterministic_and_path_independent(tmp_path: Path):
     assert len(first.runtime_sha256) == 64
     assert len(first.candidate_superglm_sha256) == 64
     assert first.candidate_superglm_version == "0.12.0"
-    assert first.candidate_superglm_git_sha == "25c06fc84b674bb2ee777ea99567772d8d57a17c"
+    assert first.candidate_superglm_git_sha == "e21bbdca98b6b511e189ae6c30f4af60ec09d95b"
     assert stable_build_export_id(first) == f"build_{first.build_fingerprint_sha256}"
 
 

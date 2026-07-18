@@ -64,7 +64,7 @@ def test_runtime_identity_resolves_the_locked_superglm_pin():
 
     assert runtime == identity.SuperGLMRuntimeIdentity(
         version="0.12.0",
-        git_sha="25c06fc84b674bb2ee777ea99567772d8d57a17c",
+        git_sha="e21bbdca98b6b511e189ae6c30f4af60ec09d95b",
     )
     with pytest.raises(FrozenInstanceError):
         runtime.version = "different"

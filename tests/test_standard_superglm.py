@@ -49,7 +49,7 @@ def _build_identity(**overrides) -> BuildIdentity:
         "candidate_superglm_sha256": "8" * 64,
         "candidate_python_version": platform.python_version(),
         "candidate_superglm_version": "0.12.0",
-        "candidate_superglm_git_sha": "25c06fc84b674bb2ee777ea99567772d8d57a17c",
+        "candidate_superglm_git_sha": "e21bbdca98b6b511e189ae6c30f4af60ec09d95b",
     }
     values.update(overrides)
     return BuildIdentity(**values)
@@ -664,7 +664,7 @@ def test_real_pinned_superglm_kfold_captures_numeric_and_categorical_split_point
     api = _api()
     assert version("superglm") == "0.12.0"
     direct_url = json.loads(distribution("superglm").read_text("direct_url.json"))
-    assert direct_url["vcs_info"]["commit_id"] == ("25c06fc84b674bb2ee777ea99567772d8d57a17c")
+    assert direct_url["vcs_info"]["commit_id"] == ("e21bbdca98b6b511e189ae6c30f4af60ec09d95b")
 
     X, y = _real_curve_data()
     folds = list(KFold(n_splits=5, shuffle=True, random_state=20260717).split(X, y))
