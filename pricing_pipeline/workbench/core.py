@@ -11,6 +11,7 @@ from sqlalchemy import text
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.spec import BUILD_IDENTITY_SHA256_FIELDS
 from pricing_pipeline.workbench.artifacts import CandidateBundle, load_candidate_bundle
 
 
@@ -24,6 +25,9 @@ _FRIENDLY_COLUMNS = [
     "Editor train delta",
     "Editor",
 ]
+_EDITOR_READY_IDENTITY_FIELDS = tuple(
+    field_name for field_name in BUILD_IDENTITY_SHA256_FIELDS if field_name != "model_frame_sha256"
+)
 _ARTIFACT_FIELDS = (
     "model_version",
     "export_id",
@@ -34,7 +38,7 @@ _ARTIFACT_FIELDS = (
     "candidate_python_version",
     "candidate_superglm_version",
     "candidate_superglm_git_sha",
-    "model_source_sha256",
+    *_EDITOR_READY_IDENTITY_FIELDS,
 )
 
 
@@ -127,14 +131,11 @@ class Workbench:
             raise CandidateLineageError("candidate bundle manifest_id does not match SQL lineage")
         if bundle.split_set_id != row.get("split_set_id"):
             raise CandidateLineageError("candidate bundle split_set_id does not match SQL lineage")
-        if bundle.model_source_sha256 != row.get("model_source_sha256"):
-            raise CandidateLineageError(
-                "candidate bundle model source hash does not match SQL lineage"
-            )
-        if bundle.model_frame_sha256 != row.get("model_frame_sha256"):
-            raise CandidateLineageError(
-                "candidate bundle model_frame_sha256 does not match SQL lineage"
-            )
+        for field_name in BUILD_IDENTITY_SHA256_FIELDS:
+            if getattr(bundle, field_name) != row.get(field_name):
+                raise CandidateLineageError(
+                    f"candidate bundle {field_name} does not match SQL lineage"
+                )
         expected_identity = {
             "model_name": model_name,
             "model_version": row.get("model_version"),
@@ -197,7 +198,13 @@ class Workbench:
                 mr.candidate_superglm_version,
                 mr.candidate_superglm_git_sha,
                 mr.model_source_sha256,
+                source_package.build_fingerprint_sha256,
+                mr.builder_source_sha256,
+                mr.materialized_split_sha256,
+                mr.runtime_sha256,
+                mr.candidate_superglm_sha256,
                 manifest.model_frame_sha256,
+                split_set.row_order_sha256,
                 manifest.data_as_of_date,
                 deployment.rate_package_id AS current_rate_package_id,
                 COALESCE(cv.metric_value, parent_cv.metric_value) AS baseline_cv_deviance,
@@ -220,6 +227,13 @@ class Workbench:
               ON mr.rate_package_id = rp.rate_package_id
             LEFT JOIN {schemas.pricing}.MODEL_RUN AS parent_mr
               ON parent_mr.rate_package_id = rp.parent_rate_package_id
+            LEFT JOIN {schemas.pricing}.MODEL_RUN AS source_run
+              ON source_run.model_run_id = COALESCE(
+                    mr.validation_source_model_run_id,
+                    mr.model_run_id
+                 )
+            LEFT JOIN {schemas.pricing}.PRICING_RATE_PACKAGE AS source_package
+              ON source_package.rate_package_id = source_run.rate_package_id
             LEFT JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
               ON manifest.manifest_id = mr.manifest_id
             LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
@@ -227,6 +241,9 @@ class Workbench:
              AND split_link.manifest_id = mr.manifest_id
              AND split_link.dataset_role = 'training'
              AND split_link.split_role = 'validation'
+            LEFT JOIN {schemas.pricing}.CV_SPLIT_SET AS split_set
+              ON split_set.split_set_id = split_link.split_set_id
+             AND split_set.manifest_id = split_link.manifest_id
             LEFT JOIN {schemas.mlops}.MODEL_RUN_METRIC AS cv
               ON cv.model_run_id = mr.model_run_id
              AND cv.metric_name = 'cv_pooled_deviance'

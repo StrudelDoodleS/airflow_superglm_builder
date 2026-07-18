@@ -59,6 +59,17 @@ def _bundle():
     )
 
 
+def _build_identity(bundle):
+    return {
+        "build_fingerprint_sha256": bundle.build_fingerprint_sha256,
+        "builder_source_sha256": bundle.builder_source_sha256,
+        "materialized_split_sha256": bundle.materialized_split_sha256,
+        "runtime_sha256": bundle.runtime_sha256,
+        "candidate_superglm_sha256": bundle.candidate_superglm_sha256,
+        "row_order_sha256": bundle.row_order_sha256,
+    }
+
+
 def _history_rows():
     return [
         {
@@ -207,13 +218,21 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
     assert "mr.candidate_superglm_git_sha" in statements[0][0]
+    assert "source_package.build_fingerprint_sha256" in statements[0][0]
+    assert "source_run.model_run_id = COALESCE(" in statements[0][0]
+    assert "mr.validation_source_model_run_id" in statements[0][0]
+    assert "mr.builder_source_sha256" in statements[0][0]
+    assert "mr.materialized_split_sha256" in statements[0][0]
+    assert "mr.runtime_sha256" in statements[0][0]
+    assert "mr.candidate_superglm_sha256" in statements[0][0]
+    assert "split_set.row_order_sha256" in statements[0][0]
     assert "manifest.model_frame_sha256" in statements[0][0]
     assert "rp.package_version = :package_version" in statements[0][0]
     assert statements[0][1]["package_version"] == 7
 
 
 @pytest.mark.parametrize("frame_digest", [None, "c" * 64])
-def test_open_resolves_one_successful_run_and_verifies_bundle(
+def test_open_resolves_one_successful_run_and_verifies_bundle_identity(
     tmp_path,
     monkeypatch,
     frame_digest,
@@ -241,6 +260,7 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
         "model_frame_sha256": frame_digest,
+        **_build_identity(bundle),
     }
     workbench = api.Workbench(
         engine=object(),
@@ -259,6 +279,13 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(
     assert candidate.rate_package_id == 107
     assert candidate.model_run_id == 907
     assert candidate.bundle.manifest_id == "manifest-1"
+
+    for field_name in _build_identity(bundle):
+        original = row[field_name]
+        row[field_name] = "9" * 64
+        with pytest.raises(api.CandidateLineageError, match=field_name):
+            workbench.open("HOME_FREQ", package_version=7)
+        row[field_name] = original
 
 
 @pytest.mark.parametrize(
@@ -298,6 +325,7 @@ def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
         "model_frame_sha256": sql_digest,
+        **_build_identity(bundle),
     }
     workbench = api.Workbench(
         engine=object(),
@@ -342,6 +370,8 @@ def test_open_rejects_candidate_bundle_model_identity_mismatch(
         "model_source_sha256": "b" * 64,
         "manifest_id": "manifest-1",
         "split_set_id": "split-1",
+        "model_frame_sha256": bundle.model_frame_sha256,
+        **_build_identity(bundle),
     }
     workbench = api.Workbench(
         engine=object(),
@@ -356,6 +386,17 @@ def test_open_rejects_candidate_bundle_model_identity_mismatch(
 
     with pytest.raises(api.CandidateLineageError, match=field_name):
         workbench.open("HOME_FREQ", package_version=7)
+
+
+def test_editor_ready_requires_persisted_build_identity():
+    api = _api()
+    row = {field: "present" for field in api._ARTIFACT_FIELDS}
+    assert api.Workbench._editor_ready(row)
+
+    for field_name in _build_identity(_bundle()):
+        row[field_name] = None
+        assert not api.Workbench._editor_ready(row), field_name
+        row[field_name] = "present"
 
 
 def test_open_rejects_ambiguous_run_lineage(monkeypatch):

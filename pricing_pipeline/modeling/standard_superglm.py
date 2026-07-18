@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import superglm.plotting.curve_similarity as superglm_curve_similarity
 
 from pricing_pipeline.build_identity import (
     BuildIdentity,
@@ -643,6 +644,12 @@ def run_cross_validation(
             **cv_options,
         )
     except Exception as capture_exc:
+        traceback = capture_exc.__traceback__
+        curve_builder_code = superglm_curve_similarity.build_cv_curve_similarity.__code__
+        while traceback is not None and traceback.tb_frame.f_code is not curve_builder_code:
+            traceback = traceback.tb_next
+        if traceback is None:
+            raise
         try:
             result = cross_validate_fn(
                 model,

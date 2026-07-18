@@ -428,6 +428,8 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         "split_set_id": bundle.split_set_id,
         "model_source_sha256": bundle.model_source_sha256,
         "model_frame_sha256": bundle.model_frame_sha256,
+        "row_order_sha256": bundle.row_order_sha256,
+        **_ROOT_BUILD_IDENTITY,
     }
 
     class Rows:
@@ -442,6 +444,13 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
             assert "manifest.model_frame_sha256" in str(statement)
             assert "DATASET_MANIFEST AS manifest" in str(statement)
             assert "mr.validation_source_model_run_id" in str(statement)
+            assert "source_package.build_fingerprint_sha256" in str(statement)
+            assert "source_run.model_run_id = COALESCE(" in str(statement)
+            assert "mr.builder_source_sha256" in str(statement)
+            assert "mr.materialized_split_sha256" in str(statement)
+            assert "mr.runtime_sha256" in str(statement)
+            assert "mr.candidate_superglm_sha256" in str(statement)
+            assert "split_set.row_order_sha256" in str(statement)
             assert "COALESCE(parent.validation_source_model_run_id, parent.model_run_id)" in str(
                 statement
             )
@@ -550,6 +559,12 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
         ("model_source_sha256", "c" * 64),
         ("model_frame_sha256", None),
         ("model_frame_sha256", "e" * 64),
+        ("build_fingerprint_sha256", "6" * 64),
+        ("builder_source_sha256", "6" * 64),
+        ("materialized_split_sha256", "6" * 64),
+        ("runtime_sha256", "6" * 64),
+        ("candidate_superglm_sha256", "6" * 64),
+        ("row_order_sha256", "6" * 64),
     ],
 )
 def test_existing_editor_publication_rejects_mismatched_lineage(
@@ -567,6 +582,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
         "split_set_id": "split-1",
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "f" * 64,
+        "row_order_sha256": "a" * 64,
+        **_ROOT_BUILD_IDENTITY,
     }
     identity = {
         "model_name": "HOME_FREQ",
@@ -648,6 +665,8 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
     expected_layer = (
         "model_frame_sha256"
         if field_name == "model_frame_sha256"
+        else field_name
+        if field_name in {*_ROOT_BUILD_IDENTITY, "row_order_sha256"}
         else "SQL lineage"
         if lineage_owner == "sql"
         else "bundle lineage"
@@ -1004,7 +1023,7 @@ def test_editor_candidate_artifact_is_verified_before_staging_or_sql(
         )
 
 
-def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
+def test_editor_export_persists_final_paths_and_degrades_unscoreable_champion(
     monkeypatch,
     tmp_path,
 ):
@@ -1065,9 +1084,8 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         bundle=bundle,
         champion=editor_candidate.ChampionSnapshot(
             deployment_slot="HOME_FREQ_UAT",
-            rate_package_id=None,
-            bundle=None,
-            unavailable_reason="no champion is deployed in HOME_FREQ_UAT",
+            rate_package_id=106,
+            bundle=replace(bundle, fitted_model={"model": "champion"}),
         ),
     )
     submission = SimpleNamespace(
@@ -1117,10 +1135,17 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     )
     monkeypatch.setattr(editor_candidate, "write_publication_receipt", fake_write_receipt)
     monkeypatch.setattr(editor_candidate, "inherited_cv_metrics", lambda bundle: ({}, {}))
+
+    def fake_training_comparison(*args, comparison_name, **kwargs):
+        del args, kwargs
+        if comparison_name == "champion":
+            raise KeyError("unseen categorical level")
+        return {}, {}
+
     monkeypatch.setattr(
         editor_candidate,
         "training_comparison_metrics",
-        lambda *args, **kwargs: ({}, {}),
+        fake_training_comparison,
     )
 
     exported = editor_candidate.export_edited_model(
@@ -1168,6 +1193,16 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert captured_export["options"]["offset_kind"] == "auto"
     assert exported.revision_metadata["claimed_identity"] == "analyst@example.test"
     assert "published_by" not in exported.revision_metadata
+    assert exported.revision_metadata["champion_comparison"] == {
+        "available": False,
+        "deployment_slot": "HOME_FREQ_UAT",
+        "rate_package_id": 106,
+        "reason": (
+            "the deployed champion could not score the parent frame: "
+            "KeyError: 'unseen categorical level'"
+        ),
+        "status": "UNAVAILABLE",
+    }
 
 
 def test_editor_publication_lock_serializes_the_same_submission(tmp_path):
@@ -1283,6 +1318,8 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         "candidate_superglm_git_sha": "f" * 40,
         "model_source_sha256": submission.model_source_sha256,
         "model_frame_sha256": "d" * 64,
+        "row_order_sha256": "6" * 64,
+        **_ROOT_BUILD_IDENTITY,
     }
 
     class Rows:
@@ -1325,6 +1362,8 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
         split_set_id="split-1",
         model_source_sha256="b" * 64,
         model_frame_sha256="d" * 64,
+        row_order_sha256="6" * 64,
+        **_ROOT_BUILD_IDENTITY,
     )
     load_calls = []
     champion_calls = []
@@ -1367,6 +1406,14 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
     assert "split_link.split_role = 'validation'" in statement
     assert "mr.model_version AS run_model_version" in statement
     assert "mr.export_id" in statement
+    assert "source_package.build_fingerprint_sha256" in statement
+    assert "source_run.model_run_id = COALESCE(" in statement
+    assert "mr.validation_source_model_run_id" in statement
+    assert "mr.builder_source_sha256" in statement
+    assert "mr.materialized_split_sha256" in statement
+    assert "mr.runtime_sha256" in statement
+    assert "mr.candidate_superglm_sha256" in statement
+    assert "split_set.row_order_sha256" in statement
     assert "manifest.model_frame_sha256" in statement
     assert "DATASET_MANIFEST AS manifest" in statement
 
@@ -1387,6 +1434,18 @@ def test_parent_candidate_uses_exact_configured_root_and_unambiguous_split_link(
             )
     row["model_frame_sha256"] = "d" * 64
     bundle.model_frame_sha256 = "d" * 64
+
+    for field_name in (*_ROOT_BUILD_IDENTITY, "row_order_sha256"):
+        original = row[field_name]
+        row[field_name] = "9" * 64
+        with pytest.raises(editor_candidate.EditorSubmissionError, match=field_name):
+            editor_candidate.load_parent_candidate(
+                engine,
+                submission,
+                allowed_root=configured_root,
+                model_config=injected_config,
+            )
+        row[field_name] = original
 
     for field_name in ("model_name", "model_version", "export_id"):
         original = getattr(bundle, field_name)

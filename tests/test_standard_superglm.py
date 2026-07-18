@@ -16,6 +16,7 @@ from pricing_pipeline.build_identity import BuildIdentity, BuildIdentityError
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.modeling.superglm_identity import SuperGLMIdentityError
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
 
@@ -513,14 +514,26 @@ def test_run_cross_validation_passes_strict_superglm_options():
     assert "curve_similarity" not in evidence.report
 
 
-def test_curve_capture_exception_retries_once_without_estimators_and_keeps_fallback_metrics():
+def test_curve_capture_exception_retries_once_without_estimators_and_keeps_fallback_metrics(
+    monkeypatch,
+):
     api = _api()
     calls = []
+
+    def failing_curve_builder(**kwargs):
+        del kwargs
+        raise RuntimeError("curve comparison\n  exploded " + "x" * 700)
+
+    monkeypatch.setattr(
+        api.superglm_curve_similarity,
+        "build_cv_curve_similarity",
+        failing_curve_builder,
+    )
 
     def fake_cross_validate(model, X, y, **kwargs):
         calls.append((model, X, y, dict(kwargs)))
         if kwargs["return_estimators"]:
-            raise RuntimeError("curve comparison\n  exploded " + "x" * 700)
+            api.superglm_curve_similarity.build_cv_curve_similarity()
         return _cv_result()
 
     inputs = api.ModelInputs(
@@ -555,15 +568,52 @@ def test_curve_capture_exception_retries_once_without_estimators_and_keeps_fallb
     assert len(evidence.validation_curve_capture.reason) == 500
 
 
-def test_curve_capture_fallback_failure_surfaces_with_first_failure_as_cause():
+def test_cv_failure_before_curve_capture_is_not_retried():
     api = _api()
     calls = []
 
     def fake_cross_validate(*args, **kwargs):
         del args
         calls.append(kwargs["return_estimators"])
+        raise SuperGLMIdentityError("audited CV identity failed")
+
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(SuperGLMIdentityError, match="audited CV identity failed"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance",),
+            cross_validate_fn=fake_cross_validate,
+        )
+
+    assert calls == [True]
+
+
+def test_curve_capture_fallback_failure_surfaces_with_first_failure_as_cause(monkeypatch):
+    api = _api()
+    calls = []
+
+    def failing_curve_builder(**kwargs):
+        del kwargs
+        raise ValueError("curve comparison failed")
+
+    monkeypatch.setattr(
+        api.superglm_curve_similarity,
+        "build_cv_curve_similarity",
+        failing_curve_builder,
+    )
+
+    def fake_cross_validate(*args, **kwargs):
+        del args
+        calls.append(kwargs["return_estimators"])
         if kwargs["return_estimators"]:
-            raise ValueError("curve comparison failed")
+            api.superglm_curve_similarity.build_cv_curve_similarity()
         raise RuntimeError("fallback scoring failed")
 
     inputs = api.ModelInputs(

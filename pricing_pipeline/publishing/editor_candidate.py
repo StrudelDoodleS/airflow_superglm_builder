@@ -19,7 +19,7 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
-from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.models.spec import ApprovedModelBuild, BUILD_IDENTITY_SHA256_FIELDS
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.package_writer import (
     ExpectedModelIdentity,
@@ -263,7 +263,13 @@ def _resolve_existing_editor_publication(
             mr.candidate_artifact_size_bytes,
             mr.candidate_python_version,
             mr.candidate_superglm_version,
-            mr.candidate_superglm_git_sha
+            mr.candidate_superglm_git_sha,
+            source_package.build_fingerprint_sha256,
+            mr.builder_source_sha256,
+            mr.materialized_split_sha256,
+            mr.runtime_sha256,
+            mr.candidate_superglm_sha256,
+            split_set.row_order_sha256
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
           ON pm.model_id = rp.model_id
@@ -271,6 +277,13 @@ def _resolve_existing_editor_publication(
           ON mr.rate_package_id = rp.rate_package_id
         LEFT JOIN {schemas.pricing}.MODEL_RUN AS parent
           ON parent.model_run_id = mr.parent_model_run_id
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS source_run
+          ON source_run.model_run_id = COALESCE(
+                mr.validation_source_model_run_id,
+                mr.model_run_id
+             )
+        LEFT JOIN {schemas.pricing}.PRICING_RATE_PACKAGE AS source_package
+          ON source_package.rate_package_id = source_run.rate_package_id
         LEFT JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
           ON manifest.manifest_id = mr.manifest_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
@@ -278,6 +291,9 @@ def _resolve_existing_editor_publication(
          AND split_link.manifest_id = mr.manifest_id
          AND split_link.dataset_role = 'training'
          AND split_link.split_role = 'validation'
+        LEFT JOIN {schemas.pricing}.CV_SPLIT_SET AS split_set
+          ON split_set.split_set_id = split_link.split_set_id
+         AND split_set.manifest_id = split_link.manifest_id
         WHERE pm.model_name = :model_name
           AND rp.parent_rate_package_id = :parent_rate_package_id
           AND rp.source_export_id = :export_id
@@ -380,6 +396,7 @@ def _resolve_existing_editor_publication(
     expected_bundle = {
         **expected_lineage,
         "model_version": row.get("model_version"),
+        **{field_name: row.get(field_name) for field_name in BUILD_IDENTITY_SHA256_FIELDS},
     }
     bundle_mismatches = [
         field for field, expected in expected_bundle.items() if getattr(bundle, field) != expected
@@ -541,7 +558,13 @@ def load_parent_candidate(
             mr.candidate_python_version,
             mr.candidate_superglm_version,
             mr.candidate_superglm_git_sha,
-            mr.model_source_sha256
+            mr.model_source_sha256,
+            source_package.build_fingerprint_sha256,
+            mr.builder_source_sha256,
+            mr.materialized_split_sha256,
+            mr.runtime_sha256,
+            mr.candidate_superglm_sha256,
+            split_set.row_order_sha256
         FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
         JOIN {schemas.pricing}.PRICING_MODEL AS pm
           ON pm.model_id = rp.model_id
@@ -549,11 +572,21 @@ def load_parent_candidate(
           ON mr.rate_package_id = rp.rate_package_id
         JOIN {schemas.pricing}.DATASET_MANIFEST AS manifest
           ON manifest.manifest_id = mr.manifest_id
+        LEFT JOIN {schemas.pricing}.MODEL_RUN AS source_run
+          ON source_run.model_run_id = COALESCE(
+                mr.validation_source_model_run_id,
+                mr.model_run_id
+             )
+        LEFT JOIN {schemas.pricing}.PRICING_RATE_PACKAGE AS source_package
+          ON source_package.rate_package_id = source_run.rate_package_id
         LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
           ON split_link.model_run_id = mr.model_run_id
          AND split_link.manifest_id = mr.manifest_id
          AND split_link.dataset_role = 'training'
          AND split_link.split_role = 'validation'
+        LEFT JOIN {schemas.pricing}.CV_SPLIT_SET AS split_set
+          ON split_set.split_set_id = split_link.split_set_id
+         AND split_set.manifest_id = split_link.manifest_id
         WHERE rp.rate_package_id = :rate_package_id
           AND mr.model_run_id = :model_run_id
         """
@@ -604,14 +637,15 @@ def load_parent_candidate(
         expected_superglm_git_sha=row["candidate_superglm_git_sha"],
         allowed_root=allowed_root,
     )
-    for field_name, expected_value in (
-        ("model_name", row["model_name"]),
-        ("model_version", row["run_model_version"]),
-        ("export_id", row["export_id"]),
-        ("manifest_id", submission.manifest_id),
-        ("split_set_id", submission.split_set_id),
-        ("model_source_sha256", submission.model_source_sha256),
-    ):
+    expected_bundle = {
+        "model_name": row["model_name"],
+        "model_version": row["run_model_version"],
+        "export_id": row["export_id"],
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        **{field_name: row.get(field_name) for field_name in BUILD_IDENTITY_SHA256_FIELDS},
+    }
+    for field_name, expected_value in expected_bundle.items():
         if getattr(bundle, field_name) != expected_value:
             raise EditorSubmissionError(
                 f"parent bundle {field_name} does not match SQL/submission lineage"
@@ -983,17 +1017,28 @@ def export_edited_model(
     )
     metrics.update(parent_metrics)
     metric_scopes.update(parent_scopes)
+    champion_comparison = parent.champion.revision_metadata()
     champion_bundle = parent.champion.bundle
     if champion_bundle is not None:
-        champion_metrics, champion_scopes = training_comparison_metrics(
-            champion_bundle.fitted_model,
-            edited_model,
-            parent.bundle,
-            comparison_name="champion",
-        )
-        metrics.update(champion_metrics)
-        metric_scopes.update(champion_scopes)
-    champion_comparison = parent.champion.revision_metadata()
+        try:
+            champion_metrics, champion_scopes = training_comparison_metrics(
+                champion_bundle.fitted_model,
+                edited_model,
+                parent.bundle,
+                comparison_name="champion",
+            )
+        except Exception as exc:
+            detail = " ".join(str(exc).split())
+            detail = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            reason = f"the deployed champion could not score the parent frame: {detail}"
+            champion_comparison = replace(
+                parent.champion,
+                bundle=None,
+                unavailable_reason=reason[:500],
+            ).revision_metadata()
+        else:
+            metrics.update(champion_metrics)
+            metric_scopes.update(champion_scopes)
     edited_bundle = replace(
         parent.bundle,
         fitted_model=edited_model,
