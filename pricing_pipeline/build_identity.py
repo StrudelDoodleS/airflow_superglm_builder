@@ -340,7 +340,9 @@ def _source_file_bytes(path: Path, *, label: str) -> bytes:
             source = raw_source
         else:
             raise BuildIdentityError(f"invalid model notebook source: {path}")
-        normalized_cells.append({"cell_type": str(cell.get("cell_type") or ""), "source": source})
+        cell_type = str(cell.get("cell_type") or "")
+        if cell_type == "code":
+            normalized_cells.append({"cell_type": cell_type, "source": source})
     return _canonical_json_bytes(normalized_cells)
 
 

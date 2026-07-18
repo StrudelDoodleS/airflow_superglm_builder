@@ -868,7 +868,7 @@ def record_model_run(
                     "model_run_id": model_run_id,
                     "metric_name": metric_name,
                     "metric_value": float((metrics or {})[metric_name]),
-                    "metric_scope": (metric_scopes or {}).get(metric_name),
+                    "metric_scope": (metric_scopes or {}).get(metric_name, "model_run"),
                 },
             )
         for split in validation_splits:

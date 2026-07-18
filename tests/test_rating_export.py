@@ -1186,6 +1186,22 @@ def test_existing_published_run_requires_exact_complete_evidence(tmp_path: Path)
         )
 
 
+def test_existing_published_run_retries_omitted_metric_scope_as_model_run(
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path).model_copy(update={"metric_scopes": {}})
+    evidence = _retry_evidence(tmp_path)
+    evidence["metrics"][0]["metric_scope"] = "model_run"
+
+    result = pipeline._resolve_existing_published_run(
+        _Engine(_EvidenceConnection(evidence)),
+        export,
+        allowed_artifact_root=tmp_path,
+    )
+
+    assert result.was_existing is True
+
+
 def test_existing_published_run_accepts_workbook_with_only_generated_timestamp_changes(
     tmp_path: Path,
 ):

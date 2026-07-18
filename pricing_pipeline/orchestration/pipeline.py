@@ -870,7 +870,7 @@ def _retry_evidence_conflicts(
     expected_metrics = {
         str(name): (
             float(value),
-            None if export.metric_scopes.get(name) is None else str(export.metric_scopes[name]),
+            str(export.metric_scopes.get(name, "model_run")),
         )
         for name, value in export.metrics.items()
     }

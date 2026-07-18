@@ -214,6 +214,25 @@ def test_record_model_run_derives_audit_evidence_from_approved_build():
     ]
 
 
+def test_record_model_run_uses_model_run_scope_when_metric_scope_is_omitted():
+    connection = _Connection()
+    build = _approved_build().model_copy(update={"metric_scopes": {}})
+
+    record_model_run(
+        None,
+        build=build,
+        dag_id="notebook",
+        airflow_run_id=build.export_id,
+        rate_package_id=43,
+        connection=connection,
+    )
+
+    metric_merge = next(
+        event for event in connection.events if "MERGE mlops.MODEL_RUN_METRIC" in event[0]
+    )
+    assert metric_merge[1]["metric_scope"] == "model_run"
+
+
 @pytest.mark.parametrize(
     ("case", "parent_model_run_id", "stored_parent_source", "expected_source"),
     [
