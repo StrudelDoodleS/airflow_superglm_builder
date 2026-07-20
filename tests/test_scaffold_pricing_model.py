@@ -35,7 +35,7 @@ def test_scaffold_template_is_checked_in_as_valid_notebook_json():
     assert notebook["cells"]
 
 
-def test_scaffold_separates_editor_open_from_publishing_the_retained_candidate(tmp_path):
+def test_scaffold_exposes_editor_session_preview_and_publish_as_separate_steps(tmp_path):
     scaffold_pricing_model(
         ScaffoldOptions(
             model_name="MY_MODEL",
@@ -45,18 +45,27 @@ def test_scaffold_separates_editor_open_from_publishing_the_retained_candidate(t
     )
 
     cells = _code_cells(tmp_path / "pricing_models" / "my_model" / "pricing_model.ipynb")
-    editor_index = next(index for index, cell in enumerate(cells) if ".editor()" in cell)
+    editor_index = next(
+        index for index, cell in enumerate(cells) if "EditorSession.from_model(" in cell
+    )
+    preview_index = next(
+        index for index, cell in enumerate(cells) if "editor_session.to_model()" in cell
+    )
     publish_index = next(index for index, cell in enumerate(cells) if "publish_edits(" in cell)
     editor_cell = cells[editor_index]
+    preview_cell = cells[preview_index]
     publish_cell = cells[publish_index]
     before_publish = publish_cell.split("publish_edits(", 1)[0]
 
-    assert editor_index < publish_index
+    assert editor_index < preview_index < publish_index
     assert "publish_edits(" not in editor_cell
     assert "reviewed = open_candidate(" in editor_cell
+    assert "editor_session.widget()" in editor_cell
+    assert "edited_model = editor_session.to_model()" in preview_cell
     assert "reviewed = None" not in before_publish
     assert "open_candidate(" not in before_publish
     assert "candidate=reviewed" in publish_cell
+    assert "editor_session=editor_session" in publish_cell
 
 
 def test_scaffold_renders_user_text_without_breaking_json_or_python(tmp_path):
@@ -118,6 +127,7 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert "ALLOW_REMOTE_WRITES = False" in cells[0]
     assert "PricingModelSpec(" in source
     assert "from superglm import Numeric, SuperGLM" in source
+    assert "from superglm.editor import EditorSession" in source
     assert source.count("FEATURES = {") == 1
     assert source.count("superglm_model = SuperGLM(") == 1
     assert '"feature_1": Numeric()' in source
@@ -139,6 +149,7 @@ def test_scaffold_writes_only_the_analyst_notebook_package(tmp_path):
     assert "publish_candidate(" in source
     assert "open_candidate(" in source
     assert "publish_edits(" in source
+    assert ".editor()" not in source
     assert "deploy_package(" in source
     assert "runtime_module=RUNTIME_MODULE" in source
     assert "build_pricing_model_dag" not in source
