@@ -112,25 +112,15 @@ def _cv_result_for(folds, metric_names=("deviance", "nll", "gini")):
         }
     )
     for metric_no, metric_name in enumerate(metric_names, start=1):
-        fold_scores[metric_name] = [
-            metric_no + (fold_no / 10) for fold_no in range(fold_count)
-        ]
-    row_count = max(
-        int(index)
-        for train, test in folds
-        for index in np.concatenate((train, test))
-    ) + 1
+        fold_scores[metric_name] = [metric_no + (fold_no / 10) for fold_no in range(fold_count)]
+    row_count = (
+        max(int(index) for train, test in folds for index in np.concatenate((train, test))) + 1
+    )
     return SimpleNamespace(
         fold_scores=fold_scores,
-        mean_scores={
-            name: np.float64(fold_scores[name].mean()) for name in metric_names
-        },
-        pooled_scores={
-            name: np.float64(fold_scores[name].mean()) for name in metric_names
-        },
-        std_scores={
-            name: np.float64(fold_scores[name].std(ddof=0)) for name in metric_names
-        },
+        mean_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
+        pooled_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
+        std_scores={name: np.float64(fold_scores[name].std(ddof=0)) for name in metric_names},
         fold_indices=folds,
         curve_similarity=None,
         oof_predictions=np.zeros(row_count),
@@ -244,11 +234,9 @@ def test_run_cross_validation_passes_strict_superglm_options():
 )
 def test_run_cross_validation_records_requested_metrics_for_every_split(folds):
     api = _api()
-    row_count = max(
-        int(index)
-        for train, test in folds
-        for index in np.concatenate((train, test))
-    ) + 1
+    row_count = (
+        max(int(index) for train, test in folds for index in np.concatenate((train, test))) + 1
+    )
     inputs = api.ModelInputs(
         X=pd.DataFrame({"age": np.arange(row_count, dtype=float)}),
         y=np.zeros(row_count),
@@ -263,9 +251,7 @@ def test_run_cross_validation_records_requested_metrics_for_every_split(folds):
         cross_validate_fn=lambda *args, **kwargs: _cv_result_for(folds),
     )
 
-    assert {
-        (item.fold_no, item.metric_name) for item in evidence.fold_metrics
-    } == {
+    assert {(item.fold_no, item.metric_name) for item in evidence.fold_metrics} == {
         (fold_no, metric_name)
         for fold_no in range(1, len(folds) + 1)
         for metric_name in ("deviance", "nll", "gini")
@@ -1226,7 +1212,9 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert superglm_model.clone_calls == 4
     assert all(model is not superglm_model for model in cv_models)
     assert all(model is not superglm_model for model in final_models)
-    assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))
+    assert all(
+        cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models)
+    )
     assert cv_models[0] is not cv_models[1]
     assert final_models[0] is not final_models[1]
     assert bundle.fitted_model is not superglm_model
@@ -1263,16 +1251,12 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert Path(result.candidate_artifact_path).exists()
     assert result.candidate_artifact_sha256
     assert result.model_source_sha256
-    assert result.rating_workbook_sha256 == api.hash_file_sha256(
-        first_paths["workbook"]
-    )
+    assert result.rating_workbook_sha256 == api.hash_file_sha256(first_paths["workbook"])
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]
-    assert bundle.cv_report["superglm_git_sha"] == (
-        "b91fbef5f1ef15aadfa0372963fed3864607d816"
-    )
+    assert bundle.cv_report["superglm_git_sha"] == ("b91fbef5f1ef15aadfa0372963fed3864607d816")
 
 
 def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(tmp_path):

@@ -200,14 +200,10 @@ def run_standard_superglm_build(
             ),
             offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
             offset_source=(
-                None
-                if inputs.offset_source is None
-                else np.asarray(inputs.offset_source).copy()
+                None if inputs.offset_source is None else np.asarray(inputs.offset_source).copy()
             ),
             export_weight=(
-                None
-                if inputs.export_weight is None
-                else np.asarray(inputs.export_weight).copy()
+                None if inputs.export_weight is None else np.asarray(inputs.export_weight).copy()
             ),
             cv_report=cv_report,
             model_name=model_config.model_name,
@@ -474,8 +470,7 @@ def run_cross_validation(
             for expected_part, returned_part in zip(expected, returned, strict=True)
         ):
             raise StandardSuperGLMError(
-                "SuperGLM CV returned fold membership that does not match "
-                f"requested fold {fold_no}"
+                f"SuperGLM CV returned fold membership that does not match requested fold {fold_no}"
             )
 
     for metric_name in _scoring_labels(scoring):
@@ -488,8 +483,7 @@ def run_cross_validation(
             missing_from.append("fold_scores")
         if missing_from:
             raise StandardSuperGLMError(
-                f"requested metric {metric_name!r} is missing from "
-                + ", ".join(missing_from)
+                f"requested metric {metric_name!r} is missing from " + ", ".join(missing_from)
             )
 
     non_converged = result.fold_scores.loc[

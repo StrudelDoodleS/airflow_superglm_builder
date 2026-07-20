@@ -123,9 +123,7 @@ def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
 
     assert inserted == len(source)
     with engine.connect() as connection:
-        count = connection.execute(
-            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
-        ).scalar_one()
+        count = connection.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
     assert count == len(source)
 
 
@@ -177,9 +175,7 @@ def test_load_fremtpl_raw_partial_store_survives_fetch_failure(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -209,9 +205,7 @@ def test_load_fremtpl_raw_wrong_fetched_count_does_not_clear_partial_store(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -719,9 +713,11 @@ def test_bulk_insert_fremtpl_raw_sqlite_replace_deletes_existing_rows(tmp_path):
 
     assert inserted == len(replacement)
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol")
-        ).scalars().all()
+        ids = (
+            connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol"))
+            .scalars()
+            .all()
+        )
     assert ids == [2, 3]
 
 

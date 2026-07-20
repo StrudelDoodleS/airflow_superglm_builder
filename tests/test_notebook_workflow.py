@@ -658,8 +658,12 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert inputs.y.name == "claim_count"
     pd.testing.assert_series_equal(inputs.offset, frame.set_index("policy_id")["term_offset"])
     pd.testing.assert_series_equal(inputs.offset_source, frame.set_index("policy_id")["term"])
-    pd.testing.assert_series_equal(inputs.sample_weight, frame.set_index("policy_id")["model_weight"])
-    pd.testing.assert_series_equal(inputs.export_weight, frame.set_index("policy_id")["rating_weight"])
+    pd.testing.assert_series_equal(
+        inputs.sample_weight, frame.set_index("policy_id")["model_weight"]
+    )
+    pd.testing.assert_series_equal(
+        inputs.export_weight, frame.set_index("policy_id")["rating_weight"]
+    )
     assert inputs.offset_source_name == "term"
     assert inputs.sample_weight_name == "model_weight"
     assert inputs.export_weight_name == "rating_weight"

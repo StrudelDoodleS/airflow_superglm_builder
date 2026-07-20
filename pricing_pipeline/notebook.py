@@ -152,8 +152,7 @@ class PricingModelSpec:
             value is not None for value in offset_fields
         ):
             raise ValueError(
-                "offset_column, offset_source_column, and offset_label must be "
-                "configured together"
+                "offset_column, offset_source_column, and offset_label must be configured together"
             )
         if not self.features:
             raise ValueError("features must contain at least one column")
@@ -210,8 +209,7 @@ class PricingModelSpec:
         overlaps = {
             column: assigned_roles
             for column, assigned_roles in roles.items()
-            if len(assigned_roles) > 1
-            and any(role in structural_roles for role in assigned_roles)
+            if len(assigned_roles) > 1 and any(role in structural_roles for role in assigned_roles)
         }
         if overlaps:
             detail = "; ".join(
@@ -439,9 +437,7 @@ def build_candidate(
     """Fit and export one candidate while deriving its audit evidence."""
     pricing.require_write("build_candidate")
     if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
+        raise StandardSuperGLMError("superglm_model must be an unfitted, copyable SuperGLM model")
     spec = model.spec
     required_columns = {
         *spec.features,

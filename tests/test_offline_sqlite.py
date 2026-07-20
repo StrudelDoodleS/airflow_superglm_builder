@@ -137,26 +137,36 @@ def test_offline_views_expose_fold_metrics_and_final_relativity(tmp_path):
         )
 
     with engine.connect() as connection:
-        splits = connection.execute(
-            text(
-                """
+        splits = (
+            connection.execute(
+                text(
+                    """
                 SELECT validation_split_no, deviance, nll, gini
                 FROM pricing.V_MODEL_VALIDATION_SPLIT
                 ORDER BY validation_split_no
                 """
+                )
             )
-        ).mappings().all()
-        summary = connection.execute(
-            text("SELECT * FROM pricing.V_MODEL_VALIDATION_SUMMARY")
-        ).mappings().one()
-        relativity = connection.execute(
-            text(
-                """
+            .mappings()
+            .all()
+        )
+        summary = (
+            connection.execute(text("SELECT * FROM pricing.V_MODEL_VALIDATION_SUMMARY"))
+            .mappings()
+            .one()
+        )
+        relativity = (
+            connection.execute(
+                text(
+                    """
                 SELECT term_name, level_value, model_fit_scope
                 FROM pricing.V_FINAL_MODEL_RELATIVITY
                 """
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert [dict(row) for row in splits] == [
         {"validation_split_no": 1, "deviance": 1.0, "nll": 2.0, "gini": 0.4},
@@ -178,9 +188,12 @@ def test_offline_views_expose_fold_metrics_and_final_relativity(tmp_path):
 
     apply_offline_ddl(engine)
     with engine.connect() as connection:
-        assert connection.execute(
-            text("SELECT COUNT(*) FROM pricing.V_MODEL_VALIDATION_SPLIT")
-        ).scalar_one() == 2
+        assert (
+            connection.execute(
+                text("SELECT COUNT(*) FROM pricing.V_MODEL_VALIDATION_SPLIT")
+            ).scalar_one()
+            == 2
+        )
 
 
 def test_offline_pricing_views_remain_valid_when_database_is_opened_directly(tmp_path):
@@ -200,9 +213,7 @@ def test_offline_pricing_views_remain_valid_when_database_is_opened_directly(tmp
     with sqlite3.connect(pricing_path) as connection:
         views = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'view'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'view'")
         }
         connection.execute("SELECT COUNT(*) FROM V_MODEL_VALIDATION_SPLIT").fetchone()
 

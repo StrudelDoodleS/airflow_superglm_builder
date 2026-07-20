@@ -562,14 +562,11 @@ def build_column_metadata(
             existing_roles = roles_by_column.setdefault(column, [])
             if existing_roles and not ({*existing_roles, role} <= combinable_roles):
                 raise ValueError(
-                    f"column {column!r} is declared as both "
-                    f"{'+'.join(existing_roles)} and {role}"
+                    f"column {column!r} is declared as both {'+'.join(existing_roles)} and {role}"
                 )
             existing_roles.append(role)
 
-    role_by_column = {
-        column: "+".join(roles) for column, roles in roles_by_column.items()
-    }
+    role_by_column = {column: "+".join(roles) for column, roles in roles_by_column.items()}
 
     column_df = pd.DataFrame(
         {
