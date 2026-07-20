@@ -31,6 +31,9 @@ FREMTPL_SOURCE_SYSTEM = "openml_41214"
 FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
 
 
+SUPERGLM_GIT_SHA = "b91fbef5f1ef15aadfa0372963fed3864607d816"
+
+
 @dataclass(frozen=True)
 class DatasetManifestResult:
     manifest_id: str
@@ -507,6 +510,7 @@ def runtime_dependency_metadata() -> str:
         "platform": platform.platform(),
         "implementation": platform.python_implementation(),
         "machine": platform.machine(),
+        "superglm_git_sha": SUPERGLM_GIT_SHA,
         "packages": {
             "numpy": np.__version__,
             "pandas": pd.__version__,

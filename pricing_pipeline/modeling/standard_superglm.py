@@ -16,6 +16,7 @@ from superglm import cross_validate
 
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
+    SUPERGLM_GIT_SHA,
     create_model_frame_manifest_with_split,
 )
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
@@ -189,6 +190,7 @@ def run_standard_superglm_build(
         cv_report["model_name"] = model_config.model_name
         cv_report["fit_mode"] = fit_mode
         cv_report["scoring"] = _scoring_labels(scoring)
+        cv_report["superglm_git_sha"] = SUPERGLM_GIT_SHA
         bundle = CandidateBundle(
             fitted_model=fitted,
             X=inputs.X.copy(),

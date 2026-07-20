@@ -84,6 +84,23 @@ def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):
     assert not hasattr(loaded, "offset_export_options")
 
 
+def test_candidate_checksum_binds_runtime_evidence(tmp_path):
+    _, _, _, save_candidate_bundle = _artifact_api()
+    original = _minimal_bundle()
+    with_revision = replace(
+        original,
+        cv_report={
+            **original.cv_report,
+            "superglm_git_sha": "b91fbef5f1ef15aadfa0372963fed3864607d816",
+        },
+    )
+
+    original_metadata = save_candidate_bundle(original, tmp_path / "original.joblib")
+    revision_metadata = save_candidate_bundle(with_revision, tmp_path / "revision.joblib")
+
+    assert original_metadata.sha256 != revision_metadata.sha256
+
+
 @pytest.mark.parametrize("digest", ["", "A" * 64, "a" * 63, "g" * 64])
 def test_candidate_bundle_rejects_invalid_model_frame_sha256(digest):
     CandidateArtifactError, _, _, _ = _artifact_api()
