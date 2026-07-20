@@ -172,7 +172,8 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.sample_weight_column == "model_weight"
     assert spec.export_weight_column == "rating_weight"
     assert spec.validation is validation
-    assert spec.scoring == ("deviance",)
+    assert spec.scoring == ("deviance", "nll", "gini")
+    assert replace(spec, scoring=("deviance",)).scoring == ("deviance",)
     assert spec.fit_mode == "fit_reml"
 
 
@@ -277,6 +278,7 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
     assert tuple(signature(api.publish_edits).parameters) == (
         "pricing",
         "candidate",
+        "editor_session",
         "reason",
         "created_by",
     )
@@ -479,12 +481,11 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
     )
 
 
-def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
+def test_build_candidate_delegates_model_state_to_standard_runner(
     monkeypatch,
     tmp_path,
 ):
     from pricing_pipeline import notebook as api
-    from pricing_pipeline.modeling.standard_superglm import StandardSuperGLMError
 
     context = replace(
         _context(api, tmp_path),
@@ -494,39 +495,42 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     model = _registered_model(api, tmp_path)
     frame = pd.DataFrame(
         {
-            "policy_id": [10],
-            "claim_count": [0.0],
-            "exposure": [1.0],
-            "age": [25.0],
-            "region": ["N"],
+            "policy_id": [10, 11],
+            "claim_count": [0.0, 1.0],
+            "exposure": [1.0, 1.0],
+            "age": [25.0, 35.0],
+            "region": ["N", "S"],
         }
     )
+    model_with_fitted_state = SimpleNamespace(_result=object())
+    captured = {}
 
     monkeypatch.setattr(
         api,
         "resolve_sqlite_model_version",
-        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+        lambda *args, **kwargs: "v7",
     )
+
+    def fake_standard_build(*args, **kwargs):
+        captured["superglm_model"] = kwargs["superglm_model"]
+        return _approved_build(tmp_path)
+
     monkeypatch.setattr(
         api,
         "run_standard_superglm_build",
-        lambda *args, **kwargs: pytest.fail("candidate artifacts were built"),
+        fake_standard_build,
     )
 
-    with pytest.raises(
-        StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
-    ):
-        api.build_candidate(
-            context,
-            model=model,
-            frame=frame,
-            superglm_model=SimpleNamespace(_result=object()),
-            data_as_of="2026-06-30",
-        )
+    candidate = api.build_candidate(
+        context,
+        model=model,
+        frame=frame,
+        superglm_model=model_with_fitted_state,
+        data_as_of="2026-06-30",
+    )
 
-    assert not context.settings.workbench_artifact_root.exists()
-    assert not context.settings.validation_split_artifact_root.exists()
+    assert captured["superglm_model"] is model_with_fitted_state
+    assert candidate.completed_build.model_version == "v7"
 
 
 @pytest.mark.parametrize(
@@ -656,8 +660,12 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert inputs.y.name == "claim_count"
     pd.testing.assert_series_equal(inputs.offset, frame.set_index("policy_id")["term_offset"])
     pd.testing.assert_series_equal(inputs.offset_source, frame.set_index("policy_id")["term"])
-    pd.testing.assert_series_equal(inputs.sample_weight, frame.set_index("policy_id")["model_weight"])
-    pd.testing.assert_series_equal(inputs.export_weight, frame.set_index("policy_id")["rating_weight"])
+    pd.testing.assert_series_equal(
+        inputs.sample_weight, frame.set_index("policy_id")["model_weight"]
+    )
+    pd.testing.assert_series_equal(
+        inputs.export_weight, frame.set_index("policy_id")["rating_weight"]
+    )
     assert inputs.offset_source_name == "term"
     assert inputs.sample_weight_name == "model_weight"
     assert inputs.export_weight_name == "rating_weight"
@@ -682,7 +690,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert "target_name" not in captured
     assert "deployment_slot" not in captured
     assert "validation_split" not in captured
-    assert captured["scoring"] == ("deviance",)
+    assert captured["scoring"] == ("deviance", "nll", "gini")
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
     assert contract.handling == "EXPORTED_FACTOR"
@@ -863,8 +871,6 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     candidate = SimpleNamespace(
         model_name=model.name,
         workbench=SimpleNamespace(engine=context.engine, model_config=model.config),
-        editor_session=session,
-        editor_widget=object(),
     )
     submission = SimpleNamespace(
         submission_id="submission-1",
@@ -895,6 +901,7 @@ def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path
     result = api.publish_edits(
         context,
         candidate=candidate,
+        editor_session=session,
         reason="Sparse age-band market adjustment",
         created_by="analyst@example.test",
     )
@@ -928,8 +935,6 @@ def test_publish_edits_rejects_candidate_opened_with_different_context(monkeypat
             engine=reviewed_context.engine,
             model_config=model.config,
         ),
-        editor_session=object(),
-        editor_widget=object(),
     )
 
     def unexpected_call(*args, **kwargs):
@@ -942,12 +947,13 @@ def test_publish_edits_rejects_candidate_opened_with_different_context(monkeypat
         api.publish_edits(
             publishing_context,
             candidate=candidate,
+            editor_session=object(),
             reason="Sparse age-band market adjustment",
             created_by="analyst@example.test",
         )
 
 
-def test_publish_edits_requires_an_open_editor(tmp_path):
+def test_publish_edits_requires_an_explicit_editor_session(tmp_path):
     from pricing_pipeline import notebook as api
 
     context = _context(api, tmp_path)
@@ -955,20 +961,14 @@ def test_publish_edits_requires_an_open_editor(tmp_path):
     candidate = SimpleNamespace(
         model_name=model.name,
         workbench=SimpleNamespace(model_config=model.config),
-        editor_session=None,
-        editor_widget=None,
     )
 
-    try:
+    with pytest.raises(TypeError, match="editor_session"):
         api.publish_edits(
             context,
             candidate=candidate,
             reason="Market adjustment",
         )
-    except RuntimeError as exc:
-        assert "Open the candidate editor" in str(exc)
-    else:
-        raise AssertionError("publish_edits accepted a candidate without an open editor")
 
 
 def test_deploy_package_uses_the_champion_snapshot_seen_during_review(monkeypatch, tmp_path):

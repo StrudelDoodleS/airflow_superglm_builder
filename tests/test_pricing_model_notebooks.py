@@ -31,6 +31,12 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
     assert "publish_candidate(" in source
     assert "open_candidate(" in source
     assert "publish_edits(" in source
+    assert "from superglm.editor import EditorSession" in source
+    assert "EditorSession.from_model(" in source
+    assert "editor_session.widget()" in source
+    assert "edited_model = editor_session.to_model()" in source
+    assert "editor_session=editor_session" in source
+    assert ".editor()" not in source
     assert "deploy_package(" in source
     assert "published.model_run_id" not in source
     assert "published.rate_package_id" not in source

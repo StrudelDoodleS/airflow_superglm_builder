@@ -36,6 +36,18 @@ def fremtpl_frame(**overrides):
     return pd.DataFrame(data)
 
 
+def _drop_current_pricing_views(connection) -> None:
+    connection.executescript(
+        """
+        DROP VIEW IF EXISTS V_PUBLISHED_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_FINAL_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_MODEL_VALIDATION_SUMMARY;
+        DROP VIEW IF EXISTS V_MODEL_VALIDATION_SPLIT;
+        """
+    )
+
+
 def test_fetch_fremtpl_uses_openml_id_and_resets_index(monkeypatch):
     calls = []
     source = fremtpl_frame()
@@ -111,9 +123,7 @@ def test_load_fremtpl_raw_loads_full_fetched_frame_into_empty_sqlite(
 
     assert inserted == len(source)
     with engine.connect() as connection:
-        count = connection.execute(
-            text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")
-        ).scalar_one()
+        count = connection.execute(text("SELECT COUNT(*) FROM pricing.FREMTPL_RAW")).scalar_one()
     assert count == len(source)
 
 
@@ -165,9 +175,7 @@ def test_load_fremtpl_raw_partial_store_survives_fetch_failure(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -197,9 +205,7 @@ def test_load_fremtpl_raw_wrong_fetched_count_does_not_clear_partial_store(
         load_fremtpl_raw(engine, replace=False)
 
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW")
-        ).scalars().all()
+        ids = connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW")).scalars().all()
     assert ids == [41]
 
 
@@ -275,6 +281,7 @@ def test_open_offline_sqlite_adds_parent_model_run_id_to_existing_store(tmp_path
     with sqlite3.connect(paths["pricing"]) as connection:
         existing_columns = {row[1] for row in connection.execute("PRAGMA table_info('MODEL_RUN')")}
         if "parent_model_run_id" in existing_columns:
+            _drop_current_pricing_views(connection)
             connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)
@@ -332,6 +339,7 @@ def test_open_offline_sqlite_backfills_parent_model_run_id_from_package_lineage(
                 (502, "export-child", 42, "b" * 64),
             ],
         )
+        _drop_current_pricing_views(connection)
         connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)
@@ -705,9 +713,11 @@ def test_bulk_insert_fremtpl_raw_sqlite_replace_deletes_existing_rows(tmp_path):
 
     assert inserted == len(replacement)
     with engine.connect() as connection:
-        ids = connection.execute(
-            text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol")
-        ).scalars().all()
+        ids = (
+            connection.execute(text("SELECT IDpol FROM pricing.FREMTPL_RAW ORDER BY IDpol"))
+            .scalars()
+            .all()
+        )
     assert ids == [2, 3]
 
 

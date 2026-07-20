@@ -17,10 +17,15 @@ from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExpor
 
 class _FakeModel:
     def __init__(self):
+        self.clone_calls = 0
         self.fit_X = None
         self.fit_y = None
         self.fit_sample_weight = None
         self.fit_offset = None
+
+    def clone_unfitted(self):
+        self.clone_calls += 1
+        return type(self)()
 
     def fit_reml(self, X, y, sample_weight=None, offset=None):
         self.fit_X = X.copy()
@@ -88,6 +93,37 @@ def _cv_result(*, converged=(True, True), oof_predictions=None):
         oof_predictions=(
             np.array([0.25, np.nan, 0.75]) if oof_predictions is None else oof_predictions
         ),
+        estimators=None,
+    )
+
+
+def _cv_result_for(folds, metric_names=("deviance", "nll", "gini")):
+    fold_count = len(folds)
+    fold_scores = pd.DataFrame(
+        {
+            "fold": range(fold_count),
+            "n_train": [len(train) for train, _ in folds],
+            "n_test": [len(test) for _, test in folds],
+            "fit_time_s": [0.1] * fold_count,
+            "score_time_s": [0.01] * fold_count,
+            "converged": [True] * fold_count,
+            "n_iter": [3] * fold_count,
+            "effective_df": [1.5] * fold_count,
+        }
+    )
+    for metric_no, metric_name in enumerate(metric_names, start=1):
+        fold_scores[metric_name] = [metric_no + (fold_no / 10) for fold_no in range(fold_count)]
+    row_count = (
+        max(int(index) for train, test in folds for index in np.concatenate((train, test))) + 1
+    )
+    return SimpleNamespace(
+        fold_scores=fold_scores,
+        mean_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
+        pooled_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
+        std_scores={name: np.float64(fold_scores[name].std(ddof=0)) for name in metric_names},
+        fold_indices=folds,
+        curve_similarity=None,
+        oof_predictions=np.zeros(row_count),
         estimators=None,
     )
 
@@ -177,6 +213,137 @@ def test_run_cross_validation_passes_strict_superglm_options():
     assert evidence.fold_indices[0][1].tolist() == [2]
 
 
+@pytest.mark.parametrize(
+    "folds",
+    [
+        [
+            (
+                np.array([candidate for candidate in range(5) if candidate != fold_no]),
+                np.array([fold_no]),
+            )
+            for fold_no in range(5)
+        ],
+        [
+            (np.array([2, 3, 4, 5]), np.array([0, 1])),
+            (np.array([0, 1, 4, 5]), np.array([2, 3])),
+            (np.array([0, 1, 2, 3]), np.array([4, 5])),
+        ],
+        [(np.array([0, 1, 2, 3]), np.array([4]))],
+    ],
+    ids=("kfold", "column-kfold", "holdout"),
+)
+def test_run_cross_validation_records_requested_metrics_for_every_split(folds):
+    api = _api()
+    row_count = (
+        max(int(index) for train, test in folds for index in np.concatenate((train, test))) + 1
+    )
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": np.arange(row_count, dtype=float)}),
+        y=np.zeros(row_count),
+    )
+
+    evidence = api.run_cross_validation(
+        object(),
+        inputs,
+        split_indices=folds,
+        fit_mode="fit_reml",
+        scoring=("deviance", "nll", "gini"),
+        cross_validate_fn=lambda *args, **kwargs: _cv_result_for(folds),
+    )
+
+    assert {(item.fold_no, item.metric_name) for item in evidence.fold_metrics} == {
+        (fold_no, metric_name)
+        for fold_no in range(1, len(folds) + 1)
+        for metric_name in ("deviance", "nll", "gini")
+    }
+    assert {
+        "cv_mean_deviance",
+        "cv_std_deviance",
+        "cv_mean_nll",
+        "cv_std_nll",
+        "cv_mean_gini",
+        "cv_std_gini",
+        "cv_oof_coverage",
+    } <= evidence.metrics.keys()
+
+
+def test_run_cross_validation_rejects_returned_fold_membership_drift():
+    api = _api()
+    expected_folds = _folds()
+    returned_folds = [
+        (np.array([0, 2]), np.array([1])),
+        expected_folds[1],
+    ]
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="fold membership"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=expected_folds,
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: _cv_result_for(returned_folds),
+        )
+
+
+@pytest.mark.parametrize(
+    "missing_from",
+    ("mean_scores", "pooled_scores", "std_scores", "fold_scores"),
+)
+def test_run_cross_validation_rejects_missing_requested_metric(missing_from):
+    api = _api()
+    result = _cv_result_for(_folds())
+    if missing_from == "mean_scores":
+        del result.mean_scores["gini"]
+    elif missing_from == "pooled_scores":
+        del result.pooled_scores["gini"]
+    elif missing_from == "std_scores":
+        del result.std_scores["gini"]
+    else:
+        result.fold_scores = result.fold_scores.drop(columns="gini")
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match=rf"requested metric.*gini.*{missing_from}",
+    ):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: result,
+        )
+
+
+def test_run_cross_validation_rejects_non_finite_requested_metric():
+    api = _api()
+    result = _cv_result_for(_folds())
+    result.fold_scores.loc[0, "nll"] = np.inf
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="must be finite"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: result,
+        )
+
+
 def test_run_cross_validation_rejects_non_converged_fold():
     api = _api()
     inputs = api.ModelInputs(
@@ -239,7 +406,7 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
         )
 
 
-def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence(
+def test_standard_runner_rejects_model_without_public_clone_before_persistence(
     tmp_path,
     monkeypatch,
 ):
@@ -252,14 +419,13 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
         }
     )
 
-    class UncopyableModel:
-        def __deepcopy__(self, memo):
-            del memo
-            raise RuntimeError("copy blocked")
+    class UnclonableModel:
+        def clone_unfitted(self):
+            raise ValueError("clone blocked")
 
     def must_not_run(*args, **kwargs):
         del args, kwargs
-        pytest.fail("training and persistence must not run after model copy failure")
+        pytest.fail("training and persistence must not run after model clone failure")
 
     monkeypatch.setattr(api, "run_cross_validation", must_not_run)
     monkeypatch.setattr(api, "fit_full_model", must_not_run)
@@ -269,13 +435,13 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
 
     with pytest.raises(
         api.StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
+        match=r"superglm_model must support SuperGLM\.clone_unfitted\(\)",
     ) as exc_info:
         api.run_standard_superglm_build(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
-            superglm_model=UncopyableModel(),
+            superglm_model=UnclonableModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -297,67 +463,7 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
             created_by="pytest",
         )
 
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert not (tmp_path / "run").exists()
-    assert not (tmp_path / "splits").exists()
-
-
-def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
-    tmp_path,
-    monkeypatch,
-):
-    from superglm import Numeric, SuperGLM
-
-    api = _api()
-    frame = pd.DataFrame(
-        {
-            "policy_id": np.arange(20),
-            "target": np.resize([0.0, 1.0], 20),
-            "age": np.linspace(20.0, 60.0, 20),
-        }
-    )
-    superglm_model = SuperGLM(
-        features={"age": Numeric()},
-        selection_penalty=0.0,
-    ).fit(frame[["age"]], frame["target"])
-    assert superglm_model._result is not None
-
-    monkeypatch.setattr(
-        api,
-        "deepcopy",
-        lambda model: pytest.fail(f"fitted model was copied: {model!r}"),
-    )
-
-    with pytest.raises(
-        api.StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
-    ):
-        api.run_standard_superglm_build(
-            object(),
-            frame=frame,
-            inputs=_identity_bound_inputs(api, frame),
-            superglm_model=superglm_model,
-            split_indices=_folds(),
-            fit_mode="fit_reml",
-            scoring=("deviance",),
-            output_dir=tmp_path / "run",
-            model_id=17,
-            model_config=_model_config(),
-            model_version="v1",
-            export_id="export-1",
-            effective_from=None,
-            manifest_spec=ModelFrameManifestSpec(
-                dataset_name="home_freq_frame",
-                source_system="pytest",
-                data_as_of_date="2026-06-30",
-                pk_columns=("policy_id",),
-                target_column="target",
-            ),
-            split_artifact_root=tmp_path / "splits",
-            model_source_root=tmp_path / "source",
-            created_by="pytest",
-        )
-
+    assert isinstance(exc_info.value.__cause__, ValueError)
     assert not (tmp_path / "run").exists()
     assert not (tmp_path / "splits").exists()
 
@@ -1113,9 +1219,12 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert captured["manifest"]["validation_split"] == validation_split
     assert len(cv_models) == 2
     assert len(final_models) == 2
+    assert superglm_model.clone_calls == 4
     assert all(model is not superglm_model for model in cv_models)
     assert all(model is not superglm_model for model in final_models)
-    assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))
+    assert all(
+        cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models)
+    )
     assert cv_models[0] is not cv_models[1]
     assert final_models[0] is not final_models[1]
     assert bundle.fitted_model is not superglm_model
@@ -1152,13 +1261,12 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert Path(result.candidate_artifact_path).exists()
     assert result.candidate_artifact_sha256
     assert result.model_source_sha256
-    assert result.rating_workbook_sha256 == api.hash_file_sha256(
-        first_paths["workbook"]
-    )
+    assert result.rating_workbook_sha256 == api.hash_file_sha256(first_paths["workbook"])
     assert result.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]
+    assert bundle.cv_report["superglm_git_sha"] == ("b91fbef5f1ef15aadfa0372963fed3864607d816")
 
 
 def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(tmp_path):

@@ -790,9 +790,9 @@ def training_comparison_metrics(
     return metrics, {metric_name: scope for metric_name in metrics}
 
 
-def inherited_cv_metrics(
+def parent_cv_metrics(
     bundle: CandidateBundle,
-) -> tuple[dict[str, float], dict[str, str]]:
+) -> dict[str, float]:
     report = bundle.cv_report
     metrics: dict[str, float] = {}
     for report_name, metric_prefix in (
@@ -805,15 +805,15 @@ def inherited_cv_metrics(
             value = float(raw_value)
             if not math.isfinite(value):
                 raise EditorSubmissionError(
-                    f"inherited CV metric {report_name}.{metric_name} is not finite"
+                    f"parent CV metric {report_name}.{metric_name} is not finite"
                 )
             metrics[f"{metric_prefix}_{metric_name}"] = value
     if report.get("oof_coverage") is not None:
         coverage = float(report["oof_coverage"])
         if not math.isfinite(coverage):
-            raise EditorSubmissionError("inherited CV OOF coverage is not finite")
+            raise EditorSubmissionError("parent CV OOF coverage is not finite")
         metrics["cv_oof_coverage"] = coverage
-    return metrics, {metric_name: "inherited_cv" for metric_name in metrics}
+    return metrics
 
 
 def _canonical_json(payload: dict[str, Any]) -> str:
@@ -874,15 +874,13 @@ def export_edited_model(
     receipt_path = final_dir / "publication_receipt.json"
     receipt_sha256 = write_publication_receipt(receipt, receipt_write_path)
 
-    metrics, metric_scopes = inherited_cv_metrics(parent.bundle)
-    parent_metrics, parent_scopes = training_comparison_metrics(
+    baseline_cv_metrics = parent_cv_metrics(parent.bundle)
+    metrics, metric_scopes = training_comparison_metrics(
         parent.bundle.fitted_model,
         edited_model,
         parent.bundle,
         comparison_name="parent",
     )
-    metrics.update(parent_metrics)
-    metric_scopes.update(parent_scopes)
     champion_bundle = parent.champion.bundle
     if champion_bundle is not None:
         champion_metrics, champion_scopes = training_comparison_metrics(
@@ -897,6 +895,7 @@ def export_edited_model(
     edited_bundle = replace(
         parent.bundle,
         fitted_model=edited_model,
+        cv_report={},
         model_name=parent.model_name,
         model_version=parent.model_version,
         export_id=_editor_export_id(submission),
@@ -923,9 +922,7 @@ def export_edited_model(
         "editor_session_sha256": submission.editor_session_sha256,
         "editor_session_size_bytes": submission.editor_session_size_bytes,
         "baseline_candidate_sha256": submission.baseline_candidate_sha256,
-        "baseline_cv_metrics": {
-            name: value for name, value in metrics.items() if name.startswith("cv_")
-        },
+        "baseline_cv_metrics": baseline_cv_metrics,
         "comparison_metrics": {
             name: value for name, value in metrics.items() if name.startswith("editor_training_")
         },

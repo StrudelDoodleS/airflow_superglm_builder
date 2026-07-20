@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,23 +51,6 @@ class Candidate:
     model_run_id: int
     bundle: CandidateBundle
     technical: dict[str, Any]
-    editor_session: Any | None = field(default=None, init=False, repr=False)
-    editor_widget: Any | None = field(default=None, init=False, repr=False)
-
-    def editor(self):
-        """Open this candidate in one retained, live SuperGLM editor session."""
-        if self.editor_session is None:
-            self.editor_session = self.workbench.create_editor_session(self.bundle)
-            self.editor_widget = self.editor_session.widget()
-        return self.editor_widget
-
-    def close_editor(self) -> None:
-        if self.editor_widget is not None:
-            close = getattr(self.editor_widget, "close", None)
-            if callable(close):
-                close()
-        self.editor_widget = None
-        self.editor_session = None
 
 
 class Workbench:
@@ -81,15 +64,6 @@ class Workbench:
         self.engine = engine
         self.settings = settings
         self.model_config = model_config
-
-    def create_editor_session(self, bundle: CandidateBundle):
-        from superglm.editor import EditorSession
-
-        return EditorSession.from_model(
-            bundle.fitted_model,
-            train_data=(bundle.X, bundle.y, bundle.sample_weight, bundle.offset),
-            cv_report=bundle.cv_report,
-        )
 
     def _required_model_name(self, model_name: str) -> str:
         cleaned = str(model_name).strip()

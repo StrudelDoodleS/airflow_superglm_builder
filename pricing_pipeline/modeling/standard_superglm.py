@@ -6,7 +6,6 @@ import math
 import re
 import shutil
 from collections.abc import Callable, Iterable, Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from superglm import cross_validate
 
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
+    SUPERGLM_GIT_SHA,
     create_model_frame_manifest_with_split,
 )
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
@@ -109,16 +109,12 @@ def run_standard_superglm_build(
         offset_source=inputs.offset_source,
         offset_source_name=offset_source_name,
     )
-    if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
     try:
-        cv_model = deepcopy(superglm_model)
-        final_model = deepcopy(superglm_model)
-    except Exception as exc:
+        cv_model = superglm_model.clone_unfitted()
+        final_model = superglm_model.clone_unfitted()
+    except (AttributeError, TypeError, ValueError) as exc:
         raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
+            "superglm_model must support SuperGLM.clone_unfitted()"
         ) from exc
     source_sha256 = hash_model_source(model_source_root)
     folds = list(split_indices)
@@ -194,6 +190,7 @@ def run_standard_superglm_build(
         cv_report["model_name"] = model_config.model_name
         cv_report["fit_mode"] = fit_mode
         cv_report["scoring"] = _scoring_labels(scoring)
+        cv_report["superglm_git_sha"] = SUPERGLM_GIT_SHA
         bundle = CandidateBundle(
             fitted_model=fitted,
             X=inputs.X.copy(),
@@ -203,14 +200,10 @@ def run_standard_superglm_build(
             ),
             offset=None if inputs.offset is None else np.asarray(inputs.offset).copy(),
             offset_source=(
-                None
-                if inputs.offset_source is None
-                else np.asarray(inputs.offset_source).copy()
+                None if inputs.offset_source is None else np.asarray(inputs.offset_source).copy()
             ),
             export_weight=(
-                None
-                if inputs.export_weight is None
-                else np.asarray(inputs.export_weight).copy()
+                None if inputs.export_weight is None else np.asarray(inputs.export_weight).copy()
             ),
             cv_report=cv_report,
             model_name=model_config.model_name,
@@ -461,6 +454,39 @@ def run_cross_validation(
     )
     if result.fold_indices is None:
         raise StandardSuperGLMError("SuperGLM CV did not return fold indices")
+
+    expected_folds = splitter.folds
+    returned_folds = tuple(result.fold_indices)
+    if len(returned_folds) != len(expected_folds):
+        raise StandardSuperGLMError(
+            "SuperGLM CV returned fold membership that does not match the requested folds"
+        )
+    for fold_no, (expected, returned) in enumerate(
+        zip(expected_folds, returned_folds, strict=True),
+        start=1,
+    ):
+        if not all(
+            np.array_equal(expected_part, np.asarray(returned_part))
+            for expected_part, returned_part in zip(expected, returned, strict=True)
+        ):
+            raise StandardSuperGLMError(
+                f"SuperGLM CV returned fold membership that does not match requested fold {fold_no}"
+            )
+
+    for metric_name in _scoring_labels(scoring):
+        missing_from = []
+        if metric_name not in result.mean_scores:
+            missing_from.append("mean_scores")
+        if metric_name not in result.pooled_scores:
+            missing_from.append("pooled_scores")
+        if metric_name not in result.std_scores:
+            missing_from.append("std_scores")
+        if metric_name not in result.fold_scores.columns:
+            missing_from.append("fold_scores")
+        if missing_from:
+            raise StandardSuperGLMError(
+                f"requested metric {metric_name!r} is missing from " + ", ".join(missing_from)
+            )
 
     non_converged = result.fold_scores.loc[
         ~result.fold_scores["converged"].astype(bool), "fold"

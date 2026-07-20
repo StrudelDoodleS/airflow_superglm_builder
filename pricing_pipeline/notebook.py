@@ -27,7 +27,6 @@ from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
-    StandardSuperGLMError,
     canonical_row_identity_index,
     run_standard_superglm_build,
 )
@@ -91,7 +90,7 @@ class PricingModelSpec:
     sample_weight_column: str | None = None
     export_weight_column: str | None = None
     data_as_of_column: str | None = None
-    scoring: tuple[str, ...] = ("deviance",)
+    scoring: tuple[str, ...] = ("deviance", "nll", "gini")
     fit_mode: str = "fit_reml"
 
     def __post_init__(self) -> None:
@@ -152,8 +151,7 @@ class PricingModelSpec:
             value is not None for value in offset_fields
         ):
             raise ValueError(
-                "offset_column, offset_source_column, and offset_label must be "
-                "configured together"
+                "offset_column, offset_source_column, and offset_label must be configured together"
             )
         if not self.features:
             raise ValueError("features must contain at least one column")
@@ -210,8 +208,7 @@ class PricingModelSpec:
         overlaps = {
             column: assigned_roles
             for column, assigned_roles in roles.items()
-            if len(assigned_roles) > 1
-            and any(role in structural_roles for role in assigned_roles)
+            if len(assigned_roles) > 1 and any(role in structural_roles for role in assigned_roles)
         }
         if overlaps:
             detail = "; ".join(
@@ -438,10 +435,6 @@ def build_candidate(
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
     pricing.require_write("build_candidate")
-    if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
     spec = model.spec
     required_columns = {
         *spec.features,
@@ -610,24 +603,23 @@ def publish_edits(
     pricing: NotebookContext,
     *,
     candidate,
+    editor_session,
     reason: str,
     created_by: str | None = None,
 ):
-    """Persist and synchronously publish one retained editor session."""
+    """Persist and synchronously publish the analyst's editor session."""
     pricing.require_write("publish_edits")
     if pricing.mode == "local":
         raise RuntimeError(
             "Remote mode is required for the editor; local SQLite records "
             "candidate audit evidence but does not publish editor revisions."
         )
-    if candidate.editor_session is None or candidate.editor_widget is None:
-        raise RuntimeError("Open the candidate editor before publishing edits")
     if candidate.workbench.engine is not pricing.engine:
         raise ValueError("candidate was opened with a different notebook context")
     identity = _created_by(created_by)
     submission = save_editor_submission(
         candidate,
-        editor_session=candidate.editor_session,
+        editor_session=editor_session,
         reason=_required_text(reason, "reason"),
         claimed_identity=identity,
     )

@@ -69,6 +69,23 @@ def test_readme_documents_automatic_audit_evidence_and_lineage():
         assert expected in readme
 
 
+def test_readme_documents_inspection_editor_and_audit_view_flow():
+    readme = _readme()
+
+    for expected in (
+        "candidate.metrics",
+        "EditorSession.from_model",
+        "editor_session.to_model",
+        "editor_session=editor_session",
+        "V_MODEL_VALIDATION_SPLIT",
+        "V_MODEL_VALIDATION_SUMMARY",
+        "V_FINAL_MODEL_RELATIVITY",
+        "do not inherit validation metrics",
+        "continuous spline SQL export",
+    ):
+        assert expected in readme
+
+
 def test_readme_documents_explicit_independent_offset_and_weight_inputs():
     readme = _readme()
 

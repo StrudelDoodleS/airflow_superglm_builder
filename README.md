@@ -37,10 +37,11 @@ Open the notebook and work from top to bottom:
 2. Load the source data and perform visible feature transforms in Python.
 3. Declare `PricingModelSpec` and the validation strategy.
 4. Define the feature objects and `SuperGLM` with ordinary Python.
-5. Call `register_model`, `build_candidate`, and `publish_candidate`.
-6. Optionally open the published package in the editor and publish retained
-   edits.
-7. Optionally deploy the exact package that was opened and reviewed.
+5. Call `register_model` and `build_candidate`, then inspect `candidate.metrics`.
+6. Call `publish_candidate` only when the build evidence is acceptable.
+7. Optionally create a visible `EditorSession`, preview its model, and publish
+   the retained edits.
+8. Optionally deploy the exact package that was opened and reviewed.
 
 There is no generated training module, DAG factory, TOML model factory, or
 analyst-facing metadata form. The notebook is the model definition.
@@ -129,7 +130,8 @@ arguments:
   metadata needed to interpret the frame checksum;
 - validation method, parameters, folds, split membership evidence, and split
   artifact checksum when materialized;
-- model source checksum and runtime dependency metadata;
+- model source checksum and runtime dependency metadata, including the pinned
+  SuperGLM git revision;
 - candidate bundle path, format, size, checksum, Python version, and SuperGLM
   version;
 - rating workbook and publication-receipt checksums, rechecked across staging;
@@ -244,23 +246,47 @@ Publishing a trained candidate does not change a live deployment.
 lineage, candidate artifact checksum, runtime compatibility, and the bundle's
 model name/version/export identity before loading it.
 
-`publish_edits(...)` saves the authoritative editor session, replays it against
-the verified parent model, publishes a child package, and records both package
-and model-run parentage. The original package remains immutable.
+The editor lifecycle stays visible in the notebook:
+
+```python
+from superglm.editor import EditorSession
+
+reviewed = open_candidate(pricing, model=model, package_version=3)
+train_data = (reviewed.bundle.X, reviewed.bundle.y,
+              reviewed.bundle.sample_weight, reviewed.bundle.offset)
+editor_session = EditorSession.from_model(
+    reviewed.bundle.fitted_model,
+    train_data=train_data,
+    cv_report=reviewed.bundle.cv_report,
+)
+display(editor_session.widget())
+edited_model = editor_session.to_model()
+edited = publish_edits(pricing, candidate=reviewed,
+                       editor_session=editor_session, reason=EDIT_REASON)
+```
+
+`publish_edits(...)` saves that authoritative session, replays it against the
+verified parent model, and publishes an immutable child package.
 
 `deploy_package(...)` accepts only a `Candidate` returned by `open_candidate`.
 It carries the champion snapshot seen during review, so deployment fails rather
 than silently overwriting a champion that changed in the meantime.
 
+## Audit views
+
+Query `pricing.V_MODEL_VALIDATION_SPLIT` for each held-out fold and
+`pricing.V_MODEL_VALIDATION_SUMMARY` for run-level mean and standard deviation.
+`pricing.V_FINAL_MODEL_RELATIVITY` contains final fitted package relativities,
+never validation-fold models, using `term_name` and the actual `level_value`.
+
+Edited packages retain parent IDs but do not inherit validation metrics they did
+not produce. Future continuous spline SQL export needs a separate exact scoring contract.
+
 ## Optional services
 
-The notebook workflow needs no Docker and no local service manager. For separate
-experiments, install the optional extra with `uv sync --extra mlflow` and start a
-local server with `scripts/start_mlflow_local.py`; the pricing publication path
-does not currently send data to it.
-
-The SQL lineage and rate-package publication path does not depend on an MLflow
-tracking database.
+The approved workflow needs neither Docker nor MLflow. Separate experiments may
+use `uv sync --extra mlflow` and `scripts/start_mlflow_local.py`; SQL publication
+does not depend on that tracking database.
 
 ## Verification
 
@@ -270,5 +296,4 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Never commit model-local `.local/` databases, notebook outputs, credentials, or
-work connection modules.
+Never commit model-local `.local/` databases, outputs, credentials, or work modules.

@@ -276,6 +276,10 @@ def apply_offline_ddl(engine: Engine) -> None:
         except BaseException:
             connection.rollback()
             raise
+        connection.executescript(
+            (OFFLINE_DDL_DIR / "pricing_views.sql").read_text(encoding="utf-8")
+        )
+        connection.commit()
     finally:
         connection.close()
 
