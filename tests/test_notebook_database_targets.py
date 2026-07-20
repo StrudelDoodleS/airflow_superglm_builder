@@ -113,8 +113,25 @@ def test_connect_local_creates_persistent_attached_schema_databases(tmp_path):
         count = connection.execute(
             text("SELECT COUNT(*) FROM pricing.PRICING_MODEL WHERE model_name = 'PRESERVED'")
         ).scalar_one()
+        views = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    """
+                    SELECT name
+                    FROM pricing.sqlite_master
+                    WHERE type = 'view'
+                    """
+                )
+            )
+        }
 
     assert count == 1
+    assert {
+        "V_FINAL_MODEL_RELATIVITY",
+        "V_MODEL_VALIDATION_SPLIT",
+        "V_MODEL_VALIDATION_SUMMARY",
+    } <= views
 
 
 def test_local_sqlite_uses_a_file_backed_transaction_coordinator(tmp_path):
