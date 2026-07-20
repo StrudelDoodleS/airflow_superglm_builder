@@ -157,6 +157,11 @@ SELECT
     MAX(CASE WHEN fm.metric_name = 'deviance' THEN fm.metric_value END) AS deviance,
     MAX(CASE WHEN fm.metric_name = 'nll' THEN fm.metric_value END) AS nll,
     MAX(CASE WHEN fm.metric_name = 'gini' THEN fm.metric_value END) AS gini
+-- SQLite cannot persist a pricing view that references the separately attached
+-- mlops database, and this view must remain usable when pricing.sqlite is opened
+-- directly. Local publication separately writes and verifies the equivalent
+-- training/validation MODEL_RUN_SPLIT_SET link. SQL Server uses that normalized
+-- role-filtered link in V035.
 FROM MODEL_RUN AS mr
 JOIN PRICING_MODEL AS m
   ON m.model_id = mr.model_id

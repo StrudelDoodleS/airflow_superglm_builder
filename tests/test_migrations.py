@@ -120,6 +120,8 @@ def test_validation_and_final_relativity_views_use_existing_audit_tables():
     assert "CONCAT(c.term_name, '=')" in sql
 
     assert "JOIN mlops.MODEL_RUN_SPLIT_SET" in sql
+    assert "run_split.dataset_role = 'training'" in sql
+    assert "run_split.split_role = 'validation'" in sql
     assert "JOIN pricing.CV_FOLD_METRIC" in sql
     assert "fm.model_run_id = mr.model_run_id" in sql
     assert "MAX(CASE WHEN fm.metric_name = 'deviance'" in sql

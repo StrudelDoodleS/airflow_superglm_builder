@@ -481,12 +481,11 @@ def test_register_model_accepts_python_spec(monkeypatch, tmp_path):
     )
 
 
-def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
+def test_build_candidate_delegates_model_state_to_standard_runner(
     monkeypatch,
     tmp_path,
 ):
     from pricing_pipeline import notebook as api
-    from pricing_pipeline.modeling.standard_superglm import StandardSuperGLMError
 
     context = replace(
         _context(api, tmp_path),
@@ -496,39 +495,42 @@ def test_build_candidate_rejects_fitted_model_before_version_or_artifact_work(
     model = _registered_model(api, tmp_path)
     frame = pd.DataFrame(
         {
-            "policy_id": [10],
-            "claim_count": [0.0],
-            "exposure": [1.0],
-            "age": [25.0],
-            "region": ["N"],
+            "policy_id": [10, 11],
+            "claim_count": [0.0, 1.0],
+            "exposure": [1.0, 1.0],
+            "age": [25.0, 35.0],
+            "region": ["N", "S"],
         }
     )
+    model_with_fitted_state = SimpleNamespace(_result=object())
+    captured = {}
 
     monkeypatch.setattr(
         api,
         "resolve_sqlite_model_version",
-        lambda *args, **kwargs: pytest.fail("model version was reserved"),
+        lambda *args, **kwargs: "v7",
     )
+
+    def fake_standard_build(*args, **kwargs):
+        captured["superglm_model"] = kwargs["superglm_model"]
+        return _approved_build(tmp_path)
+
     monkeypatch.setattr(
         api,
         "run_standard_superglm_build",
-        lambda *args, **kwargs: pytest.fail("candidate artifacts were built"),
+        fake_standard_build,
     )
 
-    with pytest.raises(
-        StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
-    ):
-        api.build_candidate(
-            context,
-            model=model,
-            frame=frame,
-            superglm_model=SimpleNamespace(_result=object()),
-            data_as_of="2026-06-30",
-        )
+    candidate = api.build_candidate(
+        context,
+        model=model,
+        frame=frame,
+        superglm_model=model_with_fitted_state,
+        data_as_of="2026-06-30",
+    )
 
-    assert not context.settings.workbench_artifact_root.exists()
-    assert not context.settings.validation_split_artifact_root.exists()
+    assert captured["superglm_model"] is model_with_fitted_state
+    assert candidate.completed_build.model_version == "v7"
 
 
 @pytest.mark.parametrize(
