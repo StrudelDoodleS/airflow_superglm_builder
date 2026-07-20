@@ -17,10 +17,15 @@ from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExpor
 
 class _FakeModel:
     def __init__(self):
+        self.clone_calls = 0
         self.fit_X = None
         self.fit_y = None
         self.fit_sample_weight = None
         self.fit_offset = None
+
+    def clone_unfitted(self):
+        self.clone_calls += 1
+        return type(self)()
 
     def fit_reml(self, X, y, sample_weight=None, offset=None):
         self.fit_X = X.copy()
@@ -239,7 +244,7 @@ def test_standard_runner_requires_explicit_canonical_row_ids(tmp_path):
         )
 
 
-def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence(
+def test_standard_runner_rejects_model_without_public_clone_before_persistence(
     tmp_path,
     monkeypatch,
 ):
@@ -252,14 +257,13 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
         }
     )
 
-    class UncopyableModel:
-        def __deepcopy__(self, memo):
-            del memo
-            raise RuntimeError("copy blocked")
+    class UnclonableModel:
+        def clone_unfitted(self):
+            raise ValueError("clone blocked")
 
     def must_not_run(*args, **kwargs):
         del args, kwargs
-        pytest.fail("training and persistence must not run after model copy failure")
+        pytest.fail("training and persistence must not run after model clone failure")
 
     monkeypatch.setattr(api, "run_cross_validation", must_not_run)
     monkeypatch.setattr(api, "fit_full_model", must_not_run)
@@ -269,13 +273,13 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
 
     with pytest.raises(
         api.StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
+        match=r"superglm_model must support SuperGLM\.clone_unfitted\(\)",
     ) as exc_info:
         api.run_standard_superglm_build(
             object(),
             frame=frame,
             inputs=_identity_bound_inputs(api, frame),
-            superglm_model=UncopyableModel(),
+            superglm_model=UnclonableModel(),
             split_indices=_folds(),
             fit_mode="fit_reml",
             scoring=("deviance",),
@@ -297,67 +301,7 @@ def test_standard_runner_rejects_uncopyable_model_before_training_or_persistence
             created_by="pytest",
         )
 
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert not (tmp_path / "run").exists()
-    assert not (tmp_path / "splits").exists()
-
-
-def test_standard_runner_rejects_fitted_model_before_copy_or_persistence(
-    tmp_path,
-    monkeypatch,
-):
-    from superglm import Numeric, SuperGLM
-
-    api = _api()
-    frame = pd.DataFrame(
-        {
-            "policy_id": np.arange(20),
-            "target": np.resize([0.0, 1.0], 20),
-            "age": np.linspace(20.0, 60.0, 20),
-        }
-    )
-    superglm_model = SuperGLM(
-        features={"age": Numeric()},
-        selection_penalty=0.0,
-    ).fit(frame[["age"]], frame["target"])
-    assert superglm_model._result is not None
-
-    monkeypatch.setattr(
-        api,
-        "deepcopy",
-        lambda model: pytest.fail(f"fitted model was copied: {model!r}"),
-    )
-
-    with pytest.raises(
-        api.StandardSuperGLMError,
-        match="superglm_model must be an unfitted, copyable SuperGLM model",
-    ):
-        api.run_standard_superglm_build(
-            object(),
-            frame=frame,
-            inputs=_identity_bound_inputs(api, frame),
-            superglm_model=superglm_model,
-            split_indices=_folds(),
-            fit_mode="fit_reml",
-            scoring=("deviance",),
-            output_dir=tmp_path / "run",
-            model_id=17,
-            model_config=_model_config(),
-            model_version="v1",
-            export_id="export-1",
-            effective_from=None,
-            manifest_spec=ModelFrameManifestSpec(
-                dataset_name="home_freq_frame",
-                source_system="pytest",
-                data_as_of_date="2026-06-30",
-                pk_columns=("policy_id",),
-                target_column="target",
-            ),
-            split_artifact_root=tmp_path / "splits",
-            model_source_root=tmp_path / "source",
-            created_by="pytest",
-        )
-
+    assert isinstance(exc_info.value.__cause__, ValueError)
     assert not (tmp_path / "run").exists()
     assert not (tmp_path / "splits").exists()
 
@@ -1113,6 +1057,7 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert captured["manifest"]["validation_split"] == validation_split
     assert len(cv_models) == 2
     assert len(final_models) == 2
+    assert superglm_model.clone_calls == 4
     assert all(model is not superglm_model for model in cv_models)
     assert all(model is not superglm_model for model in final_models)
     assert all(cv_model is not final_model for cv_model, final_model in zip(cv_models, final_models))

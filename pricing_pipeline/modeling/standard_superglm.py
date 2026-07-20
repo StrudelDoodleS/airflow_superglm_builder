@@ -6,7 +6,6 @@ import math
 import re
 import shutil
 from collections.abc import Callable, Iterable, Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -109,16 +108,12 @@ def run_standard_superglm_build(
         offset_source=inputs.offset_source,
         offset_source_name=offset_source_name,
     )
-    if getattr(superglm_model, "_result", None) is not None:
-        raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
-        )
     try:
-        cv_model = deepcopy(superglm_model)
-        final_model = deepcopy(superglm_model)
-    except Exception as exc:
+        cv_model = superglm_model.clone_unfitted()
+        final_model = superglm_model.clone_unfitted()
+    except (AttributeError, TypeError, ValueError) as exc:
         raise StandardSuperGLMError(
-            "superglm_model must be an unfitted, copyable SuperGLM model"
+            "superglm_model must support SuperGLM.clone_unfitted()"
         ) from exc
     source_sha256 = hash_model_source(model_source_root)
     folds = list(split_indices)
