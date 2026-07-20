@@ -98,6 +98,40 @@ def test_dataset_manifest_offset_contract_migration_adds_explicit_audit_columns(
     assert "dm.export_weight_column" in sql
 
 
+def test_validation_and_final_relativity_views_use_existing_audit_tables():
+    path = Path("db/migrations/V035__validation_metrics_and_final_relativity_views.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    for view_name in (
+        "V_MODEL_RELATIVITY",
+        "V_PUBLISHED_MODEL_RELATIVITY",
+        "V_FINAL_MODEL_RELATIVITY",
+        "V_MODEL_VALIDATION_SPLIT",
+        "V_MODEL_VALIDATION_SUMMARY",
+    ):
+        assert f"CREATE OR ALTER VIEW pricing.{view_name}" in sql
+
+    assert "b.term_name" in sql
+    assert "AS level_value" in sql
+    assert "PACKAGE_FINAL_MODEL" in sql
+    assert "feature_name" not in sql
+    assert "term_level" not in sql
+    assert "CONCAT(c.term_name, '=')" in sql
+
+    assert "JOIN mlops.MODEL_RUN_SPLIT_SET" in sql
+    assert "JOIN pricing.CV_FOLD_METRIC" in sql
+    assert "fm.model_run_id = mr.model_run_id" in sql
+    assert "MAX(CASE WHEN fm.metric_name = 'deviance'" in sql
+    assert "MAX(CASE WHEN fm.metric_name = 'nll'" in sql
+    assert "MAX(CASE WHEN fm.metric_name = 'gini'" in sql
+    assert "FROM mlops.MODEL_RUN_METRIC" in sql
+    assert "cv_mean_deviance" in sql
+    assert "cv_std_deviance" in sql
+    assert "cv_pooled_deviance" in sql
+    assert "parent_metric" not in sql
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 
