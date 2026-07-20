@@ -36,6 +36,18 @@ def fremtpl_frame(**overrides):
     return pd.DataFrame(data)
 
 
+def _drop_current_pricing_views(connection) -> None:
+    connection.executescript(
+        """
+        DROP VIEW IF EXISTS V_PUBLISHED_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_FINAL_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_MODEL_RELATIVITY;
+        DROP VIEW IF EXISTS V_MODEL_VALIDATION_SUMMARY;
+        DROP VIEW IF EXISTS V_MODEL_VALIDATION_SPLIT;
+        """
+    )
+
+
 def test_fetch_fremtpl_uses_openml_id_and_resets_index(monkeypatch):
     calls = []
     source = fremtpl_frame()
@@ -275,6 +287,7 @@ def test_open_offline_sqlite_adds_parent_model_run_id_to_existing_store(tmp_path
     with sqlite3.connect(paths["pricing"]) as connection:
         existing_columns = {row[1] for row in connection.execute("PRAGMA table_info('MODEL_RUN')")}
         if "parent_model_run_id" in existing_columns:
+            _drop_current_pricing_views(connection)
             connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)
@@ -332,6 +345,7 @@ def test_open_offline_sqlite_backfills_parent_model_run_id_from_package_lineage(
                 (502, "export-child", 42, "b" * 64),
             ],
         )
+        _drop_current_pricing_views(connection)
         connection.execute("ALTER TABLE MODEL_RUN DROP COLUMN parent_model_run_id")
 
     upgraded, _paths = open_offline_sqlite(tmp_path)

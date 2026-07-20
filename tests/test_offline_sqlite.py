@@ -183,6 +183,32 @@ def test_offline_views_expose_fold_metrics_and_final_relativity(tmp_path):
         ).scalar_one() == 2
 
 
+def test_offline_pricing_views_remain_valid_when_database_is_opened_directly(tmp_path):
+    import sqlite3
+
+    pricing_path = tmp_path / "pricing.sqlite"
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": pricing_path,
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    engine.dispose()
+
+    with sqlite3.connect(pricing_path) as connection:
+        views = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'view'"
+            )
+        }
+        connection.execute("SELECT COUNT(*) FROM V_MODEL_VALIDATION_SPLIT").fetchone()
+
+    assert "V_MODEL_VALIDATION_SPLIT" in views
+
+
 def test_offline_upgrade_adds_dataset_manifest_frame_evidence_columns(tmp_path):
     engine = sqlite_engine_with_offline_schemas(
         {
