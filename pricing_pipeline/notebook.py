@@ -91,7 +91,7 @@ class PricingModelSpec:
     sample_weight_column: str | None = None
     export_weight_column: str | None = None
     data_as_of_column: str | None = None
-    scoring: tuple[str, ...] = ("deviance",)
+    scoring: tuple[str, ...] = ("deviance", "nll", "gini")
     fit_mode: str = "fit_reml"
 
     def __post_init__(self) -> None:

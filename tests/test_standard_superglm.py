@@ -97,6 +97,47 @@ def _cv_result(*, converged=(True, True), oof_predictions=None):
     )
 
 
+def _cv_result_for(folds, metric_names=("deviance", "nll", "gini")):
+    fold_count = len(folds)
+    fold_scores = pd.DataFrame(
+        {
+            "fold": range(fold_count),
+            "n_train": [len(train) for train, _ in folds],
+            "n_test": [len(test) for _, test in folds],
+            "fit_time_s": [0.1] * fold_count,
+            "score_time_s": [0.01] * fold_count,
+            "converged": [True] * fold_count,
+            "n_iter": [3] * fold_count,
+            "effective_df": [1.5] * fold_count,
+        }
+    )
+    for metric_no, metric_name in enumerate(metric_names, start=1):
+        fold_scores[metric_name] = [
+            metric_no + (fold_no / 10) for fold_no in range(fold_count)
+        ]
+    row_count = max(
+        int(index)
+        for train, test in folds
+        for index in np.concatenate((train, test))
+    ) + 1
+    return SimpleNamespace(
+        fold_scores=fold_scores,
+        mean_scores={
+            name: np.float64(fold_scores[name].mean()) for name in metric_names
+        },
+        pooled_scores={
+            name: np.float64(fold_scores[name].mean()) for name in metric_names
+        },
+        std_scores={
+            name: np.float64(fold_scores[name].std(ddof=0)) for name in metric_names
+        },
+        fold_indices=folds,
+        curve_similarity=None,
+        oof_predictions=np.zeros(row_count),
+        estimators=None,
+    )
+
+
 def test_precomputed_splitter_replays_exact_folds():
     api = _api()
     splitter = api.PrecomputedSplitter(_folds(), row_count=3)
@@ -180,6 +221,131 @@ def test_run_cross_validation_passes_strict_superglm_options():
     assert captured["fit_mode"] == "fit_reml"
     assert evidence.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert evidence.fold_indices[0][1].tolist() == [2]
+
+
+@pytest.mark.parametrize(
+    "folds",
+    [
+        [
+            (
+                np.array([candidate for candidate in range(5) if candidate != fold_no]),
+                np.array([fold_no]),
+            )
+            for fold_no in range(5)
+        ],
+        [
+            (np.array([2, 3, 4, 5]), np.array([0, 1])),
+            (np.array([0, 1, 4, 5]), np.array([2, 3])),
+            (np.array([0, 1, 2, 3]), np.array([4, 5])),
+        ],
+        [(np.array([0, 1, 2, 3]), np.array([4]))],
+    ],
+    ids=("kfold", "column-kfold", "holdout"),
+)
+def test_run_cross_validation_records_requested_metrics_for_every_split(folds):
+    api = _api()
+    row_count = max(
+        int(index)
+        for train, test in folds
+        for index in np.concatenate((train, test))
+    ) + 1
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": np.arange(row_count, dtype=float)}),
+        y=np.zeros(row_count),
+    )
+
+    evidence = api.run_cross_validation(
+        object(),
+        inputs,
+        split_indices=folds,
+        fit_mode="fit_reml",
+        scoring=("deviance", "nll", "gini"),
+        cross_validate_fn=lambda *args, **kwargs: _cv_result_for(folds),
+    )
+
+    assert {
+        (item.fold_no, item.metric_name) for item in evidence.fold_metrics
+    } == {
+        (fold_no, metric_name)
+        for fold_no in range(1, len(folds) + 1)
+        for metric_name in ("deviance", "nll", "gini")
+    }
+    assert {
+        "cv_mean_deviance",
+        "cv_std_deviance",
+        "cv_mean_nll",
+        "cv_std_nll",
+        "cv_mean_gini",
+        "cv_std_gini",
+        "cv_oof_coverage",
+    } <= evidence.metrics.keys()
+
+
+def test_run_cross_validation_rejects_returned_fold_membership_drift():
+    api = _api()
+    expected_folds = _folds()
+    returned_folds = [
+        (np.array([0, 2]), np.array([1])),
+        expected_folds[1],
+    ]
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="fold membership"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=expected_folds,
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: _cv_result_for(returned_folds),
+        )
+
+
+@pytest.mark.parametrize("missing_from", ("aggregate", "fold"))
+def test_run_cross_validation_rejects_missing_requested_metric(missing_from):
+    api = _api()
+    result = _cv_result_for(_folds())
+    if missing_from == "aggregate":
+        del result.mean_scores["gini"]
+    else:
+        result.fold_scores = result.fold_scores.drop(columns="gini")
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="requested metric.*gini"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: result,
+        )
+
+
+def test_run_cross_validation_rejects_non_finite_requested_metric():
+    api = _api()
+    result = _cv_result_for(_folds())
+    result.fold_scores.loc[0, "nll"] = np.inf
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"age": [20.0, 30.0, 40.0]}),
+        y=np.array([0.0, 1.0, 0.0]),
+    )
+
+    with pytest.raises(api.StandardSuperGLMError, match="must be finite"):
+        api.run_cross_validation(
+            object(),
+            inputs,
+            split_indices=_folds(),
+            fit_mode="fit_reml",
+            scoring=("deviance", "nll", "gini"),
+            cross_validate_fn=lambda *args, **kwargs: result,
+        )
 
 
 def test_run_cross_validation_rejects_non_converged_fold():

@@ -172,7 +172,8 @@ def test_pricing_model_spec_holds_analyst_decisions():
     assert spec.sample_weight_column == "model_weight"
     assert spec.export_weight_column == "rating_weight"
     assert spec.validation is validation
-    assert spec.scoring == ("deviance",)
+    assert spec.scoring == ("deviance", "nll", "gini")
+    assert replace(spec, scoring=("deviance",)).scoring == ("deviance",)
     assert spec.fit_mode == "fit_reml"
 
 
@@ -682,7 +683,7 @@ def test_build_candidate_keeps_offset_source_and_weights_independent(monkeypatch
     assert "target_name" not in captured
     assert "deployment_slot" not in captured
     assert "validation_split" not in captured
-    assert captured["scoring"] == ("deviance",)
+    assert captured["scoring"] == ("deviance", "nll", "gini")
     assert captured["fit_mode"] == "fit_reml"
     contract = captured["offset_contract"]
     assert contract.handling == "EXPORTED_FACTOR"
