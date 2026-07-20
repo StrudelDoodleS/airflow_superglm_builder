@@ -239,6 +239,9 @@ SELECT
     AVG(deviance) AS mean_deviance,
     sqrt(MAX(AVG(deviance * deviance) - AVG(deviance) * AVG(deviance), 0.0))
         AS std_deviance,
+    -- Pooled scores live in the separately attached mlops database. SQLite
+    -- cannot expose them from a persistent pricing.sqlite view without copying
+    -- audit data, so local callers inspect candidate.metrics or mlops directly.
     CAST(NULL AS REAL) AS pooled_deviance,
     AVG(nll) AS mean_nll,
     sqrt(MAX(AVG(nll * nll) - AVG(nll) * AVG(nll), 0.0)) AS std_nll,

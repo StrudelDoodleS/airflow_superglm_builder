@@ -290,12 +290,19 @@ def test_run_cross_validation_rejects_returned_fold_membership_drift():
         )
 
 
-@pytest.mark.parametrize("missing_from", ("aggregate", "fold"))
+@pytest.mark.parametrize(
+    "missing_from",
+    ("mean_scores", "pooled_scores", "std_scores", "fold_scores"),
+)
 def test_run_cross_validation_rejects_missing_requested_metric(missing_from):
     api = _api()
     result = _cv_result_for(_folds())
-    if missing_from == "aggregate":
+    if missing_from == "mean_scores":
         del result.mean_scores["gini"]
+    elif missing_from == "pooled_scores":
+        del result.pooled_scores["gini"]
+    elif missing_from == "std_scores":
+        del result.std_scores["gini"]
     else:
         result.fold_scores = result.fold_scores.drop(columns="gini")
     inputs = api.ModelInputs(
@@ -303,7 +310,10 @@ def test_run_cross_validation_rejects_missing_requested_metric(missing_from):
         y=np.array([0.0, 1.0, 0.0]),
     )
 
-    with pytest.raises(api.StandardSuperGLMError, match="requested metric.*gini"):
+    with pytest.raises(
+        api.StandardSuperGLMError,
+        match=rf"requested metric.*gini.*{missing_from}",
+    ):
         api.run_cross_validation(
             object(),
             inputs,

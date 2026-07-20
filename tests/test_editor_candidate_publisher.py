@@ -45,9 +45,7 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "model_source_sha256": "b" * 64,
         "model_frame_sha256": "f" * 64,
         "metrics": {"editor_training_deviance_delta": 0.009},
-        "metric_scopes": {
-            "editor_training_deviance_delta": "editor_training_parent"
-        },
+        "metric_scopes": {"editor_training_deviance_delta": "editor_training_parent"},
     }
     values.update(overrides)
     return ApprovedModelBuild(**values)
@@ -803,7 +801,12 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         offset=np.log(term / 12.0),
         offset_source=term,
         export_weight=rating_weight,
-        cv_report={},
+        cv_report={
+            "mean_scores": {"deviance": 0.48},
+            "pooled_scores": {"deviance": 0.47},
+            "std_scores": {"deviance": 0.03},
+            "oof_coverage": 1.0,
+        },
         model_name="HOME_FREQ",
         model_version="20260603",
         export_id="parent-export",
@@ -886,7 +889,6 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(editor_candidate, "write_publication_receipt", fake_write_receipt)
-    monkeypatch.setattr(editor_candidate, "inherited_cv_metrics", lambda bundle: ({}, {}))
     monkeypatch.setattr(
         editor_candidate,
         "training_comparison_metrics",
@@ -914,6 +916,14 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert build.split_set_id == submission.split_set_id
     assert build.model_source_sha256 == submission.model_source_sha256
     assert build.model_frame_sha256 == bundle.model_frame_sha256
+    assert build.metrics == {}
+    assert build.metric_scopes == {}
+    assert exported.revision_metadata["baseline_cv_metrics"] == {
+        "cv_mean_deviance": 0.48,
+        "cv_pooled_deviance": 0.47,
+        "cv_std_deviance": 0.03,
+        "cv_oof_coverage": 1.0,
+    }
     assert (write_dir / "rating_tables.xlsx").read_bytes() == b"workbook"
     assert (write_dir / "candidate_bundle.joblib").is_file()
     assert not final_dir.exists()
@@ -921,6 +931,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert envelope["bundle"].model_name == "HOME_FREQ"
     assert envelope["bundle"].model_version == "20260603"
     assert envelope["bundle"].export_id == "editor__submission_1"
+    assert envelope["bundle"].cv_report == {}
     pd.testing.assert_series_equal(captured_export["weight"], rating_weight)
     np.testing.assert_allclose(captured_export["options"]["offset"], np.log(term / 12.0))
     pd.testing.assert_series_equal(captured_export["options"]["offset_source"], term)
@@ -1879,11 +1890,11 @@ def test_package_sql_parity_applies_fitted_offset_as_sql_exposure():
     )
 
 
-def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
+def test_parent_cv_metrics_are_labeled_as_revision_baseline():
     import numpy as np
     import pandas as pd
 
-    from pricing_pipeline.publishing.editor_candidate import inherited_cv_metrics
+    from pricing_pipeline.publishing.editor_candidate import parent_cv_metrics
     from pricing_pipeline.workbench.artifacts import CandidateBundle
 
     bundle = CandidateBundle(
@@ -1910,7 +1921,7 @@ def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
         offset_contract={"handling": "NONE"},
     )
 
-    metrics, scopes = inherited_cv_metrics(bundle)
+    metrics = parent_cv_metrics(bundle)
 
     assert metrics == {
         "cv_mean_deviance": 0.48,
@@ -1918,4 +1929,3 @@ def test_editor_child_inherits_original_cv_baseline_with_explicit_scope():
         "cv_std_deviance": 0.03,
         "cv_oof_coverage": 1.0,
     }
-    assert set(scopes.values()) == {"inherited_cv"}
