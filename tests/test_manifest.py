@@ -339,8 +339,8 @@ def test_runtime_dependency_metadata_records_python_platform_and_core_versions()
     assert metadata["packages"]["numpy"]
     assert metadata["packages"]["pandas"]
     assert metadata["packages"]["sklearn"]
-    assert "superglm" in metadata["packages"]
-    assert metadata["superglm_git_sha"] == "b91fbef5f1ef15aadfa0372963fed3864607d816"
+    assert metadata["packages"]["superglm"]
+    assert "superglm_git_sha" not in metadata
 
 
 class FakeBeginConnection:
