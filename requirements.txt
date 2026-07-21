@@ -1,6 +1,6 @@
 azure-identity
 joblib
-superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@b91fbef5f1ef15aadfa0372963fed3864607d816
+superglm>=0.12
 mlflow
 numpy
 openpyxl

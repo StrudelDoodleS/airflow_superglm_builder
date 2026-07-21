@@ -1,4 +1,5 @@
 import os
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -248,17 +249,19 @@ def test_env_example_does_not_ship_invalid_fernet_placeholder():
     assert "Fernet.generate_key()" in env_example
 
 
-def test_superglm_runtime_dependency_is_pinned_to_commit():
-    requirements = Path("requirements.txt").read_text(encoding="utf-8")
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    expected = (
-        "superglm[editor] @ git+https://github.com/StrudelDoodleS/superglm.git@"
-        "b91fbef5f1ef15aadfa0372963fed3864607d816"
-    )
+def test_superglm_runtime_dependency_uses_pypi_without_git_provenance():
+    requirements = Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
 
-    assert expected in requirements
-    assert f'"{expected}"' in pyproject
-    assert "git+https://github.com/StrudelDoodleS/superglm.git\n" not in requirements
+    assert "superglm>=0.12" in requirements
+    assert "superglm>=0.12" in pyproject["project"]["dependencies"]
+    assert not any(line.startswith("superglm[") for line in requirements)
+
+    superglm_package = next(
+        package for package in lock["package"] if package["name"] == "superglm"
+    )
+    assert superglm_package["source"] == {"registry": "https://pypi.org/simple"}
 
 
 def test_workbench_artifact_dependency_is_direct():
