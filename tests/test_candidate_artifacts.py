@@ -91,7 +91,7 @@ def test_candidate_checksum_binds_runtime_evidence(tmp_path):
         original,
         cv_report={
             **original.cv_report,
-            "superglm_git_sha": "b91fbef5f1ef15aadfa0372963fed3864607d816",
+            "superglm_version": "0.12.0",
         },
     )
 

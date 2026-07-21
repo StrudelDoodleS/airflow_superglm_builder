@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1108,7 +1109,11 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
 
     monkeypatch.setattr(api, "export_rating_tables", fake_export)
     monkeypatch.setattr(api, "create_model_frame_manifest_with_split", fake_manifest)
-    monkeypatch.setattr(api, "build_superglm_publication_receipt", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        api,
+        "build_superglm_publication_receipt",
+        lambda *args, **kwargs: SimpleNamespace(superglm_version=version("superglm")),
+    )
     monkeypatch.setattr(api, "write_publication_receipt", fake_receipt_writer)
     monkeypatch.setattr(api, "fit_full_model", capture_fit_full_model)
 
@@ -1266,7 +1271,8 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
     assert bundle.cv_report["model_name"] == "HOME_FREQ"
     assert bundle.cv_report["fit_mode"] == "fit_reml"
     assert bundle.cv_report["scoring"] == ["deviance"]
-    assert bundle.cv_report["superglm_git_sha"] == ("b91fbef5f1ef15aadfa0372963fed3864607d816")
+    assert bundle.cv_report["superglm_version"] == result.candidate_superglm_version
+    assert "superglm_git_sha" not in bundle.cv_report
 
 
 def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(tmp_path):
