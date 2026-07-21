@@ -120,7 +120,11 @@ def _cv_result_for(folds, metric_names=("deviance", "nll", "gini")):
     return SimpleNamespace(
         fold_scores=fold_scores,
         mean_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
-        pooled_scores={name: np.float64(fold_scores[name].mean()) for name in metric_names},
+        pooled_scores={
+            name: np.float64(fold_scores[name].mean())
+            for name in metric_names
+            if name in {"deviance", "nll"}
+        },
         std_scores={name: np.float64(fold_scores[name].std(ddof=0)) for name in metric_names},
         fold_indices=folds,
         curve_similarity=None,
@@ -266,6 +270,9 @@ def test_run_cross_validation_records_requested_metrics_for_every_split(folds):
         "cv_std_gini",
         "cv_oof_coverage",
     } <= evidence.metrics.keys()
+    assert evidence.metrics["cv_pooled_deviance"] > 0.0
+    assert evidence.metrics["cv_pooled_nll"] > 0.0
+    assert "cv_pooled_gini" not in evidence.metrics
 
 
 def test_run_cross_validation_rejects_returned_fold_membership_drift():
@@ -293,15 +300,13 @@ def test_run_cross_validation_rejects_returned_fold_membership_drift():
 
 @pytest.mark.parametrize(
     "missing_from",
-    ("mean_scores", "pooled_scores", "std_scores", "fold_scores"),
+    ("mean_scores", "std_scores", "fold_scores"),
 )
 def test_run_cross_validation_rejects_missing_requested_metric(missing_from):
     api = _api()
     result = _cv_result_for(_folds())
     if missing_from == "mean_scores":
         del result.mean_scores["gini"]
-    elif missing_from == "pooled_scores":
-        del result.pooled_scores["gini"]
     elif missing_from == "std_scores":
         del result.std_scores["gini"]
     else:
