@@ -476,8 +476,6 @@ def run_cross_validation(
         missing_from = []
         if metric_name not in result.mean_scores:
             missing_from.append("mean_scores")
-        if metric_name not in result.pooled_scores:
-            missing_from.append("pooled_scores")
         if metric_name not in result.std_scores:
             missing_from.append("std_scores")
         if metric_name not in result.fold_scores.columns:
