@@ -1390,6 +1390,7 @@ def test_v2_submission_rejects_changed_feature_names(
     ("result", "prediction", "message"),
     [
         (None, [1.0], "not fitted"),
+        (object(), None, "no callable predict"),
         (object(), [float("inf")], "invalid training predictions"),
     ],
 )
@@ -1407,7 +1408,7 @@ def test_v2_submission_rejects_unusable_final_model(
     model = SimpleNamespace(
         features={"x": object()},
         _result=result,
-        predict=lambda X, offset=None: prediction,
+        predict=None if prediction is None else lambda X, offset=None: prediction,
     )
     parent = SimpleNamespace(
         bundle=SimpleNamespace(
@@ -1437,12 +1438,13 @@ def test_v2_submission_rejects_unusable_final_model(
 
 
 def test_collapsed_editor_model_publishes(tmp_path):
+    import joblib
     import numpy as np
     import pandas as pd
     from superglm import Categorical, Numeric, SuperGLM
     from superglm.editor import EditorSession
 
-    from pricing_pipeline.publishing import editor_candidate
+    from pricing_pipeline.publishing import editor_candidate, staging
     from pricing_pipeline.workbench.artifacts import CandidateBundle
     from pricing_pipeline.workbench.submission import save_editor_submission
 
@@ -1471,6 +1473,7 @@ def test_collapsed_editor_model_publishes(tmp_path):
         pk_columns=("policy_id",),
         row_order_sha256="a" * 64,
         model_source_sha256="b" * 64,
+        model_frame_sha256="d" * 64,
         offset_contract={"handling": "NONE"},
     )
     candidate = SimpleNamespace(
@@ -1495,14 +1498,75 @@ def test_collapsed_editor_model_publishes(tmp_path):
         claimed_identity="analyst@example.test",
     )
 
-    loaded = editor_candidate._load_edited_model(
-        SimpleNamespace(bundle=bundle),
-        submission,
-        allowed_root=tmp_path,
+    parent = editor_candidate.ParentCandidate(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v1",
+        package_version=1,
+        rate_package_id=101,
+        model_run_id=201,
+        effective_from=None,
+        effective_to=None,
+        config=SimpleNamespace(
+            model_type="superglm_poisson",
+            target_name="claim_count",
+        ),
+        bundle=bundle,
+        champion=editor_candidate.ChampionSnapshot(
+            deployment_slot="HOME_FREQ_UAT",
+            rate_package_id=None,
+            bundle=None,
+            unavailable_reason="no champion is deployed",
+        ),
     )
+    write_dir = tmp_path / "publication-staging"
+    write_dir.mkdir()
+    exported = editor_candidate.export_edited_model(
+        parent,
+        submission,
+        created_by="publisher@example.test",
+        allowed_root=tmp_path,
+        write_dir=write_dir,
+        published_dir=tmp_path / "published",
+    )
+    loaded = exported.edited_model
 
     assert len(loaded.result.beta) < len(parent_model.result.beta)
     assert set(loaded.features) == set(parent_model.features)
+
+    _, rates, _ = staging.build_staging_frames(
+        staging.StagingExport(
+            workbook_path=write_dir / "rating_tables.xlsx",
+            export_id="edited-export",
+            model_name="HOME_FREQ",
+            target_name="claim_count",
+            model_type="superglm_poisson",
+            model_version="v1",
+            effective_from=None,
+            effective_to=None,
+            interaction_features={},
+            created_by="publisher@example.test",
+            replace=False,
+            model_id=17,
+        )
+    )
+    region_rows = rates.loc[rates["term_name"] == "region"]
+    relativities = dict(
+        zip(
+            region_rows["cell_key_text"].str.removeprefix("region="),
+            region_rows["multiplier"],
+            strict=True,
+        )
+    )
+    assert list(relativities) == ["A", "B", "C", "D"]
+    assert relativities["B"] == pytest.approx(relativities["C"])
+
+    child_bundle = joblib.load(write_dir / "candidate_bundle.joblib")["bundle"]
+    assert len(child_bundle.fitted_model.result.beta) < len(parent_model.result.beta)
+    np.testing.assert_allclose(
+        child_bundle.fitted_model.predict(frame),
+        loaded.predict(frame),
+    )
 
 
 def test_training_comparison_metrics_are_stable_and_scoped():
