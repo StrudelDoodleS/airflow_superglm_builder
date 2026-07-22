@@ -116,7 +116,7 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "scikit-learn" },
     { name = "sqlalchemy" },
-    { name = "superglm", specifier = ">=0.12" },
+    { name = "superglm", specifier = ">=0.13" },
 ]
 provides-extras = ["mlflow"]
 
@@ -1859,11 +1859,12 @@ wheels = [
 
 [[package]]
 name = "superglm"
-version = "0.12.0"
+version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
     { name = "matplotlib" },
+    { name = "narwhals" },
     { name = "numba" },
     { name = "numpy" },
     { name = "openpyxl" },
@@ -1873,9 +1874,9 @@ dependencies = [
     { name = "tabmat" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/52/d3/0cdbc6429baddde7174dbb5dde58bb0feeb13b41c94d4d241194b5ac4026/superglm-0.12.0.tar.gz", hash = "sha256:a76dc1d6e1448c0c5e3c5235a51841fa76d0c59964ab1d0842a007f7d01d048f", size = 649477, upload-time = "2026-07-20T20:26:40.405Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/24/74811bbab789ac14355b7fe32bf98568a2bf10f23cc627bc77c378525de6/superglm-0.13.0.tar.gz", hash = "sha256:80a5f543db4a7b8351af4af9e96f9d837a9b6bb36626840b7fb63360b6033f9f", size = 657056, upload-time = "2026-07-22T08:29:11.784Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/18/d49a098442b6b80c4e2c8d9593bf35152e66acbac9f11e25400fcbd0ecb2/superglm-0.12.0-py3-none-any.whl", hash = "sha256:b15a3d1dc24d6b99983823882b54d235535d2abe6ae283a86512eb0e49d69da1", size = 759749, upload-time = "2026-07-20T20:26:38.647Z" },
+    { url = "https://files.pythonhosted.org/packages/00/af/4ecac7fdae593597dae26806019c5775b6aa35c800d6a8d9ad97b6da9fc2/superglm-0.13.0-py3-none-any.whl", hash = "sha256:de0962b40571e3936984dfb2b9c2a653c10df5d72e3fab58ff469ee5b9e22f6d", size = 768572, upload-time = "2026-07-22T08:29:09.93Z" },
 ]
 
 [[package]]

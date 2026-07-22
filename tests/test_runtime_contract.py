@@ -254,8 +254,8 @@ def test_superglm_runtime_dependency_uses_pypi_without_git_provenance():
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
 
-    assert "superglm>=0.12" in requirements
-    assert "superglm>=0.12" in pyproject["project"]["dependencies"]
+    assert "superglm>=0.13" in requirements
+    assert "superglm>=0.13" in pyproject["project"]["dependencies"]
     assert not any(line.startswith("superglm[") for line in requirements)
 
     superglm_package = next(

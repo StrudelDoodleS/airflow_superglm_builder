@@ -1,6 +1,6 @@
 azure-identity
 joblib
-superglm>=0.12
+superglm>=0.13
 mlflow
 numpy
 openpyxl
