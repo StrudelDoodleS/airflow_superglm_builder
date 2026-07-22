@@ -35,9 +35,12 @@ from pricing_pipeline.workbench.artifacts import (
     CandidateArtifactMetadata,
     CandidateBundle,
     load_candidate_bundle,
+    load_edited_model,
     save_candidate_bundle,
 )
 from pricing_pipeline.workbench.submission import (
+    LEGACY_SUBMISSION_FORMAT,
+    SUBMISSION_FORMAT,
     EditorSubmission,
     EditorSubmissionError,
     load_verified_submission,
@@ -683,6 +686,67 @@ def _load_edited_model(
     *,
     allowed_root: str | Path,
 ) -> Any:
+    submission_format = getattr(submission, "format", LEGACY_SUBMISSION_FORMAT)
+    if submission_format == LEGACY_SUBMISSION_FORMAT:
+        return _replay_legacy_editor_session(
+            parent,
+            submission,
+            allowed_root=allowed_root,
+        )
+    if submission_format != SUBMISSION_FORMAT:
+        raise EditorSubmissionError(
+            f"unsupported editor submission format {submission_format!r}"
+        )
+
+    metadata = (
+        submission.edited_model_path,
+        submission.edited_model_sha256,
+        submission.edited_model_size_bytes,
+        submission.edited_model_format,
+        submission.edited_model_python_version,
+        submission.edited_model_superglm_version,
+    )
+    if any(value is None for value in metadata):
+        raise EditorSubmissionError("v2 submission has incomplete edited model metadata")
+    try:
+        edited_model = load_edited_model(
+            submission.edited_model_path,
+            expected_sha256=submission.edited_model_sha256,
+            expected_size_bytes=submission.edited_model_size_bytes,
+            expected_format=submission.edited_model_format,
+            expected_python_version=submission.edited_model_python_version,
+            expected_superglm_version=submission.edited_model_superglm_version,
+            allowed_root=allowed_root,
+        )
+    except CandidateArtifactError as exc:
+        raise EditorSubmissionError(
+            f"edited model artifact failed verification: {exc}"
+        ) from exc
+
+    if getattr(edited_model, "_result", None) is None:
+        raise EditorSubmissionError("edited model artifact is not fitted")
+    if not callable(getattr(edited_model, "predict", None)):
+        raise EditorSubmissionError("edited model artifact has no callable predict method")
+    try:
+        parent_features = set(parent.bundle.fitted_model.features)
+        edited_features = set(edited_model.features)
+    except (AttributeError, TypeError) as exc:
+        raise EditorSubmissionError("edited model has invalid feature names") from exc
+    if edited_features != parent_features:
+        raise EditorSubmissionError(
+            "edited model feature names do not match the parent model: "
+            f"parent={sorted(parent_features)!r}, edited={sorted(edited_features)!r}"
+        )
+    _predict(edited_model, parent.bundle)
+    return edited_model
+
+
+def _replay_legacy_editor_session(
+    parent: ParentCandidate,
+    submission: EditorSubmission,
+    *,
+    allowed_root: str | Path,
+) -> Any:
     path = Path(submission.editor_session_path).expanduser().resolve()
     root = Path(allowed_root).expanduser().resolve()
     if not path.is_relative_to(root):
@@ -928,6 +992,15 @@ def export_edited_model(
         },
         "champion_comparison": champion_comparison,
     }
+    if getattr(submission, "format", LEGACY_SUBMISSION_FORMAT) == SUBMISSION_FORMAT:
+        revision_metadata.update(
+            edited_model_path=submission.edited_model_path,
+            edited_model_sha256=submission.edited_model_sha256,
+            edited_model_size_bytes=submission.edited_model_size_bytes,
+            edited_model_format=submission.edited_model_format,
+            edited_model_python_version=submission.edited_model_python_version,
+            edited_model_superglm_version=submission.edited_model_superglm_version,
+        )
     completed_build = ApprovedModelBuild(
         model_id=parent.model_id,
         model_name=parent.model_name,
