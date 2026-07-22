@@ -22,6 +22,26 @@ def _artifact_api():
         pytest.fail(f"candidate artifact API is not implemented: {exc}")
 
 
+def _edited_artifact_api():
+    try:
+        module = importlib.import_module("pricing_pipeline.workbench.artifacts")
+        return module.load_edited_model, module.save_edited_model
+    except (ModuleNotFoundError, AttributeError) as exc:
+        pytest.fail(f"edited model artifact API is not implemented: {exc}")
+
+
+class _FakeEditorSession:
+    def __init__(self):
+        self.model = {"features": ["region", "age"], "fitted": True}
+
+    def save_model(self, path):
+        import joblib
+
+        target = Path(path)
+        joblib.dump(self.model, target)
+        return target
+
+
 def _minimal_bundle():
     _, CandidateBundle, _, _ = _artifact_api()
     return CandidateBundle(
@@ -57,6 +77,107 @@ def _load(path: Path, metadata, *, allowed_root: Path):
         expected_superglm_version=metadata.superglm_version,
         allowed_root=allowed_root,
     )
+
+
+def _load_edited(path: Path, metadata, *, allowed_root: Path, **overrides):
+    load_edited_model, _ = _edited_artifact_api()
+    values = {
+        "expected_sha256": metadata.sha256,
+        "expected_size_bytes": metadata.size_bytes,
+        "expected_format": metadata.format,
+        "expected_python_version": metadata.python_version,
+        "expected_superglm_version": metadata.superglm_version,
+        "allowed_root": allowed_root,
+    }
+    values.update(overrides)
+    return load_edited_model(path, **values)
+
+
+def test_edited_model_round_trip_verifies_hash_and_runtime(tmp_path):
+    _, save_edited_model = _edited_artifact_api()
+    session = _FakeEditorSession()
+
+    metadata = save_edited_model(session, tmp_path / "edited_model.joblib")
+    loaded = _load_edited(Path(metadata.path), metadata, allowed_root=tmp_path)
+
+    assert metadata.format == "superglm-edited-model-joblib-v1"
+    assert loaded == session.model
+
+
+def test_edited_model_accepts_superglm_patch_upgrade(tmp_path, monkeypatch):
+    _, save_edited_model = _edited_artifact_api()
+    session = _FakeEditorSession()
+    metadata = save_edited_model(session, tmp_path / "edited_model.joblib")
+    major, minor, patch = metadata.superglm_version.split(".")
+    upgraded_patch = f"{major}.{minor}.{int(patch) + 1}"
+    monkeypatch.setattr(
+        "pricing_pipeline.workbench.artifacts._superglm_version",
+        lambda: upgraded_patch,
+    )
+
+    loaded = _load_edited(Path(metadata.path), metadata, allowed_root=tmp_path)
+
+    assert loaded == session.model
+
+
+def test_edited_model_rejects_same_size_tampering(tmp_path):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    _, save_edited_model = _edited_artifact_api()
+    path = tmp_path / "edited_model.joblib"
+    metadata = save_edited_model(_FakeEditorSession(), path)
+    tampered = bytearray(path.read_bytes())
+    tampered[-1] ^= 1
+    path.write_bytes(tampered)
+
+    with pytest.raises(CandidateArtifactError, match="SHA-256"):
+        _load_edited(path, metadata, allowed_root=tmp_path)
+
+
+def test_edited_model_rejects_path_outside_allowed_root(tmp_path):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    _, save_edited_model = _edited_artifact_api()
+    outside = tmp_path / "outside" / "edited_model.joblib"
+    metadata = save_edited_model(_FakeEditorSession(), outside)
+
+    with pytest.raises(CandidateArtifactError, match="outside configured artifact root"):
+        _load_edited(outside, metadata, allowed_root=tmp_path / "allowed")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"expected_python_version": "2.7.18"}, "Python version"),
+        ({"expected_superglm_version": "0.14.0"}, "SuperGLM version"),
+        ({"expected_format": "unsupported"}, "unsupported edited model artifact format"),
+    ],
+)
+def test_edited_model_rejects_metadata_before_deserializing(
+    tmp_path,
+    monkeypatch,
+    overrides,
+    message,
+):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    _, save_edited_model = _edited_artifact_api()
+    metadata = save_edited_model(_FakeEditorSession(), tmp_path / "edited_model.joblib")
+    deserialized = False
+
+    def fail_if_loaded(source):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {source}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(CandidateArtifactError, match=message):
+        _load_edited(
+            Path(metadata.path),
+            metadata,
+            allowed_root=tmp_path,
+            **overrides,
+        )
+
+    assert deserialized is False
 
 
 def test_candidate_bundle_round_trip_verifies_hash_and_lineage(tmp_path):

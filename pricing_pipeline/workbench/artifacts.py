@@ -18,6 +18,7 @@ from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExpor
 
 
 BUNDLE_FORMAT = "superglm-candidate-joblib-v2"
+EDITED_MODEL_FORMAT = "superglm-edited-model-joblib-v1"
 
 
 class CandidateArtifactError(RuntimeError):
@@ -153,11 +154,84 @@ def _validate_runtime_versions(
         )
 
     actual_superglm = _superglm_version()
-    if expected_superglm_version != actual_superglm:
+    if _major_minor(expected_superglm_version) != _major_minor(actual_superglm):
         raise CandidateArtifactError(
             "candidate SuperGLM version is incompatible: "
             f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"
         )
+
+
+def save_edited_model(
+    editor_session: Any,
+    path: str | Path,
+) -> CandidateArtifactMetadata:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    saved = Path(editor_session.save_model(target)).expanduser().resolve()
+    if saved != target or not target.is_file():
+        raise CandidateArtifactError(
+            "editor session did not create the requested model artifact"
+        )
+    return CandidateArtifactMetadata(
+        path=str(target),
+        sha256=_sha256(target),
+        format=EDITED_MODEL_FORMAT,
+        size_bytes=target.stat().st_size,
+        python_version=platform.python_version(),
+        superglm_version=_superglm_version(),
+    )
+
+
+def load_edited_model(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    expected_format: str,
+    expected_python_version: str,
+    expected_superglm_version: str,
+    allowed_root: str | Path,
+) -> Any:
+    artifact_path = Path(path).expanduser().resolve()
+    root = Path(allowed_root).expanduser().resolve()
+    if not artifact_path.is_relative_to(root):
+        raise CandidateArtifactError(
+            f"edited model artifact is outside configured artifact root {root}: "
+            f"{artifact_path}"
+        )
+    if expected_format != EDITED_MODEL_FORMAT:
+        raise CandidateArtifactError(
+            f"unsupported edited model artifact format {expected_format!r}"
+        )
+
+    _validate_runtime_versions(
+        expected_python_version=expected_python_version,
+        expected_superglm_version=expected_superglm_version,
+    )
+
+    if not artifact_path.is_file():
+        raise CandidateArtifactError(
+            f"edited model artifact does not exist: {artifact_path}"
+        )
+    try:
+        artifact_bytes = artifact_path.read_bytes()
+    except OSError as exc:
+        raise CandidateArtifactError(
+            f"edited model artifact could not be read: {artifact_path}"
+        ) from exc
+    actual_size = len(artifact_bytes)
+    if actual_size != int(expected_size_bytes):
+        raise CandidateArtifactError(
+            "edited model artifact byte size does not match submission metadata: "
+            f"expected={expected_size_bytes}, actual={actual_size}"
+        )
+    actual_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise CandidateArtifactError(
+            "edited model artifact SHA-256 does not match submission metadata: "
+            f"expected={expected_sha256}, actual={actual_sha256}"
+        )
+    return joblib.load(io.BytesIO(artifact_bytes))
 
 
 def save_candidate_bundle(

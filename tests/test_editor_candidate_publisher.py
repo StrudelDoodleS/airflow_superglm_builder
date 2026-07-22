@@ -844,6 +844,7 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         ),
     )
     submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
         submission_id="submission-1",
         deployment_slot="HOME_FREQ_UAT",
         manifest_id="manifest-1",
@@ -862,6 +863,8 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
         edited_model_sha256="e" * 64,
         edited_model_size_bytes=11,
         edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
         baseline_candidate_sha256="f" * 64,
     )
 
@@ -938,6 +941,24 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert captured_export["options"]["offset_name"] == "Term"
     assert captured_export["options"]["offset_kind"] == "auto"
     assert exported.revision_metadata["claimed_identity"] == "analyst@example.test"
+    assert exported.revision_metadata["edited_model_path"] == submission.edited_model_path
+    assert (
+        exported.revision_metadata["edited_model_sha256"]
+        == submission.edited_model_sha256
+    )
+    assert (
+        exported.revision_metadata["edited_model_size_bytes"]
+        == submission.edited_model_size_bytes
+    )
+    assert exported.revision_metadata["edited_model_format"] == submission.edited_model_format
+    assert (
+        exported.revision_metadata["edited_model_python_version"]
+        == submission.edited_model_python_version
+    )
+    assert (
+        exported.revision_metadata["edited_model_superglm_version"]
+        == submission.edited_model_superglm_version
+    )
     assert "published_by" not in exported.revision_metadata
 
 
@@ -1221,6 +1242,7 @@ def test_editor_session_replays_against_verified_parent_model(
     )
     parent = SimpleNamespace(bundle=bundle)
     submission = SimpleNamespace(
+        format="superglm-editor-submission-v1",
         path=str(configured_root / "submission.json"),
         editor_session_path=str(session_path),
         editor_session_size_bytes=session_path.stat().st_size,
@@ -1246,6 +1268,305 @@ def test_editor_session_replays_against_verified_parent_model(
         "sample_weight": bundle.sample_weight,
         "offset": bundle.offset,
     }
+
+
+def test_v2_submission_loads_final_model_without_replaying_session(monkeypatch, tmp_path):
+    import numpy as np
+    import pandas as pd
+    from superglm.editor import EditorSession
+
+    from pricing_pipeline.publishing import editor_candidate
+
+    class Model:
+        def __init__(self, features, beta):
+            self.features = features
+            self._result = SimpleNamespace(beta=np.asarray(beta))
+
+        def predict(self, X, offset=None):
+            return np.ones(len(X))
+
+    parent_model = Model({"region": object(), "x": object()}, [0.0, 0.1, 0.2, 0.3])
+    edited_model = Model({"x": object(), "region": object()}, [0.0, 0.2, 0.3])
+    parent = SimpleNamespace(
+        bundle=SimpleNamespace(
+            fitted_model=parent_model,
+            X=pd.DataFrame({"region": ["A", "B"], "x": [1.0, 2.0]}),
+            offset=None,
+        )
+    )
+    submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
+        edited_model_path=str(tmp_path / "edited_model.joblib"),
+        edited_model_sha256="a" * 64,
+        edited_model_size_bytes=123,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
+    )
+    received = {}
+
+    def fake_load(path, **metadata):
+        received["path"] = path
+        received.update(metadata)
+        return edited_model
+
+    monkeypatch.setattr(editor_candidate, "load_edited_model", fake_load, raising=False)
+    monkeypatch.setattr(
+        EditorSession,
+        "load",
+        staticmethod(lambda *args, **kwargs: pytest.fail("v2 session was replayed")),
+    )
+
+    loaded = editor_candidate._load_edited_model(
+        parent,
+        submission,
+        allowed_root=tmp_path,
+    )
+
+    assert loaded is edited_model
+    assert len(loaded._result.beta) < len(parent_model._result.beta)
+    assert received == {
+        "path": submission.edited_model_path,
+        "expected_sha256": submission.edited_model_sha256,
+        "expected_size_bytes": submission.edited_model_size_bytes,
+        "expected_format": submission.edited_model_format,
+        "expected_python_version": submission.edited_model_python_version,
+        "expected_superglm_version": submission.edited_model_superglm_version,
+        "allowed_root": tmp_path,
+    }
+
+
+@pytest.mark.parametrize(
+    "edited_features",
+    [
+        {"region": object()},
+        {"region": object(), "x": object(), "new_feature": object()},
+    ],
+)
+def test_v2_submission_rejects_changed_feature_names(
+    monkeypatch,
+    tmp_path,
+    edited_features,
+):
+    import numpy as np
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+
+    parent_model = SimpleNamespace(features={"region": object(), "x": object()})
+    edited_model = SimpleNamespace(
+        features=edited_features,
+        _result=object(),
+        predict=lambda X, offset=None: np.ones(len(X)),
+    )
+    parent = SimpleNamespace(
+        bundle=SimpleNamespace(
+            fitted_model=parent_model,
+            X=pd.DataFrame({"region": ["A"], "x": [1.0]}),
+            offset=None,
+        )
+    )
+    submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
+        edited_model_path=str(tmp_path / "edited_model.joblib"),
+        edited_model_sha256="a" * 64,
+        edited_model_size_bytes=123,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_edited_model",
+        lambda *args, **kwargs: edited_model,
+        raising=False,
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match="feature names"):
+        editor_candidate._load_edited_model(parent, submission, allowed_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("result", "prediction", "message"),
+    [
+        (None, [1.0], "not fitted"),
+        (object(), None, "no callable predict"),
+        (object(), [float("inf")], "invalid training predictions"),
+    ],
+)
+def test_v2_submission_rejects_unusable_final_model(
+    monkeypatch,
+    tmp_path,
+    result,
+    prediction,
+    message,
+):
+    import pandas as pd
+
+    from pricing_pipeline.publishing import editor_candidate
+
+    model = SimpleNamespace(
+        features={"x": object()},
+        _result=result,
+        predict=None if prediction is None else lambda X, offset=None: prediction,
+    )
+    parent = SimpleNamespace(
+        bundle=SimpleNamespace(
+            fitted_model=SimpleNamespace(features={"x": object()}),
+            X=pd.DataFrame({"x": [1.0]}),
+            offset=None,
+        )
+    )
+    submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
+        edited_model_path=str(tmp_path / "edited_model.joblib"),
+        edited_model_sha256="a" * 64,
+        edited_model_size_bytes=123,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_edited_model",
+        lambda *args, **kwargs: model,
+        raising=False,
+    )
+
+    with pytest.raises(editor_candidate.EditorSubmissionError, match=message):
+        editor_candidate._load_edited_model(parent, submission, allowed_root=tmp_path)
+
+
+def test_collapsed_editor_model_publishes(tmp_path):
+    import joblib
+    import numpy as np
+    import pandas as pd
+    from superglm import Categorical, Numeric, SuperGLM
+    from superglm.editor import EditorSession
+
+    from pricing_pipeline.publishing import editor_candidate, staging
+    from pricing_pipeline.workbench.artifacts import CandidateBundle
+    from pricing_pipeline.workbench.submission import save_editor_submission
+
+    region = np.repeat(["A", "B", "C", "D"], 20)
+    x = np.tile(np.linspace(-1.0, 1.0, 20), 4)
+    mean = np.array([{"A": 1.0, "B": 2.0, "C": 2.0, "D": 4.0}[value] for value in region])
+    y = np.random.default_rng(20260722).poisson(mean * np.exp(0.2 * x))
+    frame = pd.DataFrame({"region": region, "x": x})
+    parent_model = SuperGLM(
+        features={"region": Categorical(base="first"), "x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(frame, y)
+    bundle = CandidateBundle(
+        fitted_model=parent_model,
+        X=frame,
+        y=y,
+        sample_weight=None,
+        offset=None,
+        export_weight=None,
+        cv_report={},
+        model_name="HOME_FREQ",
+        model_version="v1",
+        export_id="export-1",
+        manifest_id="manifest-1",
+        split_set_id=None,
+        pk_columns=("policy_id",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        model_frame_sha256="d" * 64,
+        offset_contract={"handling": "NONE"},
+    )
+    candidate = SimpleNamespace(
+        workbench=SimpleNamespace(
+            settings=Settings(workbench_artifact_root=tmp_path),
+            model_config=SimpleNamespace(deployment_slot="HOME_FREQ_UAT"),
+        ),
+        model_name="HOME_FREQ",
+        package_version=1,
+        rate_package_id=101,
+        model_run_id=201,
+        bundle=bundle,
+        technical={"candidate_artifact_sha256": "c" * 64},
+    )
+    session = EditorSession.from_model(parent_model, train_data=(frame, y))
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    submission = save_editor_submission(
+        candidate,
+        editor_session=session,
+        reason="Combine equivalent market regions",
+        claimed_identity="analyst@example.test",
+    )
+
+    parent = editor_candidate.ParentCandidate(
+        model_id=17,
+        model_name="HOME_FREQ",
+        model_version="v1",
+        package_version=1,
+        rate_package_id=101,
+        model_run_id=201,
+        effective_from=None,
+        effective_to=None,
+        config=SimpleNamespace(
+            model_type="superglm_poisson",
+            target_name="claim_count",
+        ),
+        bundle=bundle,
+        champion=editor_candidate.ChampionSnapshot(
+            deployment_slot="HOME_FREQ_UAT",
+            rate_package_id=None,
+            bundle=None,
+            unavailable_reason="no champion is deployed",
+        ),
+    )
+    write_dir = tmp_path / "publication-staging"
+    write_dir.mkdir()
+    exported = editor_candidate.export_edited_model(
+        parent,
+        submission,
+        created_by="publisher@example.test",
+        allowed_root=tmp_path,
+        write_dir=write_dir,
+        published_dir=tmp_path / "published",
+    )
+    loaded = exported.edited_model
+
+    assert len(loaded.result.beta) < len(parent_model.result.beta)
+    assert set(loaded.features) == set(parent_model.features)
+
+    _, rates, _ = staging.build_staging_frames(
+        staging.StagingExport(
+            workbook_path=write_dir / "rating_tables.xlsx",
+            export_id="edited-export",
+            model_name="HOME_FREQ",
+            target_name="claim_count",
+            model_type="superglm_poisson",
+            model_version="v1",
+            effective_from=None,
+            effective_to=None,
+            interaction_features={},
+            created_by="publisher@example.test",
+            replace=False,
+            model_id=17,
+        )
+    )
+    region_rows = rates.loc[rates["term_name"] == "region"]
+    relativities = dict(
+        zip(
+            region_rows["cell_key_text"].str.removeprefix("region="),
+            region_rows["multiplier"],
+            strict=True,
+        )
+    )
+    assert list(relativities) == ["A", "B", "C", "D"]
+    assert relativities["B"] == pytest.approx(relativities["C"])
+
+    child_bundle = joblib.load(write_dir / "candidate_bundle.joblib")["bundle"]
+    assert len(child_bundle.fitted_model.result.beta) < len(parent_model.result.beta)
+    np.testing.assert_allclose(
+        child_bundle.fitted_model.predict(frame),
+        loaded.predict(frame),
+    )
 
 
 def test_training_comparison_metrics_are_stable_and_scoped():
