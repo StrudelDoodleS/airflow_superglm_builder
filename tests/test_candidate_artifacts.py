@@ -120,6 +120,35 @@ def test_edited_model_accepts_superglm_patch_upgrade(tmp_path, monkeypatch):
     assert loaded == session.model
 
 
+def test_edited_model_rejects_artifact_from_newer_superglm_patch(
+    tmp_path,
+    monkeypatch,
+):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    _, save_edited_model = _edited_artifact_api()
+    metadata = save_edited_model(_FakeEditorSession(), tmp_path / "edited_model.joblib")
+    major, minor, patch = metadata.superglm_version.split(".")
+    newer_artifact_version = f"{major}.{minor}.{int(patch) + 1}"
+    deserialized = False
+
+    def fail_if_loaded(source):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {source}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(CandidateArtifactError, match="SuperGLM version"):
+        _load_edited(
+            Path(metadata.path),
+            metadata,
+            allowed_root=tmp_path,
+            expected_superglm_version=newer_artifact_version,
+        )
+
+    assert deserialized is False
+
+
 def test_edited_model_rejects_same_size_tampering(tmp_path):
     CandidateArtifactError, _, _, _ = _artifact_api()
     _, save_edited_model = _edited_artifact_api()
@@ -147,7 +176,6 @@ def test_edited_model_rejects_path_outside_allowed_root(tmp_path):
     ("overrides", "message"),
     [
         ({"expected_python_version": "2.7.18"}, "Python version"),
-        ({"expected_superglm_version": "0.14.0"}, "SuperGLM version"),
         ({"expected_format": "unsupported"}, "unsupported edited model artifact format"),
     ],
 )
@@ -175,6 +203,35 @@ def test_edited_model_rejects_metadata_before_deserializing(
             metadata,
             allowed_root=tmp_path,
             **overrides,
+        )
+
+    assert deserialized is False
+
+
+def test_edited_model_rejects_different_superglm_minor_before_deserializing(
+    tmp_path,
+    monkeypatch,
+):
+    CandidateArtifactError, _, _, _ = _artifact_api()
+    _, save_edited_model = _edited_artifact_api()
+    metadata = save_edited_model(_FakeEditorSession(), tmp_path / "edited_model.joblib")
+    major, minor, *_ = metadata.superglm_version.split(".")
+    incompatible_version = f"{major}.{int(minor) + 1}.0"
+    deserialized = False
+
+    def fail_if_loaded(source):
+        nonlocal deserialized
+        deserialized = True
+        raise AssertionError(f"joblib.load must not be called for {source}")
+
+    monkeypatch.setattr("pricing_pipeline.workbench.artifacts.joblib.load", fail_if_loaded)
+
+    with pytest.raises(CandidateArtifactError, match="SuperGLM version"):
+        _load_edited(
+            Path(metadata.path),
+            metadata,
+            allowed_root=tmp_path,
+            expected_superglm_version=incompatible_version,
         )
 
     assert deserialized is False

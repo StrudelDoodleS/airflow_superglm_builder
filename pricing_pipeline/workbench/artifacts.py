@@ -13,6 +13,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+from packaging.version import InvalidVersion, Version
 
 from pricing_pipeline.publishing.superglm_publication_receipt import OffsetExportContract
 
@@ -154,7 +155,18 @@ def _validate_runtime_versions(
         )
 
     actual_superglm = _superglm_version()
-    if _major_minor(expected_superglm_version) != _major_minor(actual_superglm):
+    try:
+        artifact_version = Version(expected_superglm_version)
+        runtime_version = Version(actual_superglm)
+    except InvalidVersion as exc:
+        raise CandidateArtifactError(
+            "candidate SuperGLM version is incompatible: "
+            f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"
+        ) from exc
+    if (
+        artifact_version.release[:2] != runtime_version.release[:2]
+        or artifact_version > runtime_version
+    ):
         raise CandidateArtifactError(
             "candidate SuperGLM version is incompatible: "
             f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"
