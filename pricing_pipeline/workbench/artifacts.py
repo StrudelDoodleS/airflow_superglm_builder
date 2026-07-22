@@ -154,7 +154,7 @@ def _validate_runtime_versions(
         )
 
     actual_superglm = _superglm_version()
-    if expected_superglm_version != actual_superglm:
+    if _major_minor(expected_superglm_version) != _major_minor(actual_superglm):
         raise CandidateArtifactError(
             "candidate SuperGLM version is incompatible: "
             f"artifact={expected_superglm_version!r}, runtime={actual_superglm!r}"

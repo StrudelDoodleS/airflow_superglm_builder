@@ -104,6 +104,22 @@ def test_edited_model_round_trip_verifies_hash_and_runtime(tmp_path):
     assert loaded == session.model
 
 
+def test_edited_model_accepts_superglm_patch_upgrade(tmp_path, monkeypatch):
+    _, save_edited_model = _edited_artifact_api()
+    session = _FakeEditorSession()
+    metadata = save_edited_model(session, tmp_path / "edited_model.joblib")
+    major, minor, patch = metadata.superglm_version.split(".")
+    upgraded_patch = f"{major}.{minor}.{int(patch) + 1}"
+    monkeypatch.setattr(
+        "pricing_pipeline.workbench.artifacts._superglm_version",
+        lambda: upgraded_patch,
+    )
+
+    loaded = _load_edited(Path(metadata.path), metadata, allowed_root=tmp_path)
+
+    assert loaded == session.model
+
+
 def test_edited_model_rejects_same_size_tampering(tmp_path):
     CandidateArtifactError, _, _, _ = _artifact_api()
     _, save_edited_model = _edited_artifact_api()
@@ -131,7 +147,7 @@ def test_edited_model_rejects_path_outside_allowed_root(tmp_path):
     ("overrides", "message"),
     [
         ({"expected_python_version": "2.7.18"}, "Python version"),
-        ({"expected_superglm_version": "999.0.0"}, "SuperGLM version"),
+        ({"expected_superglm_version": "0.14.0"}, "SuperGLM version"),
         ({"expected_format": "unsupported"}, "unsupported edited model artifact format"),
     ],
 )
