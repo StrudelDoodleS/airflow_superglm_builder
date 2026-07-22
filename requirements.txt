@@ -4,6 +4,7 @@ superglm>=0.13
 mlflow
 numpy
 openpyxl
+packaging
 pandas
 pydantic>=2.13,<3
 pyodbc
