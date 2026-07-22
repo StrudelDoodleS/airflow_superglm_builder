@@ -19,9 +19,17 @@ from pricing_pipeline.workbench.submission import (
 
 
 class FakeEditorSession:
-    def __init__(self, *, fail_save: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_save: bool = False,
+        fail_model_save: bool = False,
+    ) -> None:
         self.fail_save = fail_save
+        self.fail_model_save = fail_model_save
         self.saved_paths: list[Path] = []
+        self.saved_model_paths: list[Path] = []
+        self.model = {"features": ["age"], "fitted": True}
 
     def save(self, path) -> None:
         target = Path(path)
@@ -29,6 +37,16 @@ class FakeEditorSession:
         if self.fail_save:
             raise RuntimeError("injected save failure")
         target.write_text('{"edits":["age"]}\n', encoding="utf-8")
+
+    def save_model(self, path):
+        import joblib
+
+        target = Path(path)
+        self.saved_model_paths.append(target)
+        if self.fail_model_save:
+            raise RuntimeError("injected model save failure")
+        joblib.dump(self.model, target)
+        return target
 
 
 def _bundle() -> CandidateBundle:
@@ -89,7 +107,7 @@ def _save(candidate: Candidate, session: FakeEditorSession, reason: str = "Marke
     )
 
 
-def test_explicit_editor_session_is_saved_without_a_second_model_artifact(tmp_path):
+def test_editor_submission_saves_session_and_final_model_artifacts(tmp_path):
     session = FakeEditorSession()
     candidate = _candidate(tmp_path)
 
@@ -97,8 +115,17 @@ def test_explicit_editor_session_is_saved_without_a_second_model_artifact(tmp_pa
 
     payload = json.loads(Path(submission.path).read_text(encoding="utf-8"))
     assert len(session.saved_paths) == 1
+    assert len(session.saved_model_paths) == 1
     assert Path(submission.editor_session_path).is_file()
-    assert not (Path(submission.path).parent / "edited_model.joblib").exists()
+    assert Path(submission.edited_model_path).is_file()
+    assert Path(submission.edited_model_path).name == "edited_model.joblib"
+    assert payload["format"] == "superglm-editor-submission-v2"
+    assert payload["edited_model_path"] == submission.edited_model_path
+    assert payload["edited_model_sha256"] == submission.edited_model_sha256
+    assert payload["edited_model_size_bytes"] == submission.edited_model_size_bytes
+    assert payload["edited_model_format"] == "superglm-edited-model-joblib-v1"
+    assert payload["edited_model_python_version"] == submission.edited_model_python_version
+    assert payload["edited_model_superglm_version"] == submission.edited_model_superglm_version
     assert payload["parent_rate_package_id"] == 107
     assert payload["manifest_id"] == "manifest-1"
     assert payload["split_set_id"] == "split-1"
@@ -119,6 +146,31 @@ def test_submission_loader_verifies_manifest_and_editor_session_hashes(tmp_path)
 
     Path(submission.editor_session_path).write_text("tampered", encoding="utf-8")
     with pytest.raises(EditorSubmissionError, match="SHA-256"):
+        load_verified_submission(
+            submission.path,
+            submission.sha256,
+            allowed_root=tmp_path,
+        )
+
+
+def test_submission_loader_verifies_final_model_hash_and_size(tmp_path):
+    session = FakeEditorSession()
+    submission = _save(_candidate(tmp_path), session)
+    model_path = Path(submission.edited_model_path)
+
+    original = model_path.read_bytes()
+    tampered = bytearray(original)
+    tampered[-1] ^= 1
+    model_path.write_bytes(tampered)
+    with pytest.raises(EditorSubmissionError, match="edited model SHA-256"):
+        load_verified_submission(
+            submission.path,
+            submission.sha256,
+            allowed_root=tmp_path,
+        )
+
+    model_path.write_bytes(original[:-1])
+    with pytest.raises(EditorSubmissionError, match="edited model byte-size"):
         load_verified_submission(
             submission.path,
             submission.sha256,
@@ -169,6 +221,61 @@ def test_failed_session_save_leaves_no_submission(tmp_path):
     submission_root = tmp_path / "HOME_FREQ" / "editor_submissions"
     assert not list(submission_root.glob("submission-*"))
     assert not list(submission_root.glob(".submission-*"))
+
+
+def test_failed_model_save_leaves_no_submission(tmp_path):
+    session = FakeEditorSession(fail_model_save=True)
+
+    with pytest.raises(RuntimeError, match="injected model save failure"):
+        _save(_candidate(tmp_path), session)
+
+    submission_root = tmp_path / "HOME_FREQ" / "editor_submissions"
+    assert not list(submission_root.glob("submission-*"))
+    assert not list(submission_root.glob(".submission-*"))
+
+
+def test_legacy_v1_submission_remains_readable(tmp_path):
+    from pricing_pipeline.workbench.submission import (
+        LEGACY_SUBMISSION_FORMAT,
+        sha256_file,
+    )
+
+    session_path = tmp_path / "editor_session.json"
+    session_path.write_text('{"edits": []}\n', encoding="utf-8")
+    submission_path = tmp_path / "submission.json"
+    submission_path.write_text(
+        json.dumps(
+            {
+                "format": LEGACY_SUBMISSION_FORMAT,
+                "submission_id": "submission-legacy",
+                "model_name": "HOME_FREQ",
+                "deployment_slot": "HOME_FREQ_UAT",
+                "source_package_version": 7,
+                "parent_rate_package_id": 107,
+                "parent_model_run_id": 907,
+                "manifest_id": "manifest-1",
+                "split_set_id": "split-1",
+                "reason": "Legacy review",
+                "claimed_identity": "analyst@example",
+                "created_at": "2026-07-22T10:00:00+00:00",
+                "editor_session_path": str(session_path),
+                "editor_session_sha256": sha256_file(session_path),
+                "editor_session_size_bytes": session_path.stat().st_size,
+                "baseline_candidate_sha256": "c" * 64,
+                "model_source_sha256": "b" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_verified_submission(
+        submission_path,
+        sha256_file(submission_path),
+        allowed_root=tmp_path,
+    )
+
+    assert loaded.format == LEGACY_SUBMISSION_FORMAT
+    assert loaded.edited_model_path is None
 
 
 def test_candidate_and_workbench_do_not_hide_editor_session_lifecycle(tmp_path):

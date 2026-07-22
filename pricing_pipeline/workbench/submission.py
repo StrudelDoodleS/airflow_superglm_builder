@@ -13,12 +13,14 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
+from pricing_pipeline.workbench.artifacts import save_edited_model
 
 if TYPE_CHECKING:
     from pricing_pipeline.workbench.core import Candidate
 
 
-SUBMISSION_FORMAT = "superglm-editor-submission-v1"
+LEGACY_SUBMISSION_FORMAT = "superglm-editor-submission-v1"
+SUBMISSION_FORMAT = "superglm-editor-submission-v2"
 
 
 class EditorSubmissionError(RuntimeError):
@@ -27,6 +29,7 @@ class EditorSubmissionError(RuntimeError):
 
 @dataclass
 class EditorSubmission:
+    format: str
     submission_id: str
     model_name: str
     deployment_slot: str
@@ -45,10 +48,16 @@ class EditorSubmission:
     model_source_sha256: str
     path: str
     sha256: str
+    edited_model_path: str | None = None
+    edited_model_sha256: str | None = None
+    edited_model_size_bytes: int | None = None
+    edited_model_format: str | None = None
+    edited_model_python_version: str | None = None
+    edited_model_superglm_version: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "format": SUBMISSION_FORMAT,
+        payload = {
+            "format": self.format,
             "submission_id": self.submission_id,
             "model_name": self.model_name,
             "deployment_slot": self.deployment_slot,
@@ -66,6 +75,21 @@ class EditorSubmission:
             "baseline_candidate_sha256": self.baseline_candidate_sha256,
             "model_source_sha256": self.model_source_sha256,
         }
+        if self.format == SUBMISSION_FORMAT:
+            edited_fields = {
+                "edited_model_path": self.edited_model_path,
+                "edited_model_sha256": self.edited_model_sha256,
+                "edited_model_size_bytes": self.edited_model_size_bytes,
+                "edited_model_format": self.edited_model_format,
+                "edited_model_python_version": self.edited_model_python_version,
+                "edited_model_superglm_version": self.edited_model_superglm_version,
+            }
+            if any(value is None for value in edited_fields.values()):
+                raise EditorSubmissionError(
+                    "v2 submission requires complete edited model metadata"
+                )
+            payload.update(edited_fields)
+        return payload
 
 
 def sha256_file(path: str | Path) -> str:
@@ -96,9 +120,21 @@ def _write_json_atomic(payload: dict[str, Any], path: Path) -> None:
 
 
 def _submission_tree_is_complete(directory: Path) -> bool:
-    return directory.is_dir() and all(
-        (directory / name).is_file() for name in ("editor_session.json", "submission.json")
-    )
+    session_path = directory / "editor_session.json"
+    submission_path = directory / "submission.json"
+    if not directory.is_dir() or not session_path.is_file() or not submission_path.is_file():
+        return False
+    try:
+        submission_format = json.loads(
+            submission_path.read_text(encoding="utf-8")
+        ).get("format")
+    except (OSError, json.JSONDecodeError):
+        return False
+    if submission_format == LEGACY_SUBMISSION_FORMAT:
+        return True
+    return submission_format == SUBMISSION_FORMAT and (
+        directory / "edited_model.joblib"
+    ).is_file()
 
 
 def _quarantine_incomplete_submission(
@@ -148,6 +184,7 @@ def _promote_or_reuse_submission(
                 conflicts = [
                     field_name
                     for field_name in (
+                        "format",
                         "submission_id",
                         "model_name",
                         "deployment_slot",
@@ -163,6 +200,12 @@ def _promote_or_reuse_submission(
                         "editor_session_size_bytes",
                         "baseline_candidate_sha256",
                         "model_source_sha256",
+                        "edited_model_path",
+                        "edited_model_sha256",
+                        "edited_model_size_bytes",
+                        "edited_model_format",
+                        "edited_model_python_version",
+                        "edited_model_superglm_version",
                     )
                     if getattr(existing, field_name) != getattr(proposed, field_name)
                 ]
@@ -207,9 +250,14 @@ def save_editor_submission(
         editor_session.save(staged_session_path)
         session_sha256 = sha256_file(staged_session_path)
         session_size = staged_session_path.stat().st_size
+        model_artifact = save_edited_model(
+            editor_session,
+            staging / "edited_model.joblib",
+        )
 
         submission_identity = json.dumps(
             {
+                "format": SUBMISSION_FORMAT,
                 "parent_rate_package_id": int(candidate.rate_package_id),
                 "editor_session_sha256": session_sha256,
             },
@@ -220,9 +268,11 @@ def save_editor_submission(
         final_directory = submissions_root / submission_id
         deployment_slot = candidate.workbench.model_config.deployment_slot
         final_session_path = final_directory / "editor_session.json"
+        final_model_path = final_directory / "edited_model.joblib"
         submission_path = final_directory / "submission.json"
         technical = candidate.technical
         submission = EditorSubmission(
+            format=SUBMISSION_FORMAT,
             submission_id=submission_id,
             model_name=candidate.model_name,
             deployment_slot=deployment_slot,
@@ -241,6 +291,12 @@ def save_editor_submission(
             model_source_sha256=candidate.bundle.model_source_sha256,
             path=str(submission_path),
             sha256="",
+            edited_model_path=str(final_model_path),
+            edited_model_sha256=model_artifact.sha256,
+            edited_model_size_bytes=model_artifact.size_bytes,
+            edited_model_format=model_artifact.format,
+            edited_model_python_version=model_artifact.python_version,
+            edited_model_superglm_version=model_artifact.superglm_version,
         )
         staged_submission_path = staging / "submission.json"
         _write_json_atomic(submission.to_payload(), staged_submission_path)
@@ -275,7 +331,8 @@ def load_verified_submission(
     if actual_sha256 != expected_sha256:
         raise EditorSubmissionError("submission SHA-256 does not match the trigger metadata")
     payload = json.loads(submission_path.read_text(encoding="utf-8"))
-    if payload.pop("format", None) != SUBMISSION_FORMAT:
+    submission_format = payload.get("format")
+    if submission_format not in {LEGACY_SUBMISSION_FORMAT, SUBMISSION_FORMAT}:
         raise EditorSubmissionError("submission has an unsupported format")
 
     session_path = Path(payload["editor_session_path"]).expanduser().resolve()
@@ -287,6 +344,34 @@ def load_verified_submission(
         raise EditorSubmissionError("editor session SHA-256 verification failed")
     if session_path.stat().st_size != int(payload["editor_session_size_bytes"]):
         raise EditorSubmissionError("editor session byte-size verification failed")
+
+    if submission_format == SUBMISSION_FORMAT:
+        required_model_fields = (
+            "edited_model_path",
+            "edited_model_sha256",
+            "edited_model_size_bytes",
+            "edited_model_format",
+            "edited_model_python_version",
+            "edited_model_superglm_version",
+        )
+        missing = [name for name in required_model_fields if payload.get(name) is None]
+        if missing:
+            raise EditorSubmissionError(
+                "v2 submission is missing edited model metadata: " + ", ".join(missing)
+            )
+        model_path = Path(payload["edited_model_path"]).expanduser().resolve()
+        if not model_path.is_relative_to(root):
+            raise EditorSubmissionError(
+                f"edited model artifact is outside {root}: {model_path}"
+            )
+        if not model_path.is_file():
+            raise EditorSubmissionError(
+                f"edited model artifact does not exist: {model_path}"
+            )
+        if model_path.stat().st_size != int(payload["edited_model_size_bytes"]):
+            raise EditorSubmissionError("edited model byte-size verification failed")
+        if sha256_file(model_path) != payload["edited_model_sha256"]:
+            raise EditorSubmissionError("edited model SHA-256 verification failed")
     return EditorSubmission(
         **payload,
         path=str(submission_path),
