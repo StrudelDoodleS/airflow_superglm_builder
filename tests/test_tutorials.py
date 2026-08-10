@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-TUTORIAL_NOTEBOOK = Path("tutorials/basic_sql_etl_and_schema_walkthrough.ipynb")
+TUTORIAL_NOTEBOOK = Path("tutorials/00_basic_sql_etl_schema_walkthrough.ipynb")
 TUTORIAL_DDL = Path("tutorials/schema/pricing_useful_tables_ddl.sql")
 REFERENCE_DDL = Path("docs/pricing_useful_tables_ddl.sql")
 
@@ -24,7 +24,7 @@ def test_basic_sql_etl_notebook_teaches_connection_transform_and_load_pattern():
     text = _notebook_text()
 
     for expected in [
-        "Basic SQL ETL And Schema Walkthrough",
+        "Basic SQL ETL and Schema Walkthrough",
         "REPO_ROOT",
         "sys.path.insert",
         "get_engine(settings, database=source_database)",

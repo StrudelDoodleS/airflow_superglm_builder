@@ -63,6 +63,20 @@ def _registered_model(api, tmp_path: Path):
     )
 
 
+def test_notebook_state_components_are_compact_but_full_identity_stays_external():
+    from pricing_pipeline import notebook as api
+
+    model_name = "VERY_LONG_PRICING_MODEL_NAME_" * 8
+    model_component = api._compact_model_state_component(model_name)
+    run_key = api._new_notebook_run_key()
+
+    assert model_name not in model_component
+    assert model_component.startswith("m_very_long_pricing_")
+    assert len(model_component) <= 29
+    assert run_key.startswith("nb_")
+    assert len(run_key) == 24
+
+
 def _registered_spec_model(api, tmp_path: Path, **spec_overrides):
     source_root = tmp_path / "pricing_models" / "claim_frequency_spec"
     source_root.mkdir(parents=True)
@@ -270,6 +284,7 @@ def test_notebook_build_api_only_accepts_declared_model_inputs():
         "model",
         "frame",
         "superglm_model",
+        "model_kind",
         "data_as_of",
         "created_by",
     )

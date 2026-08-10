@@ -101,9 +101,7 @@ def test_export_rating_tables_preserves_raw_offset_levels(tmp_path: Path):
     term = pd.Series(np.resize([12.0, 36.0], row_count), name="Term")
     X = pd.DataFrame({"territory": np.resize(["north", "south"], row_count)})
     offset = np.log(term / 12.0)
-    y = np.random.default_rng(20260716).poisson(
-        np.exp(-1.0 + offset.to_numpy())
-    )
+    y = np.random.default_rng(20260716).poisson(np.exp(-1.0 + offset.to_numpy()))
     model = SuperGLM(
         features={"territory": Categorical(base="first")},
         selection_penalty=0.0,
@@ -127,8 +125,7 @@ def test_export_rating_tables_preserves_raw_offset_levels(tmp_path: Path):
         (row, column)
         for row in range(len(raw))
         for column in range(len(raw.columns) - 1)
-        if raw.iat[row, column] == "Term"
-        and raw.iat[row, column + 1] == "Relativity"
+        if raw.iat[row, column] == "Term" and raw.iat[row, column + 1] == "Relativity"
     ]
     assert len(header_positions) == 1
     header_row, source_column = header_positions[0]
@@ -266,7 +263,8 @@ def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path
             connection.execute(
                 text(
                     "SELECT publication_receipt_sha256, offset_handling, "
-                    "offset_factor_name, staging_content_sha256 "
+                    "offset_factor_name, staging_content_sha256, "
+                    "model_equivalence_sha256 "
                     "FROM pricing_stg.STG_RATING_EXPORT WHERE export_id = :export_id"
                 ),
                 {"export_id": "export-1"},
@@ -296,6 +294,7 @@ def test_stage_rating_export_persists_receipt_offset_and_content_digest(tmp_path
     assert len(content_sha256) == 64
     assert export["publication_receipt_sha256"] == receipt_sha256
     assert export["staging_content_sha256"] == content_sha256
+    assert len(export["model_equivalence_sha256"]) == 64
     assert export["offset_handling"] == "EXPORTED_FACTOR"
     assert export["offset_factor_name"] == "TermMonths"
     assert term["term_type"] == "OFFSET_FACTOR"
@@ -378,6 +377,146 @@ def test_staging_content_sha256_binds_every_frame():
     assert staging.staging_content_sha256(export, changed_rates, levels, terms) != digest
     assert staging.staging_content_sha256(export, rates, changed_levels, terms) != digest
     assert staging.staging_content_sha256(export, rates, levels, changed_terms) != digest
+
+
+def test_model_equivalence_ignores_volatile_identity_and_uses_small_numeric_tolerance():
+    export = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "model_id": 17,
+                "model_name": "MTPL_FREQ",
+                "model_version": "v1",
+                "base_rate": 0.123456789001,
+                "source_file": "/first/rating.xlsx",
+                "package_metadata_json": '{"family":"poisson","link":"log"}',
+            }
+        ]
+    )
+    rates = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "row_id": 1,
+                "sequence_no": 1,
+                "term_name": "Area",
+                "term_type": "CATEGORICAL_MAIN",
+                "cell_key_text": "Area=A",
+                "multiplier": 1.234567890001,
+                "log_coefficient": np.log(1.234567890001),
+            }
+        ]
+    )
+    levels = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "row_id": 1,
+                "position_no": 1,
+                "feature_name": "Area",
+                "level_set_name": "Area__export-1",
+                "level_code": "A",
+                "order_index": 1,
+            }
+        ]
+    )
+    terms = pd.DataFrame(
+        [
+            {
+                "export_id": "export-1",
+                "term_name": "Area",
+                "term_metadata_json": '{"published_term_name":"Area","feature_kind":"categorical"}',
+            }
+        ]
+    )
+    digest = staging.model_equivalence_sha256(export, rates, levels, terms)
+
+    retry_export = export.assign(
+        export_id="export-2",
+        model_version="v2",
+        source_file="/second/rating.xlsx",
+        base_rate=0.123456789002,
+    )
+    retry_rates = rates.assign(
+        export_id="export-2",
+        row_id=99,
+        sequence_no=8,
+        multiplier=1.234567890002,
+        log_coefficient=np.log(1.234567890002),
+    )
+    retry_levels = levels.assign(
+        export_id="export-2",
+        row_id=99,
+        level_set_name="Area__export-2",
+        order_index=12,
+    )
+    retry_terms = terms.assign(export_id="export-2")
+
+    assert (
+        staging.model_equivalence_sha256(
+            retry_export,
+            retry_rates,
+            retry_levels,
+            retry_terms,
+        )
+        == digest
+    )
+
+    materially_changed = retry_rates.copy()
+    materially_changed.loc[0, "multiplier"] = 1.23456799
+    materially_changed.loc[0, "log_coefficient"] = np.log(1.23456799)
+    assert (
+        staging.model_equivalence_sha256(
+            retry_export,
+            materially_changed,
+            retry_levels,
+            retry_terms,
+        )
+        != digest
+    )
+
+    changed_level = retry_levels.copy()
+    changed_level.loc[0, "level_code"] = "B"
+    assert (
+        staging.model_equivalence_sha256(
+            retry_export,
+            retry_rates,
+            changed_level,
+            retry_terms,
+        )
+        != digest
+    )
+
+
+def test_workbook_equivalence_is_calculated_entirely_in_python_before_staging(
+    tmp_path: Path,
+):
+    workbook_path = _minimal_rating_workbook(tmp_path / "rating_tables.xlsx")
+    receipt_path = tmp_path / "publication_receipt.json"
+    receipt_sha256 = write_publication_receipt(_publication_receipt(), receipt_path)
+
+    first = staging.rating_workbook_model_equivalence_sha256(
+        workbook_path=workbook_path,
+        export_id="export-1",
+        model_name="MTPL_FREQ",
+        model_version="v1",
+        effective_from="2026-08-01",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=receipt_sha256,
+        model_id=17,
+    )
+    retry = staging.rating_workbook_model_equivalence_sha256(
+        workbook_path=workbook_path,
+        export_id="export-2",
+        model_name="MTPL_FREQ",
+        model_version="v2",
+        effective_from="2026-09-01",
+        publication_receipt_path=receipt_path,
+        publication_receipt_sha256=receipt_sha256,
+        model_id=17,
+    )
+
+    assert first == retry
 
 
 def test_stage_rating_export_parses_categorical_interaction_matrix(
@@ -643,9 +782,7 @@ def test_record_model_run_writes_identity_associations_parent_and_metrics():
     kwargs["build"] = _model_run_build(
         metrics={"deviance": 0.42},
         metric_scopes={"deviance": "cv"},
-        fold_metrics=(
-            {"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},
-        ),
+        fold_metrics=({"fold_no": 1, "metric_name": "deviance", "metric_value": 0.4},),
     )
 
     model_run_id = lineage.record_model_run(
@@ -989,8 +1126,19 @@ def test_publish_model_export_stages_packages_and_records_lineage(
 ):
     calls = []
     export = _retry_export(tmp_path)
+    fingerprinted_export = export.model_copy(update={"model_equivalence_sha256": "f" * 64})
     connection = object()
 
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_model_equivalence",
+        lambda build: fingerprinted_export,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(
         pipeline,
         "stage_rating_export",
@@ -1036,9 +1184,10 @@ def test_publish_model_export_stages_packages_and_records_lineage(
     publish_call = next(call for call in calls if call[0] == "publish")
     assert "package_status" not in publish_call[2]
     assert publish_call[2]["expected_staged_metadata"]["staging_content_sha256"] == "a" * 64
+    assert publish_call[2]["expected_staged_metadata"]["model_equivalence_sha256"] == "f" * 64
     lineage_call = next(call for call in calls if call[0] == "lineage")
     assert lineage_call[1] is connection
-    assert lineage_call[2]["build"] is export
+    assert lineage_call[2]["build"] is fingerprinted_export
     assert lineage_call[2]["rate_package_id"] == 42
 
 
@@ -1047,6 +1196,7 @@ def test_publish_model_export_returns_verified_existing_result_without_rewriting
     tmp_path: Path,
 ):
     export = _retry_export(tmp_path)
+    fingerprinted_export = export.model_copy(update={"model_equivalence_sha256": "f" * 64})
     existing = CompletedModelPublishResult(
         model_id=17,
         model_name="MTPL_FREQ",
@@ -1060,6 +1210,16 @@ def test_publish_model_export_returns_verified_existing_result_without_rewriting
         rating_workbook_path=export.rating_workbook_path,
         model_run_id=501,
         was_existing=True,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_model_equivalence",
+        lambda build: fingerprinted_export,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
     )
     monkeypatch.setattr(pipeline, "stage_rating_export", lambda *args, **kwargs: "a" * 64)
     monkeypatch.setattr(
@@ -1092,3 +1252,73 @@ def test_publish_model_export_returns_verified_existing_result_without_rewriting
     )
 
     assert result is existing
+
+
+def test_publish_model_export_reuses_equivalent_run_before_any_staging_write(
+    monkeypatch,
+    tmp_path: Path,
+):
+    export = _retry_export(tmp_path)
+    fingerprinted_export = export.model_copy(update={"model_equivalence_sha256": "f" * 64})
+    equivalent = SimpleNamespace(
+        model_id=17,
+        model_name="MTPL_FREQ",
+        model_version="v1",
+        export_id="export-original",
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        rate_package_id=42,
+        package_version=3,
+        package_status="PUBLISHED",
+        rating_workbook_path="/durable/original.xlsx",
+        model_run_id=501,
+        mlflow_run_id=None,
+        publication_receipt_path="/durable/original-receipt.json",
+        publication_receipt_sha256="9" * 64,
+        model_kind="RAW",
+        model_equivalence_sha256="f" * 64,
+    )
+    calls = []
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_model_equivalence",
+        lambda build: calls.append("python_fingerprint") or fingerprinted_export,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_equivalent_publication",
+        lambda engine, *, build: calls.append("read_only_lookup") or equivalent,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "release_unused_model_version_reservation",
+        lambda engine, **kwargs: calls.append(("release_reservation", kwargs)),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "stage_rating_export",
+        lambda *args, **kwargs: pytest.fail("equivalent model reached SQL staging"),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "publish_rating_package",
+        lambda *args, **kwargs: pytest.fail("equivalent model reached package publication"),
+    )
+
+    result = pipeline.publish_model_export(
+        object(),
+        export,
+        model_config=MODEL_CONFIG,
+        validated_model_id=17,
+    )
+
+    assert calls[:2] == ["python_fingerprint", "read_only_lookup"]
+    assert calls[2] == (
+        "release_reservation",
+        {"model_id": 17, "export_id": "export-1"},
+    )
+    assert result.rate_package_id == 42
+    assert result.export_id == "export-original"
+    assert result.was_existing is True
+    assert result.deduplicated is True
+    assert result.model_equivalence_sha256 == "f" * 64

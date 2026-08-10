@@ -20,6 +20,11 @@ from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.publishing.equivalence import (
+    ensure_model_equivalence,
+    find_equivalent_publication,
+    release_unused_model_version_reservation,
+)
 from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.package_writer import publish_rating_package
 from pricing_pipeline.publishing.rating_export import export_rating_tables
@@ -107,6 +112,8 @@ class EditorPublicationResult:
     model_run_id: int
     package_status: str
     was_existing: bool
+    model_kind: str = "EDITOR_EDIT"
+    deduplicated: bool = False
 
 
 @dataclass(frozen=True)
@@ -694,9 +701,7 @@ def _load_edited_model(
             allowed_root=allowed_root,
         )
     if submission_format != SUBMISSION_FORMAT:
-        raise EditorSubmissionError(
-            f"unsupported editor submission format {submission_format!r}"
-        )
+        raise EditorSubmissionError(f"unsupported editor submission format {submission_format!r}")
 
     metadata = (
         submission.edited_model_path,
@@ -719,9 +724,7 @@ def _load_edited_model(
             allowed_root=allowed_root,
         )
     except CandidateArtifactError as exc:
-        raise EditorSubmissionError(
-            f"edited model artifact failed verification: {exc}"
-        ) from exc
+        raise EditorSubmissionError(f"edited model artifact failed verification: {exc}") from exc
 
     if getattr(edited_model, "_result", None) is None:
         raise EditorSubmissionError("edited model artifact is not fitted")
@@ -1006,6 +1009,7 @@ def export_edited_model(
         model_name=parent.model_name,
         model_version=parent.model_version,
         model_type=parent.config.model_type,
+        model_kind="EDITOR_EDIT",
         target_name=parent.config.target_name,
         deployment_slot=submission.deployment_slot,
         manifest_id=submission.manifest_id,
@@ -1173,6 +1177,36 @@ def _publish_new_editor_submission(
     try:
         if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook SHA-256 changed before staging")
+        build = ensure_model_equivalence(
+            build,
+            effective_to=parent.effective_to,
+        )
+        equivalent = find_equivalent_publication(engine, build=build)
+        if equivalent is not None:
+            if (
+                equivalent.package_status.upper() != "PUBLISHED"
+                or equivalent.parent_rate_package_id is None
+            ):
+                raise EditorSubmissionError(
+                    "equivalent editor package has unusable durable lineage"
+                )
+            release_unused_model_version_reservation(
+                engine,
+                model_id=build.model_id,
+                export_id=build.export_id,
+            )
+            _remove_path(attempt.final_dir)
+            return EditorPublicationResult(
+                submission_id=submission.submission_id,
+                model_name=equivalent.model_name,
+                parent_rate_package_id=equivalent.parent_rate_package_id,
+                rate_package_id=equivalent.rate_package_id,
+                package_version=equivalent.package_version,
+                model_run_id=equivalent.model_run_id,
+                package_status=equivalent.package_status,
+                was_existing=True,
+                deduplicated=True,
+            )
         content_sha256 = stage_rating_export(
             engine,
             workbook_path=Path(build.rating_workbook_path),
@@ -1191,6 +1225,11 @@ def _publish_new_editor_submission(
         )
         if sha256_file(build.rating_workbook_path) != build.rating_workbook_sha256:
             raise EditorSubmissionError("edited rating workbook changed during staging")
+        equivalence_sha256 = build.model_equivalence_sha256
+        if equivalence_sha256 is None:
+            raise EditorSubmissionError(
+                "Python equivalence fingerprint is missing before SQL staging"
+            )
         revision_metadata = {
             **exported.revision_metadata,
             "published_by": created_by,
@@ -1234,8 +1273,68 @@ def _publish_new_editor_submission(
                 "source_file": str(Path(build.rating_workbook_path).resolve()),
                 "publication_receipt_sha256": build.publication_receipt_sha256,
                 "staging_content_sha256": content_sha256,
+                "model_equivalence_sha256": equivalence_sha256,
+            },
+            equivalence_key={
+                "manifest_id": build.manifest_id,
+                "model_kind": build.model_kind,
+                "model_equivalence_sha256": equivalence_sha256,
             },
         )
+        if published.deduplicated:
+            schemas = schema_names_from_connectable(engine)
+            with engine.connect() as connection:
+                equivalent = (
+                    connection.execute(
+                        text(
+                            f"""
+                            SELECT
+                                rp.model_name,
+                                rp.parent_rate_package_id,
+                                rp.package_status,
+                                mr.model_run_id,
+                                mr.manifest_id,
+                                mr.model_kind,
+                                mr.model_equivalence_sha256
+                            FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+                            JOIN {schemas.pricing}.MODEL_RUN AS mr
+                              ON mr.rate_package_id = rp.rate_package_id
+                            WHERE rp.rate_package_id = :rate_package_id
+                            """
+                        ),
+                        {"rate_package_id": published.rate_package_id},
+                    )
+                    .mappings()
+                    .one()
+                )
+            expected_equivalent = {
+                "model_name": build.model_name,
+                "manifest_id": build.manifest_id,
+                "model_kind": build.model_kind,
+                "model_equivalence_sha256": equivalence_sha256,
+                "package_status": "PUBLISHED",
+            }
+            mismatches = [
+                field_name
+                for field_name, expected_value in expected_equivalent.items()
+                if str(equivalent[field_name]) != str(expected_value)
+            ]
+            if mismatches:
+                raise EditorSubmissionError(
+                    "equivalent editor package has incompatible lineage: " + ", ".join(mismatches)
+                )
+            _remove_path(attempt.final_dir)
+            return EditorPublicationResult(
+                submission_id=submission.submission_id,
+                model_name=str(equivalent["model_name"]),
+                parent_rate_package_id=int(equivalent["parent_rate_package_id"]),
+                rate_package_id=published.rate_package_id,
+                package_version=published.package_version,
+                model_run_id=int(equivalent["model_run_id"]),
+                package_status=str(equivalent["package_status"]),
+                was_existing=True,
+                deduplicated=True,
+            )
         if published.was_existing:
             existing = _resolve_existing_editor_publication(
                 engine,

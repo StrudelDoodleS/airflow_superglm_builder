@@ -25,6 +25,8 @@ _IMMUTABLE_MODEL_RUN_FIELDS = (
     "model_id",
     "model_name",
     "model_version",
+    "model_kind",
+    "model_equivalence_sha256",
     "rate_package_id",
     "rating_workbook_path",
     "rating_workbook_sha256",
@@ -76,6 +78,8 @@ def record_model_run(
         "model_id": build.model_id,
         "model_name": build.model_name,
         "model_version": build.model_version,
+        "model_kind": build.model_kind,
+        "model_equivalence_sha256": build.model_equivalence_sha256,
         "rate_package_id": rate_package_id,
         "rating_workbook_path": build.rating_workbook_path,
         "rating_workbook_sha256": build.rating_workbook_sha256,
@@ -110,6 +114,8 @@ def record_model_run(
                         mr.model_id,
                         mr.model_name,
                         mr.model_version,
+                        mr.model_kind,
+                        mr.model_equivalence_sha256,
                         mr.rate_package_id,
                         mr.rating_workbook_path,
                         mr.rating_workbook_sha256,
@@ -163,7 +169,12 @@ def record_model_run(
             mismatched_fields = [
                 field_name
                 for field_name in _IMMUTABLE_MODEL_RUN_FIELDS
-                if _identity_value(existing_successful_run[field_name])
+                if _identity_value(
+                    existing_successful_run.get(
+                        field_name,
+                        "RAW" if field_name == "model_kind" else None,
+                    )
+                )
                 != _identity_value(params[field_name])
             ]
             if mismatched_fields:
@@ -331,6 +342,8 @@ def record_model_run(
                         model_id = :model_id,
                         model_name = :model_name,
                         model_version = :model_version,
+                        model_kind = :model_kind,
+                        model_equivalence_sha256 = :model_equivalence_sha256,
                         rate_package_id = :rate_package_id,
                         rating_workbook_path = :rating_workbook_path,
                         rating_workbook_sha256 = :rating_workbook_sha256,
@@ -357,6 +370,8 @@ def record_model_run(
                         model_id,
                         model_name,
                         model_version,
+                        model_kind,
+                        model_equivalence_sha256,
                         rate_package_id,
                         rating_workbook_path,
                         rating_workbook_sha256,
@@ -383,6 +398,8 @@ def record_model_run(
                         :model_id,
                         :model_name,
                         :model_version,
+                        :model_kind,
+                        :model_equivalence_sha256,
                         :rate_package_id,
                         :rating_workbook_path,
                         :rating_workbook_sha256,

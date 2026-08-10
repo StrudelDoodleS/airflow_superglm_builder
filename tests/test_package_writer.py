@@ -299,6 +299,8 @@ class _FakeExistingPackageConnection:
             return _FakeMetaWithModelResult(self.staged_meta)
         if "source_export_id = :export_id" in sql:
             return _FakeExistingPackageResult(self.existing_package)
+        if sql.lstrip().startswith("DELETE FROM pricing_stg."):
+            return _FakeScalarResult()
         raise AssertionError("existing export publish should stop before package insert")
 
 
@@ -385,6 +387,24 @@ class _FakeNewPackageEngine:
         return self.transaction
 
 
+class _FakeEquivalentPackageConnection(_FakeNewPackageConnection):
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "FROM pricing.MODEL_RUN AS mr" in sql:
+            self.statements.append((sql, params))
+            return _FakeExistingPackageResult(
+                {
+                    "rate_package_id": 41,
+                    "package_version": 2,
+                    "package_status": "PUBLISHED",
+                    "source_export_id": "original-export",
+                    "source_file": "/tmp/original/rating_tables.xlsx",
+                    "model_run_id": 901,
+                }
+            )
+        return super().execute(statement, params)
+
+
 def _new_package_args(**overrides):
     values = {
         "export_id": "export-1",
@@ -441,6 +461,44 @@ def test_package_lineage_writer_runs_inside_transaction_before_final_status():
     }
 
 
+def test_successful_publish_deletes_staging_payload_after_final_status_only():
+    engine = _FakeNewPackageEngine()
+
+    load_staging_to_rating_package(engine, _new_package_args())
+
+    statements = [sql for sql, _params in engine.connection.statements]
+    status_index = next(
+        index
+        for index, sql in enumerate(statements)
+        if "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
+    )
+    payload_deletes = [
+        (index, " ".join(sql.split()))
+        for index, sql in enumerate(statements)
+        if sql.lstrip().startswith("DELETE FROM pricing_stg.")
+    ]
+
+    assert payload_deletes == [
+        (
+            status_index + 1,
+            "DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id",
+        ),
+        (
+            status_index + 2,
+            "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
+        ),
+        (
+            status_index + 3,
+            "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
+        ),
+    ]
+    assert all(
+        engine.connection.statements[index][1] == {"export_id": "export-1"}
+        for index, _sql in payload_deletes
+    )
+    assert not any("DELETE FROM pricing_stg.STG_RATING_EXPORT" in sql for sql in statements)
+
+
 def test_package_lineage_writer_return_id_is_exposed_from_same_transaction():
     engine = _FakeNewPackageEngine()
 
@@ -480,6 +538,9 @@ def test_package_lineage_failure_prevents_final_status_and_rolls_back_transactio
         "UPDATE pricing.PRICING_RATE_PACKAGE" in sql
         for sql, _params in engine.connection.statements
     )
+    assert not any(
+        "DELETE FROM pricing_stg." in sql for sql, _params in engine.connection.statements
+    )
 
 
 def test_existing_compatible_package_does_not_rewrite_lineage():
@@ -496,6 +557,65 @@ def test_existing_compatible_package_does_not_rewrite_lineage():
     assert calls == []
     assert args.was_existing is True
     assert args.model_run_id is None
+
+
+def test_existing_published_package_cleans_retry_payload_but_retains_header():
+    engine = _FakeExistingPackageEngine(
+        existing_package=_existing_package(package_status="PUBLISHED"),
+    )
+
+    result = publish_rating_package(engine, export_id="export-1")
+
+    assert result.was_existing is True
+    statements = [sql for sql, _params in engine.connection.statements]
+    assert [
+        " ".join(sql.split())
+        for sql in statements
+        if sql.lstrip().startswith("DELETE FROM pricing_stg.")
+    ] == [
+        "DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
+    ]
+    assert not any("DELETE FROM pricing_stg.STG_RATING_EXPORT" in sql for sql in statements)
+
+
+def test_existing_draft_package_retains_staging_payload_for_recovery():
+    engine = _FakeExistingPackageEngine(
+        existing_package=_existing_package(package_status="DRAFT"),
+    )
+
+    result = publish_rating_package(engine, export_id="export-1")
+
+    assert result.package_status == "DRAFT"
+    assert not any(
+        "DELETE FROM pricing_stg." in sql for sql, _params in engine.connection.statements
+    )
+
+
+def test_equivalent_published_package_cleans_rejected_attempt_payload():
+    engine = _FakeNewPackageEngine()
+    engine.connection = _FakeEquivalentPackageConnection()
+    engine.transaction = _FakeNewPackageBegin(engine.connection)
+
+    result = publish_rating_package(
+        engine,
+        export_id="export-1",
+        equivalence_key={
+            "manifest_id": "manifest-1",
+            "model_kind": "RAW",
+            "model_equivalence_sha256": "b" * 64,
+        },
+    )
+
+    assert result.was_existing is True
+    assert result.deduplicated is True
+    assert result.export_id == "original-export"
+    statements = [sql for sql, _params in engine.connection.statements]
+    assert (
+        len([sql for sql in statements if sql.lstrip().startswith("DELETE FROM pricing_stg.")]) == 3
+    )
+    assert not any("INSERT INTO pricing.PRICING_RATE_PACKAGE" in sql for sql in statements)
 
 
 def test_package_writer_rejects_replaced_staging_rate_content():

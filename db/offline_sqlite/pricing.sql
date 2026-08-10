@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS pricing.FREMTPL_RAW (
 
 CREATE TABLE IF NOT EXISTS pricing.DATASET_MANIFEST (
     manifest_id TEXT NOT NULL PRIMARY KEY,
+    manifest_signature_sha256 TEXT,
     dataset_name TEXT NOT NULL,
     source_system TEXT,
     data_as_of_date TEXT NOT NULL,
@@ -110,6 +111,9 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     airflow_run_id TEXT,
     mlflow_run_id TEXT,
     model_version TEXT NOT NULL,
+    model_kind TEXT NOT NULL DEFAULT 'RAW'
+        CHECK (model_kind IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')),
+    model_equivalence_sha256 TEXT,
     export_id TEXT NOT NULL,
     manifest_id TEXT NOT NULL,
     split_set_id TEXT,
@@ -171,6 +175,57 @@ CREATE TABLE IF NOT EXISTS pricing.PRICING_RATE_PACKAGE (
     UNIQUE (model_id, source_export_id),
     UNIQUE (model_id, package_version)
 );
+
+CREATE TABLE IF NOT EXISTS pricing.PRICING_MODEL_DEPLOYMENT (
+    deployment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id INTEGER NOT NULL,
+    rate_package_id INTEGER NOT NULL,
+    deployment_slot TEXT NOT NULL,
+    effective_from_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    effective_to_ts TEXT,
+    deployed_by TEXT NOT NULL,
+    deployment_note TEXT,
+    created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (effective_to_ts IS NULL OR effective_to_ts > effective_from_ts),
+    FOREIGN KEY (model_id) REFERENCES PRICING_MODEL(model_id),
+    FOREIGN KEY (rate_package_id) REFERENCES PRICING_RATE_PACKAGE(rate_package_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS pricing.UX_MODEL_DEPLOYMENT_CURRENT
+ON PRICING_MODEL_DEPLOYMENT(model_id, deployment_slot)
+WHERE effective_to_ts IS NULL;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_DEPLOYMENT_PACKAGE_GUARD_INSERT
+BEFORE INSERT ON PRICING_MODEL_DEPLOYMENT
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM PRICING_RATE_PACKAGE AS package
+    WHERE package.rate_package_id = NEW.rate_package_id
+      AND package.model_id = NEW.model_id
+      AND package.package_status = 'PUBLISHED'
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'deployment package must exist, match model_id, and be PUBLISHED'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_DEPLOYMENT_PACKAGE_GUARD_UPDATE
+BEFORE UPDATE OF model_id, rate_package_id ON PRICING_MODEL_DEPLOYMENT
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM PRICING_RATE_PACKAGE AS package
+    WHERE package.rate_package_id = NEW.rate_package_id
+      AND package.model_id = NEW.model_id
+      AND package.package_status = 'PUBLISHED'
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'deployment package must exist, match model_id, and be PUBLISHED'
+    );
+END;
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_FEATURE (
     feature_id INTEGER PRIMARY KEY AUTOINCREMENT,

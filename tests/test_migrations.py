@@ -134,6 +134,69 @@ def test_validation_and_final_relativity_views_use_existing_audit_tables():
     assert "parent_metric" not in sql
 
 
+def test_model_kind_data_lineage_and_equivalence_migration_is_normalized():
+    path = Path("db/migrations/V036__model_kind_manifest_relativity.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "ADD model_kind NVARCHAR(32) NULL" in sql
+    assert "RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT" in sql
+    assert sql.count("ADD model_equivalence_sha256 CHAR(64) NULL") == 2
+    assert "UX_MODEL_RUN_EQUIVALENT_SUCCESS" in sql
+    assert (
+        "model_id,\n            manifest_id,\n            model_kind,\n"
+        "            model_equivalence_sha256"
+    ) in sql
+    assert "WHERE model_equivalence_sha256 IS NOT NULL" in sql
+    assert "ADD manifest_signature_sha256 CHAR(64) NULL" in sql
+    assert "UX_DATASET_MANIFEST_SIGNATURE" in sql
+
+    assert "CREATE OR ALTER VIEW pricing.V_FINAL_MODEL_RELATIVITY" in sql
+    for lineage_column in (
+        "model_run.model_kind",
+        "model_run.model_equivalence_sha256",
+        "manifest.manifest_signature_sha256",
+        "manifest.dataset_name",
+        "manifest.source_system",
+        "manifest.data_as_of_date",
+        "manifest.data_as_of_column",
+        "manifest.model_frame_sha256",
+        "validation_split.validation_manifest_id",
+        "validation_split.validation_split_set_id",
+        "validation_split.validation_split_link_count",
+    ):
+        assert lineage_column in sql
+
+    assert "FROM mlops.MODEL_RUN_SPLIT_SET" in sql
+    assert "dataset_role = 'training'" in sql
+    assert "split_role = 'validation'" in sql
+    assert "model_run.split_set_id" not in sql
+
+    for view_name in (
+        "V_MODEL_CANDIDATE_RELATIVITY",
+        "V_CURRENT_DEPLOYED_RELATIVITY",
+        "V_MODEL_LINEAGE_REDUNDANCY_CHECK",
+    ):
+        assert f"CREATE OR ALTER VIEW pricing.{view_name}" in sql
+    assert "JOIN pricing.V_FINAL_MODEL_RELATIVITY AS relativity" in sql
+    assert "deployment.deployment_id" in sql
+    assert "deployment.deployment_slot" in sql
+    assert "deployment.effective_from_ts AS deployment_effective_from_ts" in sql
+    assert "deployment.effective_to_ts AS deployment_effective_to_ts" in sql
+    assert "WHERE deployment.effective_to_ts IS NULL" in sql
+    assert "AND relativity.package_status = 'PUBLISHED'" in sql
+
+    # These grouped checks can only report OK because the matching filtered
+    # unique indexes already reject duplicate non-null fingerprints.
+    assert "V_DATASET_MANIFEST_REDUNDANCY_CHECK" not in sql
+    assert "V_MODEL_EQUIVALENCE_REDUNDANCY_CHECK" not in sql
+
+    # SQL Server packages never duplicated manifest/split IDs; normalized
+    # MODEL_RUN plus mlops link tables remain the lineage source of truth.
+    assert "package.manifest_id" not in sql
+    assert "package.split_set_id" not in sql
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 

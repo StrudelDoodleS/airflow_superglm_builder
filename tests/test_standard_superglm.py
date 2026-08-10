@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -986,6 +987,17 @@ def test_manifest_attempt_directory_rejects_unsafe_path_components(
         api._manifest_attempt_directory(tmp_path / "run", manifest_id)
 
 
+def test_manifest_attempt_directory_uses_compact_digest_not_full_sql_identity(tmp_path):
+    api = _api()
+    manifest_id = "an_extremely_long_dataset_manifest_identity_20260810_0123456789abcdef"
+
+    attempt = api._manifest_attempt_directory(tmp_path / "run", manifest_id)
+
+    assert re.fullmatch(r"mf_[0-9a-f]{16}", attempt.name)
+    assert manifest_id not in str(attempt)
+    assert len(attempt.name) == 19
+
+
 def test_standard_runner_removes_partial_attempt_but_keeps_manifest_evidence(
     tmp_path,
     monkeypatch,
@@ -1260,12 +1272,15 @@ def test_standard_runner_uses_model_config_and_returns_approved_build(
         "receipt": Path(second_result.publication_receipt_path),
         "candidate": Path(second_result.candidate_artifact_path),
     }
-    assert {path.parent for path in first_paths.values()} == {
-        (tmp_path / "run" / "manifest-1").resolve()
-    }
-    assert {path.parent for path in second_paths.values()} == {
-        (tmp_path / "run" / "manifest-2").resolve()
-    }
+    first_parent = next(iter({path.parent for path in first_paths.values()}))
+    second_parent = next(iter({path.parent for path in second_paths.values()}))
+    assert {path.parent for path in first_paths.values()} == {first_parent}
+    assert {path.parent for path in second_paths.values()} == {second_parent}
+    assert first_parent.parent == (tmp_path / "run").resolve()
+    assert second_parent.parent == (tmp_path / "run").resolve()
+    assert re.fullmatch(r"mf_[0-9a-f]{16}", first_parent.name)
+    assert re.fullmatch(r"mf_[0-9a-f]{16}", second_parent.name)
+    assert first_parent != second_parent
     assert set(first_paths.values()).isdisjoint(second_paths.values())
     assert {name: path.read_bytes() for name, path in first_paths.items()} == first_bytes
     assert Path(result.candidate_artifact_path).exists()
@@ -1320,6 +1335,40 @@ def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(t
     )
     checkpoint_only_change = hash_model_source(tmp_path)
 
+    scratch_path = tmp_path / "99_scratch_work.ipynb"
+    scratch_path.write_text(
+        json.dumps(
+            {
+                **notebook,
+                "cells": [
+                    {
+                        **notebook["cells"][0],
+                        "source": ["DISPOSABLE_FEATURE_IDEA = True\n"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scratch_only_change = hash_model_source(tmp_path)
+
+    for operational_name in ("03_model_editor.ipynb", "04_model_deployment.ipynb"):
+        (tmp_path / operational_name).write_text(
+            json.dumps(
+                {
+                    **notebook,
+                    "cells": [
+                        {
+                            **notebook["cells"][0],
+                            "source": [f"OPERATIONAL_NOTEBOOK = {operational_name!r}\n"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+    operational_notebook_change = hash_model_source(tmp_path)
+
     notebook["cells"][0]["execution_count"] = 7
     notebook["cells"][0]["outputs"] = [{"output_type": "stream", "text": ["trained\n"]}]
     notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
@@ -1330,5 +1379,7 @@ def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(t
     source_change = hash_model_source(tmp_path)
 
     assert checkpoint_only_change == original
+    assert scratch_only_change == original
+    assert operational_notebook_change == original
     assert output_only_change == original
     assert source_change != original

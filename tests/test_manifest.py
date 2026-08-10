@@ -1,10 +1,13 @@
 import json
+import re
 import sys
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from sqlalchemy import text
 
 from pricing_pipeline.data import manifest as manifest_api
 from pricing_pipeline.data.manifest import (
@@ -17,8 +20,11 @@ from pricing_pipeline.data.manifest import (
     runtime_dependency_metadata,
     validation_split_indices,
 )
+from pricing_pipeline.infra.offline_sqlite import (
+    apply_offline_ddl,
+    sqlite_engine_with_offline_schemas,
+)
 from pricing_pipeline.models.config import ValidationSplitConfig
-
 
 NO_VALIDATION = ValidationSplitConfig(
     method="none",
@@ -46,6 +52,13 @@ def manifest_frame(**overrides):
     return pd.DataFrame(data)
 
 
+def assert_hashed_split_id(split_set_id: str, *, readable_prefix: str) -> None:
+    prefix, signature = split_set_id.rsplit("__", maxsplit=1)
+    assert prefix == readable_prefix
+    assert len(signature) == 16
+    assert set(signature) <= set("0123456789abcdef")
+
+
 def test_new_manifest_id_includes_dataset_date_prefix_and_unique_suffix():
     first = new_manifest_id("freMTPL2freq")
     second = new_manifest_id("freMTPL2freq")
@@ -54,6 +67,22 @@ def test_new_manifest_id_includes_dataset_date_prefix_and_unique_suffix():
     assert first.startswith(expected_prefix)
     assert second.startswith(expected_prefix)
     assert first != second
+
+
+def test_split_set_id_respects_sql_server_length_contract():
+    split_set_id = manifest_api.split_set_id_for_validation_split(
+        "m" * 128,
+        ValidationSplitConfig.kfold(n_splits=2, random_state=42),
+        row_order_sha256="a" * 64,
+        split_indices=[
+            (np.asarray([0, 1]), np.asarray([2, 3])),
+            (np.asarray([2, 3]), np.asarray([0, 1])),
+        ],
+    )
+
+    assert split_set_id is not None
+    assert len(split_set_id) == 128
+    assert len(split_set_id.rsplit("__", maxsplit=1)[1]) == 16
 
 
 @pytest.mark.parametrize(
@@ -385,7 +414,7 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
             "TermOffset": [0.0, np.log(3.0), np.log(2.0)],
             "PolicyTerm": [12, 36, 24],
             "ExportWeight": [4.0, 5.0, 6.0],
-            "SnapshotDate": ["2026-06-30"] * 3,
+            "SnapshotDate": ["2026-06-04"] * 3,
             "BandedDriverAge": ["30-39", "18-29", "40-49"],
         }
     )
@@ -428,7 +457,11 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
     )
 
     assert result.manifest_id == "manifest_frame_1"
-    assert result.split_set_id == "manifest_frame_1__train_test_split_test_0_34_seed_42"
+    assert result.split_set_id is not None
+    assert_hashed_split_id(
+        result.split_set_id,
+        readable_prefix="manifest_frame_1__train_test_split_test_0_34_seed_42",
+    )
     assert [(call["name"], call["schema"]) for call in to_sql_calls] == [
         ("DATASET_MANIFEST", "pricing"),
         ("DATASET_COLUMN", "pricing"),
@@ -451,6 +484,7 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
     assert manifest_row["export_weight_column"] == "ExportWeight"
     assert "exposure_column" not in manifest_row
     assert manifest_row["data_as_of_column"] == "SnapshotDate"
+    assert len(manifest_row["manifest_signature_sha256"]) == 64
     assert len(manifest_row["model_frame_sha256"]) == 64
     assert result.model_frame_sha256 == manifest_row["model_frame_sha256"]
     assert json.loads(manifest_row["frame_hash_metadata_json"])["packages"]["pandas"]
@@ -479,6 +513,328 @@ def test_create_model_frame_manifest_writes_final_frame_metadata(monkeypatch):
         frame,
         pk_columns=("PolicyID",),
     )
+
+
+def test_implicit_manifest_identity_excludes_validation_but_includes_frame_and_data_as_of(
+    tmp_path,
+):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2, 3, 4, 5, 6],
+            "ClaimNb": [0, 1, 0, 2, 0, 1],
+            "Area": ["A", "B", "A", "C", "B", "A"],
+            "fold_number": [1, 2, 1, 2, 1, 2],
+        }
+    )
+
+    def create(
+        *,
+        data_as_of_date: str,
+        validation_split: ValidationSplitConfig,
+        model_frame: pd.DataFrame = frame,
+    ):
+        return create_model_frame_manifest_with_split(
+            engine,
+            frame=model_frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="frequency_model_frame",
+                source_system="pricing_mart",
+                data_as_of_date=data_as_of_date,
+                pk_columns=("PolicyID",),
+                target_column="ClaimNb",
+                feature_columns=("Area",),
+            ),
+            validation_split=validation_split,
+            created_by="unit-test",
+        )
+
+    kfold = ValidationSplitConfig.kfold(n_splits=3, random_state=42)
+    first = create(data_as_of_date="2026-06-30", validation_split=kfold)
+    retry = create(data_as_of_date="2026-06-30", validation_split=kfold)
+    column_split = create(
+        data_as_of_date="2026-06-30",
+        validation_split=ValidationSplitConfig.column_kfold(column="fold_number"),
+    )
+    changed_frame = frame.copy()
+    changed_frame.loc[0, "Area"] = "D"
+    changed_data = create(
+        data_as_of_date="2026-06-30",
+        validation_split=NO_VALIDATION,
+        model_frame=changed_frame,
+    )
+    newer_data_stamp = create(
+        data_as_of_date="2026-07-31",
+        validation_split=NO_VALIDATION,
+    )
+
+    assert retry.manifest_id == first.manifest_id
+    assert retry.split_set_id == first.split_set_id
+    assert retry.model_frame_sha256 == first.model_frame_sha256
+    assert column_split.manifest_id == first.manifest_id
+    assert column_split.split_set_id != first.split_set_id
+    assert changed_data.manifest_id != first.manifest_id
+    assert changed_data.model_frame_sha256 != first.model_frame_sha256
+    assert newer_data_stamp.manifest_id != first.manifest_id
+    assert newer_data_stamp.model_frame_sha256 == first.model_frame_sha256
+    with engine.connect() as connection:
+        manifests = (
+            connection.execute(
+                text(
+                    """
+                    SELECT manifest_id, manifest_signature_sha256, data_as_of_date
+                    FROM pricing.DATASET_MANIFEST
+                    ORDER BY data_as_of_date
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+        split_sets = (
+            connection.execute(
+                text(
+                    """
+                    SELECT manifest_id, split_set_id, row_order_sha256
+                    FROM pricing.CV_SPLIT_SET
+                    ORDER BY split_set_id
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+        manifest_columns = (
+            connection.execute(
+                text(
+                    """
+                    SELECT column_name, column_role
+                    FROM pricing.DATASET_COLUMN
+                    WHERE manifest_id = :manifest_id
+                    ORDER BY ordinal_no
+                    """
+                ),
+                {"manifest_id": first.manifest_id},
+            )
+            .mappings()
+            .all()
+        )
+    assert len(manifests) == 3
+    assert [row["data_as_of_date"] for row in manifests] == [
+        "2026-06-30",
+        "2026-06-30",
+        "2026-07-31",
+    ]
+    assert all(len(row["manifest_signature_sha256"]) == 64 for row in manifests)
+    first_manifest_splits = [row for row in split_sets if row["manifest_id"] == first.manifest_id]
+    assert len(first_manifest_splits) == 2
+    assert len({row["split_set_id"] for row in first_manifest_splits}) == 2
+    assert len({row["row_order_sha256"] for row in first_manifest_splits}) == 1
+    assert {row["column_name"]: row["column_role"] for row in manifest_columns}[
+        "fold_number"
+    ] == "OTHER"
+
+
+def test_custom_split_indices_have_distinct_identity_under_one_manifest(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [101, 102, 103, 104],
+            "ClaimNb": [0, 1, 0, 2],
+            "Area": ["A", "B", "A", "C"],
+        }
+    )
+    spec = ModelFrameManifestSpec(
+        dataset_name="frequency_model_frame",
+        source_system="pricing_mart",
+        data_as_of_date="2026-06-30",
+        pk_columns=("PolicyID",),
+        target_column="ClaimNb",
+        feature_columns=("Area",),
+    )
+    first_indices = [
+        (np.asarray([0, 1, 2]), np.asarray([3])),
+    ]
+    second_indices = [
+        (np.asarray([0, 2, 3]), np.asarray([1])),
+    ]
+
+    def create(split_indices):
+        return create_model_frame_manifest_with_split(
+            engine,
+            frame=frame,
+            spec=spec,
+            validation_split=CUSTOM_VALIDATION,
+            validation_split_artifact_root=tmp_path / "split-artifacts",
+            split_indices=split_indices,
+            created_by="unit-test",
+        )
+
+    first = create(first_indices)
+    second = create(second_indices)
+    retry = create(first_indices)
+
+    assert second.manifest_id == first.manifest_id
+    assert retry.manifest_id == first.manifest_id
+    assert first.split_set_id != second.split_set_id
+    assert retry.split_set_id == first.split_set_id
+    assert first.split_artifact_uri != second.split_artifact_uri
+    with engine.connect() as connection:
+        manifest_count = connection.execute(
+            text("SELECT COUNT(*) FROM pricing.DATASET_MANIFEST")
+        ).scalar_one()
+        split_rows = (
+            connection.execute(
+                text(
+                    """
+                    SELECT split_set_id, row_order_sha256
+                    FROM pricing.CV_SPLIT_SET
+                    WHERE manifest_id = :manifest_id
+                    """
+                ),
+                {"manifest_id": first.manifest_id},
+            )
+            .mappings()
+            .all()
+        )
+    assert manifest_count == 1
+    assert len(split_rows) == 2
+    assert len({row["split_set_id"] for row in split_rows}) == 2
+    assert len({row["row_order_sha256"] for row in split_rows}) == 1
+
+
+def test_reused_replayable_split_can_be_materialized_without_new_identity(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2, 3, 4],
+            "ClaimNb": [0, 1, 0, 1],
+            "Area": ["A", "B", "A", "B"],
+        }
+    )
+    spec = ModelFrameManifestSpec(
+        dataset_name="frequency_model_frame",
+        source_system="pricing_mart",
+        data_as_of_date="2026-06-30",
+        pk_columns=("PolicyID",),
+        target_column="ClaimNb",
+        feature_columns=("Area",),
+    )
+
+    replayable = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=spec,
+        validation_split=ValidationSplitConfig.kfold(
+            n_splits=2,
+            random_state=42,
+            materialize=False,
+        ),
+        created_by="unit-test",
+    )
+    materialized = create_model_frame_manifest_with_split(
+        engine,
+        frame=frame,
+        spec=spec,
+        validation_split=ValidationSplitConfig.kfold(
+            n_splits=2,
+            random_state=42,
+            materialize=True,
+        ),
+        validation_split_artifact_root=tmp_path / "split-artifacts",
+        created_by="unit-test",
+    )
+
+    assert materialized.manifest_id == replayable.manifest_id
+    assert materialized.split_set_id == replayable.split_set_id
+    assert replayable.split_artifact_uri is None
+    assert materialized.split_artifact_uri is not None
+    assert Path(materialized.split_artifact_uri).is_file()
+    with engine.connect() as connection:
+        split_row = (
+            connection.execute(
+                text(
+                    """
+                    SELECT split_mode, artifact_uri, artifact_sha256
+                    FROM pricing.CV_SPLIT_SET
+                    WHERE split_set_id = :split_set_id
+                    """
+                ),
+                {"split_set_id": materialized.split_set_id},
+            )
+            .mappings()
+            .one()
+        )
+        fold_count = connection.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM pricing.CV_FOLD
+                WHERE split_set_id = :split_set_id
+                """
+            ),
+            {"split_set_id": materialized.split_set_id},
+        ).scalar_one()
+
+    assert split_row["split_mode"] == "MATERIALIZED"
+    assert split_row["artifact_uri"] == materialized.split_artifact_uri
+    assert len(split_row["artifact_sha256"]) == 64
+    assert fold_count == 2
+
+
+@pytest.mark.parametrize(
+    ("snapshot_values", "match"),
+    [
+        (["2026-06-30", None], "null"),
+        (["2026-06-30", "2026-07-31"], "exactly one date"),
+        (["2026-06-29", "2026-06-29"], "does not match"),
+    ],
+)
+def test_manifest_rejects_untrustworthy_data_as_of_column(snapshot_values, match):
+    frame = pd.DataFrame(
+        {
+            "PolicyID": [1, 2],
+            "ClaimNb": [0, 1],
+            "SnapshotDate": snapshot_values,
+        }
+    )
+
+    with pytest.raises(ValueError, match=match):
+        create_model_frame_manifest_with_split(
+            FakeEngine(),
+            frame=frame,
+            spec=ModelFrameManifestSpec(
+                dataset_name="frequency_model_frame",
+                source_system="pricing_mart",
+                data_as_of_date="2026-06-30",
+                pk_columns=("PolicyID",),
+                target_column="ClaimNb",
+                data_as_of_column="SnapshotDate",
+            ),
+            manifest_id="manifest_bad_data_as_of",
+            validation_split=NO_VALIDATION,
+        )
 
 
 def test_create_model_frame_manifest_records_supplied_custom_split_indices(
@@ -529,7 +885,11 @@ def test_create_model_frame_manifest_records_supplied_custom_split_indices(
         created_by="unit-test",
     )
 
-    assert result.split_set_id == "manifest_custom_split__custom"
+    assert result.split_set_id is not None
+    assert_hashed_split_id(
+        result.split_set_id,
+        readable_prefix="manifest_custom_split__custom",
+    )
 
     split_set = next(call for call in to_sql_calls if call["name"] == "CV_SPLIT_SET")["frame"].iloc[
         0
@@ -545,7 +905,9 @@ def test_create_model_frame_manifest_records_supplied_custom_split_indices(
         {"fold_no": 2, "n_train": 2, "n_test": 2},
     ]
 
-    artifact_path = tmp_path / "manifest_custom_split__custom.npz"
+    artifact_path = Path(result.split_artifact_uri)
+    assert artifact_path.parent == tmp_path
+    assert re.fullmatch(r"sp_[0-9a-f]{20}\.npz", artifact_path.name)
     loaded = np.load(artifact_path, allow_pickle=False)
     assert sorted(loaded.files) == [
         "fold_1_test_idx",
@@ -797,10 +1159,15 @@ def test_create_model_frame_manifest_materializes_compact_column_kfold_artifact(
         created_by="unit-test",
     )
 
-    assert result.split_set_id == "manifest_column_kfold__column_kfold_fold_number"
-    assert result.split_artifact_uri == str(
-        tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz"
+    assert result.split_set_id is not None
+    assert_hashed_split_id(
+        result.split_set_id,
+        readable_prefix="manifest_column_kfold__column_kfold_fold_number",
     )
+    assert result.split_artifact_uri is not None
+    artifact_path = Path(result.split_artifact_uri)
+    assert artifact_path.parent == tmp_path
+    assert re.fullmatch(r"sp_[0-9a-f]{20}\.npz", artifact_path.name)
 
     column_roles = dict(
         zip(
@@ -809,7 +1176,7 @@ def test_create_model_frame_manifest_materializes_compact_column_kfold_artifact(
             strict=True,
         )
     )
-    assert column_roles["fold_number"] == "SPLIT"
+    assert column_roles["fold_number"] == "OTHER"
 
     split_set = to_sql_calls[2]["frame"].iloc[0]
     assert split_set["splitter_class"] == "source_column"
@@ -827,10 +1194,7 @@ def test_create_model_frame_manifest_materializes_compact_column_kfold_artifact(
     assert folds["n_train"].tolist() == [2, 2]
     assert folds["n_test"].tolist() == [2, 2]
 
-    loaded = np.load(
-        tmp_path / "manifest_column_kfold__column_kfold_fold_number.npz",
-        allow_pickle=False,
-    )
+    loaded = np.load(artifact_path, allow_pickle=False)
     assert sorted(loaded.files) == ["pk_columns", "split_format", "test_fold"]
     assert str(loaded["split_format"].item()) == "fold_assignment_v1"
     assert loaded["pk_columns"].tolist() == ["PolicyID"]
@@ -859,7 +1223,10 @@ def test_build_validation_split_set_records_column_holdout_params():
     )
 
     row = split_set.iloc[0]
-    assert row["split_set_id"] == "manifest_holdout__column_holdout_holdout_flag"
+    assert_hashed_split_id(
+        row["split_set_id"],
+        readable_prefix="manifest_holdout__column_holdout_holdout_flag",
+    )
     assert row["splitter_class"] == "source_column"
     assert row["fold_count"] == 1
     assert json.loads(row["splitter_params_json"]) == {

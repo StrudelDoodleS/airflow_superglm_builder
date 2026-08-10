@@ -475,18 +475,20 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             connection.execute(
                 text(
                     """
-                    INSERT OR REPLACE INTO pricing_stg.STG_RATING_EXPORT (
-                        export_id, model_id, model_name, model_version,
-                        base_rate, effective_from_date, source_file,
-                        publication_receipt_json, publication_receipt_sha256,
-                        package_metadata_json, offset_handling,
-                        metadata_origin, staging_content_sha256, created_by
-                    ) VALUES (
-                        :export_id, :model_id, :model_name, :model_version,
-                        0.25, NULL, :source_file,
-                        '{}', :receipt_sha, '{}', 'NONE',
-                        'SUPERGLM_EXPORTER', :staging_digest, 'test'
-                    )
+                        INSERT OR REPLACE INTO pricing_stg.STG_RATING_EXPORT (
+                            export_id, model_id, model_name, model_version,
+                            base_rate, effective_from_date, source_file,
+                            publication_receipt_json, publication_receipt_sha256,
+                            package_metadata_json, offset_handling,
+                            metadata_origin, staging_content_sha256,
+                            model_equivalence_sha256, created_by
+                        ) VALUES (
+                            :export_id, :model_id, :model_name, :model_version,
+                            0.25, NULL, :source_file,
+                            '{}', :receipt_sha, '{}', 'NONE',
+                            'SUPERGLM_EXPORTER', :staging_digest,
+                            :model_equivalence_sha256, 'test'
+                        )
                     """
                 ),
                 {
@@ -501,9 +503,20 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
                     "source_file": str(kwargs["workbook_path"]),
                     "receipt_sha": kwargs["publication_receipt_sha256"],
                     "staging_digest": staging_digest["value"],
+                    "model_equivalence_sha256": "9" * 64,
                 },
             )
 
+    monkeypatch.setattr(
+        sqlite_notebook,
+        "ensure_model_equivalence",
+        lambda build: build.model_copy(update={"model_equivalence_sha256": "9" * 64}),
+    )
+    monkeypatch.setattr(
+        sqlite_notebook,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(sqlite_notebook, "stage_rating_export", stage)
     monkeypatch.setattr(
         sqlite_notebook,
@@ -706,6 +719,7 @@ def test_publish_candidate_records_local_package_run_and_audit_links(
             update={
                 "export_id": "claim-frequency__unreserved",
                 "model_version": "v3",
+                "model_kind": "ROUTINE_EDIT",
             }
         ),
     )

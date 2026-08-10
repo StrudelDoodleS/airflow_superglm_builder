@@ -154,6 +154,39 @@ def test_approved_build_rejects_unknown_fields(tmp_path: Path):
         CompletedModelBuild(**payload)
 
 
+@pytest.mark.parametrize(
+    ("raw_kind", "expected"),
+    [
+        ("raw", "RAW"),
+        ("ROUTINE_EDIT", "ROUTINE_EDIT"),
+        ("editor_edit", "EDITOR_EDIT"),
+    ],
+)
+def test_approved_build_normalises_supported_model_kinds(
+    tmp_path: Path,
+    raw_kind: str,
+    expected: str,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["model_kind"] = raw_kind
+
+    assert CompletedModelBuild(**payload).model_kind == expected
+
+
+def test_approved_build_rejects_unknown_model_kind_and_bad_equivalence_digest(
+    tmp_path: Path,
+):
+    payload = _approved_build(tmp_path).model_dump()
+    payload["model_kind"] = "manual_tweak"
+    with pytest.raises(CompletedModelBuildError, match="model_kind"):
+        CompletedModelBuild(**payload)
+
+    payload = _approved_build(tmp_path).model_dump()
+    payload["model_equivalence_sha256"] = "not-a-digest"
+    with pytest.raises(CompletedModelBuildError, match="model_equivalence_sha256"):
+        CompletedModelBuild(**payload)
+
+
 def test_remote_publication_passes_the_approved_record_without_repacking(
     tmp_path: Path,
     monkeypatch,

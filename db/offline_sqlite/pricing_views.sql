@@ -1,8 +1,15 @@
+DROP VIEW IF EXISTS pricing.V_CURRENT_DEPLOYED_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_PUBLISHED_MODEL_RELATIVITY;
+DROP VIEW IF EXISTS pricing.V_MODEL_CANDIDATE_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_FINAL_MODEL_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_MODEL_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_MODEL_VALIDATION_SUMMARY;
 DROP VIEW IF EXISTS pricing.V_MODEL_VALIDATION_SPLIT;
+DROP VIEW IF EXISTS pricing.V_MODEL_LINEAGE_REDUNDANCY_CHECK;
+-- Upgrade cleanup for short-lived audit views whose duplicate states are
+-- already made impossible by filtered unique indexes.
+DROP VIEW IF EXISTS pricing.V_DATASET_MANIFEST_REDUNDANCY_CHECK;
+DROP VIEW IF EXISTS pricing.V_MODEL_EQUIVALENCE_REDUNDANCY_CHECK;
 
 CREATE VIEW pricing.V_MODEL_RELATIVITY AS
 SELECT
@@ -117,13 +124,96 @@ WHERE NOT EXISTS (
 );
 
 CREATE VIEW pricing.V_FINAL_MODEL_RELATIVITY AS
-SELECT *
-FROM V_MODEL_RELATIVITY;
+SELECT
+    relativity.model_id,
+    relativity.model_name,
+    relativity.model_label,
+    relativity.target_name,
+    relativity.model_type,
+    model_run.model_kind,
+    model_run.model_equivalence_sha256,
+    relativity.model_run_id,
+    relativity.parent_model_run_id,
+    relativity.run_status,
+    model_run.export_id,
+    relativity.rate_package_id,
+    relativity.parent_rate_package_id,
+    relativity.package_model_name,
+    relativity.model_version,
+    relativity.package_version,
+    relativity.base_rate,
+    relativity.effective_from_date,
+    relativity.effective_to_date,
+    relativity.package_status,
+    manifest.manifest_id,
+    manifest.manifest_signature_sha256,
+    manifest.dataset_name,
+    manifest.source_system,
+    manifest.data_as_of_date,
+    manifest.data_as_of_column,
+    manifest.row_count AS dataset_row_count,
+    manifest.pk_columns_json,
+    manifest.target_column AS dataset_target_column,
+    manifest.weight_column,
+    manifest.exposure_column,
+    manifest.offset_column,
+    manifest.offset_source_column,
+    manifest.offset_label,
+    manifest.export_weight_column,
+    manifest.model_frame_sha256,
+    manifest.frame_hash_metadata_json,
+    manifest.created_ts AS manifest_created_ts,
+    manifest.created_by AS manifest_created_by,
+    model_run.split_set_id AS validation_split_set_id,
+    relativity.term_id,
+    relativity.term_sequence_no,
+    relativity.term_name,
+    relativity.term_type,
+    relativity.level_value,
+    relativity.level_sort_order,
+    relativity.lower_bound,
+    relativity.upper_bound,
+    relativity.representative_value,
+    relativity.relativity,
+    relativity.log_coefficient,
+    relativity.exposure_weight,
+    relativity.record_count,
+    relativity.is_default,
+    relativity.is_reference,
+    relativity.relativity_source,
+    relativity.model_fit_scope
+FROM V_MODEL_RELATIVITY AS relativity
+LEFT JOIN MODEL_RUN AS model_run
+  ON model_run.model_run_id = relativity.model_run_id
+LEFT JOIN DATASET_MANIFEST AS manifest
+  ON manifest.manifest_id = model_run.manifest_id;
 
-CREATE VIEW pricing.V_PUBLISHED_MODEL_RELATIVITY AS
+CREATE VIEW pricing.V_MODEL_CANDIDATE_RELATIVITY AS
 SELECT *
 FROM V_FINAL_MODEL_RELATIVITY
 WHERE package_status = 'PUBLISHED';
+
+-- Compatibility alias retained for existing notebook and reporting queries.
+CREATE VIEW pricing.V_PUBLISHED_MODEL_RELATIVITY AS
+SELECT *
+FROM V_MODEL_CANDIDATE_RELATIVITY;
+
+CREATE VIEW pricing.V_CURRENT_DEPLOYED_RELATIVITY AS
+SELECT
+    deployment.deployment_id,
+    deployment.deployment_slot,
+    deployment.effective_from_ts AS deployment_effective_from_ts,
+    deployment.effective_to_ts AS deployment_effective_to_ts,
+    deployment.deployed_by,
+    deployment.deployment_note,
+    deployment.created_ts AS deployment_created_ts,
+    relativity.*
+FROM PRICING_MODEL_DEPLOYMENT AS deployment
+JOIN V_FINAL_MODEL_RELATIVITY AS relativity
+  ON relativity.model_id = deployment.model_id
+ AND relativity.rate_package_id = deployment.rate_package_id
+WHERE deployment.effective_to_ts IS NULL
+  AND relativity.package_status = 'PUBLISHED';
 
 CREATE VIEW pricing.V_MODEL_VALIDATION_SPLIT AS
 SELECT
@@ -134,6 +224,8 @@ SELECT
     m.model_label,
     m.target_name,
     m.model_type,
+    mr.model_kind,
+    mr.model_equivalence_sha256,
     mr.model_version,
     mr.export_id,
     mr.run_status,
@@ -187,6 +279,8 @@ GROUP BY
     m.model_label,
     m.target_name,
     m.model_type,
+    mr.model_kind,
+    mr.model_equivalence_sha256,
     mr.model_version,
     mr.export_id,
     mr.run_status,
@@ -217,6 +311,8 @@ SELECT
     model_label,
     target_name,
     model_type,
+    model_kind,
+    model_equivalence_sha256,
     model_version,
     export_id,
     run_status,
@@ -259,6 +355,8 @@ GROUP BY
     model_label,
     target_name,
     model_type,
+    model_kind,
+    model_equivalence_sha256,
     model_version,
     export_id,
     run_status,
@@ -276,3 +374,29 @@ GROUP BY
     splitter_class,
     splitter_params_json,
     configured_fold_count;
+
+CREATE VIEW pricing.V_MODEL_LINEAGE_REDUNDANCY_CHECK AS
+SELECT
+    model_run.model_id,
+    model_run.model_run_id,
+    package.rate_package_id,
+    package.manifest_id AS package_manifest_id,
+    model_run.manifest_id AS run_manifest_id,
+    CAST(NULL AS TEXT) AS linked_training_manifest_id,
+    CAST(NULL AS INTEGER) AS training_manifest_link_count,
+    package.split_set_id AS package_split_set_id,
+    model_run.split_set_id AS run_split_set_id,
+    CAST(NULL AS TEXT) AS linked_validation_split_set_id,
+    CAST(NULL AS INTEGER) AS validation_split_link_count,
+    CASE
+        WHEN package.manifest_id IS NOT NULL
+         AND package.manifest_id <> model_run.manifest_id
+        THEN 'PACKAGE_RUN_MANIFEST_MISMATCH'
+        WHEN package.split_set_id IS NOT NULL
+         AND package.split_set_id <> model_run.split_set_id
+        THEN 'PACKAGE_RUN_SPLIT_MISMATCH'
+        ELSE 'OK'
+    END AS redundancy_status
+FROM MODEL_RUN AS model_run
+JOIN PRICING_RATE_PACKAGE AS package
+  ON package.rate_package_id = model_run.rate_package_id;
