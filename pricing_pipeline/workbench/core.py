@@ -13,16 +13,51 @@ from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.workbench.artifacts import CandidateBundle, load_candidate_bundle
 
-
 _FRIENDLY_COLUMNS = [
     "Package",
+    "Kind",
     "Fitted",
     "Data through",
+    "Manifest",
     "Parent",
     "State",
     "Baseline pooled CV deviance",
     "Editor train delta",
     "Editor",
+]
+_TECHNICAL_COLUMNS = [
+    "model_id",
+    "model_name",
+    "model_version",
+    "model_kind",
+    "model_equivalence_sha256",
+    "export_id",
+    "package_version",
+    "package_status",
+    "rate_package_id",
+    "parent_rate_package_id",
+    "parent_package_version",
+    "model_run_id",
+    "run_status",
+    "completed_ts",
+    "manifest_id",
+    "split_set_id",
+    "candidate_artifact_path",
+    "candidate_artifact_sha256",
+    "candidate_artifact_format",
+    "candidate_artifact_size_bytes",
+    "candidate_python_version",
+    "candidate_superglm_version",
+    "model_source_sha256",
+    "model_frame_sha256",
+    "dataset_name",
+    "source_system",
+    "data_as_of_date",
+    "current_rate_package_id",
+    "baseline_cv_deviance",
+    "baseline_metric_scope",
+    "baseline_is_parent",
+    "editor_training_delta",
 ]
 _ARTIFACT_FIELDS = (
     "model_version",
@@ -43,7 +78,7 @@ class CandidateLineageError(RuntimeError):
 
 @dataclass
 class Candidate:
-    workbench: "Workbench"
+    workbench: Workbench
     model_name: str
     package_version: int
     rate_package_id: int
@@ -82,11 +117,18 @@ class Workbench:
         deployment_slot: str | None = None,
         technical: bool = False,
     ) -> pd.DataFrame:
+        """List published packages that are eligible for editor review."""
         model_name = self._required_model_name(model_name)
         slot = deployment_slot or self.model_config.deployment_slot
-        rows = [dict(row) for row in self._candidate_rows(model_name, slot)]
+        rows = [
+            row
+            for row in (
+                dict(candidate_row) for candidate_row in self._candidate_rows(model_name, slot)
+            )
+            if str(row.get("package_status") or "").upper() == "PUBLISHED"
+        ]
         if technical:
-            return pd.DataFrame(rows)
+            return pd.DataFrame(rows, columns=_TECHNICAL_COLUMNS)
         friendly = [self._friendly_row(row, deployment_slot=slot) for row in rows]
         return pd.DataFrame(friendly, columns=_FRIENDLY_COLUMNS)
 
@@ -95,17 +137,21 @@ class Workbench:
         version = int(package_version)
         deployment_slot = self.model_config.deployment_slot
         rows = [
-            dict(row)
-            for row in self._candidate_rows(
-                model_name,
-                deployment_slot,
-                package_version=version,
+            row
+            for row in (
+                dict(candidate_row)
+                for candidate_row in self._candidate_rows(
+                    model_name,
+                    deployment_slot,
+                    package_version=version,
+                )
             )
+            if str(row.get("package_status") or "").upper() == "PUBLISHED"
         ]
         if len(rows) != 1:
             raise CandidateLineageError(
-                f"{model_name} package {version} must resolve exactly one successful MODEL_RUN; "
-                f"found {len(rows)}"
+                f"{model_name} package {version} must resolve exactly one published package "
+                f"with one successful MODEL_RUN; found {len(rows)}"
             )
         row = rows[0]
         if str(row.get("run_status") or "").upper() != "SUCCESS" or not self._editor_ready(row):
@@ -177,8 +223,11 @@ class Workbench:
                 pm.model_id,
                 pm.model_name,
                 mr.model_version,
+                mr.model_kind,
+                mr.model_equivalence_sha256,
                 mr.export_id,
                 rp.package_version,
+                rp.package_status,
                 rp.rate_package_id,
                 rp.parent_rate_package_id,
                 parent_rp.package_version AS parent_package_version,
@@ -195,6 +244,8 @@ class Workbench:
                 mr.candidate_superglm_version,
                 mr.model_source_sha256,
                 manifest.model_frame_sha256,
+                manifest.dataset_name,
+                manifest.source_system,
                 manifest.data_as_of_date,
                 deployment.rate_package_id AS current_rate_package_id,
                 COALESCE(cv.metric_value, parent_cv.metric_value) AS baseline_cv_deviance,
@@ -237,7 +288,8 @@ class Workbench:
               ON deployment.model_id = pm.model_id
              AND deployment.deployment_slot = :deployment_slot
              AND deployment.effective_to_ts IS NULL
-            WHERE pm.model_name = :model_name{package_filter}
+            WHERE pm.model_name = :model_name
+              AND rp.package_status = 'PUBLISHED'{package_filter}
             ORDER BY rp.package_version DESC
             """
         )
@@ -280,8 +332,10 @@ class Workbench:
             baseline = f"parent: {float(baseline):.3f}"
         return {
             "Package": int(row["package_version"]),
+            "Kind": row.get("model_kind"),
             "Fitted": row.get("completed_ts"),
             "Data through": row.get("data_as_of_date"),
+            "Manifest": row.get("manifest_id"),
             "Parent": row.get("parent_package_version"),
             "State": state,
             "Baseline pooled CV deviance": baseline,

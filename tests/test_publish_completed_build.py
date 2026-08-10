@@ -249,7 +249,18 @@ def test_model_export_publisher_returns_typed_result(monkeypatch, tmp_path):
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_bytes(b"rating workbook")
     export = _approved_build(tmp_path, workbook=workbook, created_by="analyst")
+    fingerprinted_export = export.model_copy(update={"model_equivalence_sha256": "f" * 64})
     connection = object()
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_model_equivalence",
+        lambda build: fingerprinted_export,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(pipeline, "stage_rating_export", lambda *args, **kwargs: "a" * 64)
     monkeypatch.setattr(
         pipeline,
@@ -290,7 +301,18 @@ def test_model_export_publisher_returns_existing_result_unchanged(
     workbook = tmp_path / "rating_tables.xlsx"
     workbook.write_bytes(b"rating workbook")
     export = _approved_build(tmp_path, workbook=workbook, created_by="analyst")
+    fingerprinted_export = export.model_copy(update={"model_equivalence_sha256": "f" * 64})
     existing = _completed_publish_result(export, was_existing=True)
+    monkeypatch.setattr(
+        pipeline,
+        "ensure_model_equivalence",
+        lambda build: fingerprinted_export,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(pipeline, "stage_rating_export", lambda *args, **kwargs: "a" * 64)
     monkeypatch.setattr(
         pipeline,

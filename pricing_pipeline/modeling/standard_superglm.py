@@ -20,6 +20,7 @@ from pricing_pipeline.data.manifest import (
 )
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.models.config import ModelBuildConfig
+from pricing_pipeline.models.kinds import normalise_model_kind
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.rating_export import export_rating_tables
 from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
@@ -78,6 +79,7 @@ def run_standard_superglm_build(
     output_dir: str | Path,
     model_id: int,
     model_config: ModelBuildConfig,
+    model_kind: str = "RAW",
     model_version: str,
     export_id: str,
     effective_from: str | None,
@@ -88,6 +90,7 @@ def run_standard_superglm_build(
     offset_contract: OffsetExportContract | None = None,
     cross_validate_fn: Callable[..., Any] = cross_validate,
 ) -> ApprovedModelBuild:
+    resolved_model_kind = normalise_model_kind(model_kind)
     _validate_input_lengths(inputs)
     _validate_canonical_row_ids(
         frame,
@@ -238,6 +241,7 @@ def run_standard_superglm_build(
             rating_workbook_sha256=workbook_sha256,
             model_version=model_version,
             model_type=model_config.model_type,
+            model_kind=resolved_model_kind,
             target_name=model_config.target_name,
             deployment_slot=model_config.deployment_slot,
             effective_from=effective_from,
@@ -385,6 +389,7 @@ def hash_model_source(root: str | Path) -> str:
         if path.is_file()
         and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
         and ".ipynb_checkpoints" not in path.relative_to(source_root).parts
+        and not (path.suffix.lower() == ".ipynb" and path.name.startswith(("03_", "04_", "99_")))
     )
     if not paths:
         raise StandardSuperGLMError(
@@ -774,7 +779,10 @@ def _manifest_attempt_directory(output_dir: str | Path, manifest_id: str) -> Pat
         )
     output_root = Path(output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    attempt_dir = (output_root / manifest_id).resolve()
+    # The full manifest ID remains in the candidate bundle and SQL lineage.  A
+    # compact digest keeps deeply nested state paths usable in Windows Explorer.
+    attempt_component = f"mf_{hashlib.sha256(manifest_id.encode('utf-8')).hexdigest()[:16]}"
+    attempt_dir = (output_root / attempt_component).resolve()
     if attempt_dir.parent != output_root:
         raise StandardSuperGLMError(
             f"manifest attempt directory is outside run output directory {output_root}"

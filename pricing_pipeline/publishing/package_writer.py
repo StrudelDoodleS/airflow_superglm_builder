@@ -23,6 +23,7 @@ _STAGED_IDENTITY_FIELDS = (
     "source_file",
     "publication_receipt_sha256",
     "staging_content_sha256",
+    "model_equivalence_sha256",
 )
 
 
@@ -132,6 +133,21 @@ def _canonical_revision_metadata(value: Mapping[str, object] | None) -> str | No
         raise ValueError("revision_metadata must contain only JSON-serializable values") from exc
 
 
+def _delete_published_staging_payload(
+    connection: Connection,
+    *,
+    export_id: str,
+) -> None:
+    """Remove bulky staged children while retaining the retry/audit header."""
+    params = {"export_id": export_id}
+    for statement in (
+        "DELETE FROM pricing_stg.STG_TERM_METADATA WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_CELL_LEVEL WHERE export_id = :export_id",
+        "DELETE FROM pricing_stg.STG_RATE_CELL WHERE export_id = :export_id",
+    ):
+        connection.execute(text(statement), params)
+
+
 def publish_rating_package(
     engine,
     *,
@@ -142,12 +158,24 @@ def publish_rating_package(
     draft_validator=None,
     package_lineage_writer: Callable[[Connection, int], int | None] | None = None,
     expected_staged_metadata: Mapping[str, object] | None = None,
+    equivalence_key: Mapping[str, object] | None = None,
 ) -> PublishResult:
     revision_metadata_json = _canonical_revision_metadata(revision_metadata)
     if draft_validator is not None and not callable(draft_validator):
         raise TypeError("draft_validator must be callable")
     if package_lineage_writer is not None and not callable(package_lineage_writer):
         raise TypeError("package_lineage_writer must be callable")
+    if equivalence_key is not None:
+        required_equivalence_fields = {
+            "manifest_id",
+            "model_kind",
+            "model_equivalence_sha256",
+        }
+        if set(equivalence_key) != required_equivalence_fields:
+            raise ValueError(
+                "equivalence_key must contain exactly: "
+                + ", ".join(sorted(required_equivalence_fields))
+            )
     model_run_id: int | None = None
     with engine.begin() as con:
         acquire_staging_export_lock(con, export_id)
@@ -171,7 +199,8 @@ def publish_rating_package(
                 offset_source_name,
                 offset_label,
                 metadata_origin,
-                staging_content_sha256
+                staging_content_sha256,
+                model_equivalence_sha256
             FROM pricing_stg.STG_RATING_EXPORT
             WHERE export_id = :export_id
         """),
@@ -240,6 +269,8 @@ def publish_rating_package(
                     f"export_id {export_id!r} is already published with "
                     "incompatible metadata: " + "; ".join(conflicts)
                 )
+            if str(existing_package["package_status"]).upper() == "PUBLISHED":
+                _delete_published_staging_payload(con, export_id=export_id)
             return PublishResult(
                 mlflow_run_id="",
                 export_id=export_id,
@@ -249,6 +280,63 @@ def publish_rating_package(
                 package_status=str(existing_package["package_status"]),
                 was_existing=True,
             )
+
+        if equivalence_key is not None:
+            equivalent_package = (
+                con.execute(
+                    text(
+                        """
+                        SELECT TOP (1)
+                            rp.rate_package_id,
+                            rp.package_version,
+                            rp.package_status,
+                            rp.source_export_id,
+                            rp.source_file,
+                            mr.model_run_id
+                        FROM pricing.MODEL_RUN AS mr WITH (UPDLOCK, HOLDLOCK)
+                        JOIN pricing.PRICING_RATE_PACKAGE AS rp
+                          ON rp.rate_package_id = mr.rate_package_id
+                        WHERE mr.model_id = :model_id
+                          AND mr.manifest_id = :manifest_id
+                          AND mr.model_kind = :model_kind
+                          AND mr.model_equivalence_sha256 =
+                              :model_equivalence_sha256
+                          AND mr.run_status = 'SUCCESS'
+                        ORDER BY rp.package_version
+                        """
+                    ),
+                    {
+                        "model_id": model_id,
+                        **dict(equivalence_key),
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if equivalent_package is not None:
+                con.execute(
+                    text(
+                        """
+                        DELETE FROM pricing.PRICING_MODEL_VERSION_RESERVATION
+                        WHERE model_id = :model_id
+                          AND export_id = :export_id
+                        """
+                    ),
+                    {"model_id": model_id, "export_id": export_id},
+                )
+                if str(equivalent_package["package_status"]).upper() == "PUBLISHED":
+                    _delete_published_staging_payload(con, export_id=export_id)
+                return PublishResult(
+                    mlflow_run_id="",
+                    export_id=str(equivalent_package["source_export_id"]),
+                    rate_package_id=int(equivalent_package["rate_package_id"]),
+                    package_version=int(equivalent_package["package_version"]),
+                    rating_workbook_path=str(equivalent_package["source_file"] or ""),
+                    package_status=str(equivalent_package["package_status"]),
+                    was_existing=True,
+                    model_run_id=int(equivalent_package["model_run_id"]),
+                    deduplicated=True,
+                )
 
         if parent_rate_package_id is not None:
             parent = (
@@ -836,6 +924,7 @@ def publish_rating_package(
                 "rate_package_id": rate_package_id,
             },
         )
+        _delete_published_staging_payload(con, export_id=export_id)
 
     return PublishResult(
         mlflow_run_id="",

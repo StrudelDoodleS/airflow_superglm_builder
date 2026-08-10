@@ -2,67 +2,227 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
+import pytest
 
-NOTEBOOK_PATH = Path("pricing_models/mtpl_frequency/pricing_model.ipynb")
+MODEL_DIR = Path("pricing_models/mtpl_frequency")
+WORKFLOW_NAMES = (
+    "01_data_ingestion.ipynb",
+    "02_model_training.ipynb",
+    "03_model_editor.ipynb",
+    "04_model_deployment.ipynb",
+    "99_scratch_work.ipynb",
+)
+STRICT_NOTEBOOK_NAME = re.compile(r"^\d{2}_[a-z0-9]+(?:_[a-z0-9]+)*\.ipynb$")
 
 
-def _source(notebook: dict) -> str:
+def _notebook(name: str) -> dict:
+    return json.loads((MODEL_DIR / name).read_text(encoding="utf-8"))
+
+
+def _source(name: str) -> str:
+    notebook = _notebook(name)
     return "\n".join("".join(cell.get("source", [])) for cell in notebook.get("cells", []))
 
 
-def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    source = _source(notebook)
-    lowered = source.lower()
+def _code_cells(name: str) -> list[str]:
+    return [
+        "".join(cell.get("source", []))
+        for cell in _notebook(name)["cells"]
+        if cell["cell_type"] == "code"
+    ]
 
-    assert "from pricing_pipeline.notebook import" in source
+
+def test_reference_model_has_exact_five_notebook_workflow():
+    assert sorted(path.name for path in MODEL_DIR.glob("*.ipynb")) == sorted(WORKFLOW_NAMES)
+
+
+def test_every_repository_notebook_uses_strict_name_compiles_and_has_no_output():
+    notebook_paths = sorted(Path(".").glob("**/*.ipynb"))
+    assert notebook_paths
+
+    for path in notebook_paths:
+        assert STRICT_NOTEBOOK_NAME.fullmatch(path.name), path
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            source = "".join(cell.get("source", []))
+            compile(source, f"{path}:cell-{index}", "exec")
+            assert cell.get("execution_count") is None
+            assert cell.get("outputs") == []
+
+
+def test_mtpl_ingestion_owns_source_transform_and_verified_handoff():
+    source = _source("01_data_ingestion.ipynb")
+
     assert "connect(" in source
-    assert "register_model(" in source
-    assert "pd.read_sql_query(" in source
     assert "load_fremtpl_raw" in source
+    assert "pd.read_sql_query(" in source
     assert 'frame["LogDensity"]' in source
-    assert "superglm_model = SuperGLM(" in source
-    assert "ValidationSplitConfig.kfold(" in source
-    assert "build_candidate(" in source
-    assert "publish_candidate(" in source
-    assert "open_candidate(" in source
-    assert "publish_edits(" in source
-    assert "from superglm.editor import EditorSession" in source
-    assert "EditorSession.from_model(" in source
-    assert "editor_session.widget()" in source
-    assert "edited_model = editor_session.to_model()" in source
-    assert "editor_session=editor_session" in source
-    assert ".editor()" not in source
-    assert "deploy_package(" in source
-    assert "published.model_run_id" not in source
-    assert "published.rate_package_id" not in source
-    assert "published.package_version" in source
-    assert 'DATABASE_MODE = "local"' in source
-    assert 'EXPECTED_REMOTE_DATABASE = ""' in source
-    assert "ALLOW_REMOTE_WRITES = False" in source
-    assert "mode=DATABASE_MODE" in source
-    assert 'local_root=MODEL_DIR / ".local"' in source
-    assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in source
-    assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in source
-    assert "pricing.destination" in source
+    assert 'frame["LogExposure"]' in source
+    assert 'DATA_AS_OF = "2026-06-30"' in source
+    assert 'frame["data_as_of"] = DATA_AS_OF' in source
+    assert "save_model_frame(" in source
+    assert "REPLACE_MODEL_FRAME = False" in source
+    assert "build_candidate(" not in source
+    assert "publish_candidate(" not in source
 
     source_cell = next(
-        cell for cell in notebook["cells"] if "SOURCE_SQL" in "".join(cell.get("source", []))
+        cell
+        for cell in _notebook("01_data_ingestion.ipynb")["cells"]
+        if "SOURCE_SQL" in "".join(cell.get("source", []))
     )
     source_code = "".join(source_cell["source"])
     assert 'if pricing.mode == "local":' in source_code
     assert source_code.count("load_fremtpl_raw(") == 1
     assert "load_fremtpl_raw(pricing.engine, replace=REFRESH_LOCAL_RAW)" in source_code
 
+
+def test_mtpl_training_has_untouched_raw_and_optional_routine_model():
+    source = _source("02_model_training.ipynb")
+    lowered = source.lower()
+
+    assert "load_model_frame(" in source
+    assert "PricingModelSpec(" in source
+    assert "register_model(" in source
+    assert "ValidationSplitConfig.kfold(" in source
+    assert 'data_as_of_column="data_as_of"' in source
+    assert "RAW_FEATURES = {" in source
+    assert "raw_superglm_model = SuperGLM(" in source
+    assert 'model_kind="RAW"' in source
+    assert "raw_candidate.metrics" in source
+    assert "publish_candidate(" in source
+    assert "load_level_groupings(" in source
+    assert "apply_level_groupings(" in source
+    assert "inspect_level_groupings(" in source
+    assert "ROUTINE_EDIT_CONFIGURED = bool(LEVEL_GROUPINGS)" in source
+    assert "LevelGrouping(" not in source
+    assert 'model_kind="ROUTINE_EDIT"' in source
+    assert "EditorSession" not in source
+    assert "open_candidate(" not in source
     assert "model.toml" not in lowered
-    assert "model_config" not in lowered
     assert "airflow" not in lowered
-    assert "apply_migrations" not in source
-    assert "schema_migration" not in lowered
+
+    raw_cell = next(
+        cell for cell in _code_cells("02_model_training.ipynb") if "RAW_FEATURES" in cell
+    )
+    assert "grouping=" not in raw_cell
+
+
+def test_mtpl_editor_selects_label_version_or_latest_before_editing():
+    cells = _code_cells("03_model_editor.ipynb")
+    source = "\n".join(cells)
+
+    assert 'MODEL_LABEL = "Motor frequency"' in source
+    assert "PACKAGE_VERSION = None" in source
+    assert "load_registered_model(" in source
+    assert "list_candidate_versions(" in source
+    assert 'versions.iloc[0]["Package"]' in source
+    assert "open_candidate(" in source
+    assert "EditorSession.from_model(" in source
+    assert "editor_session.widget()" in source
+    assert "editor_session.to_model()" in source
+    assert "publish_edits(" in source
+    assert "edited.model_kind" in source
+    assert ".editor()" not in source
+
+    editor_index = next(i for i, cell in enumerate(cells) if "EditorSession.from_model(" in cell)
+    preview_index = next(i for i, cell in enumerate(cells) if "editor_session.to_model()" in cell)
+    publish_index = next(i for i, cell in enumerate(cells) if "publish_edits(" in cell)
+    assert editor_index < preview_index < publish_index
+
+
+def test_mtpl_editor_reports_no_published_candidates_cleanly():
+    selection_cell = next(
+        cell
+        for cell in _code_cells("03_model_editor.ipynb")
+        if 'raise LookupError("No candidate package versions were found.")' in cell
+    )
+
+    with pytest.raises(LookupError, match="No candidate package versions"):
+        exec(  # noqa: S102 - execute the checked-in notebook cell under an empty result
+            compile(selection_cell, "03_model_editor.ipynb:empty-selection", "exec"),
+            {
+                "versions": pd.DataFrame(
+                    columns=["Package"],
+                ),
+                "PACKAGE_VERSION": None,
+            },
+        )
+
+
+def test_mtpl_deployment_selects_only_published_sql_candidate():
+    source = _source("04_model_deployment.ipynb")
+
+    assert "load_registered_model(" in source
+    assert "list_candidate_versions(" in source
+    assert "technical=True" in source
+    assert 'versions["package_status"]' in source
+    assert '.eq("PUBLISHED")' in source
+    assert "PACKAGE_VERSION = None" in source
+    assert "open_candidate(" in source
+    assert "deploy_package(" in source
+    assert "DEPLOYMENT_REASON" in source
+
+
+def test_mtpl_deployment_reports_no_published_candidates_cleanly():
+    selection_cell = next(
+        cell
+        for cell in _code_cells("04_model_deployment.ipynb")
+        if 'raise LookupError("No published candidate packages were found.")' in cell
+    )
+
+    with pytest.raises(LookupError, match="No published candidate packages"):
+        exec(  # noqa: S102 - execute the checked-in notebook cell under an empty result
+            compile(selection_cell, "04_model_deployment.ipynb:empty-selection", "exec"),
+            {
+                "deployable": pd.DataFrame(
+                    columns=["package_version"],
+                ),
+                "PACKAGE_VERSION": None,
+            },
+        )
+
+
+def test_mtpl_scratch_is_explicitly_outside_governed_handoff():
+    source = _source("99_scratch_work.ipynb")
+
+    assert "scratch" in source.lower()
+    assert "load_fremtpl_raw(" in source
+    assert "save_model_frame(" not in source
+    assert "load_model_frame(" not in source
+    assert "build_candidate(" not in source
+    assert "publish_candidate(" not in source
+    assert "deploy_package(" not in source
+    assert "EditorSession.from_model(" in source
+    assert "list_candidate_versions(" in source
+    assert 'versions["Kind"].eq("RAW")' in source
+    assert "open_candidate(" in source
+    assert "export_level_groupings(" in source
+    assert 'GROUPING_ARTIFACT_PATH = MODEL_DIR / ".local"' in source
+
+
+def test_mtpl_notebook_import_setup_runs_from_model_directory():
+    for name in WORKFLOW_NAMES:
+        code_cells = _code_cells(name)
+        result = subprocess.run(
+            [sys.executable, "-c", "\n\n".join(code_cells[:2])],
+            cwd=MODEL_DIR.resolve(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"{name}: {result.stderr}"
+        assert "pricing_pipeline" not in result.stderr
+
+
+def test_reference_notebooks_do_not_ask_analysts_for_generated_ids():
     generated_ids = {
         "model_id",
         "manifest_id",
@@ -72,133 +232,11 @@ def test_mtpl_pricing_model_notebook_is_direct_python_sql_workflow():
         "package_version",
     }
     assigned_names = set()
-    for cell in notebook["cells"]:
-        if cell["cell_type"] != "code":
-            continue
-        tree = ast.parse("".join(cell.get("source", [])))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                assigned_names.add(node.id)
+    for name in WORKFLOW_NAMES:
+        for cell in _code_cells(name):
+            tree = ast.parse(cell)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    assigned_names.add(node.id)
+
     assert assigned_names.isdisjoint(generated_ids)
-
-
-def test_all_pricing_model_notebooks_compile_and_have_no_saved_output():
-    notebook_paths = sorted(Path("pricing_models").glob("*/pricing_model.ipynb"))
-    assert notebook_paths
-
-    for notebook_path in notebook_paths:
-        notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
-        for index, cell in enumerate(notebook["cells"]):
-            if cell["cell_type"] != "code":
-                continue
-            source = "".join(cell.get("source", []))
-            compile(source, f"{notebook_path}:cell-{index}", "exec")
-            assert cell.get("execution_count") is None
-            assert cell.get("outputs") == []
-
-
-def test_mtpl_notebook_import_setup_runs_from_its_model_directory():
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    code_cells = [
-        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
-    ]
-
-    result = subprocess.run(
-        [sys.executable, "-c", "\n\n".join(code_cells[:2])],
-        cwd=NOTEBOOK_PATH.parent.resolve(),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert "pricing_pipeline" not in result.stderr
-
-
-def test_mtpl_pricing_model_notebook_keeps_a_small_analyst_surface():
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    code_cells = [
-        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
-    ]
-    source = "\n".join(code_cells)
-
-    assert 'DATABASE_MODE = "local"' in code_cells[0]
-    assert "RUNTIME_MODULE = None" in code_cells[0]
-    assert 'EXPECTED_REMOTE_DATABASE = ""' in code_cells[0]
-    assert "ALLOW_REMOTE_WRITES = False" in code_cells[0]
-    assert "REFRESH_LOCAL_RAW = False" in code_cells[0]
-    assert "PricingModelSpec" in source
-    globals_cell = next(cell for cell in code_cells if "DATABASE_MODE" in cell)
-    assert 'DATABASE_MODE = "local"' in globals_cell
-    assert 'EXPECTED_REMOTE_DATABASE = ""' in globals_cell
-    assert "ALLOW_REMOTE_WRITES = False" in globals_cell
-    assert "REFRESH_LOCAL_RAW = False" in globals_cell
-    assert "DATA_AS_OF" in globals_cell
-    assert "RUN_EDITOR = False" in globals_cell
-    assert "DEPLOY = False" in globals_cell
-    model_cell = next(cell for cell in code_cells if "MODEL = PricingModelSpec(" in cell)
-    assert "from superglm import Categorical, Numeric, Spline, SuperGLM" in source
-    assert source.count("FEATURES = {") == 1
-    assert source.count("superglm_model = SuperGLM(") == 1
-    assert "features=FEATURES," in model_cell
-    assert "features=tuple(FEATURES)," in model_cell
-    for feature_declaration in (
-        '"VehAge": Spline()',
-        '"DrivAge": Spline()',
-        '"BonusMalus": Spline()',
-        '"LogDensity": Numeric()',
-        '"Area": Categorical()',
-        '"VehPower": Categorical()',
-        '"VehBrand": Categorical()',
-        '"VehGas": Categorical()',
-        '"Region": Categorical()',
-    ):
-        assert feature_declaration in model_cell
-    connect_cell = next(cell for cell in code_cells if "pricing = connect(" in cell)
-    assert "mode=DATABASE_MODE" in connect_cell
-    assert "runtime_module=RUNTIME_MODULE" in connect_cell
-    assert 'local_root=MODEL_DIR / ".local"' in connect_cell
-    assert "expected_remote_database=EXPECTED_REMOTE_DATABASE" in connect_cell
-    assert "allow_remote_writes=ALLOW_REMOTE_WRITES" in connect_cell
-    assert "pricing.destination" in connect_cell
-    assert "EFFECTIVE_FROM" not in source
-    assert ".head(" not in source
-    assert "display(raw" not in source
-    assert "display(frame" not in source
-    assert 'frame["LogDensity"] = np.log(' in source
-    assert 'frame["LogExposure"] = np.log(frame["Exposure"].astype(float))' in source
-    assert "*FEATURES]" in source
-    assert 'offset_column="LogExposure"' in model_cell
-    assert 'offset_source_column="Exposure"' in model_cell
-    assert 'offset_label="log(Exposure)"' in model_cell
-    assert "sample_weight_column=None" in model_cell
-    assert 'export_weight_column="Exposure"' in model_cell
-    assert "exposure_column=" not in source
-
-    for hidden_model_surface in (
-        "FEATURE_COLUMNS",
-        "make_model",
-        "model_factory",
-        "ensure_local_fremtpl_demo",
-        "row_count=120",
-    ):
-        assert hidden_model_surface not in source
-
-    build_cell = next(cell for cell in code_cells if "candidate = build_candidate(" in cell)
-    assert "pricing," in build_cell
-    assert "model=model" in build_cell
-    assert "frame=frame" in build_cell
-    assert "superglm_model=superglm_model" in build_cell
-    assert "data_as_of=DATA_AS_OF" in build_cell
-    for hidden_argument in (
-        "X=X",
-        "y=y",
-        "scoring=",
-        "dataset_name=",
-        "source_system=",
-        "pk_columns=",
-        "weight_column=",
-        "offset_contract=",
-        "offset_export_options=",
-    ):
-        assert hidden_argument not in build_cell

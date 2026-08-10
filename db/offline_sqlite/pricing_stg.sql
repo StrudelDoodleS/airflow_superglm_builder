@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS pricing_stg.STG_RATING_EXPORT (
     offset_label TEXT,
     metadata_origin TEXT,
     staging_content_sha256 TEXT,
+    model_equivalence_sha256 TEXT,
     created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL
 );

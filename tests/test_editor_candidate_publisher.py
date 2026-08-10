@@ -26,6 +26,7 @@ def _editor_build(tmp_path, *, workbook_path=None, **overrides) -> ApprovedModel
         "model_name": "HOME_FREQ",
         "model_version": "v4",
         "model_type": "superglm_poisson",
+        "model_kind": "EDITOR_EDIT",
         "target_name": "claim_count",
         "deployment_slot": "HOME_FREQ_UAT",
         "manifest_id": "manifest-1",
@@ -103,6 +104,7 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         workbook_path=workbook_path,
         rating_workbook_sha256=editor_candidate.sha256_file(workbook_path),
     )
+    fingerprinted_build = build.model_copy(update={"model_equivalence_sha256": "f" * 64})
     exported = SimpleNamespace(
         completed_build=build,
         publication_receipt=object(),
@@ -149,6 +151,16 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", fake_load_parent_candidate)
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export_edited_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "ensure_model_equivalence",
+        lambda completed_build, **kwargs: fingerprinted_build,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(
         editor_candidate,
         "_resolve_existing_editor_publication",
@@ -233,11 +245,12 @@ def test_editor_publisher_creates_child_and_derived_run(monkeypatch, tmp_path):
         "source_file": str(Path(build.rating_workbook_path).resolve()),
         "publication_receipt_sha256": build.publication_receipt_sha256,
         "staging_content_sha256": "e" * 64,
+        "model_equivalence_sha256": "f" * 64,
     }
     lineage_kwargs = calls[2][1]
     assert lineage_kwargs["rate_package_id"] == result.rate_package_id
     assert lineage_kwargs["parent_model_run_id"] == submission.parent_model_run_id
-    assert lineage_kwargs["build"] is build
+    assert lineage_kwargs["build"] is fingerprinted_build
     assert build.manifest_id == submission.manifest_id
     assert build.split_set_id == submission.split_set_id
     assert build.rating_workbook_sha256 == editor_candidate.sha256_file(workbook_path)
@@ -687,6 +700,18 @@ def test_failed_editor_publication_removes_only_its_unique_attempt(monkeypatch, 
         lambda *args, **kwargs: parent,
     )
     monkeypatch.setattr(editor_candidate, "export_edited_model", fake_export)
+    monkeypatch.setattr(
+        editor_candidate,
+        "ensure_model_equivalence",
+        lambda completed_build, **kwargs: completed_build.model_copy(
+            update={"model_equivalence_sha256": "f" * 64}
+        ),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(editor_candidate, "stage_rating_export", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         editor_candidate,
@@ -753,6 +778,18 @@ def test_editor_publication_rejects_workbook_mutated_during_staging(
 
     monkeypatch.setattr(editor_candidate, "load_parent_candidate", lambda *args, **kwargs: parent)
     monkeypatch.setattr(editor_candidate, "export_edited_model", export_model)
+    monkeypatch.setattr(
+        editor_candidate,
+        "ensure_model_equivalence",
+        lambda completed_build, **kwargs: completed_build.model_copy(
+            update={"model_equivalence_sha256": "f" * 64}
+        ),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "find_equivalent_publication",
+        lambda engine, *, build: None,
+    )
     monkeypatch.setattr(editor_candidate, "stage_rating_export", mutate_workbook)
     monkeypatch.setattr(
         editor_candidate,
@@ -942,13 +979,9 @@ def test_editor_export_writes_staging_bytes_but_persists_final_attempt_paths(
     assert captured_export["options"]["offset_kind"] == "auto"
     assert exported.revision_metadata["claimed_identity"] == "analyst@example.test"
     assert exported.revision_metadata["edited_model_path"] == submission.edited_model_path
+    assert exported.revision_metadata["edited_model_sha256"] == submission.edited_model_sha256
     assert (
-        exported.revision_metadata["edited_model_sha256"]
-        == submission.edited_model_sha256
-    )
-    assert (
-        exported.revision_metadata["edited_model_size_bytes"]
-        == submission.edited_model_size_bytes
+        exported.revision_metadata["edited_model_size_bytes"] == submission.edited_model_size_bytes
     )
     assert exported.revision_metadata["edited_model_format"] == submission.edited_model_format
     assert (

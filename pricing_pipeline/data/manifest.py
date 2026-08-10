@@ -6,7 +6,7 @@ import platform
 import re
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from importlib import metadata
 from pathlib import Path
@@ -14,13 +14,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, train_test_split
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.data.row_identity import compute_row_order_sha256
 from pricing_pipeline.data.split_artifacts import write_split_artifact_npz
 from pricing_pipeline.infra.schema import schema_names_from_connectable
 from pricing_pipeline.models.config import ValidationSplitConfig
-
 
 FREMTPL_DATASET_NAME = "freMTPL2freq"
 
@@ -29,6 +29,7 @@ FREMTPL_SOURCE_SYSTEM = "openml_41214"
 
 
 FREMTPL_RAW_SELECT_SQL = "SELECT * FROM pricing.FREMTPL_RAW ORDER BY IDpol"
+_SPLIT_SET_ID_MAX_LENGTH = 128
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,51 @@ class ModelFrameManifestSpec:
         )
 
 
+def model_frame_manifest_signature(
+    *,
+    spec: ModelFrameManifestSpec,
+    model_frame_sha256: str,
+    columns: pd.DataFrame,
+) -> str:
+    """Hash the immutable dataset snapshot, independently of validation strategy."""
+    payload = {
+        "format_version": 2,
+        "dataset_name": spec.dataset_name,
+        "source_system": spec.source_system,
+        "data_as_of_date": spec.data_as_of_date.isoformat(),
+        "pk_columns": list(spec.pk_columns),
+        "target_column": spec.target_column,
+        "weight_column": spec.weight_column,
+        "offset_column": spec.offset_column,
+        "offset_source_column": spec.offset_source_column,
+        "offset_label": spec.offset_label,
+        "export_weight_column": spec.export_weight_column,
+        "data_as_of_column": spec.data_as_of_column,
+        "model_frame_sha256": model_frame_sha256,
+        "columns": [
+            {
+                "ordinal_no": int(row.ordinal_no),
+                "column_name": str(row.column_name),
+                "column_role": str(row.column_role),
+                "pandas_dtype": str(row.pandas_dtype),
+                "null_count": int(row.null_count),
+                "distinct_count": (
+                    None if pd.isna(row.distinct_count) else int(row.distinct_count)
+                ),
+            }
+            for row in columns.itertuples(index=False)
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def create_model_frame_manifest_with_split(
     engine: Engine,
     *,
@@ -198,16 +244,56 @@ def create_model_frame_manifest_with_split(
             split_indices=supplied_split_indices,
         )
 
+    supplied_or_generated_split_indices = (
+        supplied_split_indices
+        if supplied_split_indices is not None
+        else validation_split_indices(frame, validation_split)
+    )
+    requested_manifest_id = manifest_id
     manifest_id = manifest_id or new_manifest_id(spec.dataset_name)
     model_frame_sha256, frame_hash_metadata_json = model_frame_evidence(frame)
+    column_df = build_column_metadata(
+        frame,
+        manifest_id=manifest_id,
+        spec=spec,
+    )
+    manifest_signature_sha256 = model_frame_manifest_signature(
+        spec=spec,
+        model_frame_sha256=model_frame_sha256,
+        columns=column_df,
+    )
+    schemas = schema_names_from_connectable(engine)
+    reused_manifest = False
+    if requested_manifest_id is None:
+        with engine.connect() as con:
+            existing = (
+                con.execute(
+                    text(
+                        f"""
+                        SELECT manifest_id
+                        FROM {schemas.pricing}.DATASET_MANIFEST
+                        WHERE manifest_signature_sha256 = :manifest_signature_sha256
+                        """
+                    ),
+                    {"manifest_signature_sha256": manifest_signature_sha256},
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if existing is not None:
+            manifest_id = str(existing["manifest_id"])
+            reused_manifest = True
+            column_df["manifest_id"] = manifest_id
+
     manifest_df = pd.DataFrame(
         [
             {
                 "manifest_id": manifest_id,
+                "manifest_signature_sha256": manifest_signature_sha256,
                 "dataset_name": spec.dataset_name,
                 "source_system": spec.source_system,
                 "data_as_of_date": spec.data_as_of_date,
-                "row_count": int(len(frame)),
+                "row_count": len(frame),
                 "pk_columns_json": json.dumps(list(spec.pk_columns)),
                 "target_column": spec.target_column,
                 "weight_column": spec.weight_column,
@@ -222,25 +308,72 @@ def create_model_frame_manifest_with_split(
             }
         ]
     )
-    column_df = build_column_metadata(
-        frame,
-        manifest_id=manifest_id,
-        spec=spec,
-        split_column=validation_split_source_column(validation_split),
+    split_set_id = split_set_id_for_validation_split(
+        manifest_id,
+        validation_split,
+        row_order_sha256=compute_row_order_sha256(frame, pk_columns=spec.pk_columns),
+        split_indices=supplied_or_generated_split_indices,
     )
-    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
+    materialize_existing_split = False
+    if reused_manifest:
+        with engine.connect() as con:
+            existing_split = (
+                con.execute(
+                    text(
+                        f"""
+                        SELECT split_set_id, artifact_uri
+                        FROM {schemas.pricing}.CV_SPLIT_SET
+                        WHERE manifest_id = :manifest_id
+                          AND split_set_id = :split_set_id
+                        """
+                    ),
+                    {
+                        "manifest_id": manifest_id,
+                        "split_set_id": split_set_id,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+                if split_set_id is not None
+                else None
+            )
+        if split_set_id is None:
+            return DatasetManifestResult(
+                manifest_id=manifest_id,
+                model_frame_sha256=model_frame_sha256,
+                split_set_id=split_set_id,
+                split_artifact_uri=None,
+            )
+        if existing_split is not None:
+            existing_artifact_uri = existing_split["artifact_uri"]
+            materialize_existing_split = (
+                validation_split.materialize and existing_artifact_uri is None
+            )
+            if not materialize_existing_split:
+                return DatasetManifestResult(
+                    manifest_id=manifest_id,
+                    model_frame_sha256=model_frame_sha256,
+                    split_set_id=split_set_id,
+                    split_artifact_uri=(
+                        None if existing_artifact_uri is None else str(existing_artifact_uri)
+                    ),
+                )
+
     split_artifact_uri = None
     split_artifact_sha256 = None
     if validation_split.materialize and split_set_id is not None:
         if validation_split_artifact_root is None:
             raise ValueError("validation_split_artifact_root is required when materialize=true")
-        artifact_path = Path(validation_split_artifact_root) / f"{split_set_id}.npz"
+        split_artifact_name = (
+            f"sp_{hashlib.sha256(split_set_id.encode('utf-8')).hexdigest()[:20]}.npz"
+        )
+        artifact_path = Path(validation_split_artifact_root) / split_artifact_name
         split_artifact_sha256 = write_validation_split_npz(
             frame,
             validation_split=validation_split,
             output_path=artifact_path,
             pk_columns=spec.pk_columns,
-            split_indices=supplied_split_indices,
+            split_indices=supplied_or_generated_split_indices,
         )
         split_artifact_uri = str(artifact_path)
 
@@ -252,36 +385,56 @@ def create_model_frame_manifest_with_split(
         created_by=created_by,
         artifact_uri=split_artifact_uri,
         artifact_sha256=split_artifact_sha256,
-        split_indices=supplied_split_indices,
+        split_indices=supplied_or_generated_split_indices,
     )
     cv_fold_df = (
         build_validation_folds(
             frame,
             split_set_id=split_set_id,
             validation_split=validation_split,
-            split_indices=supplied_split_indices,
+            split_indices=supplied_or_generated_split_indices,
         )
         if split_set_id is not None
         else pd.DataFrame()
     )
-    schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
-        manifest_df.to_sql(
-            "DATASET_MANIFEST",
-            con,
-            schema=schemas.pricing,
-            if_exists="append",
-            index=False,
-        )
-        column_df.to_sql(
-            "DATASET_COLUMN",
-            con,
-            schema=schemas.pricing,
-            if_exists="append",
-            index=False,
-            chunksize=5000,
-        )
-        if not split_set_df.empty:
+        if not reused_manifest:
+            manifest_df.to_sql(
+                "DATASET_MANIFEST",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+            )
+            column_df.to_sql(
+                "DATASET_COLUMN",
+                con,
+                schema=schemas.pricing,
+                if_exists="append",
+                index=False,
+                chunksize=5000,
+            )
+        if materialize_existing_split:
+            con.execute(
+                text(
+                    f"""
+                    UPDATE {schemas.pricing}.CV_SPLIT_SET
+                    SET split_mode = 'MATERIALIZED',
+                        artifact_uri = :artifact_uri,
+                        artifact_sha256 = :artifact_sha256
+                    WHERE manifest_id = :manifest_id
+                      AND split_set_id = :split_set_id
+                      AND artifact_uri IS NULL
+                    """
+                ),
+                {
+                    "manifest_id": manifest_id,
+                    "split_set_id": split_set_id,
+                    "artifact_uri": split_artifact_uri,
+                    "artifact_sha256": split_artifact_sha256,
+                },
+            )
+        elif not split_set_df.empty:
             split_set_df.to_sql(
                 "CV_SPLIT_SET",
                 con,
@@ -289,7 +442,7 @@ def create_model_frame_manifest_with_split(
                 if_exists="append",
                 index=False,
             )
-        if not cv_fold_df.empty:
+        if not materialize_existing_split and not cv_fold_df.empty:
             cv_fold_df.to_sql(
                 "CV_FOLD",
                 con,
@@ -342,6 +495,22 @@ def _validate_model_frame(
         raise ValueError("model frame primary key columns contain null values")
     if frame.duplicated(subset=list(spec.pk_columns)).any():
         raise ValueError("model frame primary key columns contain duplicate values")
+    if spec.data_as_of_column is not None:
+        data_as_of_column = spec.data_as_of_column
+        if frame[data_as_of_column].isna().any():
+            raise ValueError(f"data-as-of column {data_as_of_column!r} contains null values")
+        data_as_of_values = {
+            _normalise_date(value, field_name="data_as_of_column")
+            for value in frame[data_as_of_column]
+        }
+        if len(data_as_of_values) != 1:
+            raise ValueError(
+                f"data-as-of column {data_as_of_column!r} must contain exactly one date"
+            )
+        if data_as_of_values.pop() != spec.data_as_of_date:
+            raise ValueError(
+                f"data-as-of column {data_as_of_column!r} does not match data_as_of_date"
+            )
 
     if (
         validation_split.stratify_column is not None
@@ -588,28 +757,91 @@ def validation_split_source_column(validation_split: ValidationSplitConfig) -> s
 def split_set_id_for_validation_split(
     manifest_id: str,
     validation_split: ValidationSplitConfig,
+    *,
+    row_order_sha256: str,
+    split_indices: list[tuple[np.ndarray, np.ndarray]],
 ) -> str | None:
     if validation_split.method == "none":
         return None
     if validation_split.method == "kfold":
-        return split_set_id_for_manifest(
+        readable_prefix = split_set_id_for_manifest(
             manifest_id,
             n_splits=int(validation_split.n_splits or 5),
             random_state=int(validation_split.random_state or 0),
         )
-    if validation_split.method == "train_test_split":
-        return (
+    elif validation_split.method == "train_test_split":
+        readable_prefix = (
             f"{manifest_id}__train_test_split_test_"
             f"{_format_split_float(float(validation_split.test_size or 0.2))}"
             f"_seed_{validation_split.random_state}"
         )
-    if validation_split.method in {"column_kfold", "column_holdout"}:
+    elif validation_split.method in {"column_kfold", "column_holdout"}:
         column_token = re.sub(r"[^A-Za-z0-9_]+", "_", str(validation_split.column)).strip("_")
         column_token = column_token or "source_column"
-        return f"{manifest_id}__{validation_split.method}_{column_token}"
-    if validation_split.method == "custom":
-        return f"{manifest_id}__custom"
-    raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+        readable_prefix = f"{manifest_id}__{validation_split.method}_{column_token}"
+    elif validation_split.method == "custom":
+        readable_prefix = f"{manifest_id}__custom"
+    else:
+        raise ValueError(f"Unsupported validation split method: {validation_split.method}")
+
+    signature = validation_split_signature(
+        manifest_id=manifest_id,
+        validation_split=validation_split,
+        row_order_sha256=row_order_sha256,
+        split_indices=split_indices,
+    )
+    signature_suffix = f"__{signature[:16]}"
+    readable_prefix = readable_prefix[: _SPLIT_SET_ID_MAX_LENGTH - len(signature_suffix)]
+    return f"{readable_prefix}{signature_suffix}"
+
+
+def validation_split_signature(
+    *,
+    manifest_id: str,
+    validation_split: ValidationSplitConfig,
+    row_order_sha256: str,
+    split_indices: list[tuple[np.ndarray, np.ndarray]],
+) -> str:
+    """Hash validation semantics separately from the dataset-manifest identity."""
+    validation_payload = asdict(validation_split)
+    validation_payload.pop("materialize", None)
+    validation_payload["train_values"] = [
+        _json_clean_value(value) for value in validation_split.train_values
+    ]
+    validation_payload["test_values"] = [
+        _json_clean_value(value) for value in validation_split.test_values
+    ]
+    payload = {
+        "format_version": 1,
+        "manifest_id": manifest_id,
+        "validation": validation_payload,
+        "row_order_sha256": row_order_sha256,
+        "split_indices_sha256": _split_indices_sha256(split_indices),
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _split_indices_sha256(
+    split_indices: list[tuple[np.ndarray, np.ndarray]],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"pricing-validation-folds-v1\0")
+    digest.update(len(split_indices).to_bytes(8, "big"))
+    for fold_no, (train_idx, test_idx) in enumerate(split_indices, start=1):
+        digest.update(fold_no.to_bytes(8, "big"))
+        for label, values in ((b"train\0", train_idx), (b"test\0", test_idx)):
+            array = np.asarray(values, dtype="<i8")
+            digest.update(label)
+            digest.update(len(array).to_bytes(8, "big"))
+            digest.update(array.tobytes())
+    return digest.hexdigest()
 
 
 def split_set_id_for_manifest(
@@ -663,7 +895,18 @@ def build_validation_split_set(
     artifact_sha256: str | None = None,
     split_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> pd.DataFrame:
-    split_set_id = split_set_id_for_validation_split(manifest_id, validation_split)
+    indices = (
+        split_indices
+        if split_indices is not None
+        else validation_split_indices(frame, validation_split)
+    )
+    row_order_sha256 = compute_row_order_sha256(frame, pk_columns=pk_columns)
+    split_set_id = split_set_id_for_validation_split(
+        manifest_id,
+        validation_split,
+        row_order_sha256=row_order_sha256,
+        split_indices=indices,
+    )
     if split_set_id is None:
         return pd.DataFrame()
 
@@ -690,17 +933,17 @@ def build_validation_split_set(
         params = _source_column_splitter_params(frame, validation_split)
         fold_count = len(params["fold_values"]) if validation_split.method == "column_kfold" else 1
     elif validation_split.method == "custom":
-        if split_indices is None:
+        if not indices:
             raise ValueError("custom validation split requires model-supplied split_indices")
         if artifact_uri is None:
             raise ValueError("custom validation split requires materialize=true")
         splitter_class = "custom"
         params = {"method": "custom"}
-        fold_count = len(split_indices)
+        fold_count = len(indices)
     else:
         raise ValueError(f"Unsupported validation split method: {validation_split.method}")
 
-    if split_indices is not None and fold_count != len(split_indices):
+    if fold_count != len(indices):
         raise ValueError(
             "validation split metadata fold count does not match supplied split_indices"
         )
@@ -713,8 +956,8 @@ def build_validation_split_set(
                 "split_mode": "MATERIALIZED" if artifact_uri is not None else "REPLAYABLE",
                 "splitter_class": splitter_class,
                 "splitter_params_json": json.dumps(params, sort_keys=True),
-                "row_order_sha256": compute_row_order_sha256(frame, pk_columns=pk_columns),
-                "row_count": int(len(frame)),
+                "row_order_sha256": row_order_sha256,
+                "row_count": len(frame),
                 "fold_count": fold_count,
                 "groups_column": None,
                 "stratify_column": (
@@ -798,8 +1041,8 @@ def build_validation_folds(
             {
                 "split_set_id": split_set_id,
                 "fold_no": fold_no,
-                "n_train": int(len(train_idx)),
-                "n_test": int(len(test_idx)),
+                "n_train": len(train_idx),
+                "n_test": len(test_idx),
             }
         )
     return pd.DataFrame(rows)

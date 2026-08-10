@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -17,13 +18,17 @@ from pricing_pipeline.orchestration.publish_completed_build import (
     _verify_candidate_artifact,
     load_candidate_sql_lineage,
 )
+from pricing_pipeline.publishing.equivalence import (
+    ensure_model_equivalence,
+    find_equivalent_publication,
+    release_unused_model_version_reservation,
+)
 from pricing_pipeline.publishing.model_registry import (
     PricingModelRecord,
     validate_registered_model,
 )
 from pricing_pipeline.publishing.staging import stage_rating_export
 from pricing_pipeline.workbench.submission import sha256_file
-
 
 _VERSION_PATTERN = re.compile(r"^v([0-9]+)$")
 
@@ -216,9 +221,7 @@ def _publish_sqlite_candidate_locked(
         )
     manifest_id = str(build.manifest_id or "").strip()
     if not manifest_id:
-        raise ApprovedModelBuildError(
-            "local notebook publication requires an existing manifest_id"
-        )
+        raise ApprovedModelBuildError("local notebook publication requires an existing manifest_id")
     split_set_id = None if build.split_set_id is None else str(build.split_set_id).strip()
     export_id = str(build.export_id or "").strip()
     if not export_id:
@@ -233,6 +236,39 @@ def _publish_sqlite_candidate_locked(
             build,
             sql_lineage=sql_lineage,
             allowed_root=artifact_root,
+        )
+
+    build = ensure_model_equivalence(build)
+    equivalent = find_equivalent_publication(engine, build=build)
+    if equivalent is not None:
+        if equivalent.package_status.upper() != "LOCAL_AUDIT":
+            raise ApprovedModelBuildError(
+                f"equivalent local model package has unusable status {equivalent.package_status!r}"
+            )
+        release_unused_model_version_reservation(
+            engine,
+            model_id=build.model_id,
+            export_id=build.export_id,
+        )
+        return CompletedModelPublishResult(
+            model_id=equivalent.model_id,
+            model_name=equivalent.model_name,
+            model_version=equivalent.model_version,
+            manifest_id=equivalent.manifest_id,
+            split_set_id=equivalent.split_set_id,
+            export_id=equivalent.export_id,
+            rate_package_id=equivalent.rate_package_id,
+            package_version=equivalent.package_version,
+            package_status=equivalent.package_status,
+            rating_workbook_path=equivalent.rating_workbook_path,
+            model_run_id=equivalent.model_run_id,
+            mlflow_run_id=equivalent.mlflow_run_id,
+            publication_receipt_path=equivalent.publication_receipt_path,
+            publication_receipt_sha256=equivalent.publication_receipt_sha256,
+            was_existing=True,
+            deduplicated=True,
+            model_kind=equivalent.model_kind,
+            model_equivalence_sha256=equivalent.model_equivalence_sha256,
         )
 
     stage_rating_export(
@@ -272,6 +308,18 @@ def _publish_sqlite_candidate_locked(
             .mappings()
             .one()
         )
+        staged_equivalence_sha256 = str(staged["model_equivalence_sha256"] or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", staged_equivalence_sha256):
+            raise ApprovedModelBuildError(
+                "local staging did not produce a valid model equivalence digest"
+            )
+        if (
+            build.model_equivalence_sha256 is not None
+            and build.model_equivalence_sha256 != staged_equivalence_sha256
+        ):
+            raise ApprovedModelBuildError(
+                "staged model equivalence digest does not match the completed build"
+            )
         existing = _existing_local_publication(
             connection,
             model_id=model_id,
@@ -322,6 +370,32 @@ def _publish_sqlite_candidate_locked(
                 was_existing=True,
             )
 
+        equivalent = _existing_equivalent_local_publication(
+            connection,
+            model_id=model_id,
+            manifest_id=manifest_id,
+            model_kind=build.model_kind,
+            model_equivalence_sha256=staged_equivalence_sha256,
+        )
+        if equivalent is not None:
+            connection.execute(
+                text(
+                    """
+                    DELETE FROM pricing.PRICING_MODEL_VERSION_RESERVATION
+                    WHERE model_id = :model_id
+                      AND export_id = :export_id
+                    """
+                ),
+                {"model_id": model_id, "export_id": export_id},
+            )
+            return _local_publish_result(
+                model_id=model_id,
+                model_config=model_config,
+                package_row=equivalent,
+                was_existing=True,
+                deduplicated=True,
+            )
+
         reserved_version = connection.execute(
             text(
                 """
@@ -349,9 +423,7 @@ def _publish_sqlite_candidate_locked(
             {"manifest_id": manifest_id},
         ).scalar_one_or_none()
         if manifest_exists is None:
-            raise ApprovedModelBuildError(
-                f"local manifest_id {manifest_id!r} does not exist"
-            )
+            raise ApprovedModelBuildError(f"local manifest_id {manifest_id!r} does not exist")
         if split_set_id is not None:
             split_exists = connection.execute(
                 text(
@@ -464,6 +536,11 @@ def _publish_sqlite_candidate_locked(
             },
         )
         rate_package_id = int(package_insert.lastrowid)
+        _record_local_final_relativities(
+            connection,
+            export_id=export_id,
+            rate_package_id=rate_package_id,
+        )
         model_run_id = rate_package_id
         connection.execute(
             text(
@@ -475,6 +552,8 @@ def _publish_sqlite_candidate_locked(
                     airflow_run_id,
                     mlflow_run_id,
                     model_version,
+                    model_kind,
+                    model_equivalence_sha256,
                     export_id,
                     manifest_id,
                     split_set_id,
@@ -503,6 +582,8 @@ def _publish_sqlite_candidate_locked(
                     :airflow_run_id,
                     :mlflow_run_id,
                     :model_version,
+                    :model_kind,
+                    :model_equivalence_sha256,
                     :export_id,
                     :manifest_id,
                     :split_set_id,
@@ -533,6 +614,8 @@ def _publish_sqlite_candidate_locked(
                 "airflow_run_id": export_id,
                 "mlflow_run_id": build.mlflow_run_id,
                 "model_version": build.model_version,
+                "model_kind": build.model_kind,
+                "model_equivalence_sha256": build.model_equivalence_sha256,
                 "export_id": export_id,
                 "manifest_id": manifest_id,
                 "split_set_id": split_set_id,
@@ -644,6 +727,157 @@ def _publish_sqlite_candidate_locked(
         )
 
 
+def _record_local_final_relativities(
+    connection,
+    *,
+    export_id: str,
+    rate_package_id: int,
+) -> None:
+    """Persist the staged final rating snapshot needed by local audit views."""
+    staged_terms = (
+        connection.execute(
+            text(
+                """
+                SELECT
+                    rate.term_name,
+                    rate.term_type,
+                    rate.sequence_no,
+                    metadata.term_metadata_json
+                FROM pricing_stg.STG_RATE_CELL AS rate
+                LEFT JOIN pricing_stg.STG_TERM_METADATA AS metadata
+                  ON metadata.export_id = rate.export_id
+                 AND metadata.term_name = rate.term_name
+                WHERE rate.export_id = :export_id
+                GROUP BY
+                    rate.term_name,
+                    rate.term_type,
+                    rate.sequence_no,
+                    metadata.term_metadata_json
+                ORDER BY rate.sequence_no, rate.term_name
+                """
+            ),
+            {"export_id": export_id},
+        )
+        .mappings()
+        .all()
+    )
+    for staged_term in staged_terms:
+        term_insert = connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_TERM (
+                    rate_package_id,
+                    term_name,
+                    term_type,
+                    sequence_no,
+                    default_multiplier,
+                    default_log_coefficient,
+                    term_metadata_json,
+                    active_flag
+                ) VALUES (
+                    :rate_package_id,
+                    :term_name,
+                    :term_type,
+                    :sequence_no,
+                    1.0,
+                    0.0,
+                    :term_metadata_json,
+                    1
+                )
+                """
+            ),
+            {
+                "rate_package_id": rate_package_id,
+                "term_name": staged_term["term_name"],
+                "term_type": staged_term["term_type"],
+                "sequence_no": staged_term["sequence_no"],
+                "term_metadata_json": staged_term["term_metadata_json"],
+            },
+        )
+        term_id = int(term_insert.lastrowid)
+        staged_cells = (
+            connection.execute(
+                text(
+                    """
+                    SELECT
+                        cell_key_text,
+                        multiplier,
+                        log_coefficient,
+                        exposure_weight,
+                        record_count,
+                        is_default,
+                        is_reference
+                    FROM pricing_stg.STG_RATE_CELL
+                    WHERE export_id = :export_id
+                      AND term_name = :term_name
+                    ORDER BY row_id
+                    """
+                ),
+                {
+                    "export_id": export_id,
+                    "term_name": staged_term["term_name"],
+                },
+            )
+            .mappings()
+            .all()
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_COMPILED_RATE_CELL (
+                    rate_package_id,
+                    term_id,
+                    cell_key_digest,
+                    term_name,
+                    term_type,
+                    sequence_no,
+                    cell_key_text,
+                    multiplier,
+                    log_coefficient,
+                    exposure_weight,
+                    record_count,
+                    is_default,
+                    is_reference
+                ) VALUES (
+                    :rate_package_id,
+                    :term_id,
+                    :cell_key_digest,
+                    :term_name,
+                    :term_type,
+                    :sequence_no,
+                    :cell_key_text,
+                    :multiplier,
+                    :log_coefficient,
+                    :exposure_weight,
+                    :record_count,
+                    :is_default,
+                    :is_reference
+                )
+                """
+            ),
+            [
+                {
+                    "rate_package_id": rate_package_id,
+                    "term_id": term_id,
+                    "cell_key_digest": hashlib.sha256(
+                        str(cell["cell_key_text"]).encode("utf-8")
+                    ).hexdigest(),
+                    "term_name": staged_term["term_name"],
+                    "term_type": staged_term["term_type"],
+                    "sequence_no": staged_term["sequence_no"],
+                    "cell_key_text": cell["cell_key_text"],
+                    "multiplier": cell["multiplier"],
+                    "log_coefficient": cell["log_coefficient"],
+                    "exposure_weight": cell["exposure_weight"],
+                    "record_count": cell["record_count"],
+                    "is_default": cell["is_default"],
+                    "is_reference": cell["is_reference"],
+                }
+                for cell in staged_cells
+            ],
+        )
+
+
 def _existing_local_publication(
     connection,
     *,
@@ -667,6 +901,8 @@ def _existing_local_publication(
                     rp.source_export_id,
                     mr.model_run_id,
                     mr.run_status,
+                    mr.model_kind,
+                    mr.model_equivalence_sha256,
                     mr.rating_workbook_sha256,
                     mr.airflow_run_id,
                     mr.mlflow_run_id,
@@ -694,6 +930,45 @@ def _existing_local_publication(
     )
 
 
+def _existing_equivalent_local_publication(
+    connection,
+    *,
+    model_id: int,
+    manifest_id: str,
+    model_kind: str,
+    model_equivalence_sha256: str,
+):
+    export_id = connection.execute(
+        text(
+            """
+            SELECT rp.source_export_id
+            FROM pricing.MODEL_RUN AS mr
+            JOIN pricing.PRICING_RATE_PACKAGE AS rp
+              ON rp.rate_package_id = mr.rate_package_id
+            WHERE mr.model_id = :model_id
+              AND mr.manifest_id = :manifest_id
+              AND mr.model_kind = :model_kind
+              AND mr.model_equivalence_sha256 = :model_equivalence_sha256
+              AND mr.run_status = 'SUCCESS'
+            LIMIT 1
+            """
+        ),
+        {
+            "model_id": model_id,
+            "manifest_id": manifest_id,
+            "model_kind": model_kind,
+            "model_equivalence_sha256": model_equivalence_sha256,
+        },
+    ).scalar_one_or_none()
+    if export_id is None:
+        return None
+    return _existing_local_publication(
+        connection,
+        model_id=model_id,
+        export_id=str(export_id),
+    )
+
+
 def _staged_export_conflicts(
     staged,
     *,
@@ -710,6 +985,7 @@ def _staged_export_conflicts(
         "effective_from_date": build.effective_from,
         "source_file": str(Path(build.rating_workbook_path).resolve()),
         "publication_receipt_sha256": build.publication_receipt_sha256,
+        "model_equivalence_sha256": build.model_equivalence_sha256,
     }
     conflicts = []
     for field_name, expected_value in expected.items():
@@ -784,6 +1060,8 @@ def _model_run_evidence_conflicts(
 
     expected_scalars = {
         "airflow_run_id": export_id,
+        "model_kind": build.model_kind,
+        "model_equivalence_sha256": build.model_equivalence_sha256,
         "mlflow_run_id": build.mlflow_run_id,
         "publication_receipt_path": build.publication_receipt_path,
         "publication_receipt_sha256": build.publication_receipt_sha256,
@@ -903,6 +1181,7 @@ def _local_publish_result(
     model_config: ModelBuildConfig,
     package_row,
     was_existing: bool,
+    deduplicated: bool = False,
 ) -> CompletedModelPublishResult:
     model_run_id = package_row["model_run_id"]
     if model_run_id is None:
@@ -938,6 +1217,9 @@ def _local_publish_result(
             else str(package_row["publication_receipt_sha256"])
         ),
         was_existing=was_existing,
+        deduplicated=deduplicated,
+        model_kind=str(package_row["model_kind"]),
+        model_equivalence_sha256=package_row["model_equivalence_sha256"],
     )
 
 

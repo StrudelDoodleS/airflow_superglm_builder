@@ -7,9 +7,10 @@ identifiers, audit records, artifact locations, and publication plumbing.
 from __future__ import annotations
 
 import getpass
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,12 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from pricing_pipeline.data.frame_artifact import (
+    ModelFrameArtifact,
+    inspect_model_frame,
+    load_model_frame,
+    save_model_frame,
+)
 from pricing_pipeline.data.manifest import (
     ModelFrameManifestSpec,
     validation_split_indices,
@@ -25,24 +32,39 @@ from pricing_pipeline.data.manifest import (
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.offline_sqlite import open_offline_sqlite
 from pricing_pipeline.infra.runtime import runtime_from_env_or_module
+from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.modeling.level_grouping_artifact import (
+    LevelGroupingArtifact,
+    save_editor_level_groupings,
+)
+from pricing_pipeline.modeling.level_grouping_artifact import (
+    apply_level_groupings as _apply_level_groupings,
+)
+from pricing_pipeline.modeling.level_grouping_artifact import (
+    inspect_level_groupings as _inspect_level_groupings,
+)
+from pricing_pipeline.modeling.level_grouping_artifact import (
+    load_level_groupings as _load_level_groupings,
+)
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
     canonical_row_identity_index,
     run_standard_superglm_build,
 )
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
+from pricing_pipeline.models.kinds import normalise_model_kind
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.orchestration.publish_completed_build import (
     CompletedModelPublishResult,
     publish_completed_model_build,
 )
+from pricing_pipeline.publishing.deployment import deploy_rate_package
+from pricing_pipeline.publishing.editor_candidate import publish_editor_submission
 from pricing_pipeline.publishing.model_registry import (
     register_pricing_model,
 )
 from pricing_pipeline.publishing.model_versions import resolve_model_version_for_export
 from pricing_pipeline.publishing.naming import clean_identifier
-from pricing_pipeline.publishing.deployment import deploy_rate_package
-from pricing_pipeline.publishing.editor_candidate import publish_editor_submission
 from pricing_pipeline.publishing.rating_export import build_export_id
 from pricing_pipeline.publishing.sqlite_notebook import (
     publish_sqlite_candidate,
@@ -223,7 +245,7 @@ class RegisteredModel:
     model_id: int
     config: ModelBuildConfig
     source_root: Path
-    spec: PricingModelSpec
+    spec: PricingModelSpec | None
 
     @property
     def name(self) -> str:
@@ -252,6 +274,20 @@ def _created_by(value: str | None) -> str:
     if not identity:
         raise ValueError("created_by is required")
     return identity
+
+
+def _compact_model_state_component(model_name: str) -> str:
+    """Keep the full SQL identity out of filesystem component lengths."""
+    cleaned = clean_identifier(model_name).lower()
+    digest = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:8]
+    readable = cleaned[:18].rstrip("_")
+    return f"m_{readable}_{digest}"
+
+
+def _new_notebook_run_key() -> str:
+    """Return a compact, readable and collision-resistant notebook run key."""
+    timestamp = datetime.now(UTC).strftime("%y%m%d%H%M%S")
+    return f"nb_{timestamp}_{uuid4().hex[:8]}"
 
 
 def _local_notebook_settings(root: Path) -> Settings:
@@ -381,6 +417,90 @@ def register_model(
     )
 
 
+def load_registered_model(
+    pricing: NotebookContext,
+    *,
+    source_root: str | Path,
+    deployment_slot: str,
+    model_name: str | None = None,
+    model_label: str | None = None,
+) -> RegisteredModel:
+    """Resolve one existing SQL model by name and/or label for review or deployment."""
+    name = None if model_name is None else _required_text(model_name, "model_name")
+    label = None if model_label is None else _required_text(model_label, "model_label")
+    if name is None and label is None:
+        raise ValueError("provide model_name or model_label")
+    slot = _required_text(deployment_slot, "deployment_slot").upper()
+    root = Path(source_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"source_root does not exist: {root}")
+
+    schemas = schema_names_from_connectable(pricing.engine)
+    filters = []
+    params: dict[str, str] = {}
+    if name is not None:
+        filters.append("model_name = :model_name")
+        params["model_name"] = name
+    if label is not None:
+        filters.append("model_label = :model_label")
+        params["model_label"] = label
+    with pricing.engine.connect() as connection:
+        rows = (
+            connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        model_id,
+                        model_name,
+                        model_label,
+                        target_name,
+                        model_type,
+                        model_status
+                    FROM {schemas.pricing}.PRICING_MODEL
+                    WHERE {" AND ".join(filters)}
+                    """
+                ),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+    if len(rows) != 1:
+        selection = ", ".join(f"{key}={value!r}" for key, value in params.items())
+        raise LookupError(f"model selection {selection} resolved {len(rows)} rows; expected one")
+    row = rows[0]
+    if str(row["model_status"]).upper() != "ACTIVE":
+        raise ValueError(f"model {row['model_name']!r} is {row['model_status']!r}, not ACTIVE")
+    config = ModelBuildConfig(
+        model_name=str(row["model_name"]),
+        model_label=str(row["model_label"] or row["model_name"]),
+        target_name=str(row["target_name"]),
+        model_type=str(row["model_type"]),
+        deployment_slot=slot,
+        validation_split=ValidationSplitConfig.kfold(),
+    )
+    return RegisteredModel(
+        model_id=int(row["model_id"]),
+        config=config,
+        source_root=root,
+        spec=None,
+    )
+
+
+def list_candidate_versions(
+    pricing: NotebookContext,
+    *,
+    model: RegisteredModel,
+    technical: bool = False,
+) -> pd.DataFrame:
+    """List package versions newest-first for an editor or deployment decision."""
+    return Workbench(
+        engine=pricing.engine,
+        settings=pricing.settings,
+        model_config=model.config,
+    ).candidates(model.name, technical=technical)
+
+
 def _normalise_notebook_date(value: Any, field_name: str) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -430,12 +550,19 @@ def build_candidate(
     model: RegisteredModel,
     frame: pd.DataFrame,
     superglm_model: Any,
+    model_kind: str = "RAW",
     data_as_of: date | datetime | str | None = None,
     created_by: str | None = None,
 ) -> BuiltCandidate:
     """Fit and export one candidate while deriving its audit evidence."""
     pricing.require_write("build_candidate")
+    resolved_model_kind = normalise_model_kind(model_kind)
     spec = model.spec
+    if spec is None:
+        raise ValueError(
+            "build_candidate requires a model returned by register_model(), "
+            "not a review-only SQL model reference"
+        )
     required_columns = {
         *spec.features,
         *spec.pk_columns,
@@ -491,8 +618,7 @@ def build_candidate(
 
     validation_split = spec.validation
     resolved_split_indices = validation_split_indices(frame, validation_split)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    resolved_run_key = f"notebook_{timestamp}_{uuid4().hex[:8]}"
+    resolved_run_key = _new_notebook_run_key()
     export_id = build_export_id(model.name, resolved_run_key)
     if pricing.mode == "local":
         model_version = resolve_sqlite_model_version(
@@ -526,9 +652,14 @@ def build_candidate(
         split_indices=resolved_split_indices,
         fit_mode=spec.fit_mode,
         scoring=spec.scoring,
-        output_dir=(Path(pricing.settings.workbench_artifact_root) / model.name / resolved_run_key),
+        output_dir=(
+            Path(pricing.settings.workbench_artifact_root)
+            / _compact_model_state_component(model.name)
+            / resolved_run_key
+        ),
         model_id=model.model_id,
         model_config=model.config,
+        model_kind=resolved_model_kind,
         model_version=model_version,
         export_id=export_id,
         effective_from=None,
@@ -597,6 +728,80 @@ def open_candidate(
         model.name,
         package_version=int(package_version),
     )
+
+
+def export_level_groupings(
+    candidate: Candidate,
+    *,
+    editor_session: Any,
+    path: str | Path,
+    replace: bool = False,
+) -> LevelGroupingArtifact:
+    """Export every editor-created collapse as actual ``LevelGrouping`` objects.
+
+    This temporary notebook API deliberately hides SuperGLM's private grouping
+    attribute.  It can be replaced by a future public SuperGLM export method
+    without changing the scratch/training notebook contract.
+    """
+    if not isinstance(candidate, Candidate):
+        raise TypeError("candidate must come from open_candidate()")
+    if str(candidate.technical.get("model_kind") or "").upper() != "RAW":
+        raise ValueError("routine level groupings must be exported from a RAW candidate")
+    reference_model = getattr(editor_session, "reference_model", None)
+    if reference_model is not candidate.bundle.fitted_model:
+        raise ValueError("editor_session must have been opened from the selected RAW candidate")
+    frame_sha256 = candidate.bundle.model_frame_sha256
+    if frame_sha256 is None:
+        raise ValueError("selected RAW candidate has no model-frame SHA-256 evidence")
+    data_as_of = candidate.technical.get("data_as_of_date")
+    if data_as_of is None:
+        raise ValueError("selected RAW candidate has no data-as-at evidence")
+    return save_editor_level_groupings(
+        editor_session,
+        path,
+        source_model_name=candidate.model_name,
+        source_package_version=candidate.package_version,
+        source_manifest_id=candidate.bundle.manifest_id,
+        source_model_frame_sha256=frame_sha256,
+        source_data_as_of_date=data_as_of,
+        replace=replace,
+    )
+
+
+def load_level_groupings(
+    path: str | Path,
+    *,
+    frame: pd.DataFrame,
+    model: RegisteredModel,
+) -> dict[str, Any]:
+    """Load editor-exported groupings for this exact model and data-as-at."""
+    if not isinstance(model, RegisteredModel) or model.spec is None:
+        raise TypeError("model must come from register_model()")
+    data_as_of = _resolve_data_as_of(
+        frame,
+        explicit=None,
+        column=model.spec.data_as_of_column,
+    )
+    return _load_level_groupings(
+        path,
+        frame=frame,
+        expected_model_name=model.name,
+        expected_data_as_of_date=data_as_of,
+        allowed_root=model.source_root,
+    )
+
+
+def inspect_level_groupings(path: str | Path) -> LevelGroupingArtifact:
+    """Inspect grouping provenance without deserializing its Python objects."""
+    return _inspect_level_groupings(path)
+
+
+def apply_level_groupings(
+    features: Mapping[str, Any],
+    groupings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach loaded groupings to copied SuperGLM categorical feature specs."""
+    return _apply_level_groupings(features, groupings)
 
 
 def publish_edits(
@@ -678,14 +883,20 @@ def deploy_package(
 
 __all__ = [
     "BuiltCandidate",
+    "ModelFrameArtifact",
     "NotebookContext",
     "PricingModelSpec",
     "RegisteredModel",
     "build_candidate",
     "connect",
     "deploy_package",
+    "inspect_model_frame",
+    "list_candidate_versions",
+    "load_model_frame",
+    "load_registered_model",
     "open_candidate",
     "publish_candidate",
     "publish_edits",
     "register_model",
+    "save_model_frame",
 ]

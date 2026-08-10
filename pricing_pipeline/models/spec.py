@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import date, datetime
 from numbers import Real
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from pricing_pipeline.models.kinds import normalise_model_kind
 
 
 class ApprovedModelBuildError(ValueError):
@@ -21,6 +24,8 @@ class ApprovedModelBuild(BaseModel):
     model_name: str
     model_version: str
     model_type: str
+    model_kind: str = "RAW"
+    model_equivalence_sha256: str | None = None
     target_name: str
     deployment_slot: str
     manifest_id: str
@@ -81,7 +86,17 @@ class ApprovedModelBuild(BaseModel):
             raise ValueError("is required")
         return str(value).strip()
 
-    @field_validator("split_set_id", "mlflow_run_id", mode="before")
+    @field_validator("model_kind", mode="before")
+    @classmethod
+    def _model_kind(cls, value: Any) -> str:
+        return normalise_model_kind(value)
+
+    @field_validator(
+        "split_set_id",
+        "mlflow_run_id",
+        "model_equivalence_sha256",
+        mode="before",
+    )
     @classmethod
     def _optional_text(cls, value: Any) -> str | None:
         if value is None:
@@ -123,10 +138,13 @@ class ApprovedModelBuild(BaseModel):
         "candidate_artifact_sha256",
         "model_source_sha256",
         "model_frame_sha256",
+        "model_equivalence_sha256",
         mode="before",
     )
     @classmethod
-    def _sha256(cls, value: Any) -> str:
+    def _sha256(cls, value: Any, info) -> str | None:
+        if info.field_name == "model_equivalence_sha256" and value is None:
+            return None
         digest = str(value).strip()
         if (
             len(digest) != 64
@@ -211,7 +229,7 @@ class ApprovedModelBuild(BaseModel):
         return tuple(records)
 
     @model_validator(mode="after")
-    def _scopes_reference_metrics(self) -> "ApprovedModelBuild":
+    def _scopes_reference_metrics(self) -> ApprovedModelBuild:
         unknown = sorted(set(self.metric_scopes) - set(self.metrics))
         if unknown:
             raise ValueError("metric_scopes reference unknown metrics: " + ", ".join(unknown))

@@ -13,6 +13,7 @@ class PublishResult:
     package_status: str = "PUBLISHED"
     was_existing: bool = False
     model_run_id: int | None = None
+    deduplicated: bool = False
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,9 @@ class CompletedModelPublishResult:
     publication_receipt_path: str | None = None
     publication_receipt_sha256: str | None = None
     was_existing: bool = False
+    deduplicated: bool = False
+    model_kind: str = "RAW"
+    model_equivalence_sha256: str | None = None
 
 
 @dataclass(frozen=True)

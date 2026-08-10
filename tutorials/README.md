@@ -1,6 +1,6 @@
 # Tutorials
 
-Open `basic_sql_etl_and_schema_walkthrough.ipynb` in Jupyter for a conceptual
+Open `00_basic_sql_etl_schema_walkthrough.ipynb` in Jupyter for a conceptual
 SQL/ETL/schema walkthrough. For an actual pricing model, use the per-model
 `pricing_model.ipynb` created by `scripts/scaffold_pricing_model.py`.
 

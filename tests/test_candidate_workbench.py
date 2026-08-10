@@ -11,7 +11,6 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
 
-
 MODEL_CONFIG = ModelBuildConfig(
     model_name="HOME_FREQ",
     model_label="Home frequency",
@@ -57,10 +56,16 @@ def _bundle():
 def _history_rows():
     return [
         {
+            "package_status": "DRAFT",
+            "package_version": 14,
+        },
+        {
             "model_name": "HOME_FREQ",
             "model_version": "20260603",
+            "model_kind": "RAW",
             "export_id": "export-13",
             "package_version": 13,
+            "package_status": "PUBLISHED",
             "rate_package_id": 113,
             "parent_rate_package_id": None,
             "parent_package_version": None,
@@ -85,8 +90,10 @@ def _history_rows():
         {
             "model_name": "HOME_FREQ",
             "model_version": "20260603",
+            "model_kind": "EDITOR_EDIT",
             "export_id": "editor-12",
             "package_version": 12,
+            "package_status": "PUBLISHED",
             "rate_package_id": 112,
             "parent_rate_package_id": 111,
             "parent_package_version": 11,
@@ -125,14 +132,17 @@ def test_candidates_returns_friendly_columns_and_hides_lineage_ids(monkeypatch):
 
     assert list(history.columns) == [
         "Package",
+        "Kind",
         "Fitted",
         "Data through",
+        "Manifest",
         "Parent",
         "State",
         "Baseline pooled CV deviance",
         "Editor train delta",
         "Editor",
     ]
+    assert history["Package"].tolist() == [13, 12]
     assert "model_run_id" not in history.columns
     assert history.iloc[0]["State"] == "Champion in HOME_FREQ_UAT"
     assert history.iloc[0]["Baseline pooled CV deviance"] == pytest.approx(0.482)
@@ -152,8 +162,38 @@ def test_candidates_can_return_explicit_technical_view(monkeypatch):
 
     history = workbench.candidates("HOME_FREQ", technical=True)
 
+    assert history["package_version"].tolist() == [13, 12]
+    assert set(history["package_status"]) == {"PUBLISHED"}
     assert history.iloc[0]["model_run_id"] == 913
     assert history.iloc[0]["candidate_artifact_sha256"] == "c" * 64
+
+
+def test_candidates_return_stable_empty_editor_and_deployment_views(monkeypatch):
+    api = _api()
+    workbench = api.Workbench(
+        engine=object(),
+        settings=_settings(),
+        model_config=MODEL_CONFIG,
+    )
+    monkeypatch.setattr(workbench, "_candidate_rows", lambda model_name, slot: [])
+
+    editor_history = workbench.candidates("HOME_FREQ")
+    deployment_history = workbench.candidates("HOME_FREQ", technical=True)
+
+    assert editor_history.empty
+    assert list(editor_history.columns) == api._FRIENDLY_COLUMNS
+    assert deployment_history.empty
+    assert list(deployment_history.columns) == api._TECHNICAL_COLUMNS
+    assert {
+        "package_version",
+        "package_status",
+        "model_kind",
+        "model_equivalence_sha256",
+        "data_as_of_date",
+        "manifest_id",
+        "parent_rate_package_id",
+        "current_rate_package_id",
+    } <= set(deployment_history.columns)
 
 
 def test_candidate_history_binds_validation_split_to_current_manifest():
@@ -201,6 +241,7 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
     assert "manifest.model_frame_sha256" in statements[0][0]
+    assert "rp.package_status = 'PUBLISHED'" in statements[0][0]
     assert "rp.package_version = :package_version" in statements[0][0]
     assert statements[0][1]["package_version"] == 7
 
@@ -219,6 +260,7 @@ def test_open_resolves_one_successful_run_and_verifies_bundle(
         "model_version": "20260603",
         "export_id": "export-1",
         "package_version": 7,
+        "package_status": "PUBLISHED",
         "rate_package_id": 107,
         "parent_rate_package_id": None,
         "model_run_id": 907,
@@ -275,6 +317,7 @@ def test_open_rejects_candidate_bundle_model_frame_digest_mismatch(
         "model_version": "20260603",
         "export_id": "export-1",
         "package_version": 7,
+        "package_status": "PUBLISHED",
         "rate_package_id": 107,
         "parent_rate_package_id": None,
         "model_run_id": 907,
@@ -319,6 +362,7 @@ def test_open_rejects_candidate_bundle_model_identity_mismatch(
         "model_version": "20260603",
         "export_id": "export-1",
         "package_version": 7,
+        "package_status": "PUBLISHED",
         "rate_package_id": 107,
         "parent_rate_package_id": None,
         "model_run_id": 907,
@@ -358,8 +402,28 @@ def test_open_rejects_ambiguous_run_lineage(monkeypatch):
     monkeypatch.setattr(
         workbench,
         "_candidate_rows",
-        lambda model_name, deployment_slot, *, package_version=None: [{}, {}],
+        lambda model_name, deployment_slot, *, package_version=None: [
+            {"package_status": "PUBLISHED"},
+            {"package_status": "PUBLISHED"},
+        ],
     )
 
-    with pytest.raises(api.CandidateLineageError, match="exactly one successful MODEL_RUN"):
+    with pytest.raises(api.CandidateLineageError, match="one successful MODEL_RUN"):
+        workbench.open("HOME_FREQ", package_version=7)
+
+
+def test_open_rejects_a_non_published_package(monkeypatch):
+    api = _api()
+    workbench = api.Workbench(
+        engine=object(),
+        settings=_settings(),
+        model_config=MODEL_CONFIG,
+    )
+    monkeypatch.setattr(
+        workbench,
+        "_candidate_rows",
+        lambda model_name, deployment_slot, *, package_version=None: [{"package_status": "DRAFT"}],
+    )
+
+    with pytest.raises(api.CandidateLineageError, match="published package"):
         workbench.open("HOME_FREQ", package_version=7)

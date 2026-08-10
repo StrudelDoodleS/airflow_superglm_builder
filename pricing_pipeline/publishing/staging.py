@@ -4,9 +4,10 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,29 @@ BASE_RATE_CELL = "C2"
 TERM_ROW = 5
 HEADER_ROW = 7
 DATA_START_ROW = 8
+MODEL_EQUIVALENCE_DECIMAL_PLACES = 10
+_EQUIVALENCE_IGNORED_COLUMNS = {
+    "export_id",
+    "model_id",
+    "model_version",
+    "row_id",
+    "sequence_no",
+    "level_set_name",
+    "order_index",
+    "effective_from_date",
+    "effective_to_date",
+    "source_file",
+    "publication_receipt_json",
+    "publication_receipt_sha256",
+    "staging_content_sha256",
+    "model_equivalence_sha256",
+    "created_ts",
+    "created_by",
+}
+_EQUIVALENCE_JSON_COLUMNS = {
+    "package_metadata_json",
+    "term_metadata_json",
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +111,7 @@ def find_blocks(raw: pd.DataFrame, term_row: int, header_row: int) -> list[dict[
     hr = header_row - 1
     blocks: list[dict[str, Any]] = []
 
-    for c in range(0, raw.shape[1] - 2):
+    for c in range(raw.shape[1] - 2):
         term_name = clean_text(raw.iat[tr, c])
         h0 = clean_text(raw.iat[hr, c])
         h1 = clean_text(raw.iat[hr, c + 1])
@@ -597,6 +621,73 @@ def staging_content_sha256(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_equivalence_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _canonical_equivalence_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, list | tuple):
+        return [_canonical_equivalence_value(item) for item in value]
+    value = _canonical_staging_value(value)
+    if isinstance(value, float) and math.isfinite(value):
+        rounded = round(value, MODEL_EQUIVALENCE_DECIMAL_PLACES)
+        return 0.0 if rounded == 0 else rounded
+    return value
+
+
+def _canonical_equivalence_frame(name: str, frame: pd.DataFrame) -> dict[str, Any]:
+    content = frame.drop(
+        columns=sorted(_EQUIVALENCE_IGNORED_COLUMNS),
+        errors="ignore",
+    )
+    columns = sorted(str(column) for column in content.columns)
+    rows = []
+    for _, row in content.loc[:, columns].iterrows():
+        values = []
+        for column in columns:
+            value = row[column]
+            if column in _EQUIVALENCE_JSON_COLUMNS and not pd.isna(value):
+                try:
+                    value = json.loads(str(value))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{column} must contain valid JSON for model equivalence"
+                    ) from exc
+            values.append(_canonical_equivalence_value(value))
+        rows.append(values)
+    rows.sort(
+        key=lambda row: json.dumps(
+            row,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    )
+    return {"name": name, "columns": columns, "rows": rows}
+
+
+def model_equivalence_sha256(
+    export_df: pd.DataFrame,
+    rate_df: pd.DataFrame,
+    level_df: pd.DataFrame,
+    term_metadata_df: pd.DataFrame | None = None,
+) -> str:
+    """Fingerprint final rating semantics with 10-decimal numeric canonicalization."""
+    term_frame = _empty_term_metadata_frame() if term_metadata_df is None else term_metadata_df
+    payload = [
+        _canonical_equivalence_frame("rating_export", export_df),
+        _canonical_equivalence_frame("rate_cell", rate_df),
+        _canonical_equivalence_frame("cell_level", level_df),
+        _canonical_equivalence_frame("term_metadata", term_frame),
+    ]
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _term_metadata_frame(
     export_id: str,
     receipt: SuperGLMPublicationReceipt,
@@ -801,12 +892,14 @@ def insert_staging_frames(
     level_df: pd.DataFrame,
     term_metadata_df: pd.DataFrame | None = None,
     staging_content_sha256: str | None = None,
+    model_equivalence_sha256: str | None = None,
 ) -> None:
-    if (
-        staging_content_sha256 is not None
-        and re.fullmatch(r"[0-9a-f]{64}", staging_content_sha256) is None
+    for field_name, digest in (
+        ("staging_content_sha256", staging_content_sha256),
+        ("model_equivalence_sha256", model_equivalence_sha256),
     ):
-        raise ValueError("staging_content_sha256 must be a lowercase SHA-256 digest")
+        if digest is not None and re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     schemas = schema_names_from_connectable(engine)
     with engine.begin() as con:
         acquire_staging_export_lock(con, args.export_id)
@@ -841,13 +934,15 @@ def insert_staging_frames(
             text(
                 "UPDATE pricing_stg.STG_RATING_EXPORT "
                 "SET model_id = :model_id, "
-                "staging_content_sha256 = :staging_content_sha256 "
+                "staging_content_sha256 = :staging_content_sha256, "
+                "model_equivalence_sha256 = :model_equivalence_sha256 "
                 "WHERE export_id = :export_id"
             ),
             {
                 "export_id": args.export_id,
                 "model_id": model_id,
                 "staging_content_sha256": staging_content_sha256,
+                "model_equivalence_sha256": model_equivalence_sha256,
             },
         )
         rate_df.to_sql(
@@ -877,8 +972,7 @@ def insert_staging_frames(
             )
 
 
-def stage_rating_export(
-    engine,
+def _verified_staging_frames(
     *,
     workbook_path: Path,
     export_id: str,
@@ -893,7 +987,13 @@ def stage_rating_export(
     model_id: int | None = None,
     publication_receipt_path: str | Path,
     publication_receipt_sha256: str,
-) -> str:
+) -> tuple[
+    StagingExport,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+]:
     receipt = load_publication_receipt(
         publication_receipt_path,
         expected_sha256=publication_receipt_sha256,
@@ -922,7 +1022,87 @@ def stage_rating_export(
         receipt=receipt,
         receipt_sha256=publication_receipt_sha256,
     )
+    return args, export_df, rate_df, level_df, term_metadata_df
+
+
+def rating_workbook_model_equivalence_sha256(
+    *,
+    workbook_path: Path,
+    export_id: str,
+    model_name: str,
+    model_version: str | None,
+    effective_from: str | None,
+    target_name: str = "ClaimNb",
+    model_type: str = "superglm_poisson",
+    effective_to: str | None = None,
+    created_by: str = "python",
+    model_id: int | None = None,
+    publication_receipt_path: str | Path,
+    publication_receipt_sha256: str,
+) -> str:
+    """Fingerprint a workbook locally before any staging-table write."""
+    _, export_df, rate_df, level_df, term_metadata_df = _verified_staging_frames(
+        workbook_path=workbook_path,
+        export_id=export_id,
+        model_name=model_name,
+        model_version=model_version,
+        effective_from=effective_from,
+        target_name=target_name,
+        model_type=model_type,
+        effective_to=effective_to,
+        created_by=created_by,
+        replace=False,
+        model_id=model_id,
+        publication_receipt_path=publication_receipt_path,
+        publication_receipt_sha256=publication_receipt_sha256,
+    )
+    return model_equivalence_sha256(
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+    )
+
+
+def stage_rating_export(
+    engine,
+    *,
+    workbook_path: Path,
+    export_id: str,
+    model_name: str,
+    model_version: str | None,
+    effective_from: str | None,
+    target_name: str = "ClaimNb",
+    model_type: str = "superglm_poisson",
+    effective_to: str | None = None,
+    created_by: str = "python",
+    replace: bool = False,
+    model_id: int | None = None,
+    publication_receipt_path: str | Path,
+    publication_receipt_sha256: str,
+) -> str:
+    args, export_df, rate_df, level_df, term_metadata_df = _verified_staging_frames(
+        workbook_path=workbook_path,
+        export_id=export_id,
+        model_name=model_name,
+        model_version=model_version,
+        effective_from=effective_from,
+        target_name=target_name,
+        model_type=model_type,
+        effective_to=effective_to,
+        created_by=created_by,
+        replace=replace,
+        model_id=model_id,
+        publication_receipt_path=publication_receipt_path,
+        publication_receipt_sha256=publication_receipt_sha256,
+    )
     content_sha256 = staging_content_sha256(
+        export_df,
+        rate_df,
+        level_df,
+        term_metadata_df,
+    )
+    equivalence_sha256 = model_equivalence_sha256(
         export_df,
         rate_df,
         level_df,
@@ -936,5 +1116,6 @@ def stage_rating_export(
         level_df,
         term_metadata_df,
         staging_content_sha256=content_sha256,
+        model_equivalence_sha256=equivalence_sha256,
     )
     return content_sha256

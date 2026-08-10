@@ -22,6 +22,7 @@ SCHEMA_DB_FILES = {
     "mlops": "mlops.sqlite",
 }
 _OFFLINE_COLUMN_UPGRADES = (
+    ("pricing", "DATASET_MANIFEST", "manifest_signature_sha256", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "model_frame_sha256", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "frame_hash_metadata_json", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "exposure_column", "TEXT"),
@@ -30,6 +31,18 @@ _OFFLINE_COLUMN_UPGRADES = (
     ("pricing", "DATASET_MANIFEST", "offset_source_column", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "offset_label", "TEXT"),
     ("pricing", "DATASET_MANIFEST", "export_weight_column", "TEXT"),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "model_kind",
+        "TEXT NOT NULL DEFAULT 'RAW'",
+    ),
+    (
+        "pricing",
+        "MODEL_RUN",
+        "model_equivalence_sha256",
+        "TEXT",
+    ),
     (
         "pricing",
         "MODEL_RUN",
@@ -94,6 +107,12 @@ _OFFLINE_COLUMN_UPGRADES = (
         "pricing_stg",
         "STG_RATING_EXPORT",
         "staging_content_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing_stg",
+        "STG_RATING_EXPORT",
+        "model_equivalence_sha256",
         "TEXT",
     ),
 )
@@ -250,6 +269,24 @@ def apply_offline_ddl(engine: Engine) -> None:
               )
             """
         )
+        connection.execute(
+            """
+            UPDATE pricing.MODEL_RUN
+            SET model_kind = CASE
+                WHEN parent_model_run_id IS NOT NULL THEN 'EDITOR_EDIT'
+                ELSE 'RAW'
+            END
+            WHERE model_kind IS NULL
+               OR model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS pricing.UX_DATASET_MANIFEST_SIGNATURE
+            ON DATASET_MANIFEST(manifest_signature_sha256)
+            WHERE manifest_signature_sha256 IS NOT NULL
+            """
+        )
         connection.commit()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -272,10 +309,89 @@ def apply_offline_ddl(engine: Engine) -> None:
                     WHERE rate_package_id IS NOT NULL
                     """
                 )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    pricing.UX_MODEL_RUN_EQUIVALENT_SUCCESS
+                ON MODEL_RUN(
+                    model_id,
+                    manifest_id,
+                    model_kind,
+                    model_equivalence_sha256
+                )
+                WHERE model_equivalence_sha256 IS NOT NULL
+                  AND run_status = 'SUCCESS'
+                """
+            )
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
+        connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_INSERT
+            BEFORE INSERT ON MODEL_RUN
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE
+            BEFORE UPDATE OF model_kind ON MODEL_RUN
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_DATASET_MANIFEST_SIGNATURE_INSERT
+            BEFORE INSERT ON DATASET_MANIFEST
+            WHEN NEW.manifest_signature_sha256 IS NOT NULL
+             AND (
+                length(NEW.manifest_signature_sha256) <> 64
+                OR NEW.manifest_signature_sha256 <> lower(NEW.manifest_signature_sha256)
+                OR NEW.manifest_signature_sha256 GLOB '*[^0-9a-f]*'
+             )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid DATASET_MANIFEST manifest signature');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_DATASET_MANIFEST_SIGNATURE_UPDATE
+            BEFORE UPDATE OF manifest_signature_sha256 ON DATASET_MANIFEST
+            WHEN NEW.manifest_signature_sha256 IS NOT NULL
+             AND (
+                length(NEW.manifest_signature_sha256) <> 64
+                OR NEW.manifest_signature_sha256 <> lower(NEW.manifest_signature_sha256)
+                OR NEW.manifest_signature_sha256 GLOB '*[^0-9a-f]*'
+             )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid DATASET_MANIFEST manifest signature');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_EQUIVALENCE_INSERT
+            BEFORE INSERT ON MODEL_RUN
+            WHEN NEW.model_equivalence_sha256 IS NOT NULL
+             AND (
+                length(NEW.model_equivalence_sha256) <> 64
+                OR NEW.model_equivalence_sha256 <> lower(NEW.model_equivalence_sha256)
+                OR NEW.model_equivalence_sha256 GLOB '*[^0-9a-f]*'
+             )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid MODEL_RUN model equivalence digest');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_EQUIVALENCE_UPDATE
+            BEFORE UPDATE OF model_equivalence_sha256 ON MODEL_RUN
+            WHEN NEW.model_equivalence_sha256 IS NOT NULL
+             AND (
+                length(NEW.model_equivalence_sha256) <> 64
+                OR NEW.model_equivalence_sha256 <> lower(NEW.model_equivalence_sha256)
+                OR NEW.model_equivalence_sha256 GLOB '*[^0-9a-f]*'
+             )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid MODEL_RUN model equivalence digest');
+            END;
+            """
+        )
         connection.executescript(
             (OFFLINE_DDL_DIR / "pricing_views.sql").read_text(encoding="utf-8")
         )

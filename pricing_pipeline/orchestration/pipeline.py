@@ -5,10 +5,15 @@ from pathlib import Path
 from sqlalchemy import text
 
 from pricing_pipeline.infra.schema import schema_names_from_connectable
-from pricing_pipeline.publishing.lineage import record_model_run
-from pricing_pipeline.publishing.lifecycle import CompletedModelPublishResult
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
+from pricing_pipeline.publishing.equivalence import (
+    ensure_model_equivalence,
+    find_equivalent_publication,
+    release_unused_model_version_reservation,
+)
+from pricing_pipeline.publishing.lifecycle import CompletedModelPublishResult
+from pricing_pipeline.publishing.lineage import record_model_run
 from pricing_pipeline.publishing.model_registry import (
     ModelRegistryError,
     validate_registered_model,
@@ -47,14 +52,35 @@ def publish_model_export(
     else:
         model_id = int(validated_model_id)
     _validate_export_matches_config(export, model_config, model_id=model_id)
-    def write_package_lineage(connection, rate_package_id: int) -> int:
-        return record_model_run(
-            None,
-            build=export,
-            dag_id="notebook",
-            airflow_run_id=export.export_id,
-            rate_package_id=rate_package_id,
-            connection=connection,
+    export = ensure_model_equivalence(export)
+    equivalent = find_equivalent_publication(engine, build=export)
+    if equivalent is not None:
+        if equivalent.package_status.upper() != "PUBLISHED":
+            raise PublishedRunIntegrityError("equivalent model package is not PUBLISHED")
+        release_unused_model_version_reservation(
+            engine,
+            model_id=export.model_id,
+            export_id=export.export_id,
+        )
+        return CompletedModelPublishResult(
+            model_id=equivalent.model_id,
+            model_name=equivalent.model_name,
+            model_version=equivalent.model_version,
+            manifest_id=equivalent.manifest_id,
+            split_set_id=equivalent.split_set_id,
+            export_id=equivalent.export_id,
+            rate_package_id=equivalent.rate_package_id,
+            package_version=equivalent.package_version,
+            package_status=equivalent.package_status,
+            rating_workbook_path=equivalent.rating_workbook_path,
+            model_run_id=equivalent.model_run_id,
+            mlflow_run_id=equivalent.mlflow_run_id,
+            publication_receipt_path=equivalent.publication_receipt_path,
+            publication_receipt_sha256=equivalent.publication_receipt_sha256,
+            was_existing=True,
+            deduplicated=True,
+            model_kind=equivalent.model_kind,
+            model_equivalence_sha256=equivalent.model_equivalence_sha256,
         )
 
     staging_kwargs = {
@@ -78,6 +104,22 @@ def publish_model_export(
             "rating workbook changed during staging: "
             f"expected={export.rating_workbook_sha256!r}, actual={staged_workbook_sha256!r}"
         )
+    equivalence_sha256 = export.model_equivalence_sha256
+    if equivalence_sha256 is None:
+        raise PublishedRunIntegrityError(
+            "Python equivalence fingerprint is missing before SQL staging"
+        )
+
+    def write_package_lineage(connection, rate_package_id: int) -> int:
+        return record_model_run(
+            None,
+            build=export,
+            dag_id="notebook",
+            airflow_run_id=export.export_id,
+            rate_package_id=rate_package_id,
+            connection=connection,
+        )
+
     publish_result = publish_rating_package(
         engine,
         export_id=export.export_id,
@@ -93,8 +135,20 @@ def publish_model_export(
             "source_file": str(Path(export.rating_workbook_path).resolve()),
             "publication_receipt_sha256": export.publication_receipt_sha256,
             "staging_content_sha256": content_sha256,
+            "model_equivalence_sha256": equivalence_sha256,
+        },
+        equivalence_key={
+            "manifest_id": export.manifest_id,
+            "model_kind": export.model_kind,
+            "model_equivalence_sha256": equivalence_sha256,
         },
     )
+    if publish_result.deduplicated:
+        return _resolve_equivalent_published_run(
+            engine,
+            export=export,
+            rate_package_id=publish_result.rate_package_id,
+        )
     if publish_result.was_existing:
         existing = _resolve_existing_published_run(
             engine,
@@ -130,6 +184,9 @@ def publish_model_export(
         publication_receipt_path=export.publication_receipt_path,
         publication_receipt_sha256=export.publication_receipt_sha256,
         was_existing=publish_result.was_existing,
+        deduplicated=publish_result.deduplicated,
+        model_kind=export.model_kind,
+        model_equivalence_sha256=export.model_equivalence_sha256,
     )
 
 
@@ -153,6 +210,113 @@ def _validate_export_matches_config(
         raise ModelRegistryError(
             "training export does not match model config: " + "; ".join(mismatches)
         )
+
+
+def _resolve_equivalent_published_run(
+    engine,
+    *,
+    export: ApprovedModelBuild,
+    rate_package_id: int,
+) -> CompletedModelPublishResult:
+    schemas = schema_names_from_connectable(engine)
+    with engine.connect() as connection:
+        rows = (
+            connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        rp.model_id,
+                        pm.model_name,
+                        rp.model_version,
+                        rp.source_export_id,
+                        rp.rate_package_id,
+                        rp.package_version,
+                        rp.package_status,
+                        mr.model_run_id,
+                        mr.run_status,
+                        mr.manifest_id,
+                        split_link.split_set_id,
+                        mr.model_kind,
+                        mr.model_equivalence_sha256,
+                        mr.rating_workbook_path,
+                        mr.mlflow_run_id,
+                        mr.publication_receipt_path,
+                        mr.publication_receipt_sha256,
+                        dataset_link.manifest_id AS linked_manifest_id
+                    FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+                    JOIN {schemas.pricing}.PRICING_MODEL AS pm
+                      ON pm.model_id = rp.model_id
+                    JOIN {schemas.pricing}.MODEL_RUN AS mr
+                      ON mr.rate_package_id = rp.rate_package_id
+                    LEFT JOIN {schemas.mlops}.MODEL_RUN_DATASET AS dataset_link
+                      ON dataset_link.model_run_id = mr.model_run_id
+                     AND dataset_link.dataset_role = 'training'
+                     AND dataset_link.manifest_id = mr.manifest_id
+                    LEFT JOIN {schemas.mlops}.MODEL_RUN_SPLIT_SET AS split_link
+                      ON split_link.model_run_id = mr.model_run_id
+                     AND split_link.manifest_id = mr.manifest_id
+                     AND split_link.dataset_role = 'training'
+                     AND split_link.split_role = 'validation'
+                    WHERE rp.rate_package_id = :rate_package_id
+                    """
+                ),
+                {"rate_package_id": rate_package_id},
+            )
+            .mappings()
+            .all()
+        )
+    if len(rows) != 1:
+        raise PublishedRunIntegrityError(
+            "equivalent package must resolve exactly one successful model run"
+        )
+    row = rows[0]
+    expected = {
+        "model_id": export.model_id,
+        "model_name": export.model_name,
+        "manifest_id": export.manifest_id,
+        "linked_manifest_id": export.manifest_id,
+        "model_kind": export.model_kind,
+        "model_equivalence_sha256": export.model_equivalence_sha256,
+        "run_status": "SUCCESS",
+        "package_status": "PUBLISHED",
+    }
+    mismatches = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if str(row[field_name]) != str(expected_value)
+    ]
+    if mismatches:
+        raise PublishedRunIntegrityError(
+            "equivalent package has incompatible durable lineage: " + ", ".join(mismatches)
+        )
+    return CompletedModelPublishResult(
+        model_id=int(row["model_id"]),
+        model_name=str(row["model_name"]),
+        model_version=str(row["model_version"]),
+        manifest_id=str(row["manifest_id"]),
+        split_set_id=(None if row["split_set_id"] is None else str(row["split_set_id"])),
+        export_id=str(row["source_export_id"]),
+        rate_package_id=int(row["rate_package_id"]),
+        package_version=int(row["package_version"]),
+        package_status=str(row["package_status"]),
+        rating_workbook_path=str(row["rating_workbook_path"]),
+        model_run_id=int(row["model_run_id"]),
+        mlflow_run_id=str(row["mlflow_run_id"] or "") or None,
+        publication_receipt_path=(
+            None
+            if row["publication_receipt_path"] is None
+            else str(row["publication_receipt_path"])
+        ),
+        publication_receipt_sha256=(
+            None
+            if row["publication_receipt_sha256"] is None
+            else str(row["publication_receipt_sha256"])
+        ),
+        was_existing=True,
+        deduplicated=True,
+        model_kind=str(row["model_kind"]),
+        model_equivalence_sha256=str(row["model_equivalence_sha256"]),
+    )
 
 
 def _resolve_existing_published_run(
@@ -183,6 +347,8 @@ def _resolve_existing_published_run(
             mr.model_id AS run_model_id,
             mr.model_name AS run_model_name,
             mr.model_version AS run_model_version,
+            mr.model_kind,
+            mr.model_equivalence_sha256,
             mr.dag_id,
             mr.airflow_run_id,
             mr.manifest_id,
@@ -418,6 +584,8 @@ def _resolve_existing_published_run(
             else str(row["publication_receipt_sha256"])
         ),
         was_existing=True,
+        model_kind=str(row.get("model_kind") or "RAW"),
+        model_equivalence_sha256=row.get("model_equivalence_sha256"),
     )
 
 
@@ -458,6 +626,8 @@ def _retry_evidence_conflicts(
         "run_model_id": export.model_id,
         "run_model_name": export.model_name,
         "run_model_version": export.model_version,
+        "model_kind": export.model_kind,
+        "model_equivalence_sha256": export.model_equivalence_sha256,
         "dag_id": "notebook",
         "airflow_run_id": export.export_id,
         "mlflow_run_id": export.mlflow_run_id,
@@ -477,6 +647,8 @@ def _retry_evidence_conflicts(
     conflicts: list[str] = []
     for field_name, expected_value in expected_scalars.items():
         actual_value = row.get(field_name)
+        if field_name == "model_kind" and actual_value is None:
+            actual_value = "RAW"
         if field_name in path_fields:
             expected_identity = (
                 None

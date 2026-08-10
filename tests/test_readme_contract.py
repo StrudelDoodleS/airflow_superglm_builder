@@ -11,7 +11,11 @@ def test_readme_documents_the_notebook_first_contract():
     for expected in (
         "notebook-first workflow",
         "scripts/scaffold_pricing_model.py",
-        "pricing_model.ipynb",
+        "01_data_ingestion.ipynb",
+        "02_model_training.ipynb",
+        "03_model_editor.ipynb",
+        "04_model_deployment.ipynb",
+        "99_scratch_work.ipynb",
         "PricingModelSpec",
         "register_model",
         "build_candidate",
@@ -55,16 +59,35 @@ def test_readme_documents_automatic_audit_evidence_and_lineage():
     readme = _readme()
 
     for expected in (
-        "data-as-of date",
-        "primary-key columns",
-        "validation method",
+        "data-as-at",
+        "primary keys",
+        "validation configuration",
         "model source checksum",
         "candidate bundle",
-        "model-run and fold metrics",
-        "edited package parent",
+        "model-run, fold, and scoped metrics",
+        "editor parent lineage",
         "champion snapshot",
         "SQL database is the audit source of truth",
         "current notebook workflow does not create or log MLflow",
+    ):
+        assert expected in readme
+
+
+def test_readme_documents_data_version_and_python_side_duplicate_preflight():
+    readme = _readme()
+
+    for expected in (
+        "Data-as-at is a dataset version",
+        "manifest_signature_sha256",
+        "model_equivalence_sha256",
+        "10 decimal places",
+        "read-only lookup",
+        "does not write\n`pricing_stg.STG_RATING_EXPORT`",
+        "deduplicated=True",
+        "RAW`, `ROUTINE_EDIT`, and `EDITOR_EDIT",
+        "before SQL staging",
+        "V_MODEL_CANDIDATE_RELATIVITY",
+        "V_CURRENT_DEPLOYED_RELATIVITY",
     ):
         assert expected in readme
 
@@ -82,6 +105,12 @@ def test_readme_documents_inspection_editor_and_audit_view_flow():
         "V_FINAL_MODEL_RELATIVITY",
         "do not inherit validation metrics",
         "continuous spline SQL export",
+        "export_level_groupings",
+        "load_level_groupings",
+        "actual\n`dict[str, LevelGrouping]` Python objects",
+        "Grouping is Python model behaviour",
+        "compact run keys",
+        "Windows Explorer",
     ):
         assert expected in readme
 
@@ -103,4 +132,4 @@ def test_readme_documents_explicit_independent_offset_and_weight_inputs():
 
 
 def test_readme_is_concise_enough_to_be_an_entry_point():
-    assert len(_readme().splitlines()) < 300
+    assert len(_readme().splitlines()) < 350
