@@ -31,7 +31,7 @@ from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
 )
 
-EXTRACTOR_VERSION = "3"
+EXTRACTOR_VERSION = "4"
 
 _SUPERGLM_VERSION = package_version("superglm")
 _SPLINE_KIND_BY_CLASS = {
@@ -143,8 +143,14 @@ def _categorical_metadata(name: str, spec: Categorical) -> dict[str, Any]:
             "declared": {
                 "base": spec.base,
                 "grouping": _grouping_metadata(spec._grouping),
+                "levels": spec._declared_levels,
+                "unseen": spec.unseen,
             },
-            "effective": {},
+            "effective": {
+                "level_source": spec._level_source,
+                "pinned_levels": spec._pinned_levels,
+                "base_fallback": spec._base_fallback,
+            },
             "fitted": {
                 "levels": spec._levels,
                 "base_level": spec._base_level,
@@ -207,42 +213,38 @@ def _spline_metadata(name: str, spec: _SplineBase) -> dict[str, Any]:
 def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[str, Any]:
     spline = spec._spline
     configured_spline = spec._spline_obj
-    if configured_spline is not None and not isinstance(configured_spline, _SplineBase):
-        raise ValueError(f"SuperGLM ordered categorical {name!r} has malformed spline metadata")
-    if spec.basis == "spline" and not isinstance(spline, _SplineBase):
-        raise ValueError(f"SuperGLM ordered categorical {name!r} has no fitted spline")
-    if spec.basis == "step" and spline is not None:
-        raise ValueError(f"SuperGLM ordered categorical {name!r} has malformed step metadata")
-    if spec._R_inv is not None and (
-        not isinstance(spec._R_inv, np.ndarray) or spec._R_inv.ndim != 2
-    ):
-        raise ValueError(f"SuperGLM term {name!r} has malformed fitted coefficients")
-    coefficient_width = None if spec._R_inv is None else int(spec._R_inv.shape[1])
-    declared_kind = _spline_kind(configured_spline) if configured_spline is not None else spec.kind
-    declared_n_knots = configured_spline.n_knots if configured_spline is not None else spec.n_knots
-    declared_degree = configured_spline.degree if configured_spline is not None else spec.degree
-    declared_penalty = configured_spline.penalty if configured_spline is not None else spec.penalty
-    declared_select = configured_spline.select if configured_spline is not None else spec.select
+    if not isinstance(configured_spline, _SplineBase):
+        raise TypeError(
+            f"SuperGLM ordered categorical {name!r} uses unsupported publication "
+            f"basis {type(configured_spline).__name__}"
+        )
+    if not isinstance(spline, _SplineBase):
+        raise TypeError(f"SuperGLM ordered categorical {name!r} has no fitted spline")
+    spline_metadata = _spline_metadata(name, spline)
+    spline_width = spline_metadata["fitted"]["coefficient_width"]
+    if spline_width is None:
+        raise ValueError(f"SuperGLM ordered categorical {name!r} has no fitted coefficients")
+    special_width = int(spec._n_special_cols)
 
     metadata = _base_feature_metadata(name, spec, "ordered_categorical")
     metadata.update(
         {
             "declared": {
-                "basis": spec.basis,
-                "kind": declared_kind,
+                "basis": spec.basis_kind,
+                "kind": _spline_kind(configured_spline),
                 "base": spec.base,
                 "ordered_levels": spec._ordered_levels,
                 "level_values": spec._original_level_to_value or spec._level_to_value,
-                "n_knots_requested": declared_n_knots,
-                "degree": declared_degree,
-                "penalty": declared_penalty,
-                "select": declared_select,
+                "n_knots_requested": configured_spline.n_knots,
+                "degree": configured_spline.degree,
+                "penalty": configured_spline.penalty,
+                "select": configured_spline.select,
                 "grouping": _grouping_metadata(spec._grouping),
             },
             "effective": {
-                "basis": spec.basis,
-                "kind": _spline_kind(spline) if spline is not None else "step",
-                "n_knots_effective": spline.n_knots if spline is not None else None,
+                "basis": spec.basis_kind,
+                "kind": _spline_kind(spline),
+                "n_knots_effective": spline.n_knots,
                 "n_levels": spec._n_levels,
                 "ordered_levels": spec._ordered_levels,
                 "level_values": spec._level_to_value,
@@ -253,12 +255,13 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
                 "levels": spec._ordered_levels,
                 "base_level": spec._base_level,
                 "non_base_levels": spec._non_base,
-                "coefficient_width": coefficient_width,
+                "coefficient_width": spline_width + special_width,
+                "spline_coefficient_width": spline_width,
+                "special_coefficient_width": special_width,
             },
+            "spline": spline_metadata,
         }
     )
-    if spline is not None:
-        metadata["spline"] = _spline_metadata(name, spline)
     return metadata
 
 

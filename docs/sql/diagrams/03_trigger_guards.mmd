@@ -1,0 +1,34 @@
+---
+config:
+  layout: elk
+  flowchart:
+    curve: linear
+---
+flowchart TB
+    subgraph PACKAGE["1  PACKAGE CONTENT WRITE"]
+        direction LR
+        P0["Write package content"] --> P1{"Package editable?"}
+        P1 -->|"Yes: DRAFT and never deployed"| P2["ALLOW<br/>Assemble package"]
+        P1 -->|"No: PUBLISHED or deployed"| P3["BLOCK<br/>THROW 51000<br/>Create a new revision"]
+    end
+
+    subgraph DEPLOYMENT["2  DEPLOYMENT WRITE"]
+        direction LR
+        D0["Insert or update deployment"] --> D1{"PUBLISHED package<br/>and model matches?"}
+        D1 -->|No| D3["BLOCK<br/>THROW 51001"]
+        D1 -->|Yes| D2{"Open row exists<br/>for model + slot?"}
+        D2 -->|Yes| D4["BLOCK<br/>Unique index"]
+        D2 -->|No| D5["ALLOW<br/>Write history row"]
+    end
+
+    PACKAGE ~~~ DEPLOYMENT
+
+    classDef input fill:#e8f1fb,stroke:#356a9a,stroke-width:2px,color:#12263a
+    classDef check fill:#fff4cc,stroke:#9a6b00,stroke-width:2px,color:#332300
+    classDef allow fill:#e3f4e8,stroke:#27733f,stroke-width:2px,color:#12351d
+    classDef block fill:#fbe5e5,stroke:#a33a3a,stroke-width:2px,color:#451818
+
+    class P0,D0 input
+    class P1,D1,D2 check
+    class P2,D5 allow
+    class P3,D3,D4 block

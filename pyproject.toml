@@ -14,7 +14,7 @@ dependencies = [
   "python-dotenv",
   "scikit-learn",
   "sqlalchemy",
-  "superglm>=0.13",
+  "superglm>=0.26",
 ]
 
 [project.optional-dependencies]

@@ -191,10 +191,20 @@ def test_mtpl_deployment_reports_no_published_candidates_cleanly():
 
 
 def test_mtpl_scratch_is_explicitly_outside_governed_handoff():
+    cells = _code_cells("99_scratch_work.ipynb")
     source = _source("99_scratch_work.ipynb")
 
     assert "scratch" in source.lower()
     assert "load_fremtpl_raw(" in source
+    assert "scratch_raw = pd.read_sql_query(" in source
+    assert "scratch_frame = scratch_raw.copy()" in source
+    assert "SCRATCH_FEATURES = {" in source
+    assert "scratch_model = SuperGLM(" in source
+    assert ").fit(scratch_X, scratch_y, offset=scratch_offset)" in source
+    assert "scratch_model.predict(" in source
+    assert "Blank ingestion area" in source
+    assert "Blank feature area" in source
+    assert "Blank modelling area" in source
     assert "save_model_frame(" not in source
     assert "load_model_frame(" not in source
     assert "build_candidate(" not in source
@@ -206,6 +216,16 @@ def test_mtpl_scratch_is_explicitly_outside_governed_handoff():
     assert "open_candidate(" in source
     assert "export_level_groupings(" in source
     assert 'GROUPING_ARTIFACT_PATH = MODEL_DIR / ".local"' in source
+
+    source_index = next(i for i, cell in enumerate(cells) if "scratch_raw =" in cell)
+    transform_index = next(i for i, cell in enumerate(cells) if "scratch_frame =" in cell)
+    features_index = next(i for i, cell in enumerate(cells) if "SCRATCH_FEATURES =" in cell)
+    fit_index = next(i for i, cell in enumerate(cells) if "scratch_model = SuperGLM(" in cell)
+    inspect_index = next(i for i, cell in enumerate(cells) if "scratch_model.predict(" in cell)
+    grouping_index = next(i for i, cell in enumerate(cells) if "load_registered_model(" in cell)
+    assert (
+        source_index < transform_index < features_index < fit_index < inspect_index < grouping_index
+    )
 
 
 def test_mtpl_notebook_import_setup_runs_from_model_directory():

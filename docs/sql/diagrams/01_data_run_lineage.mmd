@@ -1,0 +1,15 @@
+---
+config:
+  layout: elk
+---
+erDiagram
+    DATASET_MANIFEST ||--o{ DATASET_COLUMN : describes
+    DATASET_MANIFEST ||--o{ CV_SPLIT_SET : versions
+    CV_SPLIT_SET ||--o{ CV_FOLD : contains
+    CV_FOLD ||--o{ CV_FOLD_METRIC : measures
+    PRICING_MODEL ||--o{ MODEL_RUN : owns
+    MODEL_RUN ||--o{ MODEL_RUN_DATASET : dataset_link
+    DATASET_MANIFEST ||--o{ MODEL_RUN_DATASET : referenced_by
+    MODEL_RUN ||--o{ MODEL_RUN_SPLIT_SET : split_link
+    CV_SPLIT_SET ||--o{ MODEL_RUN_SPLIT_SET : referenced_by
+    MODEL_RUN ||--o{ MODEL_RUN_METRIC : records
