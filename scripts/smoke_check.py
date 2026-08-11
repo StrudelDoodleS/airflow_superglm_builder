@@ -11,8 +11,7 @@ def check_superglm_rating_export(superglm_cls=SuperGLM) -> int:
     print("smoke_check=rating_export_unavailable")
     print(
         "SuperGLM.export_rating_tables is unavailable in this environment. "
-        "Install SuperGLM from GitHub with PR #109 rating table export support "
-        "before running rating export tasks."
+        "Install SuperGLM >=0.26 from PyPI before running rating export tasks."
     )
     return 0
 

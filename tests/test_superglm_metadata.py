@@ -62,8 +62,7 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
                 "cat": Categorical(base="most_exposed"),
                 "ord": OrderedCategorical(
                     order=["low", "medium", "high"],
-                    basis="spline",
-                    n_knots=5,
+                    basis=Spline(kind="ps", n_knots=5),
                 ),
                 "age": Spline(
                     kind="ps",
@@ -101,6 +100,8 @@ def test_extracts_categorical_ordered_spline_polynomial_and_numeric_metadata():
     assert ordered["declared"]["n_knots_requested"] == 5
     assert ordered["effective"]["n_knots_effective"] == 2
     assert ordered["spline"]["fitted"]["class_name"] == "PSpline"
+    assert ordered["fitted"]["coefficient_width"] > 0
+    assert ordered["fitted"]["special_coefficient_width"] == 0
 
     spline = receipt.term_metadata["age"]
     assert spline["feature_kind"] == "spline"
@@ -266,16 +267,8 @@ def test_spline_metadata_includes_knot_alpha_only_when_strategy_uses_it():
     assert spline["declared"]["knot_alpha"] == 0.7
 
 
-def test_ordered_categorical_step_has_no_nested_spline():
-    model = _fit_model(
-        {
-            "ord": OrderedCategorical(
-                order=["low", "medium", "high"],
-                basis="step",
-                base="first",
-            )
-        }
-    )
+def test_unsmoothed_levels_use_categorical_without_nested_spline():
+    model = _fit_model({"ord": Categorical(base="first")})
 
     receipt = build_superglm_publication_receipt(
         model,
@@ -283,9 +276,34 @@ def test_ordered_categorical_step_has_no_nested_spline():
     )
 
     metadata = receipt.term_metadata["ord"]
-    assert metadata["feature_kind"] == "ordered_categorical"
-    assert metadata["declared"]["basis"] == "step"
+    assert metadata["feature_kind"] == "categorical"
     assert "spline" not in metadata
+
+
+def test_categorical_bound_level_universe_is_recorded():
+    with pytest.warns(UserWarning, match="pinned to base"):
+        model = _fit_model(
+            {
+                "cat": Categorical(
+                    base="first",
+                    levels=["A", "B", "C", "D"],
+                    unseen="base",
+                )
+            }
+        )
+
+    receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=OffsetExportContract(handling="NONE"),
+    )
+
+    metadata = receipt.term_metadata["cat"]
+    assert list(metadata["declared"]["levels"]) == ["A", "B", "C", "D"]
+    assert metadata["declared"]["unseen"] == "base"
+    assert metadata["effective"]["level_source"] == "declared"
+    assert list(metadata["effective"]["pinned_levels"]) == ["D"]
+    assert metadata["effective"]["base_fallback"] is None
+    assert list(metadata["fitted"]["levels"]) == ["A", "B", "C", "D"]
 
 
 def test_ordered_categorical_records_an_explicit_spline_basis_configuration():

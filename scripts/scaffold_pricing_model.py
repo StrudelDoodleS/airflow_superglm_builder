@@ -4,14 +4,24 @@ import argparse
 import json
 import keyword
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
 
-
 _PYTHON_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _TEMPLATE_TOKEN = re.compile(r"__[A-Z][A-Z0-9_]*__")
+_DEFAULT_CONFIG_NAME = "pricing_scaffold.toml"
+_CONFIG_SECTION = "notebook_defaults"
+_CONFIG_KEYS = frozenset(
+    {
+        "database_mode",
+        "runtime_module",
+        "expected_remote_database",
+    }
+)
 _NOTEBOOK_NAMES = (
     "01_data_ingestion.ipynb",
     "02_model_training.ipynb",
@@ -29,6 +39,9 @@ class ScaffoldOptions:
     model_type: str = "superglm_poisson"
     deployment_slot: str | None = None
     package_name: str | None = None
+    database_mode: str = "local"
+    runtime_module: str | None = None
+    expected_remote_database: str = ""
     root: Path = Path(".")
     force: bool = False
 
@@ -37,6 +50,13 @@ class ScaffoldOptions:
 class ScaffoldResult:
     package_name: str
     created_files: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class ScaffoldConfig:
+    database_mode: str = "local"
+    runtime_module: str | None = None
+    expected_remote_database: str = ""
 
 
 def _required(value: str | None, name: str) -> str:
@@ -60,6 +80,68 @@ def _package_name(value: str) -> str:
     if not _PYTHON_IDENTIFIER.fullmatch(cleaned) or keyword.iskeyword(cleaned):
         raise ValueError("package_name must be a valid Python identifier")
     return cleaned
+
+
+def _database_mode(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("database_mode must be 'local' or 'remote'")
+    cleaned = value.strip().lower()
+    if cleaned not in {"local", "remote"}:
+        raise ValueError("database_mode must be 'local' or 'remote'")
+    return cleaned
+
+
+def _runtime_module(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("runtime_module must be a dotted Python module name or an empty string")
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if not _DOTTED_MODULE.fullmatch(cleaned):
+        raise ValueError("runtime_module must be a dotted Python module name")
+    return cleaned
+
+
+def _expected_remote_database(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("expected_remote_database must be a string")
+    return value.strip()
+
+
+def load_scaffold_config(path: str | Path) -> ScaffoldConfig:
+    """Load strict, non-secret notebook connection defaults from TOML."""
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise ValueError(f"scaffold config does not exist: {config_path}")
+    try:
+        with config_path.open("rb") as handle:
+            payload = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"scaffold config could not be read: {config_path}: {exc}") from exc
+    unexpected_sections = sorted(set(payload) - {_CONFIG_SECTION})
+    if unexpected_sections:
+        raise ValueError(
+            "scaffold config has unsupported top-level sections: " + ", ".join(unexpected_sections)
+        )
+    raw = payload.get(_CONFIG_SECTION, {})
+    if not isinstance(raw, dict):
+        raise TypeError(f"[{_CONFIG_SECTION}] must be a TOML table")
+    unexpected_keys = sorted(set(raw) - _CONFIG_KEYS)
+    if unexpected_keys:
+        raise ValueError(f"[{_CONFIG_SECTION}] has unsupported keys: " + ", ".join(unexpected_keys))
+    return ScaffoldConfig(
+        database_mode=_database_mode(raw.get("database_mode", "local")),
+        runtime_module=_runtime_module(raw.get("runtime_module")),
+        expected_remote_database=_expected_remote_database(raw.get("expected_remote_database", "")),
+    )
+
+
+def _python_literal(value: object) -> str:
+    if value is None:
+        return "None"
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _render_template(value: object, replacements: dict[str, str]) -> object:
@@ -138,13 +220,18 @@ def _project_setup_source(*, imports: str) -> str:
     return f"{setup}\n\n{dedent(imports).strip()}\n\n{paths}\n"
 
 
-def _template_notebooks() -> dict[str, dict[str, object]]:
+def _template_notebooks(
+    *,
+    database_mode: str,
+    runtime_module: str | None,
+    expected_remote_database: str,
+) -> dict[str, dict[str, object]]:
     connection_settings = (
         dedent(
-            """
-            DATABASE_MODE = "local"  # "local" or "remote"
-            RUNTIME_MODULE = None  # e.g. "work_runtime.database"; never put secrets here
-            EXPECTED_REMOTE_DATABASE = ""
+            f"""
+            DATABASE_MODE = {_python_literal(database_mode)}  # "local" or "remote"
+            RUNTIME_MODULE = {_python_literal(runtime_module)}  # e.g. "work_runtime.database"; never put secrets here
+            EXPECTED_REMOTE_DATABASE = {_python_literal(expected_remote_database)}
             ALLOW_REMOTE_WRITES = False
             """
         ).strip()
@@ -660,8 +747,12 @@ DEPLOYMENT_REASON = ""
                 # __MODEL_LABEL_MARKDOWN__: scratch work
 
                 Use this notebook for source exploration and disposable feature ideas.
-                It deliberately sorts last and never updates the governed model-frame
-                artifact; move accepted transforms into `01_data_ingestion.ipynb`.
+                The first section is a complete but disposable data-to-model sandbox:
+                load or assemble data, transform it, fit ordinary SuperGLM objects, and
+                inspect predictions. It deliberately sorts last and never updates the
+                governed model-frame artifact. Move accepted data work into
+                `01_data_ingestion.ipynb` and accepted model choices into
+                `02_model_training.ipynb`.
 
                 It also provides the temporary grouping workflow: open a published RAW
                 candidate in SuperGLM's editor, collapse categorical levels, then export
@@ -674,6 +765,8 @@ DEPLOYMENT_REASON = ""
 MODEL_NAME = "__MODEL_NAME__"
 MODEL_LABEL = "__MODEL_LABEL__"
 DEPLOYMENT_SLOT = "__DEPLOYMENT_SLOT__"
+SCRATCH_SAMPLE_ROWS = 5_000  # Set to None to use every row.
+SCRATCH_RANDOM_SEED = 42
 GROUPING_SOURCE_PACKAGE_VERSION = None  # None selects the latest published RAW package.
 REPLACE_GROUPING_ARTIFACT = False
 """
@@ -683,6 +776,7 @@ REPLACE_GROUPING_ARTIFACT = False
                     imports="""
                     import numpy as np  # noqa: E402
                     import pandas as pd  # noqa: E402
+                    from superglm import Categorical, Numeric, Spline, SuperGLM  # noqa: E402
                     from superglm.editor import EditorSession  # noqa: E402
 
                     from pricing_pipeline.notebook import (  # noqa: E402
@@ -696,23 +790,127 @@ REPLACE_GROUPING_ARTIFACT = False
                 )
             ),
             _code(connect_source),
-            _markdown("## Read or sample source data for exploration"),
-            _code(
+            _markdown(
                 """
-                rng = np.random.default_rng(42)
-                scratch = pd.DataFrame({
-                    "__PRIMARY_KEY__": np.arange(1, 101),
-                    "__FEATURE_NAME__": rng.normal(size=100),
-                    "segment": rng.choice(["A", "B", "C"], size=100),
-                })
-                display(scratch.head())
+                ## Sandbox 1: load or assemble disposable data
+
+                Replace this demo with any SQL query, file read, join, filter, or sample
+                you want to investigate. Nothing in this section is saved as the
+                governed model-frame handoff.
                 """
             ),
-            _markdown("## Disposable feature experiments"),
             _code(
                 """
-                scratch["candidate_transform"] = np.square(scratch["__FEATURE_NAME__"])
-                scratch.groupby("segment")["candidate_transform"].describe()
+                rng = np.random.default_rng(SCRATCH_RANDOM_SEED)
+                scratch_raw = pd.DataFrame({
+                    "__PRIMARY_KEY__": np.arange(1, 501),
+                    "__FEATURE_NAME__": rng.normal(size=500),
+                    "segment": rng.choice(["A", "B", "C"], size=500),
+                })
+                scratch_raw["__TARGET_NAME__"] = rng.poisson(
+                    np.exp(
+                        -0.5
+                        + 0.25 * scratch_raw["__FEATURE_NAME__"]
+                        + scratch_raw["segment"].map({"A": 0.0, "B": 0.2, "C": -0.1})
+                    )
+                )
+                if SCRATCH_SAMPLE_ROWS is not None and len(scratch_raw) > SCRATCH_SAMPLE_ROWS:
+                    scratch_raw = scratch_raw.sample(
+                        n=SCRATCH_SAMPLE_ROWS,
+                        random_state=SCRATCH_RANDOM_SEED,
+                    )
+                scratch_raw = scratch_raw.sort_values("__PRIMARY_KEY__").reset_index(drop=True)
+                display({"Rows": len(scratch_raw), "Columns": len(scratch_raw.columns)})
+                display(scratch_raw.head())
+                """
+            ),
+            _code(
+                """
+                # Blank ingestion area: replace or extend scratch_raw however you like.
+                # scratch_raw = pd.read_csv("...")
+                # scratch_raw = pd.read_sql_query("SELECT ...", pricing.engine)
+                """
+            ),
+            _markdown(
+                """
+                ## Sandbox 2: clean and engineer disposable features
+
+                Work on `scratch_frame` so the originally loaded sample remains easy to
+                recover. Copy only accepted transforms into notebook 01.
+                """
+            ),
+            _code(
+                """
+                scratch_frame = scratch_raw.copy()
+                scratch_frame["candidate_transform"] = np.square(
+                    scratch_frame["__FEATURE_NAME__"]
+                )
+                display(scratch_frame.groupby("segment")["candidate_transform"].describe())
+                display(scratch_frame.head())
+                """
+            ),
+            _code(
+                """
+                # Blank feature area: add plots, joins, filters, or alternative columns.
+                # scratch_frame["another_candidate"] = ...
+                """
+            ),
+            _markdown(
+                """
+                ## Sandbox 3: define and fit a disposable model
+
+                Use normal SuperGLM feature objects here. This fits only in memory: it
+                does not register a model, create a manifest, build a candidate, or
+                publish anything. Copy accepted choices into notebook 02.
+                """
+            ),
+            _code(
+                """
+                SCRATCH_TARGET = "__TARGET_NAME__"
+                SCRATCH_FEATURES = {
+                    "__FEATURE_NAME__": Numeric(),
+                    "segment": Categorical(),
+                    "candidate_transform": Numeric(),
+                }
+                scratch_X = scratch_frame.loc[:, list(SCRATCH_FEATURES)]
+                scratch_y = scratch_frame[SCRATCH_TARGET].astype(float)
+
+                scratch_model = SuperGLM(
+                    family="poisson",
+                    selection_penalty=0.0,
+                    features=SCRATCH_FEATURES,
+                ).fit(scratch_X, scratch_y)
+                """
+            ),
+            _markdown("## Sandbox 4: inspect, compare, and iterate"),
+            _code(
+                """
+                scratch_predictions = scratch_model.predict(scratch_X)
+                scratch_results = pd.DataFrame({
+                    "actual": scratch_y,
+                    "prediction": scratch_predictions,
+                })
+                display({
+                    "Rows fitted": len(scratch_results),
+                    "Actual mean": float(scratch_results["actual"].mean()),
+                    "Predicted mean": float(scratch_results["prediction"].mean()),
+                    "Mean absolute error": float(
+                        np.mean(
+                            np.abs(
+                                scratch_results["actual"]
+                                - scratch_results["prediction"]
+                            )
+                        )
+                    ),
+                })
+                display(scratch_results.head())
+                """
+            ),
+            _code(
+                """
+                # Blank modelling area: try another feature map, family, penalty, or split.
+                # alternative_features = {...}
+                # alternative_model = SuperGLM(...).fit(...)
                 """
             ),
             _markdown(
@@ -812,6 +1010,9 @@ def _notebooks(
     target_name: str,
     model_type: str,
     deployment_slot: str,
+    database_mode: str,
+    runtime_module: str | None,
+    expected_remote_database: str,
 ) -> dict[str, str]:
     feature = "feature_1" if target_name != "feature_1" else "feature_2"
     primary_key = "row_id" if target_name != "row_id" else "record_id"
@@ -829,7 +1030,11 @@ def _notebooks(
     replacements = {token: json.dumps(value)[1:-1] for token, value in python_values.items()}
     replacements["__MODEL_LABEL_MARKDOWN__"] = model_label
     rendered = {}
-    for filename, template in _template_notebooks().items():
+    for filename, template in _template_notebooks(
+        database_mode=database_mode,
+        runtime_module=runtime_module,
+        expected_remote_database=expected_remote_database,
+    ).items():
         rendered[filename] = (
             json.dumps(
                 _render_template(template, replacements),
@@ -855,6 +1060,11 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         options.deployment_slot or f"{model_name}_UAT",
         "deployment_slot",
     )
+    database_mode = _database_mode(options.database_mode)
+    runtime_module = _runtime_module(options.runtime_module)
+    expected_remote_database = _expected_remote_database(options.expected_remote_database)
+    if database_mode == "remote" and not expected_remote_database:
+        raise ValueError("expected_remote_database is required when database_mode='remote'")
 
     package_dir = options.root / "pricing_models" / package_name
     notebooks = _notebooks(
@@ -864,6 +1074,9 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         target_name=target_name,
         model_type=model_type,
         deployment_slot=deployment_slot,
+        database_mode=database_mode,
+        runtime_module=runtime_module,
+        expected_remote_database=expected_remote_database,
     )
     content = {
         package_dir / "__init__.py": f'"""Pricing notebook package for {model_name}."""\n',
@@ -888,8 +1101,53 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
     parser.add_argument("--deployment-slot")
     parser.add_argument("--package-name")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "TOML defaults file; when omitted, <root>/pricing_scaffold.toml is loaded if present"
+        ),
+    )
+    parser.add_argument(
+        "--database-mode",
+        choices=("local", "remote"),
+        help="override notebook_defaults.database_mode",
+    )
+    parser.add_argument(
+        "--runtime-module",
+        help="override notebook_defaults.runtime_module",
+    )
+    parser.add_argument(
+        "--expected-remote-database",
+        help="override notebook_defaults.expected_remote_database",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
+    auto_config = args.root / _DEFAULT_CONFIG_NAME
+    config_path = args.config if args.config is not None else auto_config
+    if args.config is not None or config_path.is_file():
+        try:
+            config = load_scaffold_config(config_path)
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+    else:
+        config = ScaffoldConfig()
+    try:
+        database_mode = _database_mode(
+            args.database_mode if args.database_mode is not None else config.database_mode
+        )
+        runtime_module = _runtime_module(
+            args.runtime_module if args.runtime_module is not None else config.runtime_module
+        )
+        expected_remote_database = _expected_remote_database(
+            args.expected_remote_database
+            if args.expected_remote_database is not None
+            else config.expected_remote_database
+        )
+        if database_mode == "remote" and not expected_remote_database:
+            raise ValueError("expected_remote_database is required when database_mode='remote'")
+    except (TypeError, ValueError) as exc:
+        parser.error(str(exc))
     return ScaffoldOptions(
         model_name=args.model_name,
         target_name=args.target_name,
@@ -897,6 +1155,9 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
         model_type=args.model_type,
         deployment_slot=args.deployment_slot,
         package_name=args.package_name,
+        database_mode=database_mode,
+        runtime_module=runtime_module,
+        expected_remote_database=expected_remote_database,
         root=args.root,
         force=args.force,
     )

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from superglm import Categorical, SuperGLM
 
 from pricing_pipeline.data.manifest import ModelFrameManifestSpec
 from pricing_pipeline.models.config import ModelBuildConfig, ValidationSplitConfig
@@ -217,6 +218,37 @@ def test_run_cross_validation_passes_strict_superglm_options():
     assert captured["fit_mode"] == "fit_reml"
     assert evidence.metrics["cv_pooled_deviance"] == pytest.approx(0.42)
     assert evidence.fold_indices[0][1].tolist() == [2]
+
+
+def test_real_cross_validation_binds_rare_categorical_levels_across_folds():
+    api = _api()
+    row_count = 40
+    inputs = api.ModelInputs(
+        X=pd.DataFrame({"segment": ["RARE"] + ["A", "B"] * 19 + ["A"]}),
+        y=np.array([3.0] + [1.0, 2.0] * 19 + [1.0]),
+    )
+    folds = [
+        (np.arange(20, row_count), np.arange(0, 20)),
+        (np.arange(0, 20), np.arange(20, row_count)),
+    ]
+    model = SuperGLM(
+        family="poisson",
+        features={"segment": Categorical(base="first")},
+        selection_penalty=0.0,
+    )
+
+    with pytest.warns(UserWarning, match="RARE.*pinned to base|pinned to base.*RARE"):
+        evidence = api.run_cross_validation(
+            model,
+            inputs,
+            split_indices=folds,
+            fit_mode="fit",
+            scoring=("deviance",),
+        )
+
+    assert evidence.metrics["cv_oof_coverage"] == 1.0
+    assert np.isfinite(evidence.metrics["cv_pooled_deviance"])
+    assert all(value is not None for value in evidence.report["oof_predictions"])
 
 
 @pytest.mark.parametrize(

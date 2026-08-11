@@ -7,12 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.scaffold_pricing_model import (
     _NOTEBOOK_NAMES,
     ScaffoldOptions,
+    load_scaffold_config,
+    parse_args,
     scaffold_pricing_model,
 )
-
 
 NOTEBOOK_NAME = re.compile(r"^\d{2}_[a-z0-9]+(?:_[a-z0-9]+)*\.ipynb$")
 EXPECTED_NOTEBOOKS = (
@@ -124,11 +127,60 @@ def test_scaffold_separates_ingestion_training_editor_deployment_and_scratch(tmp
     assert "build_candidate(" not in scratch
     assert "publish_candidate(" not in scratch
     assert "deploy_package(" not in scratch
+    assert "scratch_raw = pd.DataFrame(" in scratch
+    assert "scratch_frame = scratch_raw.copy()" in scratch
+    assert "SCRATCH_FEATURES = {" in scratch
+    assert "scratch_model = SuperGLM(" in scratch
+    assert ").fit(scratch_X, scratch_y)" in scratch
+    assert "scratch_model.predict(" in scratch
+    assert "Blank ingestion area" in scratch
+    assert "Blank feature area" in scratch
+    assert "Blank modelling area" in scratch
     assert "EditorSession.from_model(" in scratch
     assert "list_candidate_versions(" in scratch
     assert 'versions["Kind"].eq("RAW")' in scratch
     assert "open_candidate(" in scratch
     assert "export_level_groupings(" in scratch
+
+
+def test_scaffold_scratch_sandbox_fits_and_predicts_in_memory(tmp_path):
+    import numpy as np
+    import pandas as pd
+    from superglm import Categorical, Numeric, Spline, SuperGLM
+
+    package_dir = _scaffold(tmp_path)
+    notebook = _notebook(package_dir / "99_scratch_work.ipynb")
+    cells = [
+        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    ]
+    namespace = {
+        "np": np,
+        "pd": pd,
+        "Categorical": Categorical,
+        "Numeric": Numeric,
+        "Spline": Spline,
+        "SuperGLM": SuperGLM,
+        "SCRATCH_SAMPLE_ROWS": 5_000,
+        "SCRATCH_RANDOM_SEED": 42,
+        "display": lambda *_args, **_kwargs: None,
+    }
+    markers = (
+        "scratch_raw = pd.DataFrame(",
+        "scratch_frame = scratch_raw.copy()",
+        "SCRATCH_TARGET =",
+        "scratch_model = SuperGLM(",
+        "scratch_predictions = scratch_model.predict(",
+    )
+    for marker in markers:
+        source = next(cell for cell in cells if marker in cell)
+        exec(  # noqa: S102 - execute the generated notebook cells as their contract test
+            compile(source, f"99_scratch_work.ipynb:{marker}", "exec"),
+            namespace,
+        )
+
+    predictions = np.asarray(namespace["scratch_predictions"])
+    assert len(predictions) == 500
+    assert np.isfinite(predictions).all()
 
 
 def test_scaffold_keeps_editor_preview_and_publish_as_separate_cells(tmp_path):
@@ -241,6 +293,103 @@ def test_scaffold_accepts_explicit_model_identity(tmp_path):
     assert 'DEPLOYMENT_SLOT = "WORK_FREQ_PROD"' in source
 
 
+def test_scaffold_renders_safe_connection_defaults_into_every_notebook(tmp_path):
+    package_dir = _scaffold(
+        tmp_path,
+        database_mode="remote",
+        runtime_module="work_runtime.database",
+        expected_remote_database="PricingAudit",
+    )
+
+    for name in EXPECTED_NOTEBOOKS:
+        source = _code(package_dir / name)
+        assert 'DATABASE_MODE = "remote"' in source
+        assert 'RUNTIME_MODULE = "work_runtime.database"' in source
+        assert 'EXPECTED_REMOTE_DATABASE = "PricingAudit"' in source
+        assert "ALLOW_REMOTE_WRITES = False" in source
+
+
+def test_scaffold_cli_auto_discovers_toml_and_cli_values_win(tmp_path):
+    config_path = tmp_path / "pricing_scaffold.toml"
+    config_path.write_text(
+        """
+[notebook_defaults]
+database_mode = "remote"
+runtime_module = "work_runtime.database"
+expected_remote_database = "PricingAudit"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    common = [
+        "--model-name",
+        "MY_MODEL",
+        "--target-name",
+        "target",
+        "--root",
+        str(tmp_path),
+    ]
+
+    discovered = parse_args(common)
+    explicit = parse_args(
+        [
+            "--model-name",
+            "MY_MODEL",
+            "--target-name",
+            "target",
+            "--root",
+            str(tmp_path / "another-root"),
+            "--config",
+            str(config_path),
+        ]
+    )
+    overridden = parse_args(
+        [
+            *common,
+            "--database-mode",
+            "local",
+            "--runtime-module",
+            "another_runtime.database",
+            "--expected-remote-database",
+            "AnotherAudit",
+        ]
+    )
+
+    assert discovered.database_mode == "remote"
+    assert discovered.runtime_module == "work_runtime.database"
+    assert discovered.expected_remote_database == "PricingAudit"
+    assert explicit.database_mode == "remote"
+    assert explicit.runtime_module == "work_runtime.database"
+    assert explicit.expected_remote_database == "PricingAudit"
+    assert overridden.database_mode == "local"
+    assert overridden.runtime_module == "another_runtime.database"
+    assert overridden.expected_remote_database == "AnotherAudit"
+
+
+def test_scaffold_config_is_strict_and_example_is_valid(tmp_path):
+    example = load_scaffold_config("pricing_scaffold.example.toml")
+    assert example.database_mode == "remote"
+    assert example.runtime_module == "work_runtime.database"
+    assert example.expected_remote_database == "PricingAudit"
+
+    invalid = tmp_path / "invalid.toml"
+    invalid.write_text(
+        """
+[notebook_defaults]
+allow_remote_writes = true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unsupported keys: allow_remote_writes"):
+        load_scaffold_config(invalid)
+
+
+def test_scaffold_remote_default_requires_expected_database(tmp_path):
+    with pytest.raises(ValueError, match="expected_remote_database is required"):
+        _scaffold(tmp_path, database_mode="remote")
+
+
 def test_scaffold_script_help_has_no_legacy_factory_options():
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
@@ -255,6 +404,10 @@ def test_scaffold_script_help_has_no_legacy_factory_options():
     assert result.returncode == 0
     assert "--model-name" in result.stdout
     assert "--target-name" in result.stdout
+    assert "--config" in result.stdout
+    assert "--database-mode" in result.stdout
+    assert "--runtime-module" in result.stdout
+    assert "--expected-remote-database" in result.stdout
     assert "--template" not in result.stdout
     assert "--dag-id" not in result.stdout
     assert "--experiment-name" not in result.stdout

@@ -7,7 +7,6 @@ import yaml
 
 from pricing_pipeline.infra.config import Settings
 
-
 MSSQL_PASSWORD_DEFAULT = "${MSSQL_PASSWORD:-YourStrong(!)Password123}"
 STATE_PATHS = [
     "/sources/state/mssql/data",
@@ -254,13 +253,12 @@ def test_superglm_runtime_dependency_uses_pypi_without_git_provenance():
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
 
-    assert "superglm>=0.13" in requirements
-    assert "superglm>=0.13" in pyproject["project"]["dependencies"]
+    assert "superglm>=0.26" in requirements
+    assert "superglm>=0.26" in pyproject["project"]["dependencies"]
     assert not any(line.startswith("superglm[") for line in requirements)
 
-    superglm_package = next(
-        package for package in lock["package"] if package["name"] == "superglm"
-    )
+    superglm_package = next(package for package in lock["package"] if package["name"] == "superglm")
+    assert superglm_package["version"] == "0.26.0"
     assert superglm_package["source"] == {"registry": "https://pypi.org/simple"}
 
 

@@ -1,0 +1,11 @@
+# Copy this file to pricing_scaffold.toml at the scaffold --root.
+# These values are connection names, not credentials. Keep passwords and tokens
+# inside the private runtime module or its normal secret provider.
+
+[notebook_defaults]
+database_mode = "remote"
+runtime_module = "work_runtime.database"
+expected_remote_database = "PricingAudit"
+
+# ALLOW_REMOTE_WRITES is intentionally not configurable here. Every generated
+# notebook starts with it set to false and requires an explicit review-time edit.

@@ -105,7 +105,7 @@ class PricingModelSpec:
     dataset_name: str
     source_system: str
     pk_columns: tuple[str, ...]
-    validation: ValidationSplitConfig = ValidationSplitConfig.kfold()
+    validation: ValidationSplitConfig = field(default_factory=ValidationSplitConfig.kfold)
     offset_column: str | None = None
     offset_source_column: str | None = None
     offset_label: str | None = None
@@ -887,11 +887,15 @@ __all__ = [
     "NotebookContext",
     "PricingModelSpec",
     "RegisteredModel",
+    "apply_level_groupings",
     "build_candidate",
     "connect",
     "deploy_package",
+    "export_level_groupings",
+    "inspect_level_groupings",
     "inspect_model_frame",
     "list_candidate_versions",
+    "load_level_groupings",
     "load_model_frame",
     "load_registered_model",
     "open_candidate",

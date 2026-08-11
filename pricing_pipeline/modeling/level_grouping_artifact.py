@@ -1,10 +1,11 @@
-"""Temporary, verified handoff for editor-created SuperGLM level groupings.
+"""Verified handoff for editor-created SuperGLM level groupings.
 
-SuperGLM currently stores a fitted categorical ``LevelGrouping`` on the
-private ``feature_spec._grouping`` attribute.  This module is the one allowed
-compatibility seam for that private API.  Notebook code deals only in the
-public helpers below, so a future SuperGLM grouping-export API can replace this
-module without changing the notebook workflow.
+SuperGLM 0.26 exposes the defensive ``model.features`` mapping, but currently
+stores each fitted categorical ``LevelGrouping`` on the private
+``feature_spec._grouping`` attribute. This module is the one allowed
+compatibility seam for that final private read/write. Notebook code deals only
+in the public helpers below, so a future SuperGLM grouping-export API can
+replace this module without changing the notebook workflow.
 """
 
 from __future__ import annotations
