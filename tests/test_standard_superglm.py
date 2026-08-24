@@ -1384,7 +1384,11 @@ def test_model_source_hash_tracks_notebook_source_but_ignores_execution_output(t
     )
     scratch_only_change = hash_model_source(tmp_path)
 
-    for operational_name in ("03_model_editor.ipynb", "04_model_deployment.ipynb"):
+    for operational_name in (
+        "03_model_editor.ipynb",
+        "04_manual_adjustment.ipynb",
+        "05_model_deployment.ipynb",
+    ):
         (tmp_path / operational_name).write_text(
             json.dumps(
                 {

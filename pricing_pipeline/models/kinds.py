@@ -10,6 +10,7 @@ class ModelKind(StrEnum):
     RAW = "RAW"
     ROUTINE_EDIT = "ROUTINE_EDIT"
     EDITOR_EDIT = "EDITOR_EDIT"
+    MANUAL_EDIT = "MANUAL_EDIT"
 
 
 def normalise_model_kind(value: Any) -> str:

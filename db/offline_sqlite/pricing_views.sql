@@ -1,3 +1,6 @@
+DROP VIEW IF EXISTS pricing.V_MODEL_MONITORING_RELATIVITY;
+DROP VIEW IF EXISTS pricing.V_MODEL_MONITORING_LAMBDA;
+DROP VIEW IF EXISTS pricing.V_MODEL_MONITORING_RUN;
 DROP VIEW IF EXISTS pricing.V_CURRENT_DEPLOYED_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_PUBLISHED_MODEL_RELATIVITY;
 DROP VIEW IF EXISTS pricing.V_MODEL_CANDIDATE_RELATIVITY;
@@ -214,6 +217,95 @@ JOIN V_FINAL_MODEL_RELATIVITY AS relativity
  AND relativity.rate_package_id = deployment.rate_package_id
 WHERE deployment.effective_to_ts IS NULL
   AND relativity.package_status = 'PUBLISHED';
+
+CREATE VIEW pricing.V_MODEL_MONITORING_RUN AS
+SELECT
+    monitor_run.monitor_run_id,
+    monitor_run.variant_code,
+    variant.variant_label,
+    variant.refit_coefficients,
+    variant.reestimate_lambdas,
+    variant.reposition_data_driven_knots,
+    monitor_run.component_role,
+    monitor_run.run_status,
+    monitor_run.invariant_status,
+    monitor_run.invariant_evidence_sha256,
+    monitor_run.invariant_evidence_json,
+    monitor_run.model_frame_sha256 AS observed_model_frame_sha256,
+    monitor_run.fit_configuration_json,
+    monitor_run.result_evidence_sha256,
+    monitor_run.started_ts,
+    monitor_run.completed_ts,
+    monitor_run.created_by,
+    monitor_run.run_signature_sha256,
+    contract.fit_contract_id,
+    contract.baseline_model_run_id,
+    contract.contract_sha256,
+    contract.structure_sha256,
+    contract.superglm_version,
+    monitor_run.baseline_deployment_id,
+    deployment.deployment_slot AS baseline_deployment_slot,
+    monitor_run.model_id,
+    model.model_name,
+    model.model_label,
+    model.target_name,
+    model.model_type,
+    monitor_run.rate_package_id,
+    package.model_version AS baseline_model_version,
+    package.package_version AS baseline_package_version,
+    monitor_run.manifest_id,
+    manifest.manifest_signature_sha256,
+    manifest.dataset_name,
+    manifest.source_system,
+    manifest.data_as_of_date,
+    manifest.data_as_of_column,
+    manifest.row_count AS dataset_row_count,
+    manifest.model_frame_sha256
+FROM MODEL_MONITOR_RUN AS monitor_run
+JOIN MODEL_MONITOR_VARIANT AS variant
+  ON variant.variant_code = monitor_run.variant_code
+JOIN MODEL_FIT_CONTRACT AS contract
+  ON contract.fit_contract_id = monitor_run.fit_contract_id
+JOIN PRICING_MODEL_DEPLOYMENT AS deployment
+  ON deployment.deployment_id = monitor_run.baseline_deployment_id
+JOIN PRICING_MODEL AS model
+  ON model.model_id = monitor_run.model_id
+JOIN PRICING_RATE_PACKAGE AS package
+  ON package.rate_package_id = monitor_run.rate_package_id
+JOIN DATASET_MANIFEST AS manifest
+  ON manifest.manifest_id = monitor_run.manifest_id;
+
+CREATE VIEW pricing.V_MODEL_MONITORING_RELATIVITY AS
+SELECT
+    monitoring_run.*,
+    relativity.term_name,
+    term.sequence_no AS term_sequence_no,
+    relativity.term_kind,
+    term.term_structure_sha256,
+    term.term_metadata_json,
+    relativity.point_key,
+    relativity.point_label,
+    relativity.point_numeric,
+    relativity.relativity,
+    relativity.log_relativity,
+    relativity.is_reference
+FROM V_MODEL_MONITORING_RUN AS monitoring_run
+JOIN MODEL_MONITOR_RELATIVITY AS relativity
+  ON relativity.monitor_run_id = monitoring_run.monitor_run_id
+JOIN MODEL_MONITOR_TERM AS term
+  ON term.monitor_run_id = relativity.monitor_run_id
+ AND term.term_name = relativity.term_name;
+
+CREATE VIEW pricing.V_MODEL_MONITORING_LAMBDA AS
+SELECT
+    monitoring_run.*,
+    lambda.component_name,
+    lambda.term_name,
+    lambda.lambda_value,
+    lambda.lambda_mode
+FROM V_MODEL_MONITORING_RUN AS monitoring_run
+JOIN MODEL_MONITOR_LAMBDA AS lambda
+  ON lambda.monitor_run_id = monitoring_run.monitor_run_id;
 
 CREATE VIEW pricing.V_MODEL_VALIDATION_SPLIT AS
 SELECT

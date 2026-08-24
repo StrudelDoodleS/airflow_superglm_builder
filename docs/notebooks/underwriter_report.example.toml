@@ -1,0 +1,54 @@
+# Copy this file into ignored state/ before adding machine-specific paths.
+
+[run]
+output_path = "state/underwriter_report/model_review.html"
+title = "Pricing model review"
+problem_type = "burn_cost" # frequency | severity | burn_cost
+tweedie_power = 1.5        # frequency=1, severity=2, burn_cost strictly between 1 and 2
+top_k = 12
+double_lift_bins = 10
+curve_bins = 100
+distribution_bins = 200 # evaluation points for the weighted Gaussian KDE
+movement_bins = 10     # bins per axis for aggregate model-movement heatmaps
+relativity_points = 200
+# Surface grid points per axis; 80 produces 6,400 cells per surface.
+interaction_points = 80
+comparison_bootstrap_replicates = 200 # 0 disables; otherwise at least 100
+comparison_bootstrap_seed = 1729
+minimum_cell_size = 20 # distinct comparison units required in every displayed cell
+
+[data]
+path = "/absolute/local/path/scored_model_input.parquet"
+
+[columns]
+actual = "actual_response"
+sample_weight = "business_weight"
+features = ["feature_a", "feature_b", "feature_c"]
+# Optional row-aligned log offset for fitted-evidence binding. Predictions must
+# already include it; the report neither applies nor serializes this column.
+offset = "report_time_offset"
+# Optional paired-bootstrap cluster. Never include this identifier in features.
+# Omit for one comparison unit per row.
+comparison_unit = "policy_id"
+
+# Display name = prediction column in the scored data.
+[predictions]
+"Current GAM" = "prediction_current"
+"Challenger GAM" = "prediction_challenger"
+
+# Optional adapter sections are commented out so this example runs through the
+# scored-data-only path. These values must come from training; the report never
+# estimates p or phi on review data.
+# [model_likelihoods."Challenger GAM"]
+# tweedie_power = 1.5
+# dispersion = 0.72
+
+# Optional. Paths are resolved relative to this TOML file. Only load trusted
+# joblib/pickle artifacts; the CLI requires --allow-trusted-model-load.
+# [superglm_objects]
+# "Current GAM" = "/absolute/local/path/current_model.joblib"
+
+# Optional alternative/addition for relativity plots. A workbook does not
+# provide predictions, so every compared model still needs [predictions].
+# [rating_workbooks]
+# "Challenger GAM" = "/absolute/local/path/challenger_rating_tables.xlsx"

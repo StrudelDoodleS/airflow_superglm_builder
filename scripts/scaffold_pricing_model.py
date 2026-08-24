@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import keyword
+import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -15,6 +18,7 @@ _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*
 _TEMPLATE_TOKEN = re.compile(r"__[A-Z][A-Z0-9_]*__")
 _DEFAULT_CONFIG_NAME = "pricing_scaffold.toml"
 _CONFIG_SECTION = "notebook_defaults"
+_MANUAL_EDIT_CONFIG_SECTION = "manual_edit_defaults"
 _CONFIG_KEYS = frozenset(
     {
         "database_mode",
@@ -26,9 +30,12 @@ _NOTEBOOK_NAMES = (
     "01_data_ingestion.ipynb",
     "02_model_training.ipynb",
     "03_model_editor.ipynb",
-    "04_model_deployment.ipynb",
+    "04_manual_adjustment.ipynb",
+    "05_model_deployment.ipynb",
     "99_scratch_work.ipynb",
 )
+_LEGACY_DEPLOYMENT_NOTEBOOK = "04_model_deployment.ipynb"
+_DEPLOYMENT_NOTEBOOK = "05_model_deployment.ipynb"
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,8 @@ class ScaffoldOptions:
     database_mode: str = "local"
     runtime_module: str | None = None
     expected_remote_database: str = ""
+    manual_edit_source_selector: str = "deployed"
+    manual_edit_carry_forward: bool = True
     root: Path = Path(".")
     force: bool = False
 
@@ -57,6 +66,8 @@ class ScaffoldConfig:
     database_mode: str = "local"
     runtime_module: str | None = None
     expected_remote_database: str = ""
+    manual_edit_source_selector: str = "deployed"
+    manual_edit_carry_forward: bool = True
 
 
 def _required(value: str | None, name: str) -> str:
@@ -110,6 +121,21 @@ def _expected_remote_database(value: object) -> str:
     return value.strip()
 
 
+def _manual_edit_source_selector(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("source_selector must be 'deployed' or 'latest'")
+    cleaned = value.strip().lower()
+    if cleaned not in {"deployed", "latest"}:
+        raise ValueError("source_selector must be 'deployed' or 'latest'")
+    return cleaned
+
+
+def _manual_edit_carry_forward(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("carry_forward must be true or false")
+    return value
+
+
 def load_scaffold_config(path: str | Path) -> ScaffoldConfig:
     """Load strict, non-secret notebook connection defaults from TOML."""
     config_path = Path(path).expanduser().resolve()
@@ -120,7 +146,8 @@ def load_scaffold_config(path: str | Path) -> ScaffoldConfig:
             payload = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"scaffold config could not be read: {config_path}: {exc}") from exc
-    unexpected_sections = sorted(set(payload) - {_CONFIG_SECTION})
+    supported_sections = {_CONFIG_SECTION, _MANUAL_EDIT_CONFIG_SECTION}
+    unexpected_sections = sorted(set(payload) - supported_sections)
     if unexpected_sections:
         raise ValueError(
             "scaffold config has unsupported top-level sections: " + ", ".join(unexpected_sections)
@@ -131,16 +158,31 @@ def load_scaffold_config(path: str | Path) -> ScaffoldConfig:
     unexpected_keys = sorted(set(raw) - _CONFIG_KEYS)
     if unexpected_keys:
         raise ValueError(f"[{_CONFIG_SECTION}] has unsupported keys: " + ", ".join(unexpected_keys))
+    manual_raw = payload.get(_MANUAL_EDIT_CONFIG_SECTION, {})
+    if not isinstance(manual_raw, dict):
+        raise TypeError(f"[{_MANUAL_EDIT_CONFIG_SECTION}] must be a TOML table")
+    unexpected_manual_keys = sorted(set(manual_raw) - {"source_selector", "carry_forward"})
+    if unexpected_manual_keys:
+        raise ValueError(
+            f"[{_MANUAL_EDIT_CONFIG_SECTION}] has unsupported keys: "
+            + ", ".join(unexpected_manual_keys)
+        )
     return ScaffoldConfig(
         database_mode=_database_mode(raw.get("database_mode", "local")),
         runtime_module=_runtime_module(raw.get("runtime_module")),
         expected_remote_database=_expected_remote_database(raw.get("expected_remote_database", "")),
+        manual_edit_source_selector=_manual_edit_source_selector(
+            manual_raw.get("source_selector", "deployed")
+        ),
+        manual_edit_carry_forward=_manual_edit_carry_forward(manual_raw.get("carry_forward", True)),
     )
 
 
 def _python_literal(value: object) -> str:
     if value is None:
         return "None"
+    if isinstance(value, bool):
+        return repr(value)
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -191,8 +233,8 @@ def _notebook_document(cells: list[dict[str, object]]) -> dict[str, object]:
 def _project_setup_source(*, imports: str) -> str:
     setup = dedent(
         """
-        from pathlib import Path
         import sys
+        from pathlib import Path
 
         search_root = Path.cwd().resolve()
         PROJECT_ROOT = next(
@@ -225,6 +267,8 @@ def _template_notebooks(
     database_mode: str,
     runtime_module: str | None,
     expected_remote_database: str,
+    manual_edit_source_selector: str,
+    manual_edit_carry_forward: bool,
 ) -> dict[str, dict[str, object]]:
     connection_settings = (
         dedent(
@@ -269,10 +313,10 @@ REPLACE_MODEL_FRAME = False
             _code(
                 _project_setup_source(
                     imports="""
-                    import numpy as np  # noqa: E402
-                    import pandas as pd  # noqa: E402
+                    import numpy as np
+                    import pandas as pd
 
-                    from pricing_pipeline.notebook import connect, save_model_frame  # noqa: E402
+                    from pricing_pipeline.notebook import connect, save_model_frame
                     """,
                 )
             ),
@@ -363,10 +407,10 @@ REPLACE_MODEL_FRAME = False
             _code(
                 _project_setup_source(
                     imports="""
-                    from superglm import Categorical, Numeric, SuperGLM  # noqa: E402
+                    from superglm import Categorical, Numeric, SuperGLM
 
-                    from pricing_pipeline.models.config import ValidationSplitConfig  # noqa: E402
-                    from pricing_pipeline.notebook import (  # noqa: E402
+                    from pricing_pipeline.models.config import ValidationSplitConfig
+                    from pricing_pipeline.notebook import (
                         PricingModelSpec,
                         apply_level_groupings,
                         build_candidate,
@@ -543,9 +587,9 @@ EDIT_REASON = ""
             _code(
                 _project_setup_source(
                     imports="""
-                    from superglm.editor import EditorSession  # noqa: E402
+                    from superglm.editor import EditorSession
 
-                    from pricing_pipeline.notebook import (  # noqa: E402
+                    from pricing_pipeline.notebook import (
                         connect,
                         list_candidate_versions,
                         load_registered_model,
@@ -636,6 +680,219 @@ EDIT_REASON = ""
         ]
     )
 
+    manual_adjustment = _notebook_document(
+        [
+            _markdown(
+                """
+                # __MODEL_LABEL_MARKDOWN__: manual business adjustment
+
+                Browse the published history, open the current deployment by default,
+                and express business uplifts or reductions as replayable relative rules.
+                Publication creates an immutable `MANUAL_EDIT` child. Deployment remains
+                an explicit final decision.
+                """
+            ),
+            _code(
+                connection_settings
+                + f"""
+MODEL_NAME = "__MODEL_NAME__"  # Set to None to select by label only.
+MODEL_LABEL = "__MODEL_LABEL__"
+DEPLOYMENT_SLOT = "__DEPLOYMENT_SLOT__"
+SOURCE_SELECTOR = {_python_literal(manual_edit_source_selector)}  # "deployed" or "latest"
+PACKAGE_VERSION = None  # Exact override; otherwise SOURCE_SELECTOR is used.
+POLICY_SOURCE_PACKAGE_VERSION = None  # Reuse a prior MANUAL_EDIT policy when set.
+
+POLICY_NAME = "__MODEL_NAME__ manual adjustment"
+POLICY_VERSION = 1
+CARRY_FORWARD = {_python_literal(manual_edit_carry_forward)}
+POLICY_REASON = ""
+
+# Each row selects either levels or an x_range and multiplies their relativity.
+# Python performs the log-link conversion. Add as many non-overlapping rows as needed.
+MANUAL_ADJUSTMENTS = [
+    # {{
+    #     "feature": "feature_name",
+    #     "levels": ["level_a", "level_b"],
+    #     "factor": 1.05,
+    #     "reason": "Approved business rationale",
+    # }},
+    # {{
+    #     "feature": "continuous_feature",
+    #     "x_range": [10, 20],
+    #     "factor": 0.97,
+    #     "reason": "Approved business rationale",
+    # }},
+]
+
+DEPLOY_AFTER_PUBLISH = False
+DEPLOYMENT_REASON = ""
+"""
+            ),
+            _code(
+                _project_setup_source(
+                    imports="""
+                    from pricing_pipeline.notebook import (
+                        ManualAdjustmentPolicy,
+                        apply_manual_adjustment_policy,
+                        connect,
+                        deploy_package,
+                        list_candidate_versions,
+                        load_registered_model,
+                        manual_adjustment_policy_from_candidate,
+                        open_candidate,
+                        open_deployed_candidate,
+                        publish_manual_adjustment,
+                    )
+                    """,
+                )
+            ),
+            _markdown("## Connect and browse every published version"),
+            _code(connect_source),
+            _code(
+                """
+                model = load_registered_model(
+                    pricing,
+                    model_name=MODEL_NAME,
+                    model_label=MODEL_LABEL,
+                    deployment_slot=DEPLOYMENT_SLOT,
+                    source_root=MODEL_DIR,
+                )
+                versions = list_candidate_versions(pricing, model=model, technical=True)
+                if versions.empty:
+                    raise LookupError("No published package versions were found.")
+                inventory = versions.loc[
+                    :,
+                    [
+                        "rate_package_id",
+                        "package_version",
+                        "model_version",
+                        "model_kind",
+                        "data_as_of_date",
+                        "completed_ts",
+                        "parent_package_version",
+                        "current_rate_package_id",
+                    ],
+                ].copy()
+                inventory.insert(
+                    0,
+                    "deployed",
+                    inventory["rate_package_id"].eq(inventory["current_rate_package_id"]),
+                )
+                inventory.insert(1, "model_label", MODEL_LABEL)
+                display(inventory)
+                """
+            ),
+            _markdown("## Select and verify the exact source package"),
+            _code(
+                """
+                if PACKAGE_VERSION is not None:
+                    selected_package_version = int(PACKAGE_VERSION)
+                    if selected_package_version not in set(
+                        versions["package_version"].astype(int)
+                    ):
+                        raise ValueError("PACKAGE_VERSION is not in the displayed history.")
+                    reviewed = open_candidate(
+                        pricing,
+                        model=model,
+                        package_version=selected_package_version,
+                    )
+                elif SOURCE_SELECTOR == "deployed":
+                    reviewed = open_deployed_candidate(pricing, model=model)
+                elif SOURCE_SELECTOR == "latest":
+                    reviewed = open_candidate(
+                        pricing,
+                        model=model,
+                        package_version=int(versions.iloc[0]["package_version"]),
+                    )
+                else:
+                    raise ValueError("SOURCE_SELECTOR must be 'deployed' or 'latest'.")
+                display(reviewed.technical)
+                """
+            ),
+            _markdown("## Declare the replayable adjustment policy"),
+            _code(
+                """
+                if POLICY_SOURCE_PACKAGE_VERSION is None:
+                    policy = ManualAdjustmentPolicy.from_rows(
+                        name=POLICY_NAME,
+                        version=POLICY_VERSION,
+                        reason=POLICY_REASON,
+                        rows=MANUAL_ADJUSTMENTS,
+                        carry_forward=CARRY_FORWARD,
+                    )
+                else:
+                    if str(reviewed.technical.get("model_kind") or "").upper() == "MANUAL_EDIT":
+                        raise ValueError(
+                            "Replay a carry-forward policy onto a clean non-MANUAL_EDIT "
+                            "candidate so its multiplier is applied exactly once."
+                        )
+                    policy_source = open_candidate(
+                        pricing,
+                        model=model,
+                        package_version=int(POLICY_SOURCE_PACKAGE_VERSION),
+                    )
+                    policy = manual_adjustment_policy_from_candidate(
+                        policy_source,
+                        require_carry_forward=True,
+                    )
+                display(policy.table())
+                display({
+                    "Policy": policy.name,
+                    "Version": policy.version,
+                    "Carry forward": policy.carry_forward,
+                    "Policy SHA-256": policy.sha256,
+                })
+                """
+            ),
+            _markdown("## Apply and review before anything is published"),
+            _code(
+                """
+                manual_review = apply_manual_adjustment_policy(reviewed, policy)
+                display(manual_review.rules)
+                display(manual_review.impact)
+                manual_review.edited_model
+                """
+            ),
+            _markdown("## Publish the immutable MANUAL_EDIT child"),
+            _code(
+                """
+                manual_published = publish_manual_adjustment(
+                    pricing,
+                    review=manual_review,
+                )
+                display({
+                    "Kind": manual_published.model_kind,
+                    "Package": manual_published.package_version,
+                    "Parent package ID": manual_published.parent_rate_package_id,
+                    "State": manual_published.package_status,
+                    "Reused equivalent": manual_published.deduplicated,
+                })
+                """
+            ),
+            _markdown("## Optional explicit deployment"),
+            _code(
+                """
+                if DEPLOY_AFTER_PUBLISH:
+                    if not DEPLOYMENT_REASON.strip():
+                        raise ValueError("Describe the approval for changing the live package.")
+                    deployment_candidate = open_candidate(
+                        pricing,
+                        model=model,
+                        package_version=manual_published.package_version,
+                    )
+                    deployment = deploy_package(
+                        pricing,
+                        package=deployment_candidate,
+                        reason=DEPLOYMENT_REASON,
+                    )
+                    display(deployment)
+                else:
+                    display("Published only. Use notebook 05 when it is approved for deployment.")
+                """
+            ),
+        ]
+    )
+
     deployment = _notebook_document(
         [
             _markdown(
@@ -660,7 +917,7 @@ DEPLOYMENT_REASON = ""
             _code(
                 _project_setup_source(
                     imports="""
-                    from pricing_pipeline.notebook import (  # noqa: E402
+                    from pricing_pipeline.notebook import (
                         connect,
                         deploy_package,
                         list_candidate_versions,
@@ -774,12 +1031,24 @@ REPLACE_GROUPING_ARTIFACT = False
             _code(
                 _project_setup_source(
                     imports="""
-                    import numpy as np  # noqa: E402
-                    import pandas as pd  # noqa: E402
-                    from superglm import Categorical, Numeric, Spline, SuperGLM  # noqa: E402
-                    from superglm.editor import EditorSession  # noqa: E402
+                    import numpy as np
+                    import pandas as pd
+                    from sklearn.metrics import mean_tweedie_deviance
+                    from superglm import (
+                        Categorical,
+                        Numeric,
+                        Spline,
+                        SuperGLM,
+                        Tweedie,
+                    )
+                    from superglm.editor import EditorSession
 
-                    from pricing_pipeline.notebook import (  # noqa: E402
+                    from pricing_pipeline.modeling.scratch_benchmark import (
+                        fit_boosted_blend,
+                        superglm_edf_table,
+                        unconstrained_superglm_features,
+                    )
+                    from pricing_pipeline.notebook import (
                         connect,
                         export_level_groupings,
                         list_candidate_versions,
@@ -866,6 +1135,7 @@ REPLACE_GROUPING_ARTIFACT = False
             ),
             _code(
                 """
+                SCRATCH_FAMILY = "poisson"  # For compound Tweedie: Tweedie(p=1.6)
                 SCRATCH_TARGET = "__TARGET_NAME__"
                 SCRATCH_FEATURES = {
                     "__FEATURE_NAME__": Numeric(),
@@ -876,7 +1146,7 @@ REPLACE_GROUPING_ARTIFACT = False
                 scratch_y = scratch_frame[SCRATCH_TARGET].astype(float)
 
                 scratch_model = SuperGLM(
-                    family="poisson",
+                    family=SCRATCH_FAMILY,
                     selection_penalty=0.0,
                     features=SCRATCH_FEATURES,
                 ).fit(scratch_X, scratch_y)
@@ -911,6 +1181,88 @@ REPLACE_GROUPING_ARTIFACT = False
                 # Blank modelling area: try another feature map, family, penalty, or split.
                 # alternative_features = {...}
                 # alternative_model = SuperGLM(...).fit(...)
+                """
+            ),
+            _markdown(
+                """
+                ## Optional: fully unconstrained SuperGLM benchmark
+
+                This is a decision-light technical benchmark: raw categorical levels,
+                no groupings, no monotonic or shape constraints, and data-driven spline
+                knots and REML lambdas. The reference level and spline penalty remain
+                necessary model mechanics. It stays in memory and cannot be published
+                or deployed from this notebook.
+                """
+            ),
+            _code(
+                """
+                UNCONSTRAINED_CATEGORICAL_COLUMNS = ("segment",)
+                UNCONSTRAINED_ORDERED_COLUMNS = {}
+                UNCONSTRAINED_LINEAR_COLUMNS = ()
+
+                unconstrained_features = unconstrained_superglm_features(
+                    scratch_X,
+                    categorical_columns=UNCONSTRAINED_CATEGORICAL_COLUMNS,
+                    ordered_columns=UNCONSTRAINED_ORDERED_COLUMNS,
+                    linear_columns=UNCONSTRAINED_LINEAR_COLUMNS,
+                    spline_kind="ps",
+                    k=10,
+                    knot_strategy="quantile_tempered",
+                    knot_alpha=0.2,
+                )
+                unconstrained_model = SuperGLM(
+                    family=SCRATCH_FAMILY,
+                    selection_penalty=0.0,
+                    features=unconstrained_features,
+                ).fit_reml(
+                    scratch_X,
+                    scratch_y,
+                    runtime_validation="skip",
+                )
+                unconstrained_predictions = unconstrained_model.predict(scratch_X)
+                display({
+                    "Rows fitted": len(scratch_y),
+                    "Mean unit deviance": float(
+                        mean_tweedie_deviance(
+                            scratch_y,
+                            np.clip(unconstrained_predictions, 1e-12, None),
+                            power=float(getattr(unconstrained_model.family, "p", 1.0)),
+                        )
+                    ),
+                    "Evidence": "in-sample technical fit; use OOF evidence below for comparison",
+                })
+                display(superglm_edf_table(unconstrained_model))
+                """
+            ),
+            _markdown(
+                """
+                ## Optional: CatBoost + LightGBM + XGBoost blend
+
+                Install once with `uv sync --extra scratch`, restart the kernel, then
+                run this cell. Each learner is fitted out-of-fold and non-negative
+                convex blend weights are learned only from those held-out predictions.
+                These weights are a technical predictive benchmark, not a proposed
+                pricing blend. A governed GAM/GBM blend should impose its chosen GAM
+                floor and be assessed through tail, calibration, and stability evidence.
+                This remains scratch-only: it does not touch SQL or the candidate lane.
+                """
+            ),
+            _code(
+                """
+                boosted_blend = fit_boosted_blend(
+                    scratch_X,
+                    scratch_y,
+                    categorical_columns=("segment",),
+                    n_splits=5,
+                    random_state=SCRATCH_RANDOM_SEED,
+                    n_estimators=200,
+                    learning_rate=0.05,
+                    max_depth=5,
+                    reference_superglm=unconstrained_model,
+                )
+                display(boosted_blend.metrics.sort_values("mean_unit_deviance"))
+                display(pd.Series(boosted_blend.weights, name="OOF convex weight"))
+                display(boosted_blend.oof_predictions.head())
                 """
             ),
             _markdown(
@@ -997,7 +1349,8 @@ REPLACE_GROUPING_ARTIFACT = False
         "01_data_ingestion.ipynb": ingestion,
         "02_model_training.ipynb": training,
         "03_model_editor.ipynb": editor,
-        "04_model_deployment.ipynb": deployment,
+        "04_manual_adjustment.ipynb": manual_adjustment,
+        "05_model_deployment.ipynb": deployment,
         "99_scratch_work.ipynb": scratch,
     }
 
@@ -1013,6 +1366,8 @@ def _notebooks(
     database_mode: str,
     runtime_module: str | None,
     expected_remote_database: str,
+    manual_edit_source_selector: str,
+    manual_edit_carry_forward: bool,
 ) -> dict[str, str]:
     feature = "feature_1" if target_name != "feature_1" else "feature_2"
     primary_key = "row_id" if target_name != "row_id" else "record_id"
@@ -1034,6 +1389,8 @@ def _notebooks(
         database_mode=database_mode,
         runtime_module=runtime_module,
         expected_remote_database=expected_remote_database,
+        manual_edit_source_selector=manual_edit_source_selector,
+        manual_edit_carry_forward=manual_edit_carry_forward,
     ).items():
         rendered[filename] = (
             json.dumps(
@@ -1044,6 +1401,77 @@ def _notebooks(
             + "\n"
         )
     return rendered
+
+
+def _migrate_legacy_deployment_notebook(package_dir: Path) -> Path | None:
+    legacy_path = package_dir / _LEGACY_DEPLOYMENT_NOTEBOOK
+    deployment_path = package_dir / _DEPLOYMENT_NOTEBOOK
+    if legacy_path.is_symlink():
+        raise ValueError(
+            f"cannot upgrade legacy notebook {legacy_path.name}: symbolic links are not supported. "
+            "Resolve the legacy path manually, then rerun the scaffold."
+        )
+    if not legacy_path.exists():
+        return None
+    if not legacy_path.is_file():
+        raise ValueError(
+            f"cannot upgrade legacy notebook {legacy_path.name}: expected a regular file. "
+            "Resolve the legacy path manually, then rerun the scaffold."
+        )
+    conflict_message = (
+        f"cannot upgrade legacy notebook {legacy_path.name}: {deployment_path.name} already exists. "
+        "Resolve the two deployment notebooks manually, remove "
+        f"{legacy_path.name}, then rerun the scaffold; --force will not overwrite either notebook."
+    )
+    if deployment_path.exists() or deployment_path.is_symlink():
+        raise ValueError(conflict_message)
+    try:
+        os.link(legacy_path, deployment_path, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ValueError(conflict_message) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"cannot safely upgrade legacy notebook {legacy_path.name} to {deployment_path.name}: {exc}. "
+            "Move the notebook manually, then rerun the scaffold."
+        ) from exc
+    legacy_path.unlink()
+    return deployment_path
+
+
+def _reject_output_symlinks(content: Mapping[Path, str]) -> None:
+    for path in content:
+        if path.is_symlink():
+            raise ValueError(
+                f"cannot write scaffold output {path.name}: symbolic links are not supported. "
+                "Replace the link with a regular file, then rerun the scaffold."
+            )
+
+
+def _reject_managed_ancestor_symlinks(pricing_models_dir: Path, package_dir: Path) -> None:
+    for path in (pricing_models_dir, package_dir):
+        if path.is_symlink():
+            raise ValueError(
+                f"cannot write scaffold output: managed path {path.name} is a symbolic link. "
+                "Replace the link with a directory, then rerun the scaffold."
+            )
+
+
+def _write_scaffold_output(path: Path, source: str) -> None:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("scaffold output writes require a no-follow filesystem operation")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | no_follow
+    try:
+        descriptor = os.open(path, flags, 0o666)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(
+                f"cannot write scaffold output {path.name}: symbolic links are not supported. "
+                "Replace the link with a regular file, then rerun the scaffold."
+            ) from exc
+        raise
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(source)
 
 
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
@@ -1063,10 +1491,15 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     database_mode = _database_mode(options.database_mode)
     runtime_module = _runtime_module(options.runtime_module)
     expected_remote_database = _expected_remote_database(options.expected_remote_database)
+    manual_edit_source_selector = _manual_edit_source_selector(options.manual_edit_source_selector)
+    manual_edit_carry_forward = _manual_edit_carry_forward(options.manual_edit_carry_forward)
     if database_mode == "remote" and not expected_remote_database:
         raise ValueError("expected_remote_database is required when database_mode='remote'")
 
-    package_dir = options.root / "pricing_models" / package_name
+    root = Path(options.root).resolve()
+    pricing_models_dir = root / "pricing_models"
+    package_dir = pricing_models_dir / package_name
+    _reject_managed_ancestor_symlinks(pricing_models_dir, package_dir)
     notebooks = _notebooks(
         package_name=package_name,
         model_name=model_name,
@@ -1077,17 +1510,23 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         database_mode=database_mode,
         runtime_module=runtime_module,
         expected_remote_database=expected_remote_database,
+        manual_edit_source_selector=manual_edit_source_selector,
+        manual_edit_carry_forward=manual_edit_carry_forward,
     )
     content = {
         package_dir / "__init__.py": f'"""Pricing notebook package for {model_name}."""\n',
         **{package_dir / filename: source for filename, source in notebooks.items()},
     }
+    _reject_output_symlinks(content)
+    migrated_deployment = _migrate_legacy_deployment_notebook(package_dir)
     created = []
     for path, source in content.items():
+        if path == migrated_deployment:
+            continue
         if path.exists() and not options.force:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source, encoding="utf-8")
+        _write_scaffold_output(path, source)
         created.append(path)
     return ScaffoldResult(package_name=package_name, created_files=tuple(created))
 
@@ -1121,6 +1560,17 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
         "--expected-remote-database",
         help="override notebook_defaults.expected_remote_database",
     )
+    parser.add_argument(
+        "--manual-edit-source",
+        choices=("deployed", "latest"),
+        help="override manual_edit_defaults.source_selector",
+    )
+    parser.add_argument(
+        "--manual-edit-carry-forward",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="override manual_edit_defaults.carry_forward",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     auto_config = args.root / _DEFAULT_CONFIG_NAME
@@ -1146,6 +1596,16 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
         )
         if database_mode == "remote" and not expected_remote_database:
             raise ValueError("expected_remote_database is required when database_mode='remote'")
+        manual_edit_source_selector = _manual_edit_source_selector(
+            args.manual_edit_source
+            if args.manual_edit_source is not None
+            else config.manual_edit_source_selector
+        )
+        manual_edit_carry_forward = _manual_edit_carry_forward(
+            args.manual_edit_carry_forward
+            if args.manual_edit_carry_forward is not None
+            else config.manual_edit_carry_forward
+        )
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
     return ScaffoldOptions(
@@ -1158,6 +1618,8 @@ def parse_args(argv: list[str] | None = None) -> ScaffoldOptions:
         database_mode=database_mode,
         runtime_module=runtime_module,
         expected_remote_database=expected_remote_database,
+        manual_edit_source_selector=manual_edit_source_selector,
+        manual_edit_carry_forward=manual_edit_carry_forward,
         root=args.root,
         force=args.force,
     )

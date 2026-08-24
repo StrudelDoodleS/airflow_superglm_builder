@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
-
 
 OFFLINE_DDL_DIR = Path(__file__).resolve().parents[2] / "db" / "offline_sqlite"
 COORDINATOR_DB_FILE = "coordinator.sqlite"
@@ -115,7 +114,49 @@ _OFFLINE_COLUMN_UPGRADES = (
         "model_equivalence_sha256",
         "TEXT",
     ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_status",
+        "TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED'",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_evidence_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_evidence_json",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "model_frame_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "fit_configuration_json",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "result_evidence_sha256",
+        "TEXT",
+    ),
 )
+_CANONICAL_MODEL_MONITOR_VARIANTS = {
+    "STATIC_SCORE": ("Deployed model, no refit", 0, 0, 0, 1),
+    "FROZEN_REFIT": ("Refit coefficients only", 1, 0, 0, 1),
+    "REESTIMATE_LAMBDA": ("Refit coefficients and REML lambdas", 1, 1, 0, 1),
+    "FULL_ADAPTIVE": ("Refit coefficients, lambdas, and data-driven knots", 1, 1, 1, 1),
+}
 _OFFLINE_NULLABILITY_UPGRADES = (
     ("pricing", "MODEL_RUN", "effective_from"),
     ("pricing", "PRICING_RATE_PACKAGE", "effective_from_date"),
@@ -166,6 +207,7 @@ def sqlite_engine_with_offline_schemas(
 
     @event.listens_for(engine, "connect")
     def _attach_pricing_schemas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
         dbapi_connection.execute("PRAGMA main.journal_mode=DELETE")
         for schema, path in resolved_paths.items():
             dbapi_connection.execute(
@@ -222,15 +264,104 @@ def _relax_offline_column_nullability(
         )
 
     old_table = f"__offline_upgrade_{table.lower()}"
-    quoted_columns = ", ".join(f'"{str(row[1])}"' for row in columns)
-    connection.execute(f'ALTER TABLE {schema}."{table}" RENAME TO "{old_table}"')
-    connection.execute(qualified_sql)
-    connection.execute(
-        f'INSERT INTO {schema}."{table}" ({quoted_columns}) '
-        f'SELECT {quoted_columns} FROM {schema}."{old_table}"'
-    )
-    connection.execute(f'DROP TABLE {schema}."{old_table}"')
+    quoted_columns = ", ".join(f'"{row[1]!s}"' for row in columns)
+    previous_legacy_mode = int(connection.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    connection.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        # This is a table-rebuild implementation detail, not a semantic rename.
+        # Keep dependent views, triggers, and foreign keys pointed at the final
+        # table name while the temporary old table exists.
+        connection.execute(f'ALTER TABLE {schema}."{table}" RENAME TO "{old_table}"')
+        connection.execute(qualified_sql)
+        connection.execute(
+            f'INSERT INTO {schema}."{table}" ({quoted_columns}) '
+            f'SELECT {quoted_columns} FROM {schema}."{old_table}"'
+        )
+        connection.execute(f'DROP TABLE {schema}."{old_table}"')
+    finally:
+        connection.execute(f"PRAGMA legacy_alter_table = {previous_legacy_mode}")
     return True
+
+
+def _extend_offline_model_kind_check(connection) -> bool:
+    create_row = connection.execute(
+        "SELECT sql FROM pricing.sqlite_master WHERE type = 'table' AND name = 'MODEL_RUN'"
+    ).fetchone()
+    if create_row is None or not create_row[0]:
+        raise RuntimeError("cannot rebuild missing offline table pricing.MODEL_RUN")
+    create_sql = str(create_row[0])
+    if "MANUAL_EDIT" in create_sql:
+        return False
+    extended_sql, replacements = re.subn(
+        r"'RAW'\s*,\s*'ROUTINE_EDIT'\s*,\s*'EDITOR_EDIT'",
+        "'RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT'",
+        create_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            "cannot extend offline MODEL_RUN.model_kind check: "
+            "stored CREATE TABLE statement is not recognized"
+        )
+    qualified_sql, replacements = re.subn(
+        r"^CREATE\s+TABLE\s+MODEL_RUN\s*",
+        "CREATE TABLE pricing.MODEL_RUN ",
+        extended_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            "cannot rebuild offline table pricing.MODEL_RUN: "
+            "stored CREATE TABLE prefix is not recognized"
+        )
+
+    columns = list(connection.execute("PRAGMA pricing.table_info('MODEL_RUN')").fetchall())
+    quoted_columns = ", ".join(f'"{row[1]!s}"' for row in columns)
+    old_table = "__offline_upgrade_model_run"
+    previous_legacy_mode = int(connection.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    connection.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        connection.execute(
+            'ALTER TABLE pricing."MODEL_RUN" RENAME TO "__offline_upgrade_model_run"'
+        )
+        connection.execute(qualified_sql)
+        connection.execute(
+            f'INSERT INTO pricing."MODEL_RUN" ({quoted_columns}) '
+            f'SELECT {quoted_columns} FROM pricing."{old_table}"'
+        )
+        connection.execute(f'DROP TABLE pricing."{old_table}"')
+    finally:
+        connection.execute(f"PRAGMA legacy_alter_table = {previous_legacy_mode}")
+    return True
+
+
+def _assert_canonical_monitoring_variant_policy(connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT
+            variant_code,
+            variant_label,
+            refit_coefficients,
+            reestimate_lambdas,
+            reposition_data_driven_knots,
+            structure_frozen
+        FROM pricing.MODEL_MONITOR_VARIANT
+        """
+    ).fetchall()
+    actual = {str(row[0]): (str(row[1]), *(int(value) for value in row[2:])) for row in rows}
+    if actual != _CANONICAL_MODEL_MONITOR_VARIANTS:
+        raise RuntimeError(
+            "monitoring variants differ from the canonical monitoring variant policy"
+        )
+
+
+def _assert_offline_foreign_key_integrity(connection) -> None:
+    for schema in SCHEMA_DB_FILES:
+        violations = connection.execute(f"PRAGMA {schema}.foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"offline foreign-key check failed for {schema}: {violations!r}")
 
 
 def apply_offline_ddl(engine: Engine) -> None:
@@ -240,6 +371,7 @@ def apply_offline_ddl(engine: Engine) -> None:
         for schema in SCHEMA_DB_FILES:
             ddl_path = OFFLINE_DDL_DIR / f"{schema}.sql"
             connection.executescript(ddl_path.read_text(encoding="utf-8"))
+        _assert_canonical_monitoring_variant_policy(connection)
         for schema, table, column, column_type in _OFFLINE_COLUMN_UPGRADES:
             existing_columns = {
                 str(row[1])
@@ -277,7 +409,7 @@ def apply_offline_ddl(engine: Engine) -> None:
                 ELSE 'RAW'
             END
             WHERE model_kind IS NULL
-               OR model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+               OR model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             """
         )
         connection.execute(
@@ -288,9 +420,12 @@ def apply_offline_ddl(engine: Engine) -> None:
             """
         )
         connection.commit()
+        connection.execute("PRAGMA foreign_keys=OFF")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+            raise RuntimeError("cannot disable foreign-key checks for offline table rebuild")
         try:
             connection.execute("BEGIN IMMEDIATE")
-            rebuilt_table = False
+            rebuilt_table = _extend_offline_model_kind_check(connection)
             for schema, table, column in _OFFLINE_NULLABILITY_UPGRADES:
                 rebuilt_table = (
                     _relax_offline_column_nullability(
@@ -323,22 +458,47 @@ def apply_offline_ddl(engine: Engine) -> None:
                   AND run_status = 'SUCCESS'
                 """
             )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    pricing.UX_MODEL_MONITOR_RUN_OBSERVATION
+                ON MODEL_MONITOR_RUN(
+                    baseline_deployment_id,
+                    manifest_id,
+                    component_role,
+                    variant_code
+                )
+                """
+            )
+            _assert_offline_foreign_key_integrity(connection)
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+            if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+                raise RuntimeError("cannot restore foreign-key enforcement after offline rebuild")
+        connection.executescript(
+            """
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_INSERT;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_INSERT;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_UPDATE;
+            """
+        )
         connection.executescript(
             """
             CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_INSERT
             BEFORE INSERT ON MODEL_RUN
-            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
             END;
 
             CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE
             BEFORE UPDATE OF model_kind ON MODEL_RUN
-            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
             END;
@@ -389,6 +549,56 @@ def apply_offline_ddl(engine: Engine) -> None:
              )
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN model equivalence digest');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_INSERT
+            BEFORE INSERT ON MODEL_MONITOR_RUN
+            WHEN NEW.invariant_status <> 'VERIFIED'
+              OR NEW.invariant_evidence_sha256 IS NULL
+              OR length(NEW.invariant_evidence_sha256) <> 64
+              OR NEW.invariant_evidence_sha256 <> lower(NEW.invariant_evidence_sha256)
+              OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.invariant_evidence_json IS NULL
+              OR NOT json_valid(NEW.invariant_evidence_json)
+              OR NEW.model_frame_sha256 IS NULL
+              OR length(NEW.model_frame_sha256) <> 64
+              OR NEW.model_frame_sha256 <> lower(NEW.model_frame_sha256)
+              OR NEW.model_frame_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.fit_configuration_json IS NULL
+              OR NOT json_valid(NEW.fit_configuration_json)
+              OR NEW.result_evidence_sha256 IS NULL
+              OR length(NEW.result_evidence_sha256) <> 64
+              OR NEW.result_evidence_sha256 <> lower(NEW.result_evidence_sha256)
+              OR NEW.result_evidence_sha256 GLOB '*[^0-9a-f]*'
+            BEGIN
+                SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_UPDATE
+            BEFORE UPDATE OF
+                invariant_status,
+                invariant_evidence_sha256,
+                invariant_evidence_json
+            ON MODEL_MONITOR_RUN
+            WHEN NEW.invariant_status <> 'VERIFIED'
+              OR NEW.invariant_evidence_sha256 IS NULL
+              OR length(NEW.invariant_evidence_sha256) <> 64
+              OR NEW.invariant_evidence_sha256 <> lower(NEW.invariant_evidence_sha256)
+              OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.invariant_evidence_json IS NULL
+              OR NOT json_valid(NEW.invariant_evidence_json)
+              OR NEW.model_frame_sha256 IS NULL
+              OR length(NEW.model_frame_sha256) <> 64
+              OR NEW.model_frame_sha256 <> lower(NEW.model_frame_sha256)
+              OR NEW.model_frame_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.fit_configuration_json IS NULL
+              OR NOT json_valid(NEW.fit_configuration_json)
+              OR NEW.result_evidence_sha256 IS NULL
+              OR length(NEW.result_evidence_sha256) <> 64
+              OR NEW.result_evidence_sha256 <> lower(NEW.result_evidence_sha256)
+              OR NEW.result_evidence_sha256 GLOB '*[^0-9a-f]*'
+            BEGIN
+                SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
             END;
             """
         )

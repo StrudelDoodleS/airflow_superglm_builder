@@ -389,7 +389,9 @@ def hash_model_source(root: str | Path) -> str:
         if path.is_file()
         and path.suffix.lower() in {".ipynb", ".py", ".sql", ".toml"}
         and ".ipynb_checkpoints" not in path.relative_to(source_root).parts
-        and not (path.suffix.lower() == ".ipynb" and path.name.startswith(("03_", "04_", "99_")))
+        and not (
+            path.suffix.lower() == ".ipynb" and path.name.startswith(("03_", "04_", "05_", "99_"))
+        )
     )
     if not paths:
         raise StandardSuperGLMError(

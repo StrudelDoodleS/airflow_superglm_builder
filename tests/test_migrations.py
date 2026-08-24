@@ -1,12 +1,12 @@
-import re
 import hashlib
+import re
 from pathlib import Path
 
 from pricing_pipeline.infra.migrations import (
     _ensure_schema_configuration,
     apply_migrations_in_transaction,
-    migration_files,
     migration_checksum,
+    migration_files,
     render_migration_sql,
     split_sql_server_batches,
 )
@@ -197,6 +197,104 @@ def test_model_kind_data_lineage_and_equivalence_migration_is_normalized():
     assert "package.split_set_id" not in sql
 
 
+def test_manual_edit_migration_extends_model_kind_without_rewriting_history():
+    path = Path("db/migrations/V038__manual_edit_model_kind.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "DROP CONSTRAINT CK_MODEL_RUN_MODEL_KIND" in sql
+    assert "ADD CONSTRAINT CK_MODEL_RUN_MODEL_KIND" in sql
+    assert "'RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT'" in sql
+    assert "UPDATE pricing.MODEL_RUN" not in sql
+
+
+def test_controlled_monitoring_migration_has_frozen_presets_and_lineage_views():
+    path = Path("db/migrations/V037__controlled_model_monitoring.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    for table_name in (
+        "MODEL_MONITOR_VARIANT",
+        "MODEL_FIT_CONTRACT",
+        "MODEL_MONITOR_RUN",
+        "MODEL_MONITOR_TERM",
+        "MODEL_MONITOR_LAMBDA",
+        "MODEL_MONITOR_RELATIVITY",
+        "MODEL_MONITOR_METRIC",
+    ):
+        assert f"CREATE TABLE mlops.{table_name}" in sql
+    for variant in (
+        "STATIC_SCORE",
+        "FROZEN_REFIT",
+        "REESTIMATE_LAMBDA",
+        "FULL_ADAPTIVE",
+    ):
+        assert variant in sql
+    assert "TR_MODEL_FIT_CONTRACT_IMMUTABLE" in sql
+    assert "TR_MODEL_FIT_CONTRACT_LINEAGE_GUARD" in sql
+    assert "TR_MODEL_MONITOR_RUN_LINEAGE_GUARD" in sql
+    assert "baseline_deployment_id" in sql
+    assert "invariant_status" in sql
+    assert "invariant_evidence_sha256" in sql
+    assert "invariant_evidence_json" in sql
+    assert "model_frame_sha256" in sql
+    assert "fit_configuration_json" in sql
+    assert "result_evidence_sha256" in sql
+    assert "UQ_MODEL_MONITOR_RUN_OBSERVATION" in sql
+    assert "CK_MODEL_MONITOR_RUN_INVARIANT_STATUS" in sql
+    assert "manifest.data_as_of_date" in sql
+    assert "manifest.data_as_of_column" in sql
+    assert "manifest.model_frame_sha256" in sql
+    for view_name in (
+        "V_MODEL_MONITORING_RUN",
+        "V_MODEL_MONITORING_RELATIVITY",
+        "V_MODEL_MONITORING_LAMBDA",
+    ):
+        assert f"CREATE OR ALTER VIEW pricing.{view_name}" in sql
+    for table_name in (
+        "MODEL_MONITOR_RUN",
+        "MODEL_MONITOR_TERM",
+        "MODEL_MONITOR_LAMBDA",
+        "MODEL_MONITOR_RELATIVITY",
+        "MODEL_MONITOR_METRIC",
+    ):
+        assert f"TR_{table_name}_IMMUTABLE" in sql
+    assert all(batch.strip() for batch in split_sql_server_batches(sql))
+
+
+def test_controlled_monitoring_migration_freezes_referenced_deployments():
+    sql = Path("db/migrations/V037__controlled_model_monitoring.sql").read_text(encoding="utf-8")
+
+    assert "TR_PRICING_MODEL_DEPLOYMENT_MONITORING_LINEAGE_GUARD" in sql
+    assert "ON pricing.PRICING_MODEL_DEPLOYMENT" in sql
+    assert "AFTER UPDATE, DELETE" in sql
+    assert "mlops.MODEL_MONITOR_RUN" in sql
+    assert "deployment_slot" in sql
+    assert "model_id" in sql
+    assert "rate_package_id" in sql
+    assert "effective_from_ts" in sql
+
+
+def test_controlled_monitoring_migration_freezes_referenced_manifests():
+    sql = Path("db/migrations/V037__controlled_model_monitoring.sql").read_text(encoding="utf-8")
+
+    assert "TR_DATASET_MANIFEST_MONITORING_LINEAGE_GUARD" in sql
+    assert "ON pricing.DATASET_MANIFEST" in sql
+    assert "AFTER UPDATE, DELETE" in sql
+    assert "mlops.MODEL_MONITOR_RUN" in sql
+    assert "monitor_run.manifest_id = historical_manifest.manifest_id" in sql
+
+
+def test_controlled_monitoring_migration_freezes_canonical_variant_policy():
+    sql = Path("db/migrations/V037__controlled_model_monitoring.sql").read_text(encoding="utf-8")
+
+    assert "TR_MODEL_MONITOR_VARIANT_IMMUTABLE" in sql
+    assert "ON mlops.MODEL_MONITOR_VARIANT" in sql
+    assert "INSTEAD OF UPDATE, DELETE" in sql
+    assert "WHEN MATCHED THEN UPDATE SET" not in sql
+    assert "Monitoring variants differ from the canonical policy." in sql
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 
@@ -270,7 +368,7 @@ def _create_table_foreign_keys(
 ) -> dict[str, list[tuple[tuple[str, ...], str, tuple[str, ...]]]]:
     foreign_key_pattern = re.compile(
         r"FOREIGN KEY \(([^)]*)\)\s+REFERENCES\s+([a-z_]+\.[A-Z0-9_]+)\(([^)]*)\)",
-        re.S,
+        re.DOTALL,
     )
     foreign_keys = {}
 
@@ -297,7 +395,7 @@ def _create_table_foreign_keys(
 def _view_columns(ddl: str, view_name: str) -> list[str]:
     view_pattern = re.compile(
         rf"CREATE OR ALTER VIEW {re.escape(view_name)} AS\nSELECT\n(?P<select>.*?)\nFROM ",
-        re.S,
+        re.DOTALL,
     )
     match = view_pattern.search(ddl)
     assert match is not None, f"Missing view {view_name}"
@@ -308,7 +406,7 @@ def _view_columns(ddl: str, view_name: str) -> list[str]:
         if not stripped:
             continue
 
-        alias = re.search(r"\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$", stripped, re.I)
+        alias = re.search(r"\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$", stripped, re.IGNORECASE)
         columns.append(alias.group(1) if alias else stripped.split(".")[-1])
 
     return columns

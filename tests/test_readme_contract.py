@@ -25,7 +25,8 @@ def test_root_readme_is_a_concise_entry_point():
         "01_data_ingestion.ipynb",
         "02_model_training.ipynb",
         "03_model_editor.ipynb",
-        "04_model_deployment.ipynb",
+        "04_manual_adjustment.ipynb",
+        "05_model_deployment.ipynb",
         "99_scratch_work.ipynb",
         "Data-as-at",
         "docs/notebooks/README.md",
@@ -54,8 +55,15 @@ def test_notebook_guide_documents_boundaries_and_public_functions():
         "load_registered_model",
         "list_candidate_versions",
         "open_candidate",
+        "open_deployed_candidate",
         "publish_edits",
+        "ManualAdjustmentPolicy",
+        "apply_manual_adjustment_policy",
+        "publish_manual_adjustment",
         "deploy_package",
+        "build_model_fit_contract",
+        "run_monitoring_fit",
+        "persist_monitoring_fit",
         "data_as_of_column",
         "SELECT DB_NAME()",
         "ALLOW_REMOTE_WRITES",
@@ -75,12 +83,21 @@ def test_documented_notebook_helpers_are_exported_by_the_public_module():
         "load_registered_model",
         "list_candidate_versions",
         "open_candidate",
+        "open_deployed_candidate",
         "export_level_groupings",
         "load_level_groupings",
         "inspect_level_groupings",
         "apply_level_groupings",
+        "ManualAdjustmentPolicy",
+        "ManualAdjustmentRule",
+        "apply_manual_adjustment_policy",
+        "manual_adjustment_policy_from_candidate",
         "publish_edits",
+        "publish_manual_adjustment",
         "deploy_package",
+        "build_model_fit_contract",
+        "run_monitoring_fit",
+        "persist_monitoring_fit",
     }
 
     assert expected <= set(notebook.__all__)
@@ -101,6 +118,7 @@ def test_notebook_guide_documents_python_groupings_and_duplicate_preflight():
         "RAW",
         "ROUTINE_EDIT",
         "EDITOR_EDIT",
+        "MANUAL_EDIT",
         "10 decimal places",
     ):
         assert expected in guide
@@ -109,7 +127,7 @@ def test_notebook_guide_documents_python_groupings_and_duplicate_preflight():
 def test_sql_guide_documents_schema_relationships_and_operational_objects():
     guide = _read(SQL_GUIDE)
 
-    assert guide.count("```mermaid") == 3
+    assert guide.count("```mermaid") == 4
     for expected in (
         "pricing.DATASET_MANIFEST",
         "pricing.DATASET_COLUMN",
@@ -121,6 +139,8 @@ def test_sql_guide_documents_schema_relationships_and_operational_objects():
         "pricing.PRICING_TERM",
         "pricing.PRICING_RATE_CELL",
         "pricing.PRICING_MODEL_DEPLOYMENT",
+        "mlops.MODEL_FIT_CONTRACT",
+        "pricing.V_MODEL_MONITORING_RELATIVITY",
         "pricing_stg.STG_RATING_EXPORT",
         "PRICING_PACKAGE_POINTER",
         "THROW 51000",

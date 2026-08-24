@@ -1,0 +1,52 @@
+# Copy this file into ignored state/ before adding machine-specific settings.
+
+[run]
+output_dir = "state/scratch_blend_diagnostics"
+random_seed = 1729
+
+[data]
+path = "/absolute/local/path/model_input.parquet"
+# sample_rows = 100000
+
+[columns]
+target = "target_column"
+offset_source = "duration_column"
+offset_divisor = 12
+sample_weight = "sample_weight_column"
+features = [
+  "continuous_feature",
+  "categorical_feature",
+  "period_feature",
+]
+categorical_features = ["categorical_feature"]
+# Put a numeric feature here only if it should be linear rather than a free spline.
+linear_features = []
+
+[model]
+tweedie_power = 1.5
+spline_kind = "ps"
+spline_k = 10
+knot_strategy = "quantile_tempered"
+knot_alpha = 0.2
+n_estimators = 300
+learning_rate = 0.05
+max_depth = 5
+thread_count = -1
+cv_folds = 5
+max_reml_iter = 25
+
+[split]
+train_fraction = 0.6
+validation_fraction = 0.2
+
+[diagnostics]
+governed_gam_weights = [0.4, 0.5]
+double_lift_bins = 10
+risk_bins = 20
+lorenz_bins = 100
+feature_bins = 10
+interaction_bins = 6
+max_categorical_levels = 12
+min_cell_rows = 30
+min_cell_weight_fraction = 0.001
+top_interactions = 6

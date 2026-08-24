@@ -9,6 +9,8 @@ dependencies = [
   "openpyxl",
   "packaging",
   "pandas",
+  "pyarrow>=23.0.1",
+  "plotly>=6.9",
   "pydantic>=2.13,<3",
   "pyodbc",
   "python-dotenv",
@@ -19,6 +21,13 @@ dependencies = [
 
 [project.optional-dependencies]
 mlflow = ["mlflow"]
+scratch = [
+    "catboost",
+    "lightgbm",
+    "matplotlib",
+    "scipy",
+    "xgboost",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -31,6 +40,7 @@ line-length = 100
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.10.9",
     "pytest>=9.0.3",
     "sqlfluff>=4.2.1",
 ]
