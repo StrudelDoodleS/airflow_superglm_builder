@@ -2302,7 +2302,7 @@ def persist_monitoring_fit(
             created_by=created_by,
             component_role=component_role,
         )
-    except IntegrityError, OperationalError:
+    except (IntegrityError, OperationalError):  # fmt: skip
         recovered = _recover_concurrent_monitoring_retry(
             engine,
             result,

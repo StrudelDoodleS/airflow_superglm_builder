@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
@@ -69,15 +70,45 @@ def _monitoring_history_exists(con, *, sqlite: bool) -> bool:
     return con.execute(text(sql)).scalar_one_or_none() is not None
 
 
+def _sqlite_cleanup_command(con) -> str:
+    database_paths = {
+        str(row[1]): str(row[2])
+        for row in con.execute(text("PRAGMA database_list")).fetchall()
+        if str(row[2]).strip()
+    }
+    required = ("main", "pricing", "pricing_stg", "mlops")
+    if any(schema not in database_paths for schema in required):
+        raise SystemExit(
+            "Refusing to suggest local SQLite cleanup because the attached database "
+            "file set is incomplete"
+        )
+    paths = [str(Path(database_paths[schema]).expanduser().resolve()) for schema in required]
+    if len(set(paths)) != len(paths):
+        raise SystemExit(
+            "Refusing to suggest local SQLite cleanup because database files are not distinct"
+        )
+    return shlex.join(["rm", "--", *paths])
+
+
 def reset_pricing_experiments() -> None:
     engine = get_engine()
     with engine.begin() as con:
-        if _monitoring_history_exists(con, sqlite=engine.dialect.name == "sqlite"):
+        sqlite = engine.dialect.name == "sqlite"
+        if _monitoring_history_exists(con, sqlite=sqlite):
+            if sqlite:
+                guidance = (
+                    "Local SQLite cleanup is file based. Run after closing all local "
+                    f"connections: {_sqlite_cleanup_command(con)}"
+                )
+            else:
+                guidance = (
+                    "Run: uv run python scripts/reset_remote_pricing_schema.py "
+                    "--expected-database REPLACE_WITH_DATABASE_NAME --execute "
+                    "--i-understand-this-drops-pricing-objects"
+                )
             raise SystemExit(
                 "Refusing to reset pricing experiments while immutable monitoring "
-                "history exists. Run: uv run python "
-                "scripts/reset_remote_pricing_schema.py --execute "
-                "--i-understand-this-drops-pricing-objects"
+                f"history exists. {guidance}"
             )
         for statement in RESET_SQL.strip().split(";"):
             sql = statement.strip()

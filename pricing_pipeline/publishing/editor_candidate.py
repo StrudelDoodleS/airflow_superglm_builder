@@ -217,7 +217,7 @@ def _manual_policy_provenance_identity(value: object) -> str | None:
     try:
         manual_adjustment_policy_from_metadata(value)
         return _canonical_json(dict(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         return None
 
 
@@ -387,7 +387,7 @@ def _require_existing_submission_revision(
         stored_edit_identity = (
             None if stored_edit_metadata is None else _canonical_json(dict(stored_edit_metadata))
         )
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         requested_edit_identity = None
         stored_edit_identity = "invalid"
     if stored_edit_identity != requested_edit_identity:

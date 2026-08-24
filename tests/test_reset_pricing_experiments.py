@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from pricing_pipeline.infra.offline_sqlite import (
     apply_offline_ddl,
     sqlite_engine_with_offline_schemas,
 )
-from scripts import reset_pricing_experiments
+from scripts import reset_pricing_experiments, reset_remote_pricing_schema
 
 
 def test_reset_sql_deletes_dependent_pricing_tables_before_parent_tables():
@@ -102,8 +103,17 @@ def test_sql_server_reset_refuses_monitoring_history_before_any_delete(monkeypat
     engine = _RecordingEngine(monitoring_exists=True)
     monkeypatch.setattr(reset_pricing_experiments, "get_engine", lambda: engine)
 
-    with pytest.raises(SystemExit, match="reset_remote_pricing_schema.py"):
+    with pytest.raises(SystemExit, match="reset_remote_pricing_schema.py") as exc_info:
         reset_pricing_experiments.reset_pricing_experiments()
+
+    command = str(exc_info.value).split("Run: ", maxsplit=1)[1]
+    tokens = shlex.split(command)
+    script_position = tokens.index("scripts/reset_remote_pricing_schema.py")
+    args = reset_remote_pricing_schema.build_parser().parse_args(tokens[script_position + 1 :])
+    reset_remote_pricing_schema.validate_args(args)
+    assert args.expected_database == "REPLACE_WITH_DATABASE_NAME"
+    assert args.execute is True
+    assert args.confirmed_destructive_reset is True
 
     statements = engine.connection.statements
     assert len(statements) == 2
@@ -292,8 +302,21 @@ def test_confirmed_sqlite_reset_refuses_monitoring_graph_without_mutation(
         connection.execute(text("DELETE FROM pricing.MODEL_MONITOR_METRIC"))
     monkeypatch.setattr(reset_pricing_experiments, "get_engine", lambda: engine)
 
-    with pytest.raises(SystemExit, match="reset_remote_pricing_schema.py"):
+    with pytest.raises(SystemExit, match="Local SQLite") as exc_info:
         reset_pricing_experiments.reset_pricing_experiments()
+
+    message = str(exc_info.value)
+    assert "reset_remote_pricing_schema.py" not in message
+    command = message.split("Run after closing all local connections: ", maxsplit=1)[1]
+    tokens = shlex.split(command)
+    assert tokens == [
+        "rm",
+        "--",
+        str(tmp_path / "coordinator.sqlite"),
+        str(tmp_path / "pricing.sqlite"),
+        str(tmp_path / "pricing_stg.sqlite"),
+        str(tmp_path / "mlops.sqlite"),
+    ]
 
     with engine.connect() as connection:
         for table_name in (

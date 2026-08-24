@@ -131,7 +131,7 @@ def _submission_tree_is_complete(directory: Path) -> bool:
         return False
     try:
         submission_format = json.loads(submission_path.read_text(encoding="utf-8")).get("format")
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):  # fmt: skip
         return False
     if submission_format == LEGACY_SUBMISSION_FORMAT:
         return True

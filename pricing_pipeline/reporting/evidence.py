@@ -883,7 +883,7 @@ def _context_category_labels(feature: str, context: ReportContext) -> pd.Series:
 def _raw_category_identity(value: object) -> tuple[object, ...]:
     try:
         missing = pd.isna(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):  # fmt: skip
         missing = False
     if isinstance(missing, (bool, np.bool_)) and missing:
         return ("missing",)

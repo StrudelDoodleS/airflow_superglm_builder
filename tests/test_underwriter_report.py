@@ -19,6 +19,7 @@ from pricing_pipeline.reporting import (
     build_scored_model_report,
     build_underwriter_report,
 )
+from pricing_pipeline.reporting._core import _sampled_curve
 from pricing_pipeline.reporting.adapters.superglm import SuperGLMReportAdapter
 from pricing_pipeline.reporting.evidence import EvidenceRequest
 
@@ -73,6 +74,36 @@ def test_interaction_points_are_validated():
     assert UnderwriterReportOptions().interaction_points == 80
     with pytest.raises(ValueError, match="interaction_points"):
         UnderwriterReportOptions(interaction_points=1)
+
+
+def test_lorenz_curve_does_not_resolve_below_minimum_comparison_units():
+    rows = 20
+    score = np.arange(1.0, rows + 1.0)
+    weight = np.ones(rows)
+    unit_codes = np.arange(rows)
+    first_actual = np.tile([1.0, 2.0, 3.0, 4.0, 5.0], 4)
+    redistributed_actual = np.tile([0.0, 0.0, 0.0, 0.0, 15.0], 4)
+
+    first = _sampled_curve(
+        first_actual,
+        score,
+        weight,
+        comparison_unit_codes=unit_codes,
+        minimum_cell_size=5,
+        n_bins=100,
+        ascending=True,
+    )
+    redistributed = _sampled_curve(
+        redistributed_actual,
+        score,
+        weight,
+        comparison_unit_codes=unit_codes,
+        minimum_cell_size=5,
+        n_bins=100,
+        ascending=True,
+    )
+
+    assert first == redistributed
 
 
 def test_rating_workbook_adapter_imports_without_superglm():

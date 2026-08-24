@@ -490,10 +490,28 @@ def _sampled_curve(
     prediction: np.ndarray,
     weight: np.ndarray,
     *,
+    comparison_unit_codes: np.ndarray,
+    minimum_cell_size: int,
     n_bins: int,
     ascending: bool,
 ) -> dict[str, list[float]]:
-    exact_x, exact_y = _ordered_curve(actual, prediction, weight, ascending=ascending)
+    ranking_score = prediction if ascending else -prediction
+    privacy_bins = _privacy_safe_bins(
+        ranking_score,
+        weight,
+        comparison_unit_codes,
+        n_bins=n_bins,
+        minimum_cell_size=minimum_cell_size,
+    )
+    grouped_weight = np.bincount(privacy_bins, weights=weight)
+    grouped_actual = np.bincount(privacy_bins, weights=weight * actual)
+    exact_x = np.r_[0.0, np.cumsum(grouped_weight) / grouped_weight.sum()]
+    total_actual = grouped_actual.sum()
+    exact_y = (
+        np.full_like(exact_x, np.nan)
+        if total_actual <= 0.0
+        else np.r_[0.0, np.cumsum(grouped_actual) / total_actual]
+    )
     x = np.linspace(0.0, 1.0, n_bins + 1)
     y = (
         np.full_like(x, np.nan)
@@ -507,6 +525,7 @@ def _curve_payload(
     inputs: _ValidatedInputs,
     *,
     n_bins: int,
+    minimum_cell_size: int,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"models": {}}
     for name, prediction in inputs.predictions.items():
@@ -516,6 +535,8 @@ def _curve_payload(
                 inputs.actual,
                 prediction,
                 inputs.weight,
+                comparison_unit_codes=inputs.comparison_unit_codes,
+                minimum_cell_size=minimum_cell_size,
                 n_bins=n_bins,
                 ascending=True,
             ),
@@ -523,6 +544,8 @@ def _curve_payload(
                 inputs.actual,
                 prediction,
                 inputs.weight,
+                comparison_unit_codes=inputs.comparison_unit_codes,
+                minimum_cell_size=minimum_cell_size,
                 n_bins=n_bins,
                 ascending=False,
             ),
@@ -535,6 +558,8 @@ def _curve_payload(
             inputs.actual,
             inputs.actual,
             inputs.weight,
+            comparison_unit_codes=inputs.comparison_unit_codes,
+            minimum_cell_size=minimum_cell_size,
             n_bins=n_bins,
             ascending=True,
         ),
@@ -542,6 +567,8 @@ def _curve_payload(
             inputs.actual,
             inputs.actual,
             inputs.weight,
+            comparison_unit_codes=inputs.comparison_unit_codes,
+            minimum_cell_size=minimum_cell_size,
             n_bins=n_bins,
             ascending=False,
         ),
@@ -1300,7 +1327,11 @@ def build_scored_model_report(
             n_bins=resolved_options.movement_bins,
             minimum_cell_size=resolved_options.minimum_cell_size,
         ),
-        "curves": _curve_payload(inputs, n_bins=resolved_options.curve_bins),
+        "curves": _curve_payload(
+            inputs,
+            n_bins=resolved_options.curve_bins,
+            minimum_cell_size=resolved_options.minimum_cell_size,
+        ),
         "double_lift": _double_lift_payload(
             inputs,
             n_bins=resolved_options.double_lift_bins,
