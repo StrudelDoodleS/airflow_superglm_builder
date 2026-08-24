@@ -203,8 +203,33 @@ def _canonical_json(payload: Any) -> str:
     )
 
 
+def _categorical_scalar_identity(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null", "value": None}
+    if isinstance(value, bool | np.bool_):
+        return {"type": "boolean", "value": bool(value)}
+    if isinstance(value, int | np.integer):
+        return {"type": "integer", "value": int(value)}
+    if isinstance(value, float | np.floating):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise MonitoringError("categorical real level must be finite")
+        return {"type": "real", "value": 0.0 if numeric == 0.0 else numeric}
+    if isinstance(value, str | np.str_):
+        return {"type": "string", "value": str(value)}
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            raise MonitoringError("categorical timestamp level must not be missing")
+        return {"type": "timestamp", "value": value.isoformat()}
+    raise MonitoringError(f"unsupported categorical level type: {type(value).__qualname__}")
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _label_point_key(identity: Any) -> str:
+    return "label:" + _sha256_text(_canonical_json(identity))
 
 
 def _required_sha256(value: Any, field_name: str) -> str:
@@ -575,7 +600,13 @@ def _evaluation_grid(
                 # Public inference expands a fitted grouping back to original
                 # levels.  Those are the stable business-facing points to track,
                 # not the internal group labels.
-                "points": list(inference.levels or []),
+                "points": [
+                    {
+                        "identity": _categorical_scalar_identity(level),
+                        "label": str(level),
+                    }
+                    for level in (inference.levels or [])
+                ],
             }
         elif kind == "numeric":
             grids[source_name] = {"kind": "numeric", "points": ["per_unit"]}
@@ -998,10 +1029,31 @@ def _requested_level_values(
     points: list[Any],
 ) -> list[tuple[Any, float, float]]:
     levels = list(inference.levels or [])
-    by_text = {str(level): index for index, level in enumerate(levels)}
+    by_identity: dict[str, int] = {}
+    for index, level in enumerate(levels):
+        identity = _canonical_json(_categorical_scalar_identity(level))
+        if identity in by_identity:
+            raise MonitoringError(
+                "fitted categorical levels have an ambiguous typed canonical identity"
+            )
+        by_identity[identity] = index
     rows: list[tuple[Any, float, float]] = []
+    requested_identities: set[str] = set()
     for point in points:
-        index = by_text.get(str(point))
+        if (
+            not isinstance(point, Mapping)
+            or set(point) != {"identity", "label"}
+            or not isinstance(point["identity"], Mapping)
+            or not isinstance(point["label"], str)
+        ):
+            raise MonitoringError("frozen categorical grid point is malformed")
+        identity = _canonical_json(point["identity"])
+        if identity in requested_identities:
+            raise MonitoringError(
+                "frozen categorical grid has an ambiguous typed canonical identity"
+            )
+        requested_identities.add(identity)
+        index = by_identity.get(identity)
         if index is None:
             raise MonitoringError(f"controlled refit is missing frozen categorical level {point!r}")
         rows.append(
@@ -1099,10 +1151,17 @@ def _result_relativities(
 
         for point, relativity, log_relativity in values:
             point_numeric = float(point) if kind == "continuous" else None
-            point_label = None if point_numeric is not None else str(point)
-            point_key = _canonical_json(
-                {"x": point_numeric} if point_numeric is not None else {"level": point_label}
-            )
+            if kind == "categorical":
+                point_label = str(point["label"])
+                point_key = _label_point_key({"level": point["identity"]})
+            else:
+                point_label = None if point_numeric is not None else str(point)
+                if point_numeric is not None:
+                    point_key = _canonical_json({"x": point_numeric})
+                elif kind == "numeric":
+                    point_key = _canonical_json({"level": point})
+                else:
+                    point_key = _label_point_key({"level": point})
             rows.append(
                 MonitoringRelativity(
                     term_name=term_name,

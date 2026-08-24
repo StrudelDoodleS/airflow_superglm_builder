@@ -693,6 +693,140 @@ def test_rating_workbook_adapter_emits_native_evidence_only(tmp_path: Path):
     assert effect.effect["value"].to_numpy() == pytest.approx([0.8, 1.0, 1.25])
 
 
+def test_rating_workbook_adapter_omits_curve_with_internal_unsafe_interval(
+    tmp_path: Path,
+):
+    raw = pd.DataFrame([[None] * 3 for _ in range(11)])
+    raw.iat[4, 0] = "age"
+    raw.iloc[6, 0:3] = ["age", "Relativity", "Weight"]
+    raw.iloc[7, 0:3] = ["[0, 10)", 0.8, 10.0]
+    raw.iloc[8, 0:3] = ["[10, 20)", 1.0, 20.0]
+    raw.iloc[9, 0:3] = ["[20, 30)", 1.2, 30.0]
+    workbook = tmp_path / "continuous_rating_tables.xlsx"
+    raw.to_excel(workbook, sheet_name="Rating Tables", header=False, index=False)
+    frame = pd.DataFrame(
+        {
+            "age": [1.0, 2.0, 11.0, 21.0, 22.0, 29.0],
+            "actual": np.ones(6),
+            "weight": [1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+        }
+    )
+    context = _context(
+        frame,
+        model_name="Published GAM",
+        prediction=np.ones(6),
+        features=("age",),
+        problem_type="burn_cost",
+        deviance_power=1.5,
+    )
+
+    evidence = normalize_model_evidence(
+        "Published GAM",
+        RatingWorkbookAdapter().collect(
+            model_name="Published GAM",
+            source=workbook,
+            context=context,
+        ),
+        context,
+    )
+
+    effect = evidence.main_effects["age"]
+    suppression = getattr(effect, "suppression", None)
+    assert suppression is not None
+    assert suppression.status == "partial"
+    assert suppression.reason == "minimum_support"
+    assert suppression.presentation == "curve_omitted"
+    assert effect.effect.empty
+    assert effect.density is None
+
+
+def test_rating_workbook_adapter_assigns_clipped_tails_to_boundary_intervals(
+    tmp_path: Path,
+):
+    raw = pd.DataFrame([[None] * 3 for _ in range(11)])
+    raw.iat[4, 0] = "age"
+    raw.iloc[6, 0:3] = ["age", "Relativity", "Weight"]
+    raw.iloc[7, 0:3] = ["[0, 10)", 0.8, 10.0]
+    raw.iloc[8, 0:3] = ["[10, 20)", 1.0, 20.0]
+    raw.iloc[9, 0:3] = ["[20, 30)", 1.2, 30.0]
+    workbook = tmp_path / "boundary_rating_tables.xlsx"
+    raw.to_excel(workbook, sheet_name="Rating Tables", header=False, index=False)
+    frame = pd.DataFrame(
+        {
+            "age": [-5.0, 2.0, 11.0, 12.0, 21.0, 30.0, 35.0],
+            "actual": np.ones(7),
+            "weight": [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0],
+        }
+    )
+    context = _context(
+        frame,
+        model_name="Published GAM",
+        prediction=np.ones(7),
+        features=("age",),
+        problem_type="burn_cost",
+        deviance_power=1.5,
+    )
+
+    evidence = normalize_model_evidence(
+        "Published GAM",
+        RatingWorkbookAdapter().collect(
+            model_name="Published GAM",
+            source=workbook,
+            context=context,
+        ),
+        context,
+    )
+
+    effect = evidence.main_effects["age"]
+    assert getattr(effect, "suppression", None) is None
+    assert effect.effect["x"].to_numpy() == pytest.approx([5.0, 15.0, 25.0])
+    assert effect.effect["value"].to_numpy() == pytest.approx([0.8, 1.0, 1.2])
+    assert effect.density is not None
+    assert effect.density["density"].to_numpy() == pytest.approx([3.0, 12.0, 112.0])
+
+
+def test_rating_workbook_adapter_marks_all_intervals_suppressed(tmp_path: Path):
+    raw = pd.DataFrame([[None] * 3 for _ in range(11)])
+    raw.iat[4, 0] = "age"
+    raw.iloc[6, 0:3] = ["age", "Relativity", "Weight"]
+    raw.iloc[7, 0:3] = ["[0, 10)", 0.8, 10.0]
+    raw.iloc[8, 0:3] = ["[10, 20)", 1.0, 20.0]
+    raw.iloc[9, 0:3] = ["[20, 30)", 1.2, 30.0]
+    workbook = tmp_path / "all_suppressed_rating_tables.xlsx"
+    raw.to_excel(workbook, sheet_name="Rating Tables", header=False, index=False)
+    frame = pd.DataFrame(
+        {
+            "age": [1.0, 11.0, 21.0],
+            "actual": np.ones(3),
+            "weight": np.ones(3),
+        }
+    )
+    context = _context(
+        frame,
+        model_name="Published GAM",
+        prediction=np.ones(3),
+        features=("age",),
+        problem_type="burn_cost",
+        deviance_power=1.5,
+    )
+
+    evidence = normalize_model_evidence(
+        "Published GAM",
+        RatingWorkbookAdapter().collect(
+            model_name="Published GAM",
+            source=workbook,
+            context=context,
+        ),
+        context,
+    )
+
+    effect = evidence.main_effects["age"]
+    assert effect.suppression is not None
+    assert effect.suppression.status == "all"
+    assert effect.effect.empty
+    assert effect.density is None
+
+
 def test_rating_workbook_rejects_mismatched_level_header(tmp_path: Path):
     raw = pd.DataFrame([[None] * 3 for _ in range(10)])
     raw.iat[4, 0] = "segment"

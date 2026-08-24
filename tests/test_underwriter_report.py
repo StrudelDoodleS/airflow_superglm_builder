@@ -107,6 +107,39 @@ def test_prediction_movement_uses_tie_safe_weighted_rank_bins():
     assert bins.tolist() == [0, 0, 0, 1, 1, 2]
 
 
+def test_double_lift_privacy_bins_keep_tied_ratios_together_independent_of_row_order():
+    from pricing_pipeline.reporting._core import _privacy_safe_bins
+
+    ratios = np.array([1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    weight = np.array([1.0, 2.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    comparison_unit_codes = np.arange(len(ratios))
+    permutation = np.array([7, 2, 4, 0, 5, 1, 6, 3])
+
+    bins = _privacy_safe_bins(
+        np.log(ratios),
+        weight,
+        comparison_unit_codes,
+        n_bins=4,
+        minimum_cell_size=2,
+    )
+    permuted_bins = _privacy_safe_bins(
+        np.log(ratios[permutation]),
+        weight[permutation],
+        comparison_unit_codes[permutation],
+        n_bins=4,
+        minimum_cell_size=2,
+    )
+    restored_bins = np.empty_like(permuted_bins)
+    restored_bins[permutation] = permuted_bins
+
+    assert bins.tolist() == [0, 0, 0, 1, 1, 2, 2, 2]
+    assert restored_bins.tolist() == bins.tolist()
+    assert all(np.unique(bins[ratios == ratio]).size == 1 for ratio in np.unique(ratios))
+    assert all(
+        np.unique(comparison_unit_codes[bins == label]).size >= 2 for label in np.unique(bins)
+    )
+
+
 def test_prediction_movement_suppresses_small_cells_and_uses_weighted_aggregates():
     from pricing_pipeline.reporting._underwriter_movement import (
         prediction_movement_payload,

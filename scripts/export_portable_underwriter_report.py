@@ -146,6 +146,7 @@ FeatureImportanceEvidence = _evidence.FeatureImportanceEvidence
 InteractionEvidence = _evidence.InteractionEvidence
 MainEffectEvidence = _evidence.MainEffectEvidence
 ModelEvidence = _evidence.ModelEvidence
+SuppressionMetadata = _evidence.SuppressionMetadata
 
 ProblemType = Literal["frequency", "severity", "burn_cost"]
 ColumnOrValues = str | Sequence[float] | np.ndarray | pd.Series
@@ -423,6 +424,7 @@ __all__ = [
     "MainEffectEvidence",
     "ModelEvidence",
     "PortableReportConfig",
+    "SuppressionMetadata",
     "UnderwriterReportError",
     "UnderwriterReportOptions",
     "UnderwriterReportResult",

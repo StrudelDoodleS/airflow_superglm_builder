@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from pricing_pipeline.reporting.evidence import (
     MainEffectEvidence,
     ModelEvidence,
     ReportContext,
+    SuppressionMetadata,
 )
 
 _RATING_SHEET = "Rating Tables"
@@ -27,6 +29,8 @@ _HEADER_ROW = 6
 _DATA_START_ROW = 7
 _SOURCE = "rating workbook"
 _LEVEL_HEADERS = frozenset({"level", "levels", "category", "categories", "value", "values"})
+_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_INTERVAL_RE = re.compile(rf"^\s*\[\s*({_NUMBER_PATTERN})\s*,\s*({_NUMBER_PATTERN})\s*\)\s*$")
 
 
 class RatingWorkbookAdapter:
@@ -52,18 +56,7 @@ class RatingWorkbookAdapter:
             if feature in allowed
         }
         main_effects = {
-            feature: MainEffectEvidence(
-                feature=feature,
-                semantic="native_component",
-                effect=pd.DataFrame(
-                    {
-                        "label": block["labels"],
-                        "value": block["relativity"],
-                    }
-                ),
-                source=_SOURCE,
-            )
-            for feature, block in blocks.items()
+            feature: _main_effect(feature, block, context) for feature, block in blocks.items()
         }
         return ModelEvidence(
             source=_SOURCE,
@@ -152,6 +145,111 @@ def _workbook_blocks(path: Path) -> dict[str, dict[str, Any]]:
 
 def _normalize_label(value: object) -> str:
     return " ".join(str(value).split()).casefold()
+
+
+def _main_effect(
+    feature: str,
+    block: dict[str, Any],
+    context: ReportContext,
+) -> MainEffectEvidence:
+    numeric_values = _numeric_context_values(context.frame[feature])
+    intervals = (
+        _continuous_intervals(feature, block["labels"]) if numeric_values is not None else None
+    )
+    if intervals is None:
+        return MainEffectEvidence(
+            feature=feature,
+            semantic="native_component",
+            effect=pd.DataFrame(
+                {
+                    "label": block["labels"],
+                    "value": block["relativity"],
+                }
+            ),
+            source=_SOURCE,
+        )
+
+    codes = np.asarray(context.comparison_unit_codes)
+    weights = np.asarray(context.weight, dtype=float)
+    coordinates = [lower + (upper - lower) / 2.0 for lower, upper in intervals]
+    masks = [
+        _interval_membership(numeric_values, intervals, index) for index in range(len(intervals))
+    ]
+    safe = [len(np.unique(codes[mask])) >= context.minimum_cell_size for mask in masks]
+    if not all(safe):
+        return MainEffectEvidence(
+            feature=feature,
+            semantic="native_component",
+            effect=pd.DataFrame({"x": [], "value": []}, dtype=float),
+            source=_SOURCE,
+            suppression=SuppressionMetadata(
+                status="partial" if any(safe) else "all",
+                reason="minimum_support",
+                presentation="curve_omitted",
+            ),
+        )
+    exposures = [float(weights[mask].sum()) for mask in masks]
+    relativities = [
+        float(relativity)
+        for (_lower, _upper), relativity in zip(
+            intervals,
+            block["relativity"],
+            strict=True,
+        )
+    ]
+    return MainEffectEvidence(
+        feature=feature,
+        semantic="native_component",
+        effect=pd.DataFrame({"x": coordinates, "value": relativities}),
+        source=_SOURCE,
+        density=pd.DataFrame({"x": coordinates, "density": exposures}),
+    )
+
+
+def _interval_membership(
+    values: np.ndarray,
+    intervals: list[tuple[float, float]],
+    index: int,
+) -> np.ndarray:
+    lower, upper = intervals[index]
+    if len(intervals) == 1:
+        return np.isfinite(values)
+    if index == 0:
+        return values < upper
+    if index == len(intervals) - 1:
+        return values >= lower
+    return (values >= lower) & (values < upper)
+
+
+def _numeric_context_values(values: pd.Series) -> np.ndarray | None:
+    numeric = pd.to_numeric(values, errors="coerce")
+    if numeric[values.notna()].isna().any():
+        return None
+    return numeric.to_numpy(dtype=float)
+
+
+def _continuous_intervals(
+    feature: str,
+    labels: list[str],
+) -> list[tuple[float, float]] | None:
+    matches = [_INTERVAL_RE.fullmatch(label) for label in labels]
+    if not any(matches):
+        return None
+    if not all(matches):
+        raise UnderwriterReportError(
+            f"rating workbook term {feature!r} mixes interval and categorical levels"
+        )
+    intervals = [(float(match.group(1)), float(match.group(2))) for match in matches if match]
+    for index, (lower, upper) in enumerate(intervals):
+        if not math.isfinite(lower) or not math.isfinite(upper) or lower >= upper:
+            raise UnderwriterReportError(
+                f"rating workbook term {feature!r} contains an invalid interval"
+            )
+        if index and lower != intervals[index - 1][1]:
+            raise UnderwriterReportError(
+                f"rating workbook term {feature!r} contains non-contiguous intervals"
+            )
+    return intervals
 
 
 def _weighted_mean(values: np.ndarray, weight: np.ndarray) -> float:

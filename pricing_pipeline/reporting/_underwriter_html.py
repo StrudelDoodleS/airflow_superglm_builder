@@ -610,6 +610,7 @@ __REPORT_BASE_CSS__
         <div id="relativity-empty" class="review-empty" hidden>Supply normalized main-effect evidence or a fitted-model adapter to show effects.</div>
         <div id="relativity-content" class="review-workspace">
           <div class="review-plot-column" data-print-page="relativities-figure" data-print-role="figure" data-print-section="Relativities">
+            <div id="relativity-suppression-note" class="review-empty" hidden></div>
             <div class="chart-shell review-chart-shell"><div class="review-chart" id="relativity-chart"></div></div>
             <div class="metrics-strip"><div class="metric-grid" id="relativity-metrics"></div></div>
           </div>
@@ -1552,7 +1553,29 @@ __REPORT_BASE_CSS__
         const all = DATA.relativities[feature] || {};
         selectedModel = $("relativity-model").value;
         const names = selectedModel === "__all__" ? Object.keys(all) : [selectedModel];
-        const first = all[names[0]];
+        const firstRenderableName = names.find(name => {
+          const series = all[name];
+          return series
+            && series.suppression?.presentation !== "curve_omitted"
+            && Array.isArray(series.relativity)
+            && series.relativity.length > 0;
+        });
+        const firstName = firstRenderableName || names.find(name => all[name]);
+        const first = all[firstName];
+        const suppressionNote = $("relativity-suppression-note");
+        const suppressionMessages = {
+          partial: "at least one interval did not meet minimum privacy support.",
+          all: "no interval met minimum privacy support."
+        };
+        const suppressedSeries = names.map(name => ({
+          name,
+          suppression: all[name]?.suppression
+        })).filter(item => item.suppression?.presentation === "curve_omitted");
+        const suppressionMessage = suppressedSeries.map(item => (
+          `Curve omitted for ${item.name} because ${suppressionMessages[item.suppression.status]}`
+        )).join(" ");
+        suppressionNote.textContent = suppressionMessage || "";
+        suppressionNote.hidden = !suppressionMessage;
         const presentation = first?.presentation || {
           title: feature, axis_label: "relativity", reference_value: 1,
           kind_label: first?.kind || "Native fitted component",
@@ -1596,7 +1619,13 @@ __REPORT_BASE_CSS__
           ["Source", first?.source || "—"], ["EDF", number(first?.effective_df, 3)],
           ["Exposure total", number(exposureValues.reduce((sum, value) => sum + value, 0), 3)],
           ["Safe support", categorical && safeSupport.length ? `${Math.min(...safeSupport)}–${Math.max(...safeSupport)} distinct comparison units` : "—"],
-          ["Suppressed levels", categorical ? String(first?.suppressed_levels || 0) : "—"]
+          ["Suppressed levels", categorical ? String(first?.suppressed_levels || 0) : "—"],
+          [
+            "Curve suppression",
+            suppressedSeries.length
+              ? `Omitted for privacy: ${suppressedSeries.map(item => item.name).join(", ")}`
+              : "None"
+          ]
         ], presentation.note);
         $("relativity-note").textContent = presentation.note;
       };

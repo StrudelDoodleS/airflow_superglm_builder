@@ -206,6 +206,50 @@ def test_checked_in_portable_artifact_matches_canonical_sources():
     assert PORTABLE_PATH.read_text(encoding="utf-8") == render_portable_script()
 
 
+def test_portable_direct_evidence_preserves_curve_suppression_metadata(tmp_path: Path):
+    from scripts import portable_underwriter_report as portable
+
+    frame = _scored_frame().assign(numeric_feature=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    evidence = {
+        "Current": portable.ModelEvidence(
+            source="portable adapter",
+            main_effects={
+                "numeric_feature": portable.MainEffectEvidence(
+                    feature="numeric_feature",
+                    semantic="native_component",
+                    effect=pd.DataFrame({"x": [], "value": []}, dtype=float),
+                    source="portable adapter",
+                    suppression=portable.SuppressionMetadata(
+                        status="all",
+                        reason="minimum_support",
+                        presentation="curve_omitted",
+                    ),
+                )
+            },
+        )
+    }
+
+    result = portable.build_report(
+        frame,
+        actual="actual",
+        predictions={"Current": "current"},
+        sample_weight="weight",
+        features=["numeric_feature"],
+        model_type="frequency",
+        output_path=tmp_path / "portable-suppression.html",
+        evidence=evidence,
+        minimum_cell_size=2,
+    )
+
+    assert "SuppressionMetadata" in portable.__all__
+    series = _embedded_payload(result.output_path)["relativities"]["numeric_feature"]["Current"]
+    assert series["suppression"] == {
+        "status": "all",
+        "reason": "minimum_support",
+        "presentation": "curve_omitted",
+    }
+
+
 def test_copied_script_builds_report_from_relative_csv_toml(tmp_path: Path):
     from scripts.export_portable_underwriter_report import PORTABLE_PATH
 

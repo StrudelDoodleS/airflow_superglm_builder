@@ -272,6 +272,45 @@ def test_main_effect_normalization_retains_only_declared_columns(
     ]
 
 
+@pytest.mark.parametrize(
+    ("categories", "label"),
+    [
+        ([1, "1"], "1"),
+        ([np.nan, "nan"], "nan"),
+    ],
+)
+def test_categorical_main_effect_rejects_ambiguous_display_categories(
+    categories: list[object],
+    label: str,
+):
+    context = ReportContext(
+        frame=pd.DataFrame({"segment": categories, "age": [0.0, 1.0]}),
+        actual=np.array([0.1, 0.2]),
+        predictions={"Model A": np.array([0.2, 0.3])},
+        weight=np.ones(2),
+        features=("segment", "age"),
+        comparison_unit_codes=np.array([0, 1]),
+        comparison_units=2,
+        minimum_cell_size=2,
+        problem_type="burn_cost",
+        deviance_power=1.5,
+    )
+    evidence = ModelEvidence(
+        source="direct",
+        main_effects={
+            "segment": MainEffectEvidence(
+                feature="segment",
+                semantic="partial_dependence",
+                effect=pd.DataFrame({"label": [label], "value": [1.0]}),
+                source="direct",
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="segment.*ambiguous text representation"):
+        normalize_model_evidence("Model A", evidence, context)
+
+
 @pytest.mark.parametrize("oversized_part", ["effect", "density"])
 def test_numeric_main_effect_grids_are_bounded(
     report_context: ReportContext,

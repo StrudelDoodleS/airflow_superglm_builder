@@ -7,6 +7,8 @@ import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,6 +34,7 @@ from pricing_pipeline.infra.offline_sqlite import (
     apply_offline_ddl,
     sqlite_engine_with_offline_schemas,
 )
+from pricing_pipeline.modeling import monitoring as monitoring_module
 from pricing_pipeline.modeling.monitoring import (
     MonitoringError,
     MonitoringVariant,
@@ -82,6 +85,31 @@ def monitoring_case():
     )
     model.fit_reml(X, y, max_reml_iter=5, runtime_validation="skip")
     return model, X, y
+
+
+def _mixed_type_categorical_case(first=1, second="1"):
+    levels = np.empty(120, dtype=object)
+    levels[0::2] = first
+    levels[1::2] = second
+    X = pd.DataFrame({"segment": levels})
+    y = np.where(np.arange(len(X)) % 2 == 0, 1, 3)
+    model = SuperGLM(
+        family="poisson",
+        features={"segment": Categorical(levels=[first, second], base=first)},
+        selection_penalty=0.0,
+    ).fit(X, y)
+    return model, X, y
+
+
+def _expected_categorical_point_key(type_tag, value):
+    identity_json = json.dumps(
+        {"level": {"type": type_tag, "value": value}},
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "label:" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
 
 
 def test_fit_contract_and_variants_freeze_domain_structure(monitoring_case):
@@ -250,6 +278,111 @@ def test_full_adaptive_evaluates_frozen_natural_spline_grid_with_real_extrapolat
         (float(adaptive_X["x"].min()), float(adaptive_X["x"].max()))
     )
     assert actual_delta == pytest.approx(expected_delta)
+
+
+def test_monitoring_preserves_typed_categorical_level_identity_in_memory():
+    model, X, y = _mixed_type_categorical_case()
+    inference = model.term_inference("segment", with_se=False, centering="native")
+    expected_log_relativity = {
+        _expected_categorical_point_key("integer", 1): float(inference.log_relativity[0]),
+        _expected_categorical_point_key("string", "1"): float(inference.log_relativity[1]),
+    }
+
+    result = run_monitoring_fit(
+        model,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+    )
+    rows = [row for row in result.relativities if row.term_name == "segment"]
+
+    assert [row.point_label for row in rows] == ["1", "1"]
+    assert {row.point_key for row in rows} == set(expected_log_relativity)
+    assert {row.point_key: row.log_relativity for row in rows} == pytest.approx(
+        expected_log_relativity
+    )
+
+
+def test_monitoring_distinguishes_timestamp_level_from_identical_iso_text():
+    timestamp = pd.Timestamp("2026-01-01")
+    iso_text = timestamp.isoformat()
+    model, X, y = _mixed_type_categorical_case(timestamp, iso_text)
+    inference = model.term_inference("segment", with_se=False, centering="native")
+    expected_log_relativity = {
+        _expected_categorical_point_key("timestamp", timestamp.isoformat()): float(
+            inference.log_relativity[0]
+        ),
+        _expected_categorical_point_key("string", iso_text): float(inference.log_relativity[1]),
+    }
+
+    result = run_monitoring_fit(
+        model,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+    )
+    rows = [row for row in result.relativities if row.term_name == "segment"]
+
+    assert [row.point_label for row in rows] == [str(timestamp), iso_text]
+    assert {row.point_key for row in rows} == set(expected_log_relativity)
+    assert {row.point_key: row.log_relativity for row in rows} == pytest.approx(
+        expected_log_relativity
+    )
+
+
+def test_case_distinct_categorical_keys_are_collation_safe_and_deterministic():
+    model, X, y = _mixed_type_categorical_case("A", "a")
+    inference = model.term_inference("segment", with_se=False, centering="native")
+    expected_log_relativity = {
+        _expected_categorical_point_key("string", "A"): float(inference.log_relativity[0]),
+        _expected_categorical_point_key("string", "a"): float(inference.log_relativity[1]),
+    }
+
+    result = run_monitoring_fit(model, X, y, variant=MonitoringVariant.STATIC_SCORE)
+    repeated = run_monitoring_fit(model, X, y, variant=MonitoringVariant.STATIC_SCORE)
+    rows = [row for row in result.relativities if row.term_name == "segment"]
+    keys = [row.point_key for row in rows]
+
+    assert [row.point_label for row in rows] == ["A", "a"]
+    assert set(keys) == set(expected_log_relativity)
+    assert len({key.casefold() for key in keys}) == 2
+    assert all(key.startswith("label:") and len(key) == 70 for key in keys)
+    assert {row.point_key: row.log_relativity for row in rows} == pytest.approx(
+        expected_log_relativity
+    )
+    assert result.result_evidence_sha256 == repeated.result_evidence_sha256
+    assert result.contract.payload()["evaluation_grid"]["segment"]["points"] == [
+        {"identity": {"type": "string", "value": "A"}, "label": "A"},
+        {"identity": {"type": "string", "value": "a"}, "label": "a"},
+    ]
+
+
+def test_label_point_key_is_case_safe_for_composite_interaction_labels():
+    upper = monitoring_module._label_point_key({"level": "region=A|channel=Web"})
+    lower = monitoring_module._label_point_key({"level": "region=a|channel=Web"})
+
+    assert upper != lower
+    assert upper.casefold() != lower.casefold()
+    assert upper == monitoring_module._label_point_key({"level": "region=A|channel=Web"})
+
+
+@pytest.mark.parametrize(
+    ("value", "type_name"),
+    [
+        (b"opaque", "bytes"),
+        (Decimal(1), "Decimal"),
+        (date(2026, 1, 1), "date"),
+    ],
+)
+def test_categorical_scalar_identity_fails_closed_for_unsupported_types(
+    value,
+    type_name,
+):
+    with pytest.raises(
+        MonitoringError,
+        match=f"unsupported categorical level type: {type_name}",
+    ):
+        monitoring_module._categorical_scalar_identity(value)
 
 
 def test_monitoring_metrics_use_declared_sample_weights(monitoring_case):
@@ -854,6 +987,116 @@ def _seed_monitoring_lineage(
                 """
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected_labels"),
+    [
+        pytest.param(
+            1,
+            "1",
+            {
+                _expected_categorical_point_key("integer", 1): "1",
+                _expected_categorical_point_key("string", "1"): "1",
+            },
+            id="integer-and-string",
+        ),
+        pytest.param(
+            pd.Timestamp("2026-01-01"),
+            "2026-01-01T00:00:00",
+            {
+                _expected_categorical_point_key(
+                    "timestamp", "2026-01-01T00:00:00"
+                ): "2026-01-01 00:00:00",
+                _expected_categorical_point_key(
+                    "string", "2026-01-01T00:00:00"
+                ): "2026-01-01T00:00:00",
+            },
+            id="timestamp-and-iso-string",
+        ),
+        pytest.param(
+            "A",
+            "a",
+            {
+                _expected_categorical_point_key("string", "A"): "A",
+                _expected_categorical_point_key("string", "a"): "a",
+            },
+            id="case-distinct-strings",
+        ),
+    ],
+)
+def test_candidate_monitoring_persists_mixed_type_categorical_points_uniquely(
+    tmp_path,
+    first,
+    second,
+    expected_labels,
+):
+    model, X, y = _mixed_type_categorical_case(first, second)
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    model_frame = X.assign(target=y)
+    result = run_monitoring_fit(
+        candidate,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        model_frame=model_frame,
+        target_column="target",
+    )
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    _seed_monitoring_lineage(
+        engine,
+        model_frame_sha256=model_frame_evidence(model_frame)[0],
+        candidate=candidate,
+        monitor_row_count=len(model_frame),
+    )
+
+    persisted = persist_monitoring_fit(
+        engine,
+        result,
+        baseline_model_run_id="baseline-run-1",
+        baseline_deployment_id=93,
+        manifest_id="manifest-monitor-1",
+        created_by="pytest",
+    )
+    retry = persist_monitoring_fit(
+        engine,
+        result,
+        baseline_model_run_id="baseline-run-1",
+        baseline_deployment_id=93,
+        manifest_id="manifest-monitor-1",
+        created_by="pytest",
+    )
+    with engine.connect() as connection:
+        stored = (
+            connection.execute(
+                text(
+                    """
+                    SELECT point_key, point_label, log_relativity
+                    FROM pricing.MODEL_MONITOR_RELATIVITY
+                    WHERE monitor_run_id = :monitor_run_id
+                      AND term_name = 'segment'
+                    ORDER BY point_key
+                    """
+                ),
+                {"monitor_run_id": persisted.monitor_run_id},
+            )
+            .mappings()
+            .all()
+        )
+
+    assert {row["point_key"]: row["point_label"] for row in stored} == expected_labels
+    assert len({row["point_key"].casefold() for row in stored}) == 2
+    assert stored[0]["log_relativity"] != pytest.approx(stored[1]["log_relativity"])
+    assert retry.monitor_run_id == persisted.monitor_run_id
+    assert retry.run_signature_sha256 == persisted.run_signature_sha256
+    assert retry.deduplicated is True
 
 
 @pytest.mark.parametrize(

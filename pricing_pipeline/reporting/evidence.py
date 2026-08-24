@@ -32,6 +32,9 @@ InteractionPlotKind = Literal[
     "factor_smooth",
 ]
 ExactLossSizeBasis = Literal["row_count", "weight_sum"]
+SuppressionStatus = Literal["partial", "all"]
+SuppressionReason = Literal["minimum_support"]
+SuppressionPresentation = Literal["curve_omitted"]
 
 MAX_MAIN_EFFECT_GRID_POINTS = 512
 MAX_SURFACE_AXIS_POINTS = 160
@@ -127,6 +130,13 @@ class FeatureImportanceEvidence:
 
 
 @dataclass(frozen=True)
+class SuppressionMetadata:
+    status: SuppressionStatus
+    reason: SuppressionReason
+    presentation: SuppressionPresentation
+
+
+@dataclass(frozen=True)
 class MainEffectEvidence:
     feature: str
     semantic: EvidenceSemantic
@@ -136,6 +146,7 @@ class MainEffectEvidence:
     effective_df: float | None = None
     facts: tuple[EvidenceFact, ...] = ()
     warnings: tuple[str, ...] = ()
+    suppression: SuppressionMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -399,6 +410,9 @@ def _normalize_main_effects(
             density = _categorical_support(feature, effect["label"], context)
         _validate_bounds(effect)
         effective_df = _optional_finite_number(main_effect.effective_df, "main_effect.effective_df")
+        suppression = _normalize_suppression(main_effect.suppression)
+        if suppression is not None and (not effect.empty or density is not None):
+            raise ValueError("suppressed main effects must omit the entire effect and density")
         normalized[key] = MainEffectEvidence(
             feature=feature,
             semantic=semantic,
@@ -408,8 +422,23 @@ def _normalize_main_effects(
             effective_df=effective_df,
             facts=_normalize_facts(main_effect.facts),
             warnings=_normalize_warnings(main_effect.warnings),
+            suppression=suppression,
         )
     return normalized
+
+
+def _normalize_suppression(value: object) -> SuppressionMetadata | None:
+    if value is None:
+        return None
+    if not isinstance(value, SuppressionMetadata):
+        raise TypeError("main_effect.suppression must be SuppressionMetadata")
+    if value.status not in {"partial", "all"}:
+        raise ValueError("main_effect.suppression.status is invalid")
+    if value.reason != "minimum_support":
+        raise ValueError("main_effect.suppression.reason is invalid")
+    if value.presentation != "curve_omitted":
+        raise ValueError("main_effect.suppression.presentation is invalid")
+    return value
 
 
 def _normalize_numeric_density(density: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -429,7 +458,7 @@ def _normalize_numeric_density(density: pd.DataFrame | None) -> pd.DataFrame | N
 
 
 def _categorical_support(feature: str, labels: pd.Series, context: ReportContext) -> pd.DataFrame:
-    values = context.frame[feature].astype(str)
+    values = _context_category_labels(feature, context)
     codes = np.asarray(context.comparison_unit_codes)
     weights = np.asarray(context.weight, dtype=float)
     masks = [values.eq(label).to_numpy() for label in labels]

@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 
 from pricing_pipeline.reporting._underwriter_html import render_underwriter_html
-from pricing_pipeline.reporting._underwriter_movement import prediction_movement_payload
+from pricing_pipeline.reporting._underwriter_movement import (
+    _tie_safe_weighted_bins,
+    prediction_movement_payload,
+)
 from pricing_pipeline.reporting.evidence import (
     MAX_MAIN_EFFECT_GRID_POINTS,
     MAX_SURFACE_AXIS_POINTS,
@@ -267,23 +270,6 @@ def _validate_inputs(
 
 def _weighted_mean(values: np.ndarray, weight: np.ndarray) -> float:
     return float(np.average(values, weights=weight))
-
-
-def _weighted_quantile_bins(
-    values: np.ndarray,
-    weight: np.ndarray,
-    *,
-    n_bins: int,
-) -> np.ndarray:
-    order = np.argsort(values, kind="stable")
-    ordered_weight = weight[order]
-    midpoint = np.cumsum(ordered_weight) - 0.5 * ordered_weight
-    ordered_bins = np.floor(n_bins * midpoint / ordered_weight.sum()).astype(int)
-    ordered_bins = np.clip(ordered_bins, 0, n_bins - 1)
-    _, ordered_bins = np.unique(ordered_bins, return_inverse=True)
-    bins = np.empty(len(order), dtype=int)
-    bins[order] = ordered_bins
-    return bins
 
 
 def _ordered_curve(
@@ -669,7 +655,7 @@ def _privacy_safe_bins(
     effective_bins = min(n_bins, maximum_bins)
     if effective_bins == 1:
         return np.zeros(len(values), dtype=int)
-    bins = _weighted_quantile_bins(values, weight, n_bins=effective_bins)
+    bins = _tie_safe_weighted_bins(values, weight, n_bins=effective_bins)
     while True:
         labels = np.unique(bins)
         cell_units = np.asarray(
@@ -1051,6 +1037,7 @@ def _main_effect_series(
             "x": main_effect.density["x"].tolist(),
             "y": weight,
         }
+    suppression = main_effect.suppression
     return {
         "x": x,
         "labels": labels,
@@ -1067,6 +1054,15 @@ def _main_effect_series(
         "source": main_effect.source,
         "suppressed_levels": suppressed_levels,
         "support_basis": support_basis,
+        "suppression": (
+            None
+            if suppression is None
+            else {
+                "status": suppression.status,
+                "reason": suppression.reason,
+                "presentation": suppression.presentation,
+            }
+        ),
     }
 
 

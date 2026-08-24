@@ -21,6 +21,7 @@ from pricing_pipeline.reporting.evidence import (
     InteractionEvidence,
     MainEffectEvidence,
     ModelEvidence,
+    SuppressionMetadata,
 )
 
 
@@ -546,6 +547,265 @@ def test_categorical_support_redacts_cells_below_the_privacy_threshold(tmp_path:
     ]
     assert series["suppressed_levels"] == 1
     assert unsafe_label not in result.output_path.read_text(encoding="utf-8")
+
+
+def _suppressed_numeric_report(tmp_path: Path, status: str):
+    frame = _scored_frame()
+    evidence = {
+        "Model A": ModelEvidence(
+            source="model-neutral adapter",
+            main_effects={
+                "age": MainEffectEvidence(
+                    feature="age",
+                    semantic="native_component",
+                    effect=pd.DataFrame({"x": [], "value": []}, dtype=float),
+                    source="rating workbook",
+                    suppression=SuppressionMetadata(
+                        status=status,
+                        reason="minimum_support",
+                        presentation="curve_omitted",
+                    ),
+                )
+            },
+        )
+    }
+    return build_scored_model_report(
+        frame,
+        actual="actual",
+        predictions={"Model A": "model_a"},
+        sample_weight="weight",
+        features=["age"],
+        evidence=evidence,
+        output_path=tmp_path / f"{status}-suppression.html",
+        options=UnderwriterReportOptions(
+            problem_type="burn_cost",
+            tweedie_power=1.5,
+            comparison_bootstrap_replicates=0,
+            minimum_cell_size=2,
+        ),
+    )
+
+
+@pytest.mark.parametrize("status", ["partial", "all"])
+def test_numeric_curve_suppression_metadata_reaches_payload(
+    tmp_path: Path,
+    status: str,
+):
+    result = _suppressed_numeric_report(tmp_path, status)
+
+    series = _embedded_payload(result.output_path)["relativities"]["age"]["Model A"]
+    assert series["x"] == []
+    assert series["relativity"] == []
+    assert series["density"] is None
+    assert series["suppression"] == {
+        "status": status,
+        "reason": "minimum_support",
+        "presentation": "curve_omitted",
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_message"),
+    [
+        (
+            "partial",
+            (
+                "Curve omitted for Model A because at least one interval did not meet minimum "
+                "privacy support."
+            ),
+        ),
+        (
+            "all",
+            "Curve omitted for Model A because no interval met minimum privacy support.",
+        ),
+    ],
+)
+def test_complete_html_displays_numeric_curve_suppression(
+    tmp_path: Path,
+    status: str,
+    expected_message: str,
+):
+    chromium = _headless_chromium()
+    if chromium is None:
+        pytest.skip("headless Chromium is unavailable")
+    result = _suppressed_numeric_report(tmp_path, status)
+
+    completed = subprocess.run(
+        [
+            str(chromium),
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--allow-file-access-from-files",
+            "--virtual-time-budget=5000",
+            "--dump-dom",
+            result.output_path.resolve().as_uri(),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    match = re.search(
+        r'<div id="relativity-suppression-note"([^>]*)>(.*?)</div>',
+        completed.stdout,
+        flags=re.DOTALL,
+    )
+
+    assert match is not None
+    assert "hidden" not in match.group(1)
+    assert unescape(match.group(2)).strip() == expected_message
+
+
+def test_complete_html_tracks_suppression_for_each_selected_model(tmp_path: Path):
+    chromium = _headless_chromium()
+    if chromium is None:
+        pytest.skip("headless Chromium is unavailable")
+    frame = _scored_frame()
+    evidence = {
+        "Model B": ModelEvidence(
+            source="rating workbook",
+            main_effects={
+                "age": MainEffectEvidence(
+                    feature="age",
+                    semantic="native_component",
+                    effect=pd.DataFrame({"x": [], "value": []}, dtype=float),
+                    source="rating workbook",
+                    suppression=SuppressionMetadata(
+                        status="partial",
+                        reason="minimum_support",
+                        presentation="curve_omitted",
+                    ),
+                )
+            },
+        ),
+        "Model A": ModelEvidence(
+            source="safe adapter",
+            main_effects={
+                "age": MainEffectEvidence(
+                    feature="age",
+                    semantic="native_component",
+                    effect=pd.DataFrame({"x": [20.0, 45.0, 70.0], "value": [0.9, 1.0, 1.2]}),
+                    density=pd.DataFrame({"x": [20.0, 45.0, 70.0], "density": [1.0, 2.0, 3.0]}),
+                    source="safe adapter",
+                )
+            },
+        ),
+    }
+    result = build_scored_model_report(
+        frame,
+        actual="actual",
+        predictions={"Model B": "model_b", "Model A": "model_a"},
+        sample_weight="weight",
+        features=["age"],
+        evidence=evidence,
+        output_path=tmp_path / "mixed-suppression.html",
+        options=UnderwriterReportOptions(
+            problem_type="burn_cost",
+            tweedie_power=1.5,
+            comparison_bootstrap_replicates=0,
+            minimum_cell_size=2,
+        ),
+    )
+    probe = """
+    <script>
+      window.setTimeout(() => {
+        const note = document.getElementById("relativity-suppression-note");
+        const select = document.getElementById("relativity-model");
+        const state = () => {
+          const metrics = Object.fromEntries(
+            [...document.querySelectorAll("#relativity-metrics .metric-item")].map(node => [
+              node.querySelector(".metric-item-name").textContent,
+              node.querySelector(".metric-item-value").textContent
+            ])
+          );
+          const facts = Object.fromEntries(
+            [...document.querySelectorAll("#relativity-inspector .summary-fact")].map(node => [
+              node.querySelector("span").textContent,
+              node.querySelector("strong").textContent
+            ])
+          );
+          return {
+            hidden: note.hidden,
+            text: note.textContent,
+            points: metrics.Points,
+            source: facts.Source,
+            exposure: facts["Exposure total"]
+          };
+        };
+        const allModels = state();
+        select.value = "Model A";
+        select.dispatchEvent(new Event("change"));
+        const safeModel = state();
+        select.value = "Model B";
+        select.dispatchEvent(new Event("change"));
+        const suppressedModel = state();
+        document.body.dataset.suppressionProbe = JSON.stringify({
+          allModels, safeModel, suppressedModel
+        });
+      }, 1200);
+    </script>
+    """
+    result.output_path.write_text(
+        result.output_path.read_text(encoding="utf-8").replace(
+            "</body>",
+            f"{probe}</body>",
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            str(chromium),
+            "--headless",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--allow-file-access-from-files",
+            "--virtual-time-budget=5000",
+            "--dump-dom",
+            result.output_path.resolve().as_uri(),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    match = re.search(r'data-suppression-probe="([^"]+)"', completed.stdout)
+
+    assert match is not None
+    observed = json.loads(unescape(match.group(1)))
+    expected = {
+        "allModels": {
+            "hidden": False,
+            "text": (
+                "Curve omitted for Model B because at least one interval did not meet "
+                "minimum privacy support."
+            ),
+            "points": "3",
+            "source": "safe adapter",
+            "exposure": "6",
+        },
+        "safeModel": {
+            "hidden": True,
+            "text": "",
+            "points": "3",
+            "source": "safe adapter",
+            "exposure": "6",
+        },
+        "suppressedModel": {
+            "hidden": False,
+            "text": (
+                "Curve omitted for Model B because at least one interval did not meet "
+                "minimum privacy support."
+            ),
+            "points": "0",
+            "source": "rating workbook",
+            "exposure": "0",
+        },
+    }
+    assert observed == expected
 
 
 def test_categorical_main_effect_plots_weighted_business_exposure(tmp_path: Path):
