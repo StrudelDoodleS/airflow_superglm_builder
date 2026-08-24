@@ -554,6 +554,48 @@ def test_superglm_adapter_fails_closed_without_retained_fitted_offset():
     )
 
 
+def test_superglm_adapter_rejects_retained_offset_for_different_report_rows():
+    row_count = 40
+    train = pd.DataFrame(
+        {
+            "x": np.linspace(0.0, 1.0, row_count),
+            "actual": np.resize([0.0, 1.0, 2.0, 1.0], row_count),
+            "weight": np.linspace(0.5, 1.5, row_count),
+        }
+    )
+    offset = np.log(np.linspace(0.8, 1.2, row_count))
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        train[["x"]],
+        train["actual"],
+        sample_weight=train["weight"],
+        offset=offset,
+    )
+    holdout = train.assign(x=train["x"] + 0.25)
+    prediction = model.predict(holdout[["x"]], offset=offset)
+    context = _context(
+        holdout,
+        model_name="Different rows",
+        prediction=prediction,
+        features=("x",),
+        problem_type="frequency",
+        deviance_power=1.0,
+    )
+
+    with pytest.raises(UnderwriterReportError) as exc_info:
+        SuperGLMReportAdapter().collect(
+            model_name="Different rows",
+            source=model,
+            context=context,
+        )
+
+    assert str(exc_info.value) == (
+        "fitted SuperGLM object for 'Different rows' does not match the supplied prediction series"
+    )
+
+
 def test_unsupported_superglm_capabilities_have_stable_plain_text_reasons(monkeypatch):
     class UnsupportedModel:
         def term_importance(self, frame, weight):

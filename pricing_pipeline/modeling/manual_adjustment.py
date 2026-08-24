@@ -42,8 +42,8 @@ def _normalise_level(value: Any, field_name: str = "level") -> LevelValue:
         if not value.strip():
             raise ValueError(f"{field_name} is required")
         return value
-    if isinstance(value, bool):
-        return value
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
     if isinstance(value, Integral):
         return int(value)
     if isinstance(value, Real):

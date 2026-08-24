@@ -147,6 +147,86 @@ dispersion = 0.8
     assert "private-" not in output_path.read_text(encoding="utf-8")
 
 
+def test_configured_runner_binds_holdout_superglm_with_report_time_offset(tmp_path: Path):
+    import joblib
+    import numpy as np
+    from superglm import Numeric, SuperGLM
+
+    train_rows = 40
+    train = pd.DataFrame(
+        {
+            "feature": np.linspace(-1.0, 1.0, train_rows),
+            "actual": np.resize([0.0, 1.0, 0.0, 2.0, 1.0], train_rows),
+            "weight": np.linspace(0.5, 1.8, train_rows),
+            "fit_offset": np.log(np.linspace(0.8, 1.4, train_rows)),
+        }
+    )
+    model = SuperGLM(
+        features={"feature": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        train[["feature"]],
+        train["actual"],
+        sample_weight=train["weight"],
+        offset=train["fit_offset"].to_numpy(),
+    )
+    model_path = tmp_path / "model.joblib"
+    joblib.dump(model, model_path)
+
+    holdout_rows = 9
+    frame = pd.DataFrame(
+        {
+            "feature": np.linspace(-0.8, 1.2, holdout_rows),
+            "actual": np.resize([0.0, 1.0, 2.0], holdout_rows),
+            "weight": np.linspace(0.4, 1.6, holdout_rows),
+            "report_offset": np.log(np.linspace(1.5, 0.9, holdout_rows)),
+        }
+    )
+    frame["prediction_a"] = model.predict(
+        frame[["feature"]],
+        offset=frame["report_offset"].to_numpy(),
+    )
+    data_path = tmp_path / "holdout.parquet"
+    frame.to_parquet(data_path, index=False)
+    output_path = tmp_path / "holdout.html"
+    config_path = tmp_path / "holdout.toml"
+    config_path.write_text(
+        f"""
+[run]
+output_path = {str(output_path)!r}
+problem_type = "frequency"
+minimum_cell_size = 2
+comparison_bootstrap_replicates = 0
+
+[data]
+path = {str(data_path)!r}
+
+[columns]
+actual = "actual"
+sample_weight = "weight"
+features = ["feature"]
+offset = "report_offset"
+
+[predictions]
+"Model A" = "prediction_a"
+
+[superglm_objects]
+"Model A" = {str(model_path)!r}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = report_script.load_report_config(config_path)
+    assert config.offset == "report_offset"
+    result = report_script.build_report_from_config(
+        config,
+        allow_trusted_model_load=True,
+    )
+
+    assert result.output_path == output_path
+    assert result.metrics.loc[0, "likelihood_source"] == "fitted SuperGLM object"
+
+
 def test_prediction_only_cli_run_does_not_import_joblib_or_superglm(tmp_path: Path):
     frame = pd.DataFrame(
         {

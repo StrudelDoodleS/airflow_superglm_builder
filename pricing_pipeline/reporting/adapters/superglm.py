@@ -225,6 +225,8 @@ def _bind_fitted_predictions(
 
 
 def _aligned_fitted_offset(model: SuperGLM, context: ReportContext) -> np.ndarray | None:
+    if context.offset is not None:
+        return np.asarray(context.offset, dtype=float)
     if not bool(getattr(model, "_fit_used_offset", False)):
         return None
     offset = np.asarray(getattr(model, "_fit_offset", None), dtype=float)
@@ -241,14 +243,25 @@ def _aligned_fitted_offset(model: SuperGLM, context: ReportContext) -> np.ndarra
     if len(offset) == len(context.frame):
         aligned_offset = offset
         aligned_weight = fit_weight
+        fit_row_mask = None
     else:
         positive = fit_weight > 0.0
         if int(positive.sum()) != len(context.frame):
             raise ValueError("retained fitted offset state is not row-aligned")
         aligned_offset = offset[positive]
         aligned_weight = fit_weight[positive]
+        fit_row_mask = positive
     if not np.array_equal(aligned_weight, np.asarray(context.weight, dtype=float)):
         raise ValueError("retained fitted offset weights are not row-aligned")
+    fit_frame = getattr(model, "_fit_X_ref", None)
+    if not isinstance(fit_frame, pd.DataFrame) or len(fit_frame) != len(offset):
+        raise ValueError("retained fitted feature state is unavailable")
+    if any(column not in context.frame.columns for column in fit_frame.columns):
+        raise ValueError("retained fitted feature state is not row-aligned")
+    aligned_fit_frame = fit_frame if fit_row_mask is None else fit_frame.loc[fit_row_mask]
+    report_frame = context.frame.loc[:, fit_frame.columns]
+    if not aligned_fit_frame.reset_index(drop=True).equals(report_frame.reset_index(drop=True)):
+        raise ValueError("retained fitted feature state is not row-aligned")
     return aligned_offset
 
 

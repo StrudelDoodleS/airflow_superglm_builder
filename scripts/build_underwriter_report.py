@@ -48,7 +48,7 @@ _ALLOWED_KEYS = {
         "minimum_cell_size",
     },
     "data": {"path"},
-    "columns": {"actual", "sample_weight", "features", "comparison_unit"},
+    "columns": {"actual", "sample_weight", "features", "comparison_unit", "offset"},
 }
 
 
@@ -61,6 +61,7 @@ class ReportRunConfig:
     actual: str
     sample_weight: str
     comparison_unit: str | None
+    offset: str | None
     features: tuple[str, ...]
     predictions: dict[str, str]
     superglm_objects: dict[str, Path]
@@ -297,6 +298,9 @@ def load_report_config(path: Path) -> ReportRunConfig:
         not isinstance(raw_comparison_unit, str) or not raw_comparison_unit.strip()
     ):
         raise ValueError("[columns].comparison_unit must be a non-empty column name")
+    raw_offset = columns.get("offset")
+    if raw_offset is not None and (not isinstance(raw_offset, str) or not raw_offset.strip()):
+        raise ValueError("[columns].offset must be a non-empty column name")
     model_likelihoods = _model_likelihood_table(
         payload.get("model_likelihoods"),
         prediction_names=prediction_names,
@@ -307,6 +311,7 @@ def load_report_config(path: Path) -> ReportRunConfig:
         actual=str(columns["actual"]),
         sample_weight=str(columns["sample_weight"]),
         comparison_unit=(None if raw_comparison_unit is None else raw_comparison_unit.strip()),
+        offset=None if raw_offset is None else raw_offset.strip(),
         features=features,
         predictions=predictions,
         superglm_objects={
@@ -351,6 +356,7 @@ def build_report_from_config(
                 config.actual,
                 config.sample_weight,
                 *([config.comparison_unit] if config.comparison_unit is not None else []),
+                *([config.offset] if config.offset is not None else []),
                 *config.features,
                 *config.predictions.values(),
             ]
@@ -377,6 +383,7 @@ def build_report_from_config(
             superglm_models=models,
             rating_workbooks=config.rating_workbooks,
             model_likelihoods=config.model_likelihoods,
+            offset=config.offset,
             comparison_unit=config.comparison_unit,
             options=config.options,
         )
@@ -388,6 +395,7 @@ def build_report_from_config(
         sample_weight=config.sample_weight,
         features=config.features,
         output_path=config.output_path,
+        offset=config.offset,
         comparison_unit=config.comparison_unit,
         options=config.options,
     )

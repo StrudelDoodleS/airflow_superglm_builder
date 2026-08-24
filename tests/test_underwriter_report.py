@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from superglm import Categorical, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 
 from pricing_pipeline.modeling.scratch_diagnostics import weighted_quantile_bins
 from pricing_pipeline.reporting import (
@@ -648,6 +648,22 @@ def test_facade_matches_likelihood_metadata_to_normalized_prediction_names(tmp_p
     assert result.metrics.loc[0, "likelihood_source"] == "supplied training metadata"
 
 
+def test_facade_normalizes_direct_likelihood_metadata_names(tmp_path: Path):
+    result = build_underwriter_report(
+        _scored_frame(),
+        actual="actual",
+        predictions={"Model A": "model_a"},
+        sample_weight="weight",
+        features=["segment", "age"],
+        model_likelihoods={" Model A ": ModelLikelihoodSpec(tweedie_power=1.5, dispersion=0.7)},
+        output_path=tmp_path / "normalized-likelihood-name.html",
+        options=_small_options(problem_type="burn_cost", tweedie_power=1.5),
+    )
+
+    assert result.metrics.loc[0, "model"] == "Model A"
+    assert result.metrics.loc[0, "likelihood_source"] == "supplied training metadata"
+
+
 @pytest.mark.parametrize(
     "section",
     ["predictions", "superglm_models", "rating_workbooks", "model_likelihoods"],
@@ -962,6 +978,64 @@ def test_superglm_object_takes_priority_and_supplies_native_evidence(tmp_path: P
     assert payload["relativities"]["segment"]["Fitted GAM"]["labels"] == ["A", "B", "C"]
     assert payload["relativities"]["age"]["Fitted GAM"]["source"] == "SuperGLM object"
     assert len(payload["relativities"]["age"]["Fitted GAM"]["relativity"]) == 200
+
+
+def test_superglm_facade_binds_different_holdout_rows_with_report_time_offset(
+    tmp_path: Path,
+):
+    train_rows = 72
+    train = pd.DataFrame(
+        {
+            "x": np.linspace(-1.0, 1.0, train_rows),
+            "actual": np.resize([0.0, 1.0, 0.0, 2.0, 1.0, 3.0], train_rows),
+            "weight": np.linspace(0.4, 2.1, train_rows),
+            "fit_offset": np.log(np.linspace(0.7, 1.5, train_rows)),
+        }
+    )
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        train[["x"]],
+        train["actual"],
+        sample_weight=train["weight"],
+        offset=train["fit_offset"].to_numpy(),
+    )
+
+    holdout_rows = 19
+    holdout = pd.DataFrame(
+        {
+            "x": np.linspace(-0.85, 1.15, holdout_rows),
+            "actual": np.resize([0.0, 1.0, 2.0, 0.0, 1.0], holdout_rows),
+            "weight": np.linspace(0.3, 1.9, holdout_rows),
+            "report_offset": np.log(np.linspace(1.6, 0.8, holdout_rows)),
+        }
+    )
+    holdout.loc[5, "weight"] = 0.0
+    holdout["prediction"] = model.predict(
+        holdout[["x"]],
+        offset=holdout["report_offset"].to_numpy(),
+    )
+
+    result = build_underwriter_report(
+        holdout,
+        actual="actual",
+        predictions={"Holdout GAM": "prediction"},
+        sample_weight="weight",
+        features=["x"],
+        offset="report_offset",
+        superglm_models={"Holdout GAM": model},
+        output_path=tmp_path / "holdout-offset.html",
+        options=_small_options(
+            problem_type="frequency",
+            comparison_bootstrap_replicates=0,
+        ),
+    )
+
+    assert result.rows_used == holdout_rows - 1
+    metric = result.metrics.iloc[0]
+    assert metric["likelihood_source"] == "fitted SuperGLM object"
+    assert np.isfinite(metric["exact_mean_nll"])
 
 
 def test_superglm_facade_matches_model_neutral_builder(tmp_path: Path):

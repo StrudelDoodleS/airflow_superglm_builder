@@ -168,7 +168,7 @@ _ALLOWED_KEYS = {
         "minimum_cell_size",
     },
     "data": {"path"},
-    "columns": {"actual", "sample_weight", "features", "comparison_unit"},
+    "columns": {"actual", "sample_weight", "features", "comparison_unit", "offset"},
 }
 
 
@@ -181,6 +181,7 @@ def build_report(
     features: Sequence[str],
     model_type: ProblemType,
     output_path: str | Path,
+    offset: ColumnOrValues | None = None,
     comparison_unit: ComparisonUnit | None = None,
     evidence: Mapping[str, ModelEvidence] | None = None,
     title: str = "Pricing model review",
@@ -202,6 +203,7 @@ def build_report(
         features=features,
         output_path=output_path,
         evidence=evidence,
+        offset=offset,
         comparison_unit=comparison_unit,
         options=options,
     )
@@ -217,6 +219,7 @@ class PortableReportConfig:
     predictions: dict[str, str]
     options: UnderwriterReportOptions
     comparison_unit: str | None = None
+    offset: str | None = None
 
 
 def _required_string(table: Mapping[str, Any], key: str, label: str) -> str:
@@ -318,6 +321,11 @@ def load_config(path: str | Path) -> PortableReportConfig:
         comparison_unit = comparison_unit.strip()
         if comparison_unit in features:
             raise ValueError("comparison_unit must not also appear in features")
+    offset = columns.get("offset")
+    if offset is not None:
+        if not isinstance(offset, str) or not offset.strip():
+            raise ValueError("[columns].offset must be a non-empty string")
+        offset = offset.strip()
     options = UnderwriterReportOptions(
         title=title,
         problem_type=model_type,
@@ -359,6 +367,7 @@ def load_config(path: str | Path) -> PortableReportConfig:
         predictions=predictions,
         options=options,
         comparison_unit=comparison_unit,
+        offset=offset,
     )
 
 
@@ -369,6 +378,7 @@ def _read_configured_frame(config: PortableReportConfig) -> pd.DataFrame:
                 config.actual,
                 config.sample_weight,
                 *([config.comparison_unit] if config.comparison_unit else []),
+                *([config.offset] if config.offset else []),
                 *config.features,
                 *config.predictions.values(),
             ]
@@ -393,6 +403,7 @@ def build_report_from_config(config: PortableReportConfig) -> UnderwriterReportR
         sample_weight=config.sample_weight,
         features=config.features,
         output_path=config.output_path,
+        offset=config.offset,
         comparison_unit=config.comparison_unit,
         options=config.options,
     )

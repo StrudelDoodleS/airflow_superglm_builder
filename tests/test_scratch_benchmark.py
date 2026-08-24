@@ -10,7 +10,10 @@ from superglm.features.spline import _SplineBase
 from pricing_pipeline.modeling.scratch_benchmark import (
     ScratchBenchmarkError,
     ScratchBoostedBlend,
+    _catboost_frame,
+    _category_levels,
     _required_scratch_estimators,
+    _tree_frame,
     fit_boosted_blend,
     superglm_edf_table,
     unconstrained_superglm_features,
@@ -67,6 +70,79 @@ def _column_factories():
         "lightgbm": lambda _seed: _ColumnEstimator("candidate_b"),
         "xgboost": lambda _seed: _ColumnEstimator("candidate_c"),
     }
+
+
+@pytest.mark.parametrize("backend", ["catboost", "lightgbm", "xgboost"])
+def test_booster_preprocessing_preserves_typed_and_missing_category_identities(backend):
+    values = np.empty(40, dtype=object)
+    values[0::4] = 1
+    values[1::4] = "1"
+    values[2::4] = None
+    values[3::4] = "__SCRATCH_MISSING__"
+    frame = pd.DataFrame({"category": values})
+
+    levels = _category_levels(frame, ("category",))
+    tree = _tree_frame(
+        frame,
+        feature_columns=("category",),
+        categorical_levels=levels,
+    )
+    prepared = _catboost_frame(frame, ("category",), levels) if backend == "catboost" else tree
+
+    assert len(levels["category"]) == 4
+    assert prepared["category"].nunique(dropna=False) == 4
+    assert prepared["category"].iloc[0] != prepared["category"].iloc[1]
+    assert prepared["category"].iloc[2] != prepared["category"].iloc[3]
+
+
+def test_tree_prediction_rejects_text_match_with_wrong_category_type():
+    training = pd.DataFrame({"category": np.resize([1, 2], 30)})
+    levels = _category_levels(training, ("category",))
+    prediction = pd.DataFrame({"category": ["1", 2]})
+
+    with pytest.raises(
+        ScratchBenchmarkError,
+        match="categorical benchmark column 'category'.*absent from the training contract",
+    ):
+        _tree_frame(
+            prediction,
+            feature_columns=("category",),
+            categorical_levels=levels,
+        )
+
+
+def test_unsupported_category_fails_safely_before_any_estimator_fit():
+    secret = "private-category-value"
+
+    class UnsupportedCategory:
+        def __str__(self):
+            return secret
+
+    fit_calls = 0
+
+    class TrackingEstimator(_WeightedMeanEstimator):
+        def fit(self, X, y, *, sample_weight=None, **kwargs):
+            nonlocal fit_calls
+            fit_calls += 1
+            return super().fit(X, y, sample_weight=sample_weight, **kwargs)
+
+    factories = {
+        name: lambda _seed, multiplier=multiplier: TrackingEstimator(multiplier)
+        for name, multiplier in {"catboost": 0.75, "lightgbm": 1.0, "xgboost": 1.25}.items()
+    }
+    values = np.empty(30, dtype=object)
+    values[:] = UnsupportedCategory()
+
+    with pytest.raises(ScratchBenchmarkError) as exc_info:
+        fit_boosted_blend(
+            pd.DataFrame({"category": values}),
+            np.resize([0.0, 1.0, 2.0], 30),
+            categorical_columns=("category",),
+            estimator_factories=factories,
+        )
+
+    assert fit_calls == 0
+    assert secret not in str(exc_info.value)
 
 
 def test_unconstrained_feature_map_has_no_groupings_or_shape_constraints():

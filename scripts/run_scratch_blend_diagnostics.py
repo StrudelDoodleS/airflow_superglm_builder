@@ -657,10 +657,44 @@ def _plot_interaction(
     _save_figure(figure, output_path)
 
 
-def _observed_levels(series: pd.Series) -> list[str]:
+def _typed_level_identity(value: Any) -> tuple[str, str]:
+    missing = pd.isna(value)
+    if isinstance(missing, (bool, np.bool_)) and bool(missing):
+        return ("missing", "")
+    return (f"{type(value).__module__}.{type(value).__qualname__}", repr(value))
+
+
+def _level_display_label(value: Any) -> str:
+    missing = pd.isna(value)
+    return "__MISSING__" if isinstance(missing, (bool, np.bool_)) and bool(missing) else str(value)
+
+
+def _scalar_values_compare_equal(left: Any, right: Any) -> bool:
+    comparison = left == right
+    return isinstance(comparison, (bool, np.bool_)) and bool(comparison)
+
+
+def _observed_levels(series: pd.Series) -> list[Any]:
     if series.isna().any():
         raise ValueError(f"simplified GAM feature {series.name!r} contains missing levels")
-    return sorted(series.astype(str).unique().tolist())
+    levels: list[Any] = []
+    identities: set[tuple[str, str]] = set()
+    for value in series.tolist():
+        identity = _typed_level_identity(value)
+        if identity in identities:
+            continue
+        if any(_scalar_values_compare_equal(value, existing) for existing in levels):
+            raise ValueError(
+                f"simplified GAM feature {series.name!r} has distinct typed levels that compare equal"
+            )
+        identities.add(identity)
+        levels.append(value)
+    try:
+        return sorted(levels)
+    except TypeError as exc:
+        raise ValueError(
+            f"simplified GAM feature {series.name!r} has levels that cannot be ordered safely"
+        ) from exc
 
 
 def _validate_holdout_categorical_levels(
@@ -672,13 +706,18 @@ def _validate_holdout_categorical_levels(
     partition: str,
 ) -> None:
     for feature in categorical_features:
-        training_levels = set(frame.iloc[train][feature].astype("string").fillna("__MISSING__"))
-        holdout_levels = set(frame.iloc[holdout][feature].astype("string").fillna("__MISSING__"))
-        unseen = sorted(holdout_levels - training_levels)
+        training_levels = {
+            _typed_level_identity(value) for value in frame.iloc[train][feature].tolist()
+        }
+        holdout_levels = {
+            _typed_level_identity(value): _level_display_label(value)
+            for value in frame.iloc[holdout][feature].tolist()
+        }
+        unseen = sorted(set(holdout_levels) - training_levels)
         if unseen:
             raise ValueError(
                 f"{partition} partition contains unseen levels for categorical feature "
-                f"{feature!r}: {', '.join(unseen)}"
+                f"{feature!r}: {', '.join(sorted(holdout_levels[level] for level in unseen))}"
             )
 
 
@@ -944,10 +983,10 @@ def _marginal_relativity_tables(
         if feature not in categorical:
             continue
         levels = _observed_levels(full_features[feature])
-        held_out_levels = reference_features[feature].astype(str).to_numpy()
+        held_out_levels = reference_features[feature]
         records: list[dict[str, Any]] = []
         for level in levels:
-            mask = held_out_levels == level
+            mask = held_out_levels.eq(level).to_numpy()
             support = float(sample_weight[mask].sum())
             scenario = reference_features.copy()
             scenario[feature] = level

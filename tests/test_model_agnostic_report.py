@@ -1000,6 +1000,88 @@ def test_oversized_row_aligned_adapter_effect_is_rejected_before_html(tmp_path: 
     assert not output_path.exists()
 
 
+def test_report_time_offset_is_filtered_for_adapters_and_not_serialized(tmp_path: Path):
+    frame = _scored_frame().assign(report_offset=np.linspace(-0.4, 0.5, 10))
+    captured: list[np.ndarray | None] = []
+
+    class CapturingAdapter:
+        def collect(self, *, model_name, source, context):
+            del model_name, source
+            captured.append(None if context.offset is None else context.offset.copy())
+            return ModelEvidence(source="capturing adapter")
+
+    result = build_scored_model_report(
+        frame,
+        actual="actual",
+        predictions={"Model A": "model_a"},
+        sample_weight="weight",
+        features=["age"],
+        offset="report_offset",
+        evidence_requests=(EvidenceRequest("Model A", CapturingAdapter(), None),),
+        output_path=tmp_path / "offset-alignment.html",
+        options=UnderwriterReportOptions(
+            problem_type="burn_cost",
+            tweedie_power=1.5,
+            comparison_bootstrap_replicates=0,
+            minimum_cell_size=2,
+        ),
+    )
+
+    positive = frame["weight"].gt(0.0).to_numpy()
+    assert len(captured) == 1
+    np.testing.assert_array_equal(
+        captured[0],
+        frame.loc[positive, "report_offset"].to_numpy(),
+    )
+
+    def keys(value):
+        if isinstance(value, dict):
+            yield from value
+            for nested in value.values():
+                yield from keys(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from keys(nested)
+
+    assert "offset" not in set(keys(_embedded_payload(result.output_path)))
+
+
+@pytest.mark.parametrize(
+    ("offset", "message"),
+    [
+        (np.zeros(9), "one-dimensional and match the frame"),
+        (np.r_[np.zeros(9), np.inf], "contain only finite values"),
+    ],
+    ids=["wrong-length", "non-finite"],
+)
+def test_report_time_offset_is_validated_before_evidence_collection(
+    tmp_path: Path,
+    offset: np.ndarray,
+    message: str,
+):
+    class UnexpectedAdapter:
+        def collect(self, *, model_name, source, context):
+            raise AssertionError((model_name, source, context))
+
+    with pytest.raises(ValueError, match=message):
+        build_scored_model_report(
+            _scored_frame(),
+            actual="actual",
+            predictions={"Model A": "model_a"},
+            sample_weight="weight",
+            features=["age"],
+            offset=offset,
+            evidence_requests=(EvidenceRequest("Model A", UnexpectedAdapter(), None),),
+            output_path=tmp_path / "invalid-offset.html",
+            options=UnderwriterReportOptions(
+                problem_type="burn_cost",
+                tweedie_power=1.5,
+                comparison_bootstrap_replicates=0,
+                minimum_cell_size=2,
+            ),
+        )
+
+
 def test_direct_pdp_and_ale_html_contracts_are_semantic_aware(tmp_path: Path):
     frame = _scored_frame().assign(risk_score=np.linspace(-1.0, 1.0, 10))
     evidence = {

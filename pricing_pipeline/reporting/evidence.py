@@ -108,6 +108,7 @@ class ReportContext:
     minimum_cell_size: int
     problem_type: Literal["frequency", "severity", "burn_cost"]
     deviance_power: float
+    offset: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -1057,8 +1058,9 @@ def _validate_context(context: ReportContext) -> None:
         raise ValueError("context.frame must not be empty")
     actual = _numeric_vector(context.actual, "context.actual")
     weight = _numeric_vector(context.weight, "context.weight")
+    offset = None if context.offset is None else _numeric_vector(context.offset, "context.offset")
     codes = np.asarray(context.comparison_unit_codes)
-    if len(actual) != rows or len(weight) != rows:
+    if len(actual) != rows or len(weight) != rows or (offset is not None and len(offset) != rows):
         raise ValueError("context vectors must match context.frame length")
     if (weight <= 0.0).any():
         raise ValueError("context.weight must be positive")

@@ -140,6 +140,14 @@ Identifier columns used as `comparison_unit` must not also appear in `features`;
 the builder rejects that overlap so identifier levels cannot leak through a
 relativity table.
 
+Predictions must already include any model offset and remain on the response
+scale. When fitted SuperGLM evidence is collected for a current or holdout
+portfolio, pass the exactly row-aligned log offset with `offset=` or configure
+the optional `[columns].offset` column. It is used only to verify that the
+fitted object produced the supplied predictions: the report does not apply the
+offset again or serialize its values. If it is omitted, a retained training
+offset is accepted only when the fitted rows and weights are provably aligned.
+
 For SuperGLM-enriched evidence, the compatibility facade keeps the established
 signature. Supplied likelihood metadata validates a fitted object's values and
 never overrides them:
@@ -162,6 +170,7 @@ report = build_underwriter_report(
     model_likelihoods={
         "Challenger": ModelLikelihoodSpec(tweedie_power=1.5, dispersion=0.72),
     },
+    offset="report_time_offset",  # optional, aligned fitted-evidence binding only
     comparison_unit="policy_id",  # optional; one unit per row when omitted
     output_path="state/underwriter_report/model_review.html",
     options=UnderwriterReportOptions(

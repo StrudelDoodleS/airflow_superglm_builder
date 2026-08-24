@@ -7,6 +7,7 @@ benchmark cannot accidentally become a governed pricing model.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -20,7 +21,7 @@ from sklearn.model_selection import KFold
 from superglm import Categorical, Numeric, OrderedCategorical, Poisson, Spline, SuperGLM, Tweedie
 from superglm.features.spline import _SplineBase
 
-_MISSING_CATEGORY = "__SCRATCH_MISSING__"
+_CATEGORY_TOKEN_PREFIX = "__SCRATCH_CATEGORY_V1__"
 _MODEL_NAMES = ("catboost", "lightgbm", "xgboost")
 _EXPLORATORY_BLEND_EVIDENCE = (
     "exploratory_cross_fitted_meta_over_global_base_oof_"
@@ -233,8 +234,66 @@ def _required_scratch_estimators(
     )
 
 
+def _category_token(value: Any) -> str:
+    if value is None or value is pd.NA or value is pd.NaT:
+        identity = {"type": "missing", "value": None}
+    elif isinstance(value, str):
+        identity = {"type": "string", "value": value}
+    elif isinstance(value, bool | np.bool_):
+        identity = {"type": "boolean", "value": bool(value)}
+    elif isinstance(value, int | np.integer):
+        identity = {"type": "integer", "value": int(value)}
+    elif isinstance(value, float | np.floating):
+        numeric = float(value)
+        if np.isnan(numeric):
+            identity = {"type": "missing", "value": None}
+        elif np.isfinite(numeric):
+            identity = {"type": "float", "value": numeric.hex()}
+        else:
+            raise TypeError
+    elif isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            identity = {"type": "missing", "value": None}
+        else:
+            identity = {"type": "timestamp", "value": value.isoformat()}
+    else:
+        raise TypeError
+    return _CATEGORY_TOKEN_PREFIX + json.dumps(
+        identity,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _category_text(series: pd.Series) -> pd.Series:
-    return series.astype("string").fillna(_MISSING_CATEGORY)
+    try:
+        tokens = [_category_token(value) for value in series.array]
+    except TypeError:
+        column = series.name if isinstance(series.name, str) else "<unnamed>"
+        raise ScratchBenchmarkError(
+            f"categorical benchmark column {column!r} contains an unsupported scalar type"
+        ) from None
+    return pd.Series(tokens, index=series.index, dtype="string", name=series.name)
+
+
+def _validated_category_text(series: pd.Series, levels: Sequence[str]) -> pd.Series:
+    expected = tuple(levels)
+    if (
+        not expected
+        or any(not isinstance(level, str) for level in expected)
+        or len(set(expected)) != len(expected)
+    ):
+        raise ScratchBenchmarkError("categorical benchmark training contract is invalid")
+    encoded = _category_text(series)
+    if not encoded.isin(expected).all():
+        column = series.name if isinstance(series.name, str) else "<unnamed>"
+        raise ScratchBenchmarkError(
+            f"categorical benchmark column {column!r} contains a level absent from "
+            "the training contract"
+        )
+    return encoded
 
 
 def _category_levels(
@@ -261,7 +320,10 @@ def _tree_frame(
     for column in prepared.columns:
         if column in categorical:
             prepared[column] = pd.Categorical(
-                _category_text(prepared[column]),
+                _validated_category_text(
+                    prepared[column],
+                    categorical_levels[column],
+                ),
                 categories=list(categorical_levels[column]),
             )
         elif not pd.api.types.is_numeric_dtype(prepared[column]):
@@ -274,10 +336,14 @@ def _tree_frame(
 def _catboost_frame(
     frame: pd.DataFrame,
     categorical_columns: Sequence[str],
+    categorical_levels: Mapping[str, Sequence[str]],
 ) -> pd.DataFrame:
     prepared = frame.copy()
     for column in categorical_columns:
-        prepared[column] = _category_text(prepared[column]).astype(str)
+        prepared[column] = _validated_category_text(
+            prepared[column],
+            categorical_levels[column],
+        ).astype(str)
     return prepared
 
 
@@ -417,7 +483,11 @@ class ScratchBoostedBlend:
             feature_columns=self.feature_columns,
             categorical_levels=self.categorical_levels,
         )
-        catboost = _catboost_frame(tree, self.categorical_columns)
+        catboost = _catboost_frame(
+            frame.loc[:, list(self.feature_columns)],
+            self.categorical_columns,
+            self.categorical_levels,
+        )
         return pd.DataFrame(
             {
                 name: _predict_estimator(name, self.models[name], tree, catboost)
@@ -589,7 +659,11 @@ def fit_boosted_blend(
         feature_columns=feature_columns,
         categorical_levels=levels,
     )
-    catboost = _catboost_frame(tree, categorical)
+    catboost = _catboost_frame(
+        frame.loc[:, list(feature_columns)],
+        categorical,
+        levels,
+    )
     splitter: Iterable[tuple[np.ndarray, np.ndarray]]
     if cv is None:
         if not isinstance(n_splits, int) or isinstance(n_splits, bool) or n_splits < 2:

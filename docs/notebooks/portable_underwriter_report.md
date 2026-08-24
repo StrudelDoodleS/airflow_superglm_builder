@@ -23,6 +23,7 @@ result = build_report(
     predictions={"Current": "pred_current", "New": "pred_new"},
     sample_weight="exposure",
     features=["region", "vehicle_age"],
+    # offset="report_time_offset",  # optional aligned adapter context
     model_type="frequency",
     output_path="model_review.html",
 )
@@ -30,7 +31,7 @@ result = build_report(
 print(result.output_path)
 ```
 
-`actual`, each prediction, `sample_weight`, and the optional
+`actual`, each prediction, `sample_weight`, and the optional `offset` and
 `comparison_unit` can be column names or one-dimensional arrays. The output is
 one self-contained offline HTML file.
 
@@ -43,9 +44,11 @@ one self-contained offline HTML file.
 | `burn_cost` | claim cost / exposure | exposure | Tweedie, default `p=1.5` |
 
 Predictions must already include any model offset and be on the response-rate
-scale. For burn cost, pass `tweedie_power=<value>` when the common reporting
-power should differ from 1.5. The report does not estimate power or dispersion
-from review outcomes.
+scale. The optional report-time `offset` is aligned and validated for neutral
+evidence adapters; the report never applies it to predictions, uses it in
+aggregate metrics, or serializes its values. For burn cost, pass
+`tweedie_power=<value>` when the common reporting power should differ from 1.5.
+The report does not estimate power or dispersion from review outcomes.
 
 ## TOML use
 
@@ -66,6 +69,7 @@ path = "scored.parquet"
 actual = "actual_burn_cost"
 sample_weight = "exposure"
 features = ["region", "vehicle_age"]
+# offset = "report_time_offset"
 # comparison_unit = "policy_id"
 
 [predictions]

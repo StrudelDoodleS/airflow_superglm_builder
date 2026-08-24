@@ -499,10 +499,33 @@ def _feature_labels(
 ) -> pd.Series:
     values = analysis[feature]
     if categorical:
-        labels = values.astype("string").fillna("__MISSING__")
+        labels: list[str] = []
+        identities_by_label: dict[str, set[tuple[str, str]]] = {}
+        for value in values.tolist():
+            if _is_missing_scalar(value):
+                label = "__MISSING__"
+                identity = ("missing", "")
+            else:
+                label = str(value)
+                identity = (
+                    f"{type(value).__module__}.{type(value).__qualname__}",
+                    repr(value),
+                )
+            labels.append(label)
+            identities_by_label.setdefault(label, set()).add(identity)
+        if any(len(identities) > 1 for identities in identities_by_label.values()):
+            raise ValueError(
+                f"categorical diagnostic feature {feature!r} has ambiguous display labels"
+            )
+        labels = pd.Series(labels, index=values.index, dtype="string")
         level_weight = analysis.groupby(labels, observed=True)[f"{_PREFIX}sample_weight"].sum()
         if len(level_weight) > max_categorical_levels:
             keep = set(level_weight.nlargest(max_categorical_levels - 1).index)
+            coarsened = ~labels.isin(keep)
+            if labels.eq("__OTHER__").any() and (coarsened & labels.ne("__OTHER__")).any():
+                raise ValueError(
+                    f"categorical diagnostic feature {feature!r} has ambiguous display labels"
+                )
             labels = labels.where(labels.isin(keep), "__OTHER__")
         return labels.astype(str)
     numeric = pd.to_numeric(values, errors="coerce")
@@ -520,6 +543,11 @@ def _feature_labels(
         [f"{bin_no + 1:02d} | {medians.loc[bin_no]:.6g}" for bin_no in bins],
         index=analysis.index,
     )
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    missing = pd.isna(value)
+    return isinstance(missing, (bool, np.bool_)) and bool(missing)
 
 
 def feature_calibration_tables(

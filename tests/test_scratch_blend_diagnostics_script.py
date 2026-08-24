@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -151,6 +152,52 @@ def test_fit_superglm_binds_levels_from_training_partition_only(monkeypatch, tmp
 
     assert captured["frame"]["category"].tolist() == ["train-a", "train-b"]
     assert np.asarray(captured["weight"]).tolist() == [1.0, 2.0]
+
+
+def test_simplified_ordered_terms_retain_native_integer_levels(tmp_path):
+    config = replace(
+        _config(data_path=tmp_path / "unused.parquet", output_dir=tmp_path),
+        simplified_gam=diagnostic_script.SimplifiedGamConfig(
+            ordered_spline_features=("period",),
+            monotone_increasing_features=(),
+            special_levels={},
+            collapse_from={},
+            level_groups={},
+            spline_k=5,
+        ),
+    )
+
+    features = diagnostic_script._simplified_superglm_features(
+        pd.DataFrame({"period": [0, 1, 2]}),
+        config=config,
+    )
+
+    assert features["period"]._ordered_levels == [0, 1, 2]
+
+
+def test_observed_ordered_levels_refuse_distinct_typed_values_that_compare_equal():
+    with pytest.raises(ValueError, match="compare equal"):
+        diagnostic_script._observed_levels(pd.Series([1, True], name="period", dtype=object))
+
+
+@pytest.mark.parametrize(
+    ("training_level", "holdout_level"),
+    [(1, "1"), (np.nan, "__MISSING__")],
+)
+def test_holdout_validation_does_not_merge_typed_level_collisions(
+    training_level,
+    holdout_level,
+):
+    frame = pd.DataFrame({"category": pd.Series([training_level, holdout_level], dtype=object)})
+
+    with pytest.raises(ValueError, match="unseen levels"):
+        diagnostic_script._validate_holdout_categorical_levels(
+            frame,
+            np.array([0]),
+            np.array([1]),
+            categorical_features=("category",),
+            partition="validation",
+        )
 
 
 def test_runner_rejects_unseen_validation_levels_before_model_fit(tmp_path, monkeypatch):

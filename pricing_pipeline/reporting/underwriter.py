@@ -64,15 +64,15 @@ def _coerce_model_likelihoods(
     prediction_names: Sequence[str],
     problem_type: ProblemType,
 ) -> dict[str, ModelLikelihoodSpec]:
-    unknown = set(values) - set(prediction_names)
+    normalized_values = [(str(raw_name).strip(), raw_spec) for raw_name, raw_spec in values.items()]
+    unknown = {name for name, _ in normalized_values} - set(prediction_names)
     if unknown:
         raise ValueError(
             "model_likelihoods contains models without predictions: " + ", ".join(sorted(unknown))
         )
     expected_power = {"frequency": 1.0, "severity": 2.0}.get(problem_type)
     resolved: dict[str, ModelLikelihoodSpec] = {}
-    for raw_name, raw_spec in values.items():
-        name = str(raw_name)
+    for name, raw_spec in normalized_values:
         if isinstance(raw_spec, ModelLikelihoodSpec):
             spec = raw_spec
         elif isinstance(raw_spec, Mapping):
@@ -128,6 +128,7 @@ def build_underwriter_report(
         ModelLikelihoodSpec | Mapping[str, Any],
     ]
     | None = None,
+    offset: ColumnOrValues | None = None,
     comparison_unit: ComparisonUnit | None = None,
     options: UnderwriterReportOptions | None = None,
 ) -> UnderwriterReportResult:
@@ -212,6 +213,7 @@ def build_underwriter_report(
         features=features,
         output_path=output_path,
         evidence_requests=tuple(requests),
+        offset=offset,
         comparison_unit=comparison_unit,
         options=resolved_options,
     )

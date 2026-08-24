@@ -203,6 +203,23 @@ def test_feature_and_risk_tables_expose_tail_calibration_with_support():
     assert (risk["offset_weight"] > 0).all()
 
 
+def test_feature_calibration_refuses_typed_categorical_display_collisions():
+    features = pd.DataFrame({"category": pd.Series([1, "1"] * 4, dtype=object)})
+    response = np.linspace(1.0, 2.0, len(features))
+
+    with pytest.raises(ValueError, match="ambiguous display labels"):
+        feature_calibration_tables(
+            features,
+            response,
+            offset_exposure=np.ones(len(features)),
+            sample_weight=np.ones(len(features)),
+            gam_rate=np.ones(len(features)),
+            gbm_rate=np.ones(len(features)),
+            power=1.5,
+            categorical_features=("category",),
+        )
+
+
 def test_lorenz_curve_is_aggregate_weighted_and_reaches_one():
     _features, response, exposure, weight, gam_rate, gbm_rate = _diagnostic_case()
 
@@ -255,3 +272,27 @@ def test_interaction_ranking_finds_unsupported_gbm_interaction_and_failure_cells
     assert not failure.empty
     assert failure["gbm_minus_gam_mean_deviance"].max() > 0
     assert failure["interaction_log_ratio"].abs().max() > 0.1
+
+
+def test_interaction_failure_tables_refuse_missing_sentinel_display_collision():
+    features = pd.DataFrame(
+        {
+            "x": np.tile([0.0, 1.0], 4),
+            "category": pd.Series([np.nan, "__MISSING__"] * 4, dtype=object),
+        }
+    )
+    response = np.linspace(1.0, 2.0, len(features))
+
+    with pytest.raises(ValueError, match="ambiguous display labels"):
+        interaction_failure_tables(
+            features,
+            response,
+            offset_exposure=np.ones(len(features)),
+            sample_weight=np.ones(len(features)),
+            gam_rate=np.ones(len(features)),
+            gbm_rate=np.ones(len(features)),
+            power=1.5,
+            categorical_features=("category",),
+            min_cell_rows=1,
+            min_cell_weight_fraction=0.0,
+        )

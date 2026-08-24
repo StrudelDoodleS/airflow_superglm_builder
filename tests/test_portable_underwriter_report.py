@@ -250,6 +250,48 @@ def test_portable_direct_evidence_preserves_curve_suppression_metadata(tmp_path:
     }
 
 
+def test_portable_direct_report_accepts_offset_without_serializing_it(tmp_path: Path):
+    from scripts import portable_underwriter_report as portable
+
+    frame = _scored_frame().assign(report_offset=[-0.3, -0.2, -0.1, 0.1, 0.2, 0.3])
+    result = portable.build_report(
+        frame,
+        actual="actual",
+        predictions={"Current": "current", "New": "new"},
+        sample_weight="weight",
+        features=["feature"],
+        model_type="frequency",
+        output_path=tmp_path / "portable-offset.html",
+        offset="report_offset",
+        minimum_cell_size=2,
+    )
+
+    assert "offset" not in json.dumps(_embedded_payload(result.output_path))
+
+
+def test_portable_config_loads_and_reads_optional_offset_column(tmp_path: Path):
+    from scripts import portable_underwriter_report as portable
+
+    _scored_frame().assign(report_offset=[-0.3, -0.2, -0.1, 0.1, 0.2, 0.3]).to_csv(
+        tmp_path / "scored.csv",
+        index=False,
+    )
+    config_path = tmp_path / "report.toml"
+    config_path.write_text(
+        _portable_config_text().replace(
+            'features = ["feature"]',
+            'features = ["feature"]\noffset = "report_offset"',
+        ),
+        encoding="utf-8",
+    )
+
+    config = portable.load_config(config_path)
+    assert config.offset == "report_offset"
+    result = portable.build_report_from_config(config)
+
+    assert "offset" not in json.dumps(_embedded_payload(result.output_path))
+
+
 def test_copied_script_builds_report_from_relative_csv_toml(tmp_path: Path):
     from scripts.export_portable_underwriter_report import PORTABLE_PATH
 

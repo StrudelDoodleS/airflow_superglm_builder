@@ -238,6 +238,18 @@ def test_policy_digest_preserves_integer_and_string_level_identity():
     assert integer_policy.sha256 != string_policy.sha256
 
 
+def test_policy_normalizes_numpy_boolean_level_identity():
+    rule = ManualAdjustmentRule.multiply_levels(
+        "segment",
+        [np.bool_(True)],
+        1.05,
+        reason="Selected boolean cohort uplift",
+    )
+
+    assert rule.levels == (True,)
+    assert type(rule.levels[0]) is bool
+
+
 def test_direct_rule_application_checks_session_training_level_identity(tmp_path):
     candidate = _candidate(tmp_path, segment_levels=("1", "2", "3"))
     session = EditorSession.from_model(

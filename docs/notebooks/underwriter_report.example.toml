@@ -24,6 +24,9 @@ path = "/absolute/local/path/scored_model_input.parquet"
 actual = "actual_response"
 sample_weight = "business_weight"
 features = ["feature_a", "feature_b", "feature_c"]
+# Optional row-aligned log offset for fitted-evidence binding. Predictions must
+# already include it; the report neither applies nor serializes this column.
+offset = "report_time_offset"
 # Optional paired-bootstrap cluster. Never include this identifier in features.
 # Omit for one comparison unit per row.
 comparison_unit = "policy_id"

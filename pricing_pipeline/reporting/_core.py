@@ -162,6 +162,7 @@ class _ValidatedInputs:
     comparison_unit_codes: np.ndarray
     comparison_units: int
     zero_weight_rows_ignored: int
+    offset: np.ndarray | None
 
 
 def _column_or_vector(
@@ -188,6 +189,7 @@ def _validate_inputs(
     predictions: Mapping[str, ColumnOrValues],
     sample_weight: ColumnOrValues,
     features: Sequence[str],
+    offset: ColumnOrValues | None,
     comparison_unit: ComparisonUnit | None,
     options: UnderwriterReportOptions,
 ) -> _ValidatedInputs:
@@ -211,6 +213,7 @@ def _validate_inputs(
     if np.any(y < 0):
         raise ValueError("actual must be non-negative")
     positive = weight > 0
+    resolved_offset = None if offset is None else _column_or_vector(frame, offset, "offset")
     if options.resolved_tweedie_power >= 2.0 and np.any(y[positive] <= 0):
         raise ValueError("severity actuals must be strictly positive for Gamma deviance")
 
@@ -265,6 +268,7 @@ def _validate_inputs(
         comparison_unit_codes=np.asarray(unit_codes, dtype=np.intp),
         comparison_units=len(unique_units),
         zero_weight_rows_ignored=ignored,
+        offset=None if resolved_offset is None else resolved_offset[positive],
     )
 
 
@@ -1200,6 +1204,7 @@ def build_scored_model_report(
     output_path: str | Path,
     evidence: Mapping[str, ModelEvidence] | None = None,
     evidence_requests: Sequence[EvidenceRequest] = (),
+    offset: ColumnOrValues | None = None,
     comparison_unit: ComparisonUnit | None = None,
     options: UnderwriterReportOptions | None = None,
 ) -> UnderwriterReportResult:
@@ -1211,6 +1216,7 @@ def build_scored_model_report(
         predictions=predictions,
         sample_weight=sample_weight,
         features=features,
+        offset=offset,
         comparison_unit=comparison_unit,
         options=resolved_options,
     )
@@ -1225,6 +1231,7 @@ def build_scored_model_report(
         minimum_cell_size=resolved_options.minimum_cell_size,
         problem_type=resolved_options.problem_type,
         deviance_power=resolved_options.resolved_tweedie_power,
+        offset=inputs.offset,
     )
     resolved_evidence = collect_model_evidence(
         context,
