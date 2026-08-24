@@ -71,6 +71,7 @@ def _history_rows():
             "parent_package_version": None,
             "completed_ts": "2026-07-10T09:00:00",
             "data_as_of_date": "2026-06-30",
+            "current_deployment_id": 713,
             "current_rate_package_id": 113,
             "baseline_cv_deviance": 0.482,
             "baseline_is_parent": False,
@@ -99,6 +100,7 @@ def _history_rows():
             "parent_package_version": 11,
             "completed_ts": "2026-07-03T12:00:00",
             "data_as_of_date": "2026-06-23",
+            "current_deployment_id": 713,
             "current_rate_package_id": 113,
             "baseline_cv_deviance": 0.491,
             "baseline_is_parent": True,
@@ -192,6 +194,7 @@ def test_candidates_return_stable_empty_editor_and_deployment_views(monkeypatch)
         "data_as_of_date",
         "manifest_id",
         "parent_rate_package_id",
+        "current_deployment_id",
         "current_rate_package_id",
     } <= set(deployment_history.columns)
 
@@ -241,6 +244,7 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
     assert "manifest.model_frame_sha256" in statements[0][0]
+    assert "deployment.deployment_id AS current_deployment_id" in statements[0][0]
     assert "rp.package_status = 'PUBLISHED'" in statements[0][0]
     assert "rp.package_version = :package_version" in statements[0][0]
     assert statements[0][1]["package_version"] == 7

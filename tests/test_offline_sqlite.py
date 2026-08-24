@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -482,6 +484,58 @@ def test_offline_upgrade_adds_dataset_manifest_frame_evidence_columns(tmp_path):
     assert columns["offset_source_column"] == "TEXT"
     assert columns["offset_label"] == "TEXT"
     assert columns["export_weight_column"] == "TEXT"
+
+
+def test_offline_upgrade_extends_existing_model_kind_check_for_manual_edits(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    legacy_pricing_sql = (
+        Path("db/offline_sqlite/pricing.sql")
+        .read_text(encoding="utf-8")
+        .replace(", 'MANUAL_EDIT'", "")
+    )
+    raw_connection = engine.raw_connection()
+    try:
+        raw_connection.executescript(legacy_pricing_sql)
+        raw_connection.commit()
+    finally:
+        raw_connection.close()
+
+    apply_offline_ddl(engine)
+
+    with engine.begin() as connection:
+        stored_sql = connection.exec_driver_sql(
+            """
+            SELECT sql
+            FROM pricing.sqlite_master
+            WHERE type = 'table' AND name = 'MODEL_RUN'
+            """
+        ).scalar_one()
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.MODEL_RUN (
+                    model_run_id, model_id, model_version, model_kind,
+                    export_id, manifest_id, rate_package_id, model_name,
+                    rating_workbook_path, rating_workbook_sha256,
+                    run_status, created_by
+                ) VALUES (
+                    'manual-run', 17, 'v1', 'MANUAL_EDIT',
+                    'manual-export', 'manifest-1', 71, 'TEST_MODEL',
+                    '/tmp/manual.xlsx', :workbook_sha,
+                    'SUCCESS', 'pytest'
+                )
+                """
+            ),
+            {"workbook_sha": "a" * 64},
+        )
+
+    assert "MANUAL_EDIT" in stored_sql
 
 
 def test_fresh_offline_dataset_manifest_requires_frame_evidence(tmp_path):

@@ -197,6 +197,59 @@ def test_model_kind_data_lineage_and_equivalence_migration_is_normalized():
     assert "package.split_set_id" not in sql
 
 
+def test_manual_edit_migration_extends_model_kind_without_rewriting_history():
+    path = Path("db/migrations/V038__manual_edit_model_kind.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    assert "DROP CONSTRAINT CK_MODEL_RUN_MODEL_KIND" in sql
+    assert "ADD CONSTRAINT CK_MODEL_RUN_MODEL_KIND" in sql
+    assert "'RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT'" in sql
+    assert "UPDATE pricing.MODEL_RUN" not in sql
+
+
+def test_controlled_monitoring_migration_has_frozen_presets_and_lineage_views():
+    path = Path("db/migrations/V037__controlled_model_monitoring.sql")
+
+    assert path.exists()
+    sql = path.read_text(encoding="utf-8")
+    for table_name in (
+        "MODEL_MONITOR_VARIANT",
+        "MODEL_FIT_CONTRACT",
+        "MODEL_MONITOR_RUN",
+        "MODEL_MONITOR_TERM",
+        "MODEL_MONITOR_LAMBDA",
+        "MODEL_MONITOR_RELATIVITY",
+        "MODEL_MONITOR_METRIC",
+    ):
+        assert f"CREATE TABLE mlops.{table_name}" in sql
+    for variant in (
+        "STATIC_SCORE",
+        "FROZEN_REFIT",
+        "REESTIMATE_LAMBDA",
+        "FULL_ADAPTIVE",
+    ):
+        assert variant in sql
+    assert "TR_MODEL_FIT_CONTRACT_IMMUTABLE" in sql
+    assert "TR_MODEL_FIT_CONTRACT_LINEAGE_GUARD" in sql
+    assert "TR_MODEL_MONITOR_RUN_LINEAGE_GUARD" in sql
+    assert "baseline_deployment_id" in sql
+    assert "invariant_status" in sql
+    assert "invariant_evidence_sha256" in sql
+    assert "invariant_evidence_json" in sql
+    assert "CK_MODEL_MONITOR_RUN_INVARIANT_STATUS" in sql
+    assert "manifest.data_as_of_date" in sql
+    assert "manifest.data_as_of_column" in sql
+    assert "manifest.model_frame_sha256" in sql
+    for view_name in (
+        "V_MODEL_MONITORING_RUN",
+        "V_MODEL_MONITORING_RELATIVITY",
+        "V_MODEL_MONITORING_LAMBDA",
+    ):
+        assert f"CREATE OR ALTER VIEW pricing.{view_name}" in sql
+    assert all(batch.strip() for batch in split_sql_server_batches(sql))
+
+
 def test_current_scorer_upgrade_matches_package_term_semantics():
     path = Path("db/migrations/V029__current_rate_package_scoring.sql")
 

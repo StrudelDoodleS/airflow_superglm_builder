@@ -4,10 +4,11 @@ import json
 import math
 import os
 import shutil
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -178,7 +179,12 @@ def publish_editor_submission(
 
 
 def _editor_export_id(submission: EditorSubmission) -> str:
-    return f"editor__{submission.submission_id.replace('-', '_')}"
+    prefix = "manual" if _submission_model_kind(submission) == "MANUAL_EDIT" else "editor"
+    return f"{prefix}__{submission.submission_id.replace('-', '_')}"
+
+
+def _submission_model_kind(submission: EditorSubmission) -> str:
+    return str(getattr(submission, "model_kind", "EDITOR_EDIT") or "EDITOR_EDIT").upper()
 
 
 def _submission_directory(
@@ -243,6 +249,7 @@ def _resolve_existing_editor_publication(
             mr.parent_model_run_id,
             mr.run_status,
             mr.model_version,
+            mr.model_kind,
             mr.export_id,
             mr.manifest_id,
             manifest.model_frame_sha256,
@@ -335,7 +342,10 @@ def _resolve_existing_editor_publication(
     expected_sql_lineage = {
         **expected_lineage,
         "parent_model_run_id": submission.parent_model_run_id,
+        "model_kind": _submission_model_kind(submission),
     }
+    if row.get("model_kind") is None:
+        row["model_kind"] = "EDITOR_EDIT"
     sql_mismatches = [
         field for field, expected in expected_sql_lineage.items() if row.get(field) != expected
     ]
@@ -384,6 +394,7 @@ def _resolve_existing_editor_publication(
         model_run_id=int(row["model_run_id"]),
         package_status=str(row["package_status"]),
         was_existing=True,
+        model_kind=_submission_model_kind(submission),
     )
 
 
@@ -976,7 +987,11 @@ def export_edited_model(
         path=str(final_dir / "candidate_bundle.joblib"),
     )
     revision_metadata = {
-        "kind": "SUPERGLM_EDITOR",
+        "kind": (
+            "SUPERGLM_MANUAL_EDIT"
+            if _submission_model_kind(submission) == "MANUAL_EDIT"
+            else "SUPERGLM_EDITOR"
+        ),
         "schema_version": 1,
         "submission_id": submission.submission_id,
         "reason": submission.reason,
@@ -995,6 +1010,9 @@ def export_edited_model(
         },
         "champion_comparison": champion_comparison,
     }
+    edit_metadata = getattr(submission, "edit_metadata", None)
+    if edit_metadata is not None:
+        revision_metadata["edit_metadata"] = edit_metadata
     if getattr(submission, "format", LEGACY_SUBMISSION_FORMAT) == SUBMISSION_FORMAT:
         revision_metadata.update(
             edited_model_path=submission.edited_model_path,
@@ -1009,7 +1027,7 @@ def export_edited_model(
         model_name=parent.model_name,
         model_version=parent.model_version,
         model_type=parent.config.model_type,
-        model_kind="EDITOR_EDIT",
+        model_kind=_submission_model_kind(submission),
         target_name=parent.config.target_name,
         deployment_slot=submission.deployment_slot,
         manifest_id=submission.manifest_id,
@@ -1205,6 +1223,7 @@ def _publish_new_editor_submission(
                 model_run_id=equivalent.model_run_id,
                 package_status=equivalent.package_status,
                 was_existing=True,
+                model_kind=build.model_kind,
                 deduplicated=True,
             )
         content_sha256 = stage_rating_export(
@@ -1333,6 +1352,7 @@ def _publish_new_editor_submission(
                 model_run_id=int(equivalent["model_run_id"]),
                 package_status=str(equivalent["package_status"]),
                 was_existing=True,
+                model_kind=build.model_kind,
                 deduplicated=True,
             )
         if published.was_existing:
@@ -1361,4 +1381,5 @@ def _publish_new_editor_submission(
         model_run_id=published.model_run_id,
         package_status=published.package_status,
         was_existing=published.was_existing,
+        model_kind=build.model_kind,
     )

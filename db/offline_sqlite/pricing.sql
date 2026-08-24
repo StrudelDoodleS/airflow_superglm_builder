@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_RUN (
     mlflow_run_id TEXT,
     model_version TEXT NOT NULL,
     model_kind TEXT NOT NULL DEFAULT 'RAW'
-        CHECK (model_kind IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')),
+        CHECK (model_kind IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')),
     model_equivalence_sha256 TEXT,
     export_id TEXT NOT NULL,
     manifest_id TEXT NOT NULL,
@@ -224,6 +224,258 @@ BEGIN
     SELECT RAISE(
         ABORT,
         'deployment package must exist, match model_id, and be PUBLISHED'
+    );
+END;
+
+-- SQL Server owns these logical tables in mlops.  The local mirror lives in
+-- pricing.sqlite so its persistent monitoring views also work when that file
+-- is opened without the attached-schema coordinator.
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_VARIANT (
+    variant_code TEXT NOT NULL PRIMARY KEY,
+    variant_label TEXT NOT NULL,
+    refit_coefficients INTEGER NOT NULL CHECK (refit_coefficients IN (0, 1)),
+    reestimate_lambdas INTEGER NOT NULL CHECK (reestimate_lambdas IN (0, 1)),
+    reposition_data_driven_knots INTEGER NOT NULL
+        CHECK (reposition_data_driven_knots IN (0, 1)),
+    structure_frozen INTEGER NOT NULL DEFAULT 1 CHECK (structure_frozen = 1),
+    CHECK (
+        variant_code IN (
+            'STATIC_SCORE',
+            'FROZEN_REFIT',
+            'REESTIMATE_LAMBDA',
+            'FULL_ADAPTIVE'
+        )
+    )
+);
+
+INSERT INTO pricing.MODEL_MONITOR_VARIANT (
+    variant_code,
+    variant_label,
+    refit_coefficients,
+    reestimate_lambdas,
+    reposition_data_driven_knots,
+    structure_frozen
+) VALUES
+    ('STATIC_SCORE', 'Deployed model, no refit', 0, 0, 0, 1),
+    ('FROZEN_REFIT', 'Refit coefficients only', 1, 0, 0, 1),
+    ('REESTIMATE_LAMBDA', 'Refit coefficients and REML lambdas', 1, 1, 0, 1),
+    ('FULL_ADAPTIVE', 'Refit coefficients, lambdas, and data-driven knots', 1, 1, 1, 1)
+ON CONFLICT(variant_code) DO UPDATE SET
+    variant_label = excluded.variant_label,
+    refit_coefficients = excluded.refit_coefficients,
+    reestimate_lambdas = excluded.reestimate_lambdas,
+    reposition_data_driven_knots = excluded.reposition_data_driven_knots,
+    structure_frozen = excluded.structure_frozen;
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_FIT_CONTRACT (
+    fit_contract_id TEXT NOT NULL PRIMARY KEY,
+    baseline_model_run_id TEXT NOT NULL UNIQUE,
+    model_id INTEGER NOT NULL,
+    rate_package_id INTEGER NOT NULL,
+    contract_schema_version INTEGER NOT NULL CHECK (contract_schema_version >= 1),
+    contract_sha256 TEXT NOT NULL
+        CHECK (
+            length(contract_sha256) = 64
+            AND contract_sha256 = lower(contract_sha256)
+            AND contract_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+    structure_sha256 TEXT NOT NULL
+        CHECK (
+            length(structure_sha256) = 64
+            AND structure_sha256 = lower(structure_sha256)
+            AND structure_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+    contract_json TEXT NOT NULL CHECK (json_valid(contract_json)),
+    superglm_version TEXT NOT NULL,
+    created_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL,
+    FOREIGN KEY (baseline_model_run_id) REFERENCES MODEL_RUN(model_run_id),
+    FOREIGN KEY (model_id) REFERENCES PRICING_MODEL(model_id),
+    FOREIGN KEY (rate_package_id) REFERENCES PRICING_RATE_PACKAGE(rate_package_id)
+);
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_RUN (
+    monitor_run_id TEXT NOT NULL PRIMARY KEY,
+    fit_contract_id TEXT NOT NULL,
+    baseline_deployment_id INTEGER NOT NULL,
+    model_id INTEGER NOT NULL,
+    rate_package_id INTEGER NOT NULL,
+    manifest_id TEXT NOT NULL,
+    component_role TEXT NOT NULL
+        CHECK (component_role IN ('FREQUENCY', 'SEVERITY', 'OTHER')),
+    variant_code TEXT NOT NULL,
+    run_signature_sha256 TEXT NOT NULL UNIQUE
+        CHECK (
+            length(run_signature_sha256) = 64
+            AND run_signature_sha256 = lower(run_signature_sha256)
+            AND run_signature_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+    run_status TEXT NOT NULL CHECK (run_status IN ('SUCCESS', 'FAILED')),
+    invariant_status TEXT NOT NULL
+        CHECK (invariant_status IN ('VERIFIED', 'LEGACY_UNVERIFIED')),
+    invariant_evidence_sha256 TEXT,
+    invariant_evidence_json TEXT,
+    started_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT NOT NULL,
+    CHECK (completed_ts >= started_ts),
+    CHECK (
+        (
+            invariant_status = 'VERIFIED'
+            AND invariant_evidence_sha256 IS NOT NULL
+            AND length(invariant_evidence_sha256) = 64
+            AND invariant_evidence_sha256 = lower(invariant_evidence_sha256)
+            AND invariant_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+            AND invariant_evidence_json IS NOT NULL
+            AND json_valid(invariant_evidence_json)
+        )
+        OR (
+            invariant_status = 'LEGACY_UNVERIFIED'
+            AND invariant_evidence_sha256 IS NULL
+            AND invariant_evidence_json IS NULL
+        )
+    ),
+    FOREIGN KEY (fit_contract_id) REFERENCES MODEL_FIT_CONTRACT(fit_contract_id),
+    FOREIGN KEY (baseline_deployment_id)
+        REFERENCES PRICING_MODEL_DEPLOYMENT(deployment_id),
+    FOREIGN KEY (model_id) REFERENCES PRICING_MODEL(model_id),
+    FOREIGN KEY (rate_package_id) REFERENCES PRICING_RATE_PACKAGE(rate_package_id),
+    FOREIGN KEY (manifest_id) REFERENCES DATASET_MANIFEST(manifest_id),
+    FOREIGN KEY (variant_code) REFERENCES MODEL_MONITOR_VARIANT(variant_code)
+);
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_TERM (
+    monitor_run_id TEXT NOT NULL,
+    term_name TEXT NOT NULL,
+    term_kind TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
+    term_structure_sha256 TEXT NOT NULL
+        CHECK (
+            length(term_structure_sha256) = 64
+            AND term_structure_sha256 = lower(term_structure_sha256)
+            AND term_structure_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+    term_metadata_json TEXT NOT NULL CHECK (json_valid(term_metadata_json)),
+    PRIMARY KEY (monitor_run_id, term_name),
+    UNIQUE (monitor_run_id, sequence_no),
+    FOREIGN KEY (monitor_run_id) REFERENCES MODEL_MONITOR_RUN(monitor_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_LAMBDA (
+    monitor_run_id TEXT NOT NULL,
+    component_name TEXT NOT NULL,
+    term_name TEXT,
+    lambda_value REAL NOT NULL CHECK (lambda_value >= 0),
+    lambda_mode TEXT NOT NULL CHECK (lambda_mode IN ('BASELINE', 'FIXED', 'ESTIMATED')),
+    PRIMARY KEY (monitor_run_id, component_name),
+    FOREIGN KEY (monitor_run_id) REFERENCES MODEL_MONITOR_RUN(monitor_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_RELATIVITY (
+    monitor_run_id TEXT NOT NULL,
+    term_name TEXT NOT NULL,
+    term_kind TEXT NOT NULL,
+    point_key TEXT NOT NULL,
+    point_label TEXT,
+    point_numeric REAL,
+    relativity REAL NOT NULL CHECK (relativity > 0),
+    log_relativity REAL NOT NULL,
+    is_reference INTEGER NOT NULL CHECK (is_reference IN (0, 1)),
+    PRIMARY KEY (monitor_run_id, term_name, point_key),
+    CHECK (
+        (point_label IS NULL AND point_numeric IS NOT NULL)
+        OR (point_label IS NOT NULL AND point_numeric IS NULL)
+    ),
+    FOREIGN KEY (monitor_run_id) REFERENCES MODEL_MONITOR_RUN(monitor_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_METRIC (
+    monitor_run_id TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    metric_value REAL NOT NULL,
+    PRIMARY KEY (monitor_run_id, metric_name),
+    FOREIGN KEY (monitor_run_id) REFERENCES MODEL_MONITOR_RUN(monitor_run_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_FIT_CONTRACT_LINEAGE_INSERT
+BEFORE INSERT ON MODEL_FIT_CONTRACT
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM MODEL_RUN AS baseline_run
+    JOIN PRICING_RATE_PACKAGE AS package
+      ON package.rate_package_id = NEW.rate_package_id
+    WHERE baseline_run.model_run_id = NEW.baseline_model_run_id
+      AND baseline_run.model_id = NEW.model_id
+      AND baseline_run.rate_package_id = NEW.rate_package_id
+      AND baseline_run.run_status = 'SUCCESS'
+      AND package.model_id = NEW.model_id
+      AND package.package_status = 'PUBLISHED'
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'fit contract must identify one successful published baseline run'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_FIT_CONTRACT_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_FIT_CONTRACT
+BEGIN
+    SELECT RAISE(ABORT, 'model fit contracts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_FIT_CONTRACT_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_FIT_CONTRACT
+BEGIN
+    SELECT RAISE(ABORT, 'model fit contracts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RUN_LINEAGE_INSERT
+BEFORE INSERT ON MODEL_MONITOR_RUN
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM MODEL_FIT_CONTRACT AS contract
+    JOIN MODEL_RUN AS baseline_run
+      ON baseline_run.model_run_id = contract.baseline_model_run_id
+    JOIN PRICING_MODEL_DEPLOYMENT AS deployment
+      ON deployment.deployment_id = NEW.baseline_deployment_id
+    WHERE contract.fit_contract_id = NEW.fit_contract_id
+      AND contract.model_id = NEW.model_id
+      AND contract.rate_package_id = NEW.rate_package_id
+      AND baseline_run.model_id = NEW.model_id
+      AND baseline_run.rate_package_id = NEW.rate_package_id
+      AND deployment.model_id = NEW.model_id
+      AND deployment.rate_package_id = NEW.rate_package_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'monitoring contract, run, and deployment must identify one model package'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RUN_LINEAGE_UPDATE
+BEFORE UPDATE OF fit_contract_id, baseline_deployment_id, model_id, rate_package_id
+ON MODEL_MONITOR_RUN
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM MODEL_FIT_CONTRACT AS contract
+    JOIN MODEL_RUN AS baseline_run
+      ON baseline_run.model_run_id = contract.baseline_model_run_id
+    JOIN PRICING_MODEL_DEPLOYMENT AS deployment
+      ON deployment.deployment_id = NEW.baseline_deployment_id
+    WHERE contract.fit_contract_id = NEW.fit_contract_id
+      AND contract.model_id = NEW.model_id
+      AND contract.rate_package_id = NEW.rate_package_id
+      AND baseline_run.model_id = NEW.model_id
+      AND baseline_run.rate_package_id = NEW.rate_package_id
+      AND deployment.model_id = NEW.model_id
+      AND deployment.rate_package_id = NEW.rate_package_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'monitoring contract, run, and deployment must identify one model package'
     );
 END;
 

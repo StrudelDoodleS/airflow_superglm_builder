@@ -131,6 +131,52 @@ def test_editor_submission_saves_session_and_final_model_artifacts(tmp_path):
     assert payload["split_set_id"] == "split-1"
     assert payload["baseline_candidate_sha256"] == "c" * 64
     assert payload["claimed_identity"] == "analyst@example"
+    assert payload["model_kind"] == "EDITOR_EDIT"
+    assert submission.model_kind == "EDITOR_EDIT"
+
+
+def test_manual_submission_records_kind_and_structured_policy_metadata(tmp_path):
+    session = FakeEditorSession()
+    policy = {
+        "format": "pricing-manual-adjustment-policy-v1",
+        "name": "market adjustment",
+        "version": 1,
+        "reason": "Approved response",
+        "carry_forward": True,
+        "rules": [],
+    }
+
+    submission = save_editor_submission(
+        _candidate(tmp_path),
+        editor_session=session,
+        reason="Approved response",
+        claimed_identity="analyst@example",
+        model_kind="MANUAL_EDIT",
+        edit_metadata={"manual_adjustment_policy": policy},
+    )
+
+    payload = json.loads(Path(submission.path).read_text(encoding="utf-8"))
+    assert submission.model_kind == "MANUAL_EDIT"
+    assert payload["model_kind"] == "MANUAL_EDIT"
+    assert payload["edit_metadata"] == {"manual_adjustment_policy": policy}
+    loaded = load_verified_submission(
+        submission.path,
+        submission.sha256,
+        allowed_root=tmp_path,
+    )
+    assert loaded.model_kind == "MANUAL_EDIT"
+    assert loaded.edit_metadata == {"manual_adjustment_policy": policy}
+
+
+def test_editor_submission_rejects_non_edit_model_kind(tmp_path):
+    with pytest.raises(ValueError, match="EDITOR_EDIT or MANUAL_EDIT"):
+        save_editor_submission(
+            _candidate(tmp_path),
+            editor_session=FakeEditorSession(),
+            reason="Not an edit",
+            claimed_identity="analyst@example",
+            model_kind="RAW",
+        )
 
 
 def test_submission_loader_verifies_manifest_and_editor_session_hashes(tmp_path):

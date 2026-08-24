@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
-
 
 OFFLINE_DDL_DIR = Path(__file__).resolve().parents[2] / "db" / "offline_sqlite"
 COORDINATOR_DB_FILE = "coordinator.sqlite"
@@ -113,6 +112,24 @@ _OFFLINE_COLUMN_UPGRADES = (
         "pricing_stg",
         "STG_RATING_EXPORT",
         "model_equivalence_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_status",
+        "TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED'",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_evidence_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "invariant_evidence_json",
         "TEXT",
     ),
 )
@@ -222,14 +239,76 @@ def _relax_offline_column_nullability(
         )
 
     old_table = f"__offline_upgrade_{table.lower()}"
-    quoted_columns = ", ".join(f'"{str(row[1])}"' for row in columns)
-    connection.execute(f'ALTER TABLE {schema}."{table}" RENAME TO "{old_table}"')
-    connection.execute(qualified_sql)
-    connection.execute(
-        f'INSERT INTO {schema}."{table}" ({quoted_columns}) '
-        f'SELECT {quoted_columns} FROM {schema}."{old_table}"'
+    quoted_columns = ", ".join(f'"{row[1]!s}"' for row in columns)
+    previous_legacy_mode = int(connection.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    connection.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        # This is a table-rebuild implementation detail, not a semantic rename.
+        # Keep dependent views, triggers, and foreign keys pointed at the final
+        # table name while the temporary old table exists.
+        connection.execute(f'ALTER TABLE {schema}."{table}" RENAME TO "{old_table}"')
+        connection.execute(qualified_sql)
+        connection.execute(
+            f'INSERT INTO {schema}."{table}" ({quoted_columns}) '
+            f'SELECT {quoted_columns} FROM {schema}."{old_table}"'
+        )
+        connection.execute(f'DROP TABLE {schema}."{old_table}"')
+    finally:
+        connection.execute(f"PRAGMA legacy_alter_table = {previous_legacy_mode}")
+    return True
+
+
+def _extend_offline_model_kind_check(connection) -> bool:
+    create_row = connection.execute(
+        "SELECT sql FROM pricing.sqlite_master WHERE type = 'table' AND name = 'MODEL_RUN'"
+    ).fetchone()
+    if create_row is None or not create_row[0]:
+        raise RuntimeError("cannot rebuild missing offline table pricing.MODEL_RUN")
+    create_sql = str(create_row[0])
+    if "MANUAL_EDIT" in create_sql:
+        return False
+    extended_sql, replacements = re.subn(
+        r"'RAW'\s*,\s*'ROUTINE_EDIT'\s*,\s*'EDITOR_EDIT'",
+        "'RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT'",
+        create_sql,
+        count=1,
+        flags=re.IGNORECASE,
     )
-    connection.execute(f'DROP TABLE {schema}."{old_table}"')
+    if replacements != 1:
+        raise RuntimeError(
+            "cannot extend offline MODEL_RUN.model_kind check: "
+            "stored CREATE TABLE statement is not recognized"
+        )
+    qualified_sql, replacements = re.subn(
+        r"^CREATE\s+TABLE\s+MODEL_RUN\s*",
+        "CREATE TABLE pricing.MODEL_RUN ",
+        extended_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if replacements != 1:
+        raise RuntimeError(
+            "cannot rebuild offline table pricing.MODEL_RUN: "
+            "stored CREATE TABLE prefix is not recognized"
+        )
+
+    columns = list(connection.execute("PRAGMA pricing.table_info('MODEL_RUN')").fetchall())
+    quoted_columns = ", ".join(f'"{row[1]!s}"' for row in columns)
+    old_table = "__offline_upgrade_model_run"
+    previous_legacy_mode = int(connection.execute("PRAGMA legacy_alter_table").fetchone()[0])
+    connection.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        connection.execute(
+            'ALTER TABLE pricing."MODEL_RUN" RENAME TO "__offline_upgrade_model_run"'
+        )
+        connection.execute(qualified_sql)
+        connection.execute(
+            f'INSERT INTO pricing."MODEL_RUN" ({quoted_columns}) '
+            f'SELECT {quoted_columns} FROM pricing."{old_table}"'
+        )
+        connection.execute(f'DROP TABLE pricing."{old_table}"')
+    finally:
+        connection.execute(f"PRAGMA legacy_alter_table = {previous_legacy_mode}")
     return True
 
 
@@ -277,7 +356,7 @@ def apply_offline_ddl(engine: Engine) -> None:
                 ELSE 'RAW'
             END
             WHERE model_kind IS NULL
-               OR model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+               OR model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             """
         )
         connection.execute(
@@ -290,7 +369,7 @@ def apply_offline_ddl(engine: Engine) -> None:
         connection.commit()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            rebuilt_table = False
+            rebuilt_table = _extend_offline_model_kind_check(connection)
             for schema, table, column in _OFFLINE_NULLABILITY_UPGRADES:
                 rebuilt_table = (
                     _relax_offline_column_nullability(
@@ -329,16 +408,22 @@ def apply_offline_ddl(engine: Engine) -> None:
             raise
         connection.executescript(
             """
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_INSERT;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE;
+            """
+        )
+        connection.executescript(
+            """
             CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_INSERT
             BEFORE INSERT ON MODEL_RUN
-            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
             END;
 
             CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE
             BEFORE UPDATE OF model_kind ON MODEL_RUN
-            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT')
+            WHEN NEW.model_kind NOT IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT')
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN.model_kind');
             END;
@@ -389,6 +474,36 @@ def apply_offline_ddl(engine: Engine) -> None:
              )
             BEGIN
                 SELECT RAISE(ABORT, 'invalid MODEL_RUN model equivalence digest');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_INSERT
+            BEFORE INSERT ON MODEL_MONITOR_RUN
+            WHEN NEW.invariant_status <> 'VERIFIED'
+              OR NEW.invariant_evidence_sha256 IS NULL
+              OR length(NEW.invariant_evidence_sha256) <> 64
+              OR NEW.invariant_evidence_sha256 <> lower(NEW.invariant_evidence_sha256)
+              OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.invariant_evidence_json IS NULL
+              OR NOT json_valid(NEW.invariant_evidence_json)
+            BEGIN
+                SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_UPDATE
+            BEFORE UPDATE OF
+                invariant_status,
+                invariant_evidence_sha256,
+                invariant_evidence_json
+            ON MODEL_MONITOR_RUN
+            WHEN NEW.invariant_status <> 'VERIFIED'
+              OR NEW.invariant_evidence_sha256 IS NULL
+              OR length(NEW.invariant_evidence_sha256) <> 64
+              OR NEW.invariant_evidence_sha256 <> lower(NEW.invariant_evidence_sha256)
+              OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.invariant_evidence_json IS NULL
+              OR NOT json_valid(NEW.invariant_evidence_json)
+            BEGIN
+                SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
             END;
             """
         )

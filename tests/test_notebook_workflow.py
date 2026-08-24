@@ -877,6 +877,52 @@ def test_open_candidate_uses_registered_python_config(monkeypatch, tmp_path):
     assert captured["open"] == ("CLAIM_FREQUENCY", 4)
 
 
+def test_open_deployed_candidate_resolves_the_current_package(monkeypatch, tmp_path):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    expected = object()
+    opened = {}
+    history = pd.DataFrame(
+        {
+            "package_version": [9, 8],
+            "rate_package_id": [109, 108],
+            "current_rate_package_id": [108, 108],
+            "current_deployment_id": [708, 708],
+        }
+    )
+    monkeypatch.setattr(api, "list_candidate_versions", lambda *args, **kwargs: history)
+
+    def open_candidate(*args, **kwargs):
+        opened.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(api, "open_candidate", open_candidate)
+
+    assert api.open_deployed_candidate(context, model=model) is expected
+    assert opened == {"model": model, "package_version": 8}
+
+
+def test_open_deployed_candidate_rejects_a_missing_deployment(monkeypatch, tmp_path):
+    from pricing_pipeline import notebook as api
+
+    context = _context(api, tmp_path)
+    model = _registered_model(api, tmp_path)
+    history = pd.DataFrame(
+        {
+            "package_version": [9],
+            "rate_package_id": [109],
+            "current_rate_package_id": [None],
+            "current_deployment_id": [None],
+        }
+    )
+    monkeypatch.setattr(api, "list_candidate_versions", lambda *args, **kwargs: history)
+
+    with pytest.raises(LookupError, match="current deployment"):
+        api.open_deployed_candidate(context, model=model)
+
+
 def test_publish_edits_runs_editor_publisher_synchronously(monkeypatch, tmp_path):
     from pricing_pipeline import notebook as api
 

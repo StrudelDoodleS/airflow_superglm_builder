@@ -46,6 +46,23 @@ from pricing_pipeline.modeling.level_grouping_artifact import (
 from pricing_pipeline.modeling.level_grouping_artifact import (
     load_level_groupings as _load_level_groupings,
 )
+from pricing_pipeline.modeling.manual_adjustment import (
+    ManualAdjustmentPolicy,
+    ManualAdjustmentRule,
+    ManualEditReview,
+    apply_manual_adjustment_policy,
+    manual_adjustment_policy_from_candidate,
+)
+from pricing_pipeline.modeling.monitoring import (
+    ModelFitContract,
+    MonitoringFitResult,
+    MonitoringInvariantEvidence,
+    MonitoringVariant,
+    PersistedMonitoringRun,
+    build_model_fit_contract,
+    persist_monitoring_fit,
+    run_monitoring_fit,
+)
 from pricing_pipeline.modeling.standard_superglm import (
     ModelInputs,
     canonical_row_identity_index,
@@ -730,6 +747,33 @@ def open_candidate(
     )
 
 
+def open_deployed_candidate(
+    pricing: NotebookContext,
+    *,
+    model: RegisteredModel,
+):
+    """Open the exact package currently deployed in the model's configured slot."""
+    versions = list_candidate_versions(pricing, model=model, technical=True)
+    if versions.empty:
+        raise LookupError(f"model {model.name!r} has no published candidate packages")
+    current_ids = {int(value) for value in versions["current_rate_package_id"].dropna().tolist()}
+    if len(current_ids) != 1:
+        raise LookupError(
+            f"model {model.name!r} has no unambiguous current deployment in "
+            f"slot {model.config.deployment_slot!r}"
+        )
+    selected = versions.loc[versions["rate_package_id"].astype(int).eq(current_ids.pop())]
+    if len(selected) != 1:
+        raise LookupError(
+            f"the current deployment for model {model.name!r} did not resolve one package"
+        )
+    return open_candidate(
+        pricing,
+        model=model,
+        package_version=int(selected.iloc[0]["package_version"]),
+    )
+
+
 def export_level_groupings(
     candidate: Candidate,
     *,
@@ -840,6 +884,53 @@ def publish_edits(
     )
 
 
+def publish_manual_adjustment(
+    pricing: NotebookContext,
+    *,
+    review: ManualEditReview,
+    created_by: str | None = None,
+):
+    """Publish a reviewed relative business adjustment as a MANUAL_EDIT child."""
+    pricing.require_write("publish_manual_adjustment")
+    if pricing.mode == "local":
+        raise RuntimeError(
+            "Remote mode is required for manual adjustment publication; local SQLite "
+            "can validate model-kind and lineage records but cannot publish rating tables."
+        )
+    if not isinstance(review, ManualEditReview):
+        raise TypeError("review must come from apply_manual_adjustment_policy()")
+    candidate = review.candidate
+    if candidate.workbench.engine is not pricing.engine:
+        raise ValueError("manual adjustment candidate was opened with a different context")
+
+    # Reapply the canonical relative policy so later interactive session mutations
+    # cannot diverge from the payload recorded in SQL.
+    verified = apply_manual_adjustment_policy(candidate, review.policy)
+    identity = _created_by(created_by)
+    policy_payload = verified.policy.to_payload()
+    submission = save_editor_submission(
+        candidate,
+        editor_session=verified.editor_session,
+        reason=verified.policy.reason,
+        claimed_identity=identity,
+        model_kind="MANUAL_EDIT",
+        edit_metadata={
+            "manual_adjustment_policy": policy_payload,
+            "manual_adjustment_policy_sha256": verified.policy.sha256,
+        },
+    )
+    return publish_editor_submission(
+        pricing.engine,
+        settings=pricing.settings,
+        submission_path=submission.path,
+        submission_sha256=submission.sha256,
+        dag_id="notebook_publish_manual_adjustment",
+        airflow_run_id=f"notebook__{submission.submission_id}",
+        created_by=identity,
+        model_config=candidate.workbench.model_config,
+    )
+
+
 def deploy_package(
     pricing: NotebookContext,
     *,
@@ -883,12 +974,22 @@ def deploy_package(
 
 __all__ = [
     "BuiltCandidate",
+    "ManualAdjustmentPolicy",
+    "ManualAdjustmentRule",
+    "ManualEditReview",
+    "ModelFitContract",
     "ModelFrameArtifact",
+    "MonitoringFitResult",
+    "MonitoringInvariantEvidence",
+    "MonitoringVariant",
     "NotebookContext",
+    "PersistedMonitoringRun",
     "PricingModelSpec",
     "RegisteredModel",
     "apply_level_groupings",
+    "apply_manual_adjustment_policy",
     "build_candidate",
+    "build_model_fit_contract",
     "connect",
     "deploy_package",
     "export_level_groupings",
@@ -898,9 +999,14 @@ __all__ = [
     "load_level_groupings",
     "load_model_frame",
     "load_registered_model",
+    "manual_adjustment_policy_from_candidate",
     "open_candidate",
+    "open_deployed_candidate",
+    "persist_monitoring_fit",
     "publish_candidate",
     "publish_edits",
+    "publish_manual_adjustment",
     "register_model",
+    "run_monitoring_fit",
     "save_model_frame",
 ]

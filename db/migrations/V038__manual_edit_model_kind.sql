@@ -1,0 +1,16 @@
+IF EXISTS (
+    SELECT 1
+    FROM sys.check_constraints
+    WHERE name = 'CK_MODEL_RUN_MODEL_KIND'
+      AND parent_object_id = OBJECT_ID('pricing.MODEL_RUN')
+)
+BEGIN
+    ALTER TABLE pricing.MODEL_RUN
+        DROP CONSTRAINT CK_MODEL_RUN_MODEL_KIND;
+END;
+GO
+
+ALTER TABLE pricing.MODEL_RUN WITH CHECK
+    ADD CONSTRAINT CK_MODEL_RUN_MODEL_KIND
+    CHECK (model_kind IN ('RAW', 'ROUTINE_EDIT', 'EDITOR_EDIT', 'MANUAL_EDIT'));
+GO

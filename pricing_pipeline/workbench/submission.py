@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
+from pricing_pipeline.models.kinds import ModelKind, normalise_model_kind
 from pricing_pipeline.workbench.artifacts import save_edited_model
 
 if TYPE_CHECKING:
@@ -48,6 +50,8 @@ class EditorSubmission:
     model_source_sha256: str
     path: str
     sha256: str
+    model_kind: str = ModelKind.EDITOR_EDIT.value
+    edit_metadata: dict[str, Any] | None = None
     edited_model_path: str | None = None
     edited_model_sha256: str | None = None
     edited_model_size_bytes: int | None = None
@@ -74,7 +78,10 @@ class EditorSubmission:
             "editor_session_size_bytes": self.editor_session_size_bytes,
             "baseline_candidate_sha256": self.baseline_candidate_sha256,
             "model_source_sha256": self.model_source_sha256,
+            "model_kind": self.model_kind,
         }
+        if self.edit_metadata is not None:
+            payload["edit_metadata"] = self.edit_metadata
         if self.format == SUBMISSION_FORMAT:
             edited_fields = {
                 "edited_model_path": self.edited_model_path,
@@ -85,9 +92,7 @@ class EditorSubmission:
                 "edited_model_superglm_version": self.edited_model_superglm_version,
             }
             if any(value is None for value in edited_fields.values()):
-                raise EditorSubmissionError(
-                    "v2 submission requires complete edited model metadata"
-                )
+                raise EditorSubmissionError("v2 submission requires complete edited model metadata")
             payload.update(edited_fields)
         return payload
 
@@ -125,16 +130,12 @@ def _submission_tree_is_complete(directory: Path) -> bool:
     if not directory.is_dir() or not session_path.is_file() or not submission_path.is_file():
         return False
     try:
-        submission_format = json.loads(
-            submission_path.read_text(encoding="utf-8")
-        ).get("format")
-    except (OSError, json.JSONDecodeError):
+        submission_format = json.loads(submission_path.read_text(encoding="utf-8")).get("format")
+    except OSError, json.JSONDecodeError:
         return False
     if submission_format == LEGACY_SUBMISSION_FORMAT:
         return True
-    return submission_format == SUBMISSION_FORMAT and (
-        directory / "edited_model.joblib"
-    ).is_file()
+    return submission_format == SUBMISSION_FORMAT and (directory / "edited_model.joblib").is_file()
 
 
 def _quarantine_incomplete_submission(
@@ -200,6 +201,8 @@ def _promote_or_reuse_submission(
                         "editor_session_size_bytes",
                         "baseline_candidate_sha256",
                         "model_source_sha256",
+                        "model_kind",
+                        "edit_metadata",
                         "edited_model_path",
                         "edited_model_sha256",
                         "edited_model_size_bytes",
@@ -228,6 +231,8 @@ def save_editor_submission(
     editor_session: Any,
     reason: str,
     claimed_identity: str,
+    model_kind: str = ModelKind.EDITOR_EDIT.value,
+    edit_metadata: Mapping[str, Any] | None = None,
 ) -> EditorSubmission:
     cleaned_reason = str(reason).strip()
     if not cleaned_reason:
@@ -235,6 +240,13 @@ def save_editor_submission(
     cleaned_identity = str(claimed_identity).strip()
     if not cleaned_identity:
         raise ValueError("A non-empty claimed_identity is required")
+    resolved_model_kind = normalise_model_kind(model_kind)
+    if resolved_model_kind not in {
+        ModelKind.EDITOR_EDIT.value,
+        ModelKind.MANUAL_EDIT.value,
+    }:
+        raise ValueError("editor submissions must be EDITOR_EDIT or MANUAL_EDIT")
+    resolved_edit_metadata = _normalise_edit_metadata(edit_metadata)
 
     root = Path(candidate.workbench.settings.workbench_artifact_root).expanduser().resolve()
     submissions_root = (root / candidate.model_name / "editor_submissions").resolve()
@@ -260,6 +272,8 @@ def save_editor_submission(
                 "format": SUBMISSION_FORMAT,
                 "parent_rate_package_id": int(candidate.rate_package_id),
                 "editor_session_sha256": session_sha256,
+                "model_kind": resolved_model_kind,
+                "edit_metadata": resolved_edit_metadata,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -291,6 +305,8 @@ def save_editor_submission(
             model_source_sha256=candidate.bundle.model_source_sha256,
             path=str(submission_path),
             sha256="",
+            model_kind=resolved_model_kind,
+            edit_metadata=resolved_edit_metadata,
             edited_model_path=str(final_model_path),
             edited_model_sha256=model_artifact.sha256,
             edited_model_size_bytes=model_artifact.size_bytes,
@@ -311,6 +327,29 @@ def save_editor_submission(
         shutil.rmtree(staging, ignore_errors=True)
 
     return submission
+
+
+def _normalise_edit_metadata(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("edit_metadata must be a mapping")
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("edit_metadata must contain finite JSON values") from exc
+    decoded = json.loads(encoded)
+    if not isinstance(decoded, dict):
+        raise TypeError("edit_metadata must be a mapping")
+    return decoded
 
 
 def load_verified_submission(
@@ -334,6 +373,22 @@ def load_verified_submission(
     submission_format = payload.get("format")
     if submission_format not in {LEGACY_SUBMISSION_FORMAT, SUBMISSION_FORMAT}:
         raise EditorSubmissionError("submission has an unsupported format")
+    payload.setdefault("model_kind", ModelKind.EDITOR_EDIT.value)
+    payload.setdefault("edit_metadata", None)
+    try:
+        resolved_model_kind = normalise_model_kind(payload["model_kind"])
+    except ValueError as exc:
+        raise EditorSubmissionError("submission has an invalid model_kind") from exc
+    if resolved_model_kind not in {
+        ModelKind.EDITOR_EDIT.value,
+        ModelKind.MANUAL_EDIT.value,
+    }:
+        raise EditorSubmissionError("submission model_kind is not an editor revision")
+    payload["model_kind"] = resolved_model_kind
+    try:
+        payload["edit_metadata"] = _normalise_edit_metadata(payload["edit_metadata"])
+    except (TypeError, ValueError) as exc:
+        raise EditorSubmissionError("submission edit_metadata is invalid") from exc
 
     session_path = Path(payload["editor_session_path"]).expanduser().resolve()
     if not session_path.is_relative_to(root):
@@ -361,13 +416,9 @@ def load_verified_submission(
             )
         model_path = Path(payload["edited_model_path"]).expanduser().resolve()
         if not model_path.is_relative_to(root):
-            raise EditorSubmissionError(
-                f"edited model artifact is outside {root}: {model_path}"
-            )
+            raise EditorSubmissionError(f"edited model artifact is outside {root}: {model_path}")
         if not model_path.is_file():
-            raise EditorSubmissionError(
-                f"edited model artifact does not exist: {model_path}"
-            )
+            raise EditorSubmissionError(f"edited model artifact does not exist: {model_path}")
         if model_path.stat().st_size != int(payload["edited_model_size_bytes"]):
             raise EditorSubmissionError("edited model byte-size verification failed")
         if sha256_file(model_path) != payload["edited_model_sha256"]:

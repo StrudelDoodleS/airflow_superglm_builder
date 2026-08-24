@@ -31,7 +31,7 @@ from pricing_pipeline.publishing.superglm_publication_receipt import (
     SuperGLMPublicationReceipt,
 )
 
-EXTRACTOR_VERSION = "4"
+EXTRACTOR_VERSION = "5"
 
 _SUPERGLM_VERSION = package_version("superglm")
 _SPLINE_KIND_BY_CLASS = {
@@ -235,6 +235,7 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
                 "base": spec.base,
                 "ordered_levels": spec._ordered_levels,
                 "level_values": spec._original_level_to_value or spec._level_to_value,
+                "specials": spec._special_raw,
                 "n_knots_requested": configured_spline.n_knots,
                 "degree": configured_spline.degree,
                 "penalty": configured_spline.penalty,
@@ -250,11 +251,14 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
                 "level_values": spec._level_to_value,
                 "base_level": spec._base_level,
                 "non_base_levels": spec._non_base,
+                "special_levels": spec._special_display,
             },
             "fitted": {
                 "levels": spec._ordered_levels,
                 "base_level": spec._base_level,
                 "non_base_levels": spec._non_base,
+                "special_levels": spec._special_display,
+                "pinned_special_levels": spec._pinned_specials,
                 "coefficient_width": spline_width + special_width,
                 "spline_coefficient_width": spline_width,
                 "special_coefficient_width": special_width,

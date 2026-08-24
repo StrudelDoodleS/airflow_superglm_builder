@@ -160,6 +160,7 @@ def test_approved_build_rejects_unknown_fields(tmp_path: Path):
         ("raw", "RAW"),
         ("ROUTINE_EDIT", "ROUTINE_EDIT"),
         ("editor_edit", "EDITOR_EDIT"),
+        ("manual_edit", "MANUAL_EDIT"),
     ],
 )
 def test_approved_build_normalises_supported_model_kinds(

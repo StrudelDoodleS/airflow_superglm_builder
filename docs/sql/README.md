@@ -13,7 +13,7 @@ Configured schema names may differ at work. This guide uses the defaults:
 |---|---|
 | `pricing` | Dataset manifests, validation definitions, model registry/runs, immutable rating packages, deployments, read views, scoring procedures |
 | `pricing_stg` | Short-lived workbook publication payload and retained export receipt |
-| `mlops` | Normalized run-to-dataset, run-to-split, and run-metric lineage |
+| `mlops` | Normalized run lineage plus controlled deployed-model monitoring evidence |
 | `dbo` | `SCHEMA_MIGRATION` checksums/status and `SCHEMA_CONFIGURATION` schema-name lock |
 
 ## Data and run lineage
@@ -57,13 +57,59 @@ lineage integrity checks use them. Validation split lineage is read from
 direct manifest foreign key is stated here instead of drawn so it does not cross
 the two normalized link paths in the diagram.
 
+## Controlled monitoring lineage
+
+Monitoring is attached to an exact deployed run. It does not create
+`MODEL_RUN` or `PRICING_RATE_PACKAGE` rows and therefore cannot become a
+deployment by accident.
+
+```mermaid
+erDiagram
+    MODEL_RUN ||--|| MODEL_FIT_CONTRACT : freezes
+    PRICING_MODEL_DEPLOYMENT ||--o{ MODEL_MONITOR_RUN : baseline_for
+    DATASET_MANIFEST ||--o{ MODEL_MONITOR_RUN : observed_on
+    MODEL_MONITOR_VARIANT ||--o{ MODEL_MONITOR_RUN : selects
+    MODEL_FIT_CONTRACT ||--o{ MODEL_MONITOR_RUN : governs
+    MODEL_MONITOR_RUN ||--o{ MODEL_MONITOR_TERM : records
+    MODEL_MONITOR_RUN ||--o{ MODEL_MONITOR_LAMBDA : records
+    MODEL_MONITOR_RUN ||--o{ MODEL_MONITOR_RELATIVITY : records
+    MODEL_MONITOR_RUN ||--o{ MODEL_MONITOR_METRIC : records
+```
+
+| Table | Purpose |
+|---|---|
+| `mlops.MODEL_MONITOR_VARIANT` | The four interpretable presets: static, coefficient-only frozen, fixed-knot lambda refit, and full adaptive refit |
+| `mlops.MODEL_FIT_CONTRACT` | One immutable canonical contract per baseline run, including exact SuperGLM structure, fitted geometry, lambdas, and comparison grids |
+| `mlops.MODEL_MONITOR_RUN` | One variant observed against one baseline deployment and one dated dataset manifest, with canonical post-fit invariant evidence |
+| `mlops.MODEL_MONITOR_TERM` | Per-run feature kind, order, structural digest, and JSON metadata |
+| `mlops.MODEL_MONITOR_LAMBDA` | Smoothing component value and whether it was baseline, fixed, or estimated |
+| `mlops.MODEL_MONITOR_RELATIVITY` | Relativities on stable categorical levels or the baseline continuous grid |
+| `mlops.MODEL_MONITOR_METRIC` | Lightweight fit/score metrics |
+
+Every variant freezes categorical grouping and level universes, special levels,
+bases/unseen handling, feature types/order, basis type/dimension/penalty order,
+and monotonic/shape constraints. Only the switches declared by the variant may
+move. Python refuses persistence unless its post-fit guard verifies protected
+lambdas and every fixed-lambda history step exactly, verifies protected knot
+and boundary arrays exactly, and hashes an exact structural match. The run row
+stores `invariant_status`, `invariant_evidence_sha256`, and the canonical
+`invariant_evidence_json`. The run signature deduplicates an exact retry of
+`deployment + manifest + variant + contract`; a new data-as-at manifest remains
+a new observation.
+
+For frequency and severity components, four variants across 52 weekly
+snapshots means at most 416 small evidence runs per year. The heavier rows are
+relativity points, not duplicated workbooks or rate packages, so this is modest
+SQL volume. A proper model refresh creates and deploys a new package, which
+starts a new baseline contract epoch.
+
 Important columns are deliberately distinct:
 
 | Column | Meaning |
 |---|---|
 | `data_as_of_date` | Dataset version date: the last date for which source data is complete |
 | `data_as_of_column` | Name of the governed frame column that supplied that date |
-| `model_kind` | Semantic class: `RAW`, `ROUTINE_EDIT`, or `EDITOR_EDIT` |
+| `model_kind` | Semantic class: `RAW`, `ROUTINE_EDIT`, `EDITOR_EDIT`, or `MANUAL_EDIT` |
 | `model_equivalence_sha256` | Canonical final rating semantics used for duplicate prevention |
 | `manifest_signature_sha256` | Canonical dataset snapshot identity |
 | `parent_model_run_id` / `parent_rate_package_id` | Editor/revision provenance, not deployment state |
@@ -106,6 +152,14 @@ Package state is `DRAFT` during assembly and `PUBLISHED` after successful
 validation. Published/deployed package content is immutable; change means a new
 package. Deploying closes the old open history row and inserts a new one.
 
+A `MANUAL_EDIT` is a new child run/package, never an update to its parent.
+`PRICING_RATE_PACKAGE.revision_metadata_json` carries the canonical relative
+adjustment policy, its SHA-256, analyst reason, session/artifact evidence, and
+parent IDs. The normalized rating tables hold the resulting final
+relativities. A carry-forward policy is replayed in Python against a later
+clean candidate; SQL records the policy and outcome but does not perform the
+adjustment.
+
 `pricing.PRICING_PACKAGE_POINTER` is a compatibility table still dual-written
 by deployment code. Current repo reads use `PRICING_MODEL_DEPLOYMENT`; do not
 build new consumers on the pointer table.
@@ -145,6 +199,9 @@ concurrency backstop:
 | `TR_PRICING_COMPILED_RATE_CELL_IMMUTABLE_WRITE` | Protects compiled cells. |
 | `TR_PRICING_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE` | Protects compiled 1D bands. |
 | `TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD` | Deployment package must be `PUBLISHED` and belong to the same model. |
+| `mlops.TR_MODEL_FIT_CONTRACT_IMMUTABLE` | A baseline fit contract cannot be changed or deleted. |
+| `mlops.TR_MODEL_FIT_CONTRACT_LINEAGE_GUARD` | A contract must identify one successful run and its published package. |
+| `mlops.TR_MODEL_MONITOR_RUN_LINEAGE_GUARD` | Contract, deployed package, model run, and monitoring row must identify one baseline. |
 
 ```mermaid
 ---
@@ -197,6 +254,9 @@ cover state-dependent rules that ordinary constraints cannot express.
 | `pricing.V_MODEL_VALIDATION_SPLIT` | Validation configuration/fold evidence per run |
 | `pricing.V_MODEL_VALIDATION_SUMMARY` | Run and fold metric summary |
 | `pricing.V_MODEL_LINEAGE_REDUNDANCY_CHECK` | Missing, duplicated, or mismatched run/manifest/split links; healthy rows say `OK` |
+| `pricing.V_MODEL_MONITORING_RUN` | One row per monitoring preset with baseline deployment and full manifest/data-as-at evidence |
+| `pricing.V_MODEL_MONITORING_RELATIVITY` | Stable point-level relativities for week/variant comparisons |
+| `pricing.V_MODEL_MONITORING_LAMBDA` | Smoothing lambdas and fixed/estimated mode for week/variant comparisons |
 | `pricing.PREDICT_RATE_PACKAGE` | Score an explicitly selected package |
 | `pricing.PREDICT_CURRENT_RATE` | Resolve the current deployment, then score through the package procedure |
 
@@ -300,8 +360,9 @@ uv run python scripts/generate_db_diagrams.py \
 The committed standalone Mermaid sources are:
 
 - `docs/sql/diagrams/01_data_run_lineage.mmd`
-- `docs/sql/diagrams/02_rating_package_deployment.mmd`
-- `docs/sql/diagrams/03_trigger_guards.mmd`
+- `docs/sql/diagrams/02_controlled_monitoring_lineage.mmd`
+- `docs/sql/diagrams/03_rating_package_deployment.mmd`
+- `docs/sql/diagrams/04_trigger_guards.mmd`
 
 With Mermaid CLI (`mmdc`) and Chafa installed, render and preview all three in a
 Kitty terminal:

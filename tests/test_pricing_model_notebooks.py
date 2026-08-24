@@ -15,7 +15,8 @@ WORKFLOW_NAMES = (
     "01_data_ingestion.ipynb",
     "02_model_training.ipynb",
     "03_model_editor.ipynb",
-    "04_model_deployment.ipynb",
+    "04_manual_adjustment.ipynb",
+    "05_model_deployment.ipynb",
     "99_scratch_work.ipynb",
 )
 STRICT_NOTEBOOK_NAME = re.compile(r"^\d{2}_[a-z0-9]+(?:_[a-z0-9]+)*\.ipynb$")
@@ -38,7 +39,7 @@ def _code_cells(name: str) -> list[str]:
     ]
 
 
-def test_reference_model_has_exact_five_notebook_workflow():
+def test_reference_model_has_exact_six_notebook_workflow():
     assert sorted(path.name for path in MODEL_DIR.glob("*.ipynb")) == sorted(WORKFLOW_NAMES)
 
 
@@ -157,8 +158,32 @@ def test_mtpl_editor_reports_no_published_candidates_cleanly():
         )
 
 
+def test_mtpl_manual_adjustment_is_replayable_and_explicitly_deployable():
+    cells = _code_cells("04_manual_adjustment.ipynb")
+    source = "\n".join(cells)
+
+    assert 'SOURCE_SELECTOR = "deployed"' in source
+    assert "PACKAGE_VERSION = None" in source
+    assert "list_candidate_versions(" in source
+    assert "open_deployed_candidate(" in source
+    assert "ManualAdjustmentPolicy.from_rows(" in source
+    assert "apply_manual_adjustment_policy(" in source
+    assert "manual_adjustment_policy_from_candidate(" in source
+    assert "publish_manual_adjustment(" in source
+    assert "POLICY_SOURCE_PACKAGE_VERSION = None" in source
+    assert "DEPLOY_AFTER_PUBLISH = False" in source
+    assert "deploy_package(" in source
+
+    preview_index = next(
+        i for i, cell in enumerate(cells) if "apply_manual_adjustment_policy(" in cell
+    )
+    publish_index = next(i for i, cell in enumerate(cells) if "publish_manual_adjustment(" in cell)
+    deploy_index = next(i for i, cell in enumerate(cells) if "if DEPLOY_AFTER_PUBLISH:" in cell)
+    assert preview_index < publish_index < deploy_index
+
+
 def test_mtpl_deployment_selects_only_published_sql_candidate():
-    source = _source("04_model_deployment.ipynb")
+    source = _source("05_model_deployment.ipynb")
 
     assert "load_registered_model(" in source
     assert "list_candidate_versions(" in source
@@ -174,13 +199,13 @@ def test_mtpl_deployment_selects_only_published_sql_candidate():
 def test_mtpl_deployment_reports_no_published_candidates_cleanly():
     selection_cell = next(
         cell
-        for cell in _code_cells("04_model_deployment.ipynb")
+        for cell in _code_cells("05_model_deployment.ipynb")
         if 'raise LookupError("No published candidate packages were found.")' in cell
     )
 
     with pytest.raises(LookupError, match="No published candidate packages"):
         exec(  # noqa: S102 - execute the checked-in notebook cell under an empty result
-            compile(selection_cell, "04_model_deployment.ipynb:empty-selection", "exec"),
+            compile(selection_cell, "05_model_deployment.ipynb:empty-selection", "exec"),
             {
                 "deployable": pd.DataFrame(
                     columns=["package_version"],
@@ -199,12 +224,21 @@ def test_mtpl_scratch_is_explicitly_outside_governed_handoff():
     assert "scratch_raw = pd.read_sql_query(" in source
     assert "scratch_frame = scratch_raw.copy()" in source
     assert "SCRATCH_FEATURES = {" in source
+    assert 'SCRATCH_FAMILY = "poisson"' in source
     assert "scratch_model = SuperGLM(" in source
     assert ").fit(scratch_X, scratch_y, offset=scratch_offset)" in source
     assert "scratch_model.predict(" in source
     assert "Blank ingestion area" in source
     assert "Blank feature area" in source
     assert "Blank modelling area" in source
+    assert "unconstrained_superglm_features(" in source
+    assert "unconstrained_model = SuperGLM(" in source
+    assert ").fit_reml(" in source
+    assert "superglm_edf_table(unconstrained_model)" in source
+    assert "fit_boosted_blend(" in source
+    assert "reference_superglm=unconstrained_model" in source
+    assert "boosted_blend.metrics" in source
+    assert 'exposure=scratch_frame.loc[scratch_X.index, "Exposure"]' in source
     assert "save_model_frame(" not in source
     assert "load_model_frame(" not in source
     assert "build_candidate(" not in source
@@ -222,9 +256,16 @@ def test_mtpl_scratch_is_explicitly_outside_governed_handoff():
     features_index = next(i for i, cell in enumerate(cells) if "SCRATCH_FEATURES =" in cell)
     fit_index = next(i for i, cell in enumerate(cells) if "scratch_model = SuperGLM(" in cell)
     inspect_index = next(i for i, cell in enumerate(cells) if "scratch_model.predict(" in cell)
+    blend_index = next(i for i, cell in enumerate(cells) if "fit_boosted_blend(" in cell)
     grouping_index = next(i for i, cell in enumerate(cells) if "load_registered_model(" in cell)
     assert (
-        source_index < transform_index < features_index < fit_index < inspect_index < grouping_index
+        source_index
+        < transform_index
+        < features_index
+        < fit_index
+        < inspect_index
+        < blend_index
+        < grouping_index
     )
 
 

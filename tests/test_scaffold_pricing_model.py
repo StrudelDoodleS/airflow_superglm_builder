@@ -22,7 +22,8 @@ EXPECTED_NOTEBOOKS = (
     "01_data_ingestion.ipynb",
     "02_model_training.ipynb",
     "03_model_editor.ipynb",
-    "04_model_deployment.ipynb",
+    "04_manual_adjustment.ipynb",
+    "05_model_deployment.ipynb",
     "99_scratch_work.ipynb",
 )
 
@@ -64,7 +65,7 @@ def test_scaffold_has_one_strict_ordered_notebook_contract():
     assert all(NOTEBOOK_NAME.fullmatch(name) for name in _NOTEBOOK_NAMES)
 
 
-def test_scaffold_writes_five_notebook_workflow_and_no_legacy_factory(tmp_path):
+def test_scaffold_writes_six_notebook_workflow_and_no_legacy_factory(tmp_path):
     result = scaffold_pricing_model(
         ScaffoldOptions(
             model_name="MY_MODEL",
@@ -87,12 +88,13 @@ def test_scaffold_writes_five_notebook_workflow_and_no_legacy_factory(tmp_path):
         _notebook(notebook_path)
 
 
-def test_scaffold_separates_ingestion_training_editor_deployment_and_scratch(tmp_path):
+def test_scaffold_separates_all_governed_steps_and_scratch(tmp_path):
     package_dir = _scaffold(tmp_path)
     ingestion = _code(package_dir / "01_data_ingestion.ipynb")
     training = _code(package_dir / "02_model_training.ipynb")
     editor = _code(package_dir / "03_model_editor.ipynb")
-    deployment = _code(package_dir / "04_model_deployment.ipynb")
+    manual = _code(package_dir / "04_manual_adjustment.ipynb")
+    deployment = _code(package_dir / "05_model_deployment.ipynb")
     scratch = _code(package_dir / "99_scratch_work.ipynb")
 
     assert "save_model_frame(" in ingestion
@@ -118,6 +120,17 @@ def test_scaffold_separates_ingestion_training_editor_deployment_and_scratch(tmp
     assert "editor_session.to_model()" in editor
     assert "publish_edits(" in editor
 
+    assert "list_candidate_versions(" in manual
+    assert "open_deployed_candidate(" in manual
+    assert "ManualAdjustmentPolicy.from_rows(" in manual
+    assert "apply_manual_adjustment_policy(" in manual
+    assert "manual_adjustment_policy_from_candidate(" in manual
+    assert "publish_manual_adjustment(" in manual
+    assert 'SOURCE_SELECTOR = "deployed"' in manual
+    assert "CARRY_FORWARD = True" in manual
+    assert "DEPLOY_AFTER_PUBLISH = False" in manual
+    assert "POLICY_SOURCE_PACKAGE_VERSION = None" in manual
+
     assert "list_candidate_versions(" in deployment
     assert 'eq("PUBLISHED")' in deployment
     assert "open_candidate(" in deployment
@@ -130,12 +143,20 @@ def test_scaffold_separates_ingestion_training_editor_deployment_and_scratch(tmp
     assert "scratch_raw = pd.DataFrame(" in scratch
     assert "scratch_frame = scratch_raw.copy()" in scratch
     assert "SCRATCH_FEATURES = {" in scratch
+    assert 'SCRATCH_FAMILY = "poisson"' in scratch
     assert "scratch_model = SuperGLM(" in scratch
     assert ").fit(scratch_X, scratch_y)" in scratch
     assert "scratch_model.predict(" in scratch
     assert "Blank ingestion area" in scratch
     assert "Blank feature area" in scratch
     assert "Blank modelling area" in scratch
+    assert "unconstrained_superglm_features(" in scratch
+    assert "unconstrained_model = SuperGLM(" in scratch
+    assert ").fit_reml(" in scratch
+    assert "superglm_edf_table(unconstrained_model)" in scratch
+    assert "fit_boosted_blend(" in scratch
+    assert "reference_superglm=unconstrained_model" in scratch
+    assert "boosted_blend.metrics" in scratch
     assert "EditorSession.from_model(" in scratch
     assert "list_candidate_versions(" in scratch
     assert 'versions["Kind"].eq("RAW")' in scratch
@@ -146,7 +167,13 @@ def test_scaffold_separates_ingestion_training_editor_deployment_and_scratch(tmp
 def test_scaffold_scratch_sandbox_fits_and_predicts_in_memory(tmp_path):
     import numpy as np
     import pandas as pd
-    from superglm import Categorical, Numeric, Spline, SuperGLM
+    from sklearn.metrics import mean_tweedie_deviance
+    from superglm import Categorical, Numeric, Spline, SuperGLM, Tweedie
+
+    from pricing_pipeline.modeling.scratch_benchmark import (
+        superglm_edf_table,
+        unconstrained_superglm_features,
+    )
 
     package_dir = _scaffold(tmp_path)
     notebook = _notebook(package_dir / "99_scratch_work.ipynb")
@@ -160,6 +187,10 @@ def test_scaffold_scratch_sandbox_fits_and_predicts_in_memory(tmp_path):
         "Numeric": Numeric,
         "Spline": Spline,
         "SuperGLM": SuperGLM,
+        "Tweedie": Tweedie,
+        "mean_tweedie_deviance": mean_tweedie_deviance,
+        "superglm_edf_table": superglm_edf_table,
+        "unconstrained_superglm_features": unconstrained_superglm_features,
         "SCRATCH_SAMPLE_ROWS": 5_000,
         "SCRATCH_RANDOM_SEED": 42,
         "display": lambda *_args, **_kwargs: None,
@@ -170,6 +201,7 @@ def test_scaffold_scratch_sandbox_fits_and_predicts_in_memory(tmp_path):
         "SCRATCH_TARGET =",
         "scratch_model = SuperGLM(",
         "scratch_predictions = scratch_model.predict(",
+        "unconstrained_features = unconstrained_superglm_features(",
     )
     for marker in markers:
         source = next(cell for cell in cells if marker in cell)
@@ -181,6 +213,9 @@ def test_scaffold_scratch_sandbox_fits_and_predicts_in_memory(tmp_path):
     predictions = np.asarray(namespace["scratch_predictions"])
     assert len(predictions) == 500
     assert np.isfinite(predictions).all()
+    unconstrained_predictions = np.asarray(namespace["unconstrained_predictions"])
+    assert len(unconstrained_predictions) == 500
+    assert np.isfinite(unconstrained_predictions).all()
 
 
 def test_scaffold_keeps_editor_preview_and_publish_as_separate_cells(tmp_path):
@@ -198,6 +233,23 @@ def test_scaffold_keeps_editor_preview_and_publish_as_separate_cells(tmp_path):
     assert "publish_edits(" not in cells[preview_index]
     assert "candidate=reviewed" in cells[publish_index]
     assert "editor_session=editor_session" in cells[publish_index]
+
+
+def test_scaffold_keeps_manual_preview_publish_and_deploy_separate(tmp_path):
+    package_dir = _scaffold(tmp_path)
+    notebook = _notebook(package_dir / "04_manual_adjustment.ipynb")
+    cells = [
+        "".join(cell.get("source", [])) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    ]
+    preview_index = next(
+        i for i, cell in enumerate(cells) if "apply_manual_adjustment_policy(" in cell
+    )
+    publish_index = next(i for i, cell in enumerate(cells) if "publish_manual_adjustment(" in cell)
+    deploy_index = next(i for i, cell in enumerate(cells) if "if DEPLOY_AFTER_PUBLISH:" in cell)
+
+    assert preview_index < publish_index < deploy_index
+    assert "publish_manual_adjustment(" not in cells[preview_index]
+    assert "deploy_package(" not in cells[publish_index]
 
 
 def test_scaffold_renders_user_text_without_breaking_json_or_python(tmp_path):
@@ -309,6 +361,18 @@ def test_scaffold_renders_safe_connection_defaults_into_every_notebook(tmp_path)
         assert "ALLOW_REMOTE_WRITES = False" in source
 
 
+def test_scaffold_renders_manual_edit_defaults_into_manual_notebook(tmp_path):
+    package_dir = _scaffold(
+        tmp_path,
+        manual_edit_source_selector="latest",
+        manual_edit_carry_forward=False,
+    )
+
+    source = _code(package_dir / "04_manual_adjustment.ipynb")
+    assert 'SOURCE_SELECTOR = "latest"' in source
+    assert "CARRY_FORWARD = False" in source
+
+
 def test_scaffold_cli_auto_discovers_toml_and_cli_values_win(tmp_path):
     config_path = tmp_path / "pricing_scaffold.toml"
     config_path.write_text(
@@ -317,6 +381,10 @@ def test_scaffold_cli_auto_discovers_toml_and_cli_values_win(tmp_path):
 database_mode = "remote"
 runtime_module = "work_runtime.database"
 expected_remote_database = "PricingAudit"
+
+[manual_edit_defaults]
+source_selector = "latest"
+carry_forward = false
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -352,18 +420,27 @@ expected_remote_database = "PricingAudit"
             "another_runtime.database",
             "--expected-remote-database",
             "AnotherAudit",
+            "--manual-edit-source",
+            "deployed",
+            "--manual-edit-carry-forward",
         ]
     )
 
     assert discovered.database_mode == "remote"
     assert discovered.runtime_module == "work_runtime.database"
     assert discovered.expected_remote_database == "PricingAudit"
+    assert discovered.manual_edit_source_selector == "latest"
+    assert discovered.manual_edit_carry_forward is False
     assert explicit.database_mode == "remote"
     assert explicit.runtime_module == "work_runtime.database"
     assert explicit.expected_remote_database == "PricingAudit"
+    assert explicit.manual_edit_source_selector == "latest"
+    assert explicit.manual_edit_carry_forward is False
     assert overridden.database_mode == "local"
     assert overridden.runtime_module == "another_runtime.database"
     assert overridden.expected_remote_database == "AnotherAudit"
+    assert overridden.manual_edit_source_selector == "deployed"
+    assert overridden.manual_edit_carry_forward is True
 
 
 def test_scaffold_config_is_strict_and_example_is_valid(tmp_path):
@@ -371,6 +448,8 @@ def test_scaffold_config_is_strict_and_example_is_valid(tmp_path):
     assert example.database_mode == "remote"
     assert example.runtime_module == "work_runtime.database"
     assert example.expected_remote_database == "PricingAudit"
+    assert example.manual_edit_source_selector == "deployed"
+    assert example.manual_edit_carry_forward is True
 
     invalid = tmp_path / "invalid.toml"
     invalid.write_text(
@@ -408,6 +487,8 @@ def test_scaffold_script_help_has_no_legacy_factory_options():
     assert "--database-mode" in result.stdout
     assert "--runtime-module" in result.stdout
     assert "--expected-remote-database" in result.stdout
+    assert "--manual-edit-source" in result.stdout
+    assert "--manual-edit-carry-forward" in result.stdout
     assert "--template" not in result.stdout
     assert "--dag-id" not in result.stdout
     assert "--experiment-name" not in result.stdout
