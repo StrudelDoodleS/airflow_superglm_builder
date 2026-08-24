@@ -10,7 +10,6 @@ from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.lifecycle import PublishResult
 
-
 EDITOR_CONFIG = SimpleNamespace(
     model_name="HOME_FREQ",
     deployment_slot="HOME_FREQ_UAT",
@@ -317,6 +316,185 @@ def test_existing_editor_publication_returns_before_artifact_write(monkeypatch, 
     assert result == existing
 
 
+@pytest.mark.parametrize(
+    ("stored_carry_forward", "stored_parent_ids", "is_compatible"),
+    [
+        pytest.param(True, (107, 907), False, id="different-policy"),
+        pytest.param(False, (106, 906), False, id="different-parent"),
+        pytest.param(False, (107, 907), True, id="same-policy-and-parent"),
+    ],
+)
+def test_manual_equivalence_requires_matching_immutable_policy_lineage(
+    monkeypatch,
+    tmp_path,
+    stored_carry_forward,
+    stored_parent_ids,
+    is_compatible,
+):
+    from dataclasses import replace
+
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    staging_dir = tmp_path / ".staging" / "attempt"
+    final_dir = tmp_path / "attempts" / "attempt"
+    staging_dir.mkdir(parents=True)
+    final_dir.parent.mkdir(parents=True)
+    workbook = staging_dir / "rating_tables.xlsx"
+    workbook.write_bytes(b"manual rating workbook")
+
+    requested_policy = ManualAdjustmentPolicy(
+        name="market adjustment",
+        version=1,
+        reason="Approved market response",
+        carry_forward=False,
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["B"],
+                1.05,
+                reason="Selected segment uplift",
+            ),
+        ),
+    )
+    stored_policy = replace(requested_policy, carry_forward=stored_carry_forward)
+    stored_parent_rate_package_id, stored_parent_model_run_id = stored_parent_ids
+
+    def edit_metadata(policy):
+        return {
+            "manual_adjustment_policy": policy.to_payload(),
+            "manual_adjustment_policy_sha256": policy.sha256,
+        }
+
+    requested_edit_metadata = edit_metadata(requested_policy)
+    submission = SimpleNamespace(
+        submission_id="submission-new-policy",
+        model_kind="MANUAL_EDIT",
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        edit_metadata=requested_edit_metadata,
+    )
+    parent = SimpleNamespace(effective_to=None)
+    build = _editor_build(
+        tmp_path,
+        workbook_path=final_dir / workbook.name,
+        rating_workbook_sha256=editor_candidate.sha256_file(workbook),
+        model_kind="MANUAL_EDIT",
+    )
+    fingerprinted_build = build.model_copy(update={"model_equivalence_sha256": "f" * 64})
+    exported = SimpleNamespace(
+        completed_build=build,
+        revision_metadata={
+            "kind": "SUPERGLM_MANUAL_EDIT",
+            "parent_rate_package_id": submission.parent_rate_package_id,
+            "parent_model_run_id": submission.parent_model_run_id,
+            "edit_metadata": requested_edit_metadata,
+        },
+    )
+    equivalent = SimpleNamespace(
+        model_name="HOME_FREQ",
+        parent_rate_package_id=stored_parent_rate_package_id,
+        rate_package_id=108,
+        package_version=8,
+        model_run_id=908,
+        package_status="PUBLISHED",
+    )
+    stored_row = {
+        "parent_rate_package_id": stored_parent_rate_package_id,
+        "parent_model_run_id": stored_parent_model_run_id,
+        "revision_metadata_json": json.dumps(
+            {
+                "kind": "SUPERGLM_MANUAL_EDIT",
+                "parent_rate_package_id": stored_parent_rate_package_id,
+                "parent_model_run_id": stored_parent_model_run_id,
+                "edit_metadata": edit_metadata(stored_policy),
+            }
+        ),
+    }
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return stored_row
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement, params):
+            assert params == {
+                "rate_package_id": equivalent.rate_package_id,
+                "model_run_id": equivalent.model_run_id,
+            }
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_parent_candidate",
+        lambda *args, **kwargs: parent,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "export_edited_model",
+        lambda *args, **kwargs: exported,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "ensure_model_equivalence",
+        lambda completed_build, **kwargs: fingerprinted_build,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "find_equivalent_publication",
+        lambda engine, *, build: equivalent,
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "release_unused_model_version_reservation",
+        lambda *args, **kwargs: None,
+    )
+
+    def publish():
+        return editor_candidate._publish_new_editor_submission(
+            Engine(),
+            submission=submission,
+            allowed_root=tmp_path,
+            attempt=editor_candidate.EditorPublicationAttempt(staging_dir, final_dir),
+            dag_id="pricing_publish_editor_candidate",
+            airflow_run_id="manual__submission-new-policy",
+            created_by="publisher@example.test",
+            model_config=EDITOR_CONFIG,
+        )
+
+    if is_compatible:
+        result = publish()
+        assert result.rate_package_id == equivalent.rate_package_id
+        assert result.deduplicated is True
+    else:
+        with pytest.raises(
+            editor_candidate.EditorSubmissionError,
+            match="equivalent MANUAL_EDIT package has incompatible immutable policy lineage",
+        ):
+            publish()
+
+
 def test_editor_retry_rejects_submission_slot_mismatch_before_existing_lookup(
     monkeypatch,
     tmp_path,
@@ -443,11 +621,25 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
     submission = SimpleNamespace(
         submission_id="submission-1",
         model_name="HOME_FREQ",
+        model_kind="EDITOR_EDIT",
+        path=str(tmp_path / "submission.json"),
+        sha256="a" * 64,
         parent_rate_package_id=107,
         parent_model_run_id=907,
         manifest_id=bundle.manifest_id,
         split_set_id=bundle.split_set_id,
         model_source_sha256=bundle.model_source_sha256,
+        edit_metadata=None,
+    )
+    row["revision_metadata_json"] = json.dumps(
+        {
+            "kind": "SUPERGLM_EDITOR",
+            "submission_id": submission.submission_id,
+            "submission_path": submission.path,
+            "submission_sha256": submission.sha256,
+            "parent_rate_package_id": submission.parent_rate_package_id,
+            "parent_model_run_id": submission.parent_model_run_id,
+        }
     )
 
     result = editor_candidate._resolve_existing_editor_publication(
@@ -491,6 +683,144 @@ def test_existing_editor_publication_verifies_committed_candidate_bytes(
 
     Path(artifact.path).write_bytes(b"overwritten")
     with pytest.raises(EditorSubmissionError, match="failed verification"):
+        editor_candidate._resolve_existing_editor_publication(
+            Engine(),
+            submission,
+            allowed_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("changed_identity", ["submission-sha", "manual-policy"])
+def test_existing_manual_publication_rejects_changed_signed_submission_before_artifact_load(
+    monkeypatch,
+    tmp_path,
+    changed_identity,
+):
+    from dataclasses import replace
+
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    policy = ManualAdjustmentPolicy(
+        name="market adjustment",
+        version=1,
+        reason="Approved market response",
+        carry_forward=True,
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["B"],
+                1.05,
+                reason="Selected segment uplift",
+            ),
+        ),
+    )
+
+    def edit_metadata(value):
+        return {
+            "manual_adjustment_policy": value.to_payload(),
+            "manual_adjustment_policy_sha256": value.sha256,
+        }
+
+    stored_edit_metadata = edit_metadata(policy)
+    submission = SimpleNamespace(
+        submission_id="submission-1",
+        model_name="HOME_FREQ",
+        model_kind="MANUAL_EDIT",
+        path=str(tmp_path / "submission.json"),
+        sha256="a" * 64,
+        parent_rate_package_id=107,
+        parent_model_run_id=907,
+        manifest_id="manifest-1",
+        split_set_id="split-1",
+        model_source_sha256="b" * 64,
+        edit_metadata=stored_edit_metadata,
+    )
+    revision_metadata = {
+        "kind": "SUPERGLM_MANUAL_EDIT",
+        "submission_id": submission.submission_id,
+        "submission_path": submission.path,
+        "submission_sha256": submission.sha256,
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "parent_model_run_id": submission.parent_model_run_id,
+        "edit_metadata": stored_edit_metadata,
+    }
+    if changed_identity == "submission-sha":
+        submission.sha256 = "e" * 64
+    else:
+        submission.edit_metadata = edit_metadata(replace(policy, carry_forward=False))
+
+    workbook = tmp_path / "rating_tables.xlsx"
+    workbook.write_bytes(b"manual workbook")
+    row = {
+        "model_name": submission.model_name,
+        "model_version": "20260603",
+        "export_id": "manual__submission_1",
+        "rate_package_id": 108,
+        "package_version": 8,
+        "package_status": "PUBLISHED",
+        "parent_rate_package_id": 107,
+        "model_run_id": 908,
+        "parent_model_run_id": 907,
+        "run_status": "SUCCESS",
+        "model_kind": "MANUAL_EDIT",
+        "rating_workbook_path": str(workbook),
+        "rating_workbook_sha256": editor_candidate.sha256_file(workbook),
+        "candidate_artifact_path": str(tmp_path / "candidate.joblib"),
+        "candidate_artifact_sha256": "d" * 64,
+        "candidate_artifact_format": "superglm-candidate-joblib-v2",
+        "candidate_artifact_size_bytes": 321,
+        "candidate_python_version": "3.14.4",
+        "candidate_superglm_version": "0.13.0",
+        "manifest_id": submission.manifest_id,
+        "split_set_id": submission.split_set_id,
+        "model_source_sha256": submission.model_source_sha256,
+        "model_frame_sha256": "f" * 64,
+        "revision_metadata_json": json.dumps(revision_metadata),
+    }
+
+    class Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class Connection:
+        def execute(self, statement, params):
+            return Rows()
+
+    class Begin:
+        def __enter__(self):
+            return Connection()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Begin()
+
+    monkeypatch.setattr(
+        editor_candidate,
+        "schema_names_from_connectable",
+        lambda engine: SimpleNamespace(pricing="pricing", mlops="mlops"),
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_candidate_bundle",
+        lambda *args, **kwargs: pytest.fail(
+            "changed signed submission reached committed artifact loading"
+        ),
+    )
+
+    with pytest.raises(
+        editor_candidate.EditorSubmissionError,
+        match="existing editor publication signed submission metadata does not match",
+    ):
         editor_candidate._resolve_existing_editor_publication(
             Engine(),
             submission,
@@ -594,9 +924,23 @@ def test_existing_editor_publication_rejects_mismatched_lineage(
     submission = SimpleNamespace(
         submission_id="submission-1",
         model_name="HOME_FREQ",
+        model_kind="EDITOR_EDIT",
+        path=str(tmp_path / "submission.json"),
+        sha256="a" * 64,
         parent_rate_package_id=107,
         parent_model_run_id=907,
+        edit_metadata=None,
         **expected,
+    )
+    row["revision_metadata_json"] = json.dumps(
+        {
+            "kind": "SUPERGLM_EDITOR",
+            "submission_id": submission.submission_id,
+            "submission_path": submission.path,
+            "submission_sha256": submission.sha256,
+            "parent_rate_package_id": submission.parent_rate_package_id,
+            "parent_model_run_id": submission.parent_model_run_id,
+        }
     )
 
     expected_layer = (
@@ -1256,9 +1600,10 @@ def test_editor_session_replays_against_verified_parent_model(
     monkeypatch,
     tmp_path,
 ):
+    from superglm.editor import EditorSession
+
     from pricing_pipeline.publishing import editor_candidate
     from pricing_pipeline.workbench.submission import sha256_file
-    from superglm.editor import EditorSession
 
     configured_root = tmp_path / "configured-workbench"
     session_path = configured_root / "models/HOME_FREQ/editor/deep/session.json"
@@ -1367,6 +1712,349 @@ def test_v2_submission_loads_final_model_without_replaying_session(monkeypatch, 
         "expected_superglm_version": submission.edited_model_superglm_version,
         "allowed_root": tmp_path,
     }
+
+
+@pytest.mark.parametrize("metadata_kind", ["missing", "bad-schema", "bad-sha"])
+def test_manual_submission_rejects_missing_or_malformed_policy_before_model_load(
+    monkeypatch,
+    tmp_path,
+    metadata_kind,
+):
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    policy = ManualAdjustmentPolicy(
+        name="market adjustment",
+        version=1,
+        reason="Approved market response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["B"],
+                1.05,
+                reason="Selected segment uplift",
+            ),
+        ),
+    )
+    edit_metadata = None
+    if metadata_kind != "missing":
+        policy_payload = policy.to_payload()
+        if metadata_kind == "bad-schema":
+            policy_payload["rules"] = "not-a-list"
+        edit_metadata = {
+            "manual_adjustment_policy": policy_payload,
+            "manual_adjustment_policy_sha256": (
+                policy.sha256 if metadata_kind == "bad-schema" else "0" * 64
+            ),
+        }
+    submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
+        model_kind="MANUAL_EDIT",
+        edit_metadata=edit_metadata,
+        edited_model_path=str(tmp_path / "edited_model.joblib"),
+        edited_model_sha256="a" * 64,
+        edited_model_size_bytes=123,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
+    )
+    parent = SimpleNamespace(bundle=SimpleNamespace(fitted_model=object()))
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_edited_model",
+        lambda *args, **kwargs: pytest.fail(
+            "invalid MANUAL_EDIT policy reached trusted object loading"
+        ),
+    )
+
+    with pytest.raises(
+        editor_candidate.EditorSubmissionError,
+        match="MANUAL_EDIT submission has invalid manual adjustment policy",
+    ):
+        editor_candidate._load_edited_model(
+            parent,
+            submission,
+            allowed_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_variant", "error_match"),
+    [
+        pytest.param("trusted-parent", None, id="trusted-parent"),
+        pytest.param(
+            "mutated-parent",
+            "does not match trusted manual adjustment policy replay",
+            id="mutated-parent",
+        ),
+        pytest.param(
+            "off-frame-structure",
+            "publication receipt does not match trusted manual adjustment policy replay",
+            id="off-frame-structure",
+        ),
+        pytest.param(
+            "unspanned-coefficient",
+            "normalized fitted runtime state does not match trusted manual adjustment policy replay",
+            id="unspanned-coefficient",
+        ),
+    ],
+)
+def test_manual_submission_must_match_policy_replayed_on_trusted_parent(
+    monkeypatch,
+    tmp_path,
+    model_variant,
+    error_match,
+):
+    import math
+
+    import numpy as np
+    import pandas as pd
+    from superglm import Categorical, Numeric, SuperGLM
+    from superglm.editor import EditorSession
+
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    x = (
+        np.zeros(60)
+        if model_variant == "unspanned-coefficient"
+        else np.tile(np.linspace(-1.0, 1.0, 20), 3)
+    )
+    frame = pd.DataFrame(
+        {
+            "segment": np.repeat(["A", "B", "C"], 20),
+            "hidden": np.tile(["H", "I"], 30),
+            "x": x,
+        }
+    )
+    target = np.array(
+        [
+            {"A": 1.0, "B": 2.0, "C": 3.0}[segment] * np.exp(0.1 * x)
+            for segment, x in zip(frame["segment"], frame["x"], strict=True)
+        ]
+    )
+    trusted_parent_model = SuperGLM(
+        features={
+            "segment": Categorical(base="first"),
+            "hidden": Categorical(base="first", levels=["H", "I"]),
+            "x": Numeric(),
+        },
+        selection_penalty=0.0,
+    ).fit(frame, target)
+    train_data = (frame, target, None, None)
+    submission_parent_model = trusted_parent_model
+    if model_variant == "mutated-parent":
+        mutated_parent_session = EditorSession.from_model(
+            trusted_parent_model,
+            train_data=train_data,
+            cv_report={},
+        )
+        mutated_parent_session.select_levels("segment", ["A"])
+        mutated_parent_session.shift("segment", math.log(1.2))
+        submission_parent_model = mutated_parent_session.to_model()
+    elif model_variant == "off-frame-structure":
+        submission_parent_model = SuperGLM(
+            features={
+                "segment": Categorical(base="first"),
+                "hidden": Categorical(base="first", levels=["H", "I", "OFF"]),
+                "x": Numeric(),
+            },
+            selection_penalty=0.0,
+        ).fit(frame, target)
+
+    policy = ManualAdjustmentPolicy(
+        name="market adjustment",
+        version=1,
+        reason="Approved market response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["B"],
+                1.05,
+                reason="Selected segment uplift",
+            ),
+        ),
+    )
+    submitted_session = EditorSession.from_model(
+        submission_parent_model,
+        train_data=train_data,
+        cv_report={},
+    )
+    for rule in policy.rules:
+        rule.apply(submitted_session)
+    submitted_model = submitted_session.to_model()
+    if model_variant == "unspanned-coefficient":
+        changed_beta = np.array(submitted_model._result.beta, copy=True)
+        changed_beta[-1] += 3.0
+        object.__setattr__(submitted_model._result, "beta", changed_beta)
+        trusted_frame_prediction = submitted_session.to_model().predict(frame)
+        np.testing.assert_allclose(submitted_model.predict(frame), trusted_frame_prediction)
+        off_frame = pd.DataFrame({"segment": ["A"], "hidden": ["H"], "x": [2.0]})
+        assert not np.allclose(
+            submitted_model.predict(off_frame),
+            submitted_session.to_model().predict(off_frame),
+        )
+
+    parent = SimpleNamespace(
+        bundle=SimpleNamespace(
+            fitted_model=trusted_parent_model,
+            X=frame,
+            y=target,
+            sample_weight=None,
+            offset=None,
+            cv_report={},
+            offset_contract=editor_candidate.OffsetExportContract(handling="NONE"),
+            fit_sample_weight_name=None,
+            export_weight_name=None,
+        )
+    )
+    submission = SimpleNamespace(
+        format="superglm-editor-submission-v2",
+        model_kind="MANUAL_EDIT",
+        edit_metadata={
+            "manual_adjustment_policy": policy.to_payload(),
+            "manual_adjustment_policy_sha256": policy.sha256,
+        },
+        edited_model_path=str(tmp_path / "edited_model.joblib"),
+        edited_model_sha256="a" * 64,
+        edited_model_size_bytes=123,
+        edited_model_format="superglm-edited-model-joblib-v1",
+        edited_model_python_version="3.14.4",
+        edited_model_superglm_version="0.13.0",
+    )
+    monkeypatch.setattr(
+        editor_candidate,
+        "load_edited_model",
+        lambda *args, **kwargs: submitted_model,
+    )
+
+    def load():
+        return editor_candidate._load_edited_model(
+            parent,
+            submission,
+            allowed_root=tmp_path,
+        )
+
+    if error_match is not None:
+        with pytest.raises(
+            editor_candidate.EditorSubmissionError,
+            match=error_match,
+        ):
+            load()
+    else:
+        assert load() is submitted_model
+
+
+@pytest.mark.parametrize("mutate_spline", [False, True], ids=["loaded-replay", "mutated-r-inv"])
+def test_manual_replay_compares_complete_normalized_fitted_runtime_state(mutate_spline):
+    import io
+
+    import joblib
+    import numpy as np
+    import pandas as pd
+    from superglm import Categorical, NaturalSpline, SuperGLM
+
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+        replay_manual_adjustment_policy,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    x = np.tile([-1.0, 0.0, 1.0], 30)
+    segment = np.repeat(["A", "B", "C"], 30)
+    frame = pd.DataFrame({"segment": segment, "x": x})
+    target = np.exp(0.2 * x) * np.array(
+        [{"A": 1.0, "B": 2.0, "C": 3.0}[value] for value in segment]
+    )
+    parent_model = SuperGLM(
+        features={
+            "segment": Categorical(base="first"),
+            "x": NaturalSpline(n_knots=8, extrapolation="extend"),
+        },
+        selection_penalty=0.0,
+    ).fit(frame, target)
+    bundle = SimpleNamespace(
+        fitted_model=parent_model,
+        X=frame,
+        y=target,
+        sample_weight=None,
+        offset=None,
+        cv_report={},
+        offset_contract=editor_candidate.OffsetExportContract(handling="NONE"),
+        fit_sample_weight_name=None,
+        export_weight_name=None,
+    )
+    policy = ManualAdjustmentPolicy(
+        name="market adjustment",
+        version=1,
+        reason="Approved market response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["B"],
+                1.05,
+                reason="Selected segment uplift",
+            ),
+        ),
+    )
+    _, submitted_model = replay_manual_adjustment_policy(bundle, policy)
+    artifact = io.BytesIO()
+    joblib.dump(submitted_model, artifact, protocol=5)
+    artifact.seek(0)
+    submitted_model = joblib.load(artifact)
+
+    if mutate_spline:
+        spline = submitted_model._specs["x"]
+        plan = next(
+            entry for entry in submitted_model._prediction_plan["features"] if entry["name"] == "x"
+        )
+        spline_beta = np.asarray(submitted_model._result.beta)[plan["beta_idx"]]
+        raw_basis = spline._basis_matrix(frame["x"].to_numpy()).toarray()
+        null_vector = np.linalg.svd(raw_basis, full_matrices=True)[2][-1]
+        assert np.max(np.abs(raw_basis @ null_vector)) < 1e-12
+        beta_position = int(np.argmax(np.abs(spline_beta)))
+        changed_r_inv = np.array(spline._R_inv, copy=True)
+        changed_r_inv[:, beta_position] += null_vector / spline_beta[beta_position]
+        spline.set_reparametrisation(changed_r_inv)
+
+        _, trusted_model = replay_manual_adjustment_policy(bundle, policy)
+        np.testing.assert_allclose(
+            submitted_model.predict(frame),
+            trusted_model.predict(frame),
+        )
+        grid = np.linspace(-1.0, 1.0, 201)
+        grid_delta = spline._basis_matrix(grid).toarray() @ null_vector
+        off_frame_x = float(grid[int(np.argmax(np.abs(grid_delta)))])
+        off_frame = pd.DataFrame({"segment": ["A"], "x": [off_frame_x]})
+        assert not np.allclose(
+            submitted_model.predict(off_frame),
+            trusted_model.predict(off_frame),
+        )
+
+    parent = SimpleNamespace(bundle=bundle)
+    if mutate_spline:
+        with pytest.raises(
+            editor_candidate.EditorSubmissionError,
+            match="normalized fitted runtime state does not match trusted manual adjustment policy replay",
+        ):
+            editor_candidate._require_manual_policy_replay(
+                parent,
+                submitted_model,
+                policy,
+            )
+    else:
+        editor_candidate._require_manual_policy_replay(
+            parent,
+            submitted_model,
+            policy,
+        )
 
 
 @pytest.mark.parametrize(

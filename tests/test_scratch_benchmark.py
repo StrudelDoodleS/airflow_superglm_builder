@@ -3,15 +3,22 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import mean_tweedie_deviance
 from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM, Tweedie
 from superglm.features.spline import _SplineBase
 
 from pricing_pipeline.modeling.scratch_benchmark import (
     ScratchBenchmarkError,
+    ScratchBoostedBlend,
     _required_scratch_estimators,
     fit_boosted_blend,
     superglm_edf_table,
     unconstrained_superglm_features,
+)
+
+_EXPLORATORY_BLEND_EVIDENCE = (
+    "exploratory_cross_fitted_meta_over_global_base_oof_"
+    "non_nested_not_unbiased_generalization_estimate"
 )
 
 
@@ -38,6 +45,27 @@ def _fake_factories():
         "catboost": lambda _seed: _WeightedMeanEstimator(0.75),
         "lightgbm": lambda _seed: _WeightedMeanEstimator(1.0),
         "xgboost": lambda _seed: _WeightedMeanEstimator(1.25),
+    }
+
+
+class _ColumnEstimator:
+    def __init__(self, column: str):
+        self.column = column
+
+    def fit(self, X, y, *, sample_weight=None, **_kwargs):
+        del y, sample_weight
+        assert self.column in X
+        return self
+
+    def predict(self, X):
+        return X[self.column].to_numpy(dtype=float)
+
+
+def _column_factories():
+    return {
+        "catboost": lambda _seed: _ColumnEstimator("candidate_a"),
+        "lightgbm": lambda _seed: _ColumnEstimator("candidate_b"),
+        "xgboost": lambda _seed: _ColumnEstimator("candidate_c"),
     }
 
 
@@ -145,18 +173,76 @@ def test_boosted_blend_learns_weights_only_from_complete_oof_predictions():
         "xgboost",
         "blend",
     }
-    base_deviance = blend.metrics.loc[
-        blend.metrics["model"].ne("blend"), "mean_unit_deviance"
-    ].min()
     blend_deviance = blend.metrics.loc[
         blend.metrics["model"].eq("blend"), "mean_unit_deviance"
     ].item()
-    assert blend_deviance <= base_deviance + 1e-10
+    assert blend_deviance == pytest.approx(
+        mean_tweedie_deviance(
+            blend.oof_predictions["actual_rate"],
+            blend.oof_predictions["blend_rate"],
+            sample_weight=blend.oof_predictions["fit_weight"],
+            power=1.0,
+        )
+    )
+    assert blend.metrics.set_index("model").loc["blend", "evaluation"] == (
+        _EXPLORATORY_BLEND_EVIDENCE
+    )
+    assert set(blend.oof_predictions["blend_evidence"]) == {_EXPLORATORY_BLEND_EVIDENCE}
 
     expected = blend.predict_expected(frame.iloc[:5], exposure=exposure[:5])
     assert expected.shape == (5,)
     assert np.isfinite(expected).all()
     assert (expected > 0.0).all()
+
+
+def test_blend_evidence_cross_fits_meta_weights_by_assessment_fold():
+    row_count = 40
+    first_fold = np.arange(0, 20)
+    second_fold = np.arange(20, 40)
+    frame = pd.DataFrame(
+        {
+            "candidate_a": np.r_[np.ones(20), np.full(20, 4.0)],
+            "candidate_b": np.r_[np.full(20, 4.0), np.ones(20)],
+            "candidate_c": np.full(row_count, 3.0),
+        }
+    )
+    target = np.ones(row_count)
+    cv = [
+        (second_fold, first_fold),
+        (first_fold, second_fold),
+    ]
+
+    blend = fit_boosted_blend(
+        frame,
+        target,
+        cv=cv,
+        estimator_factories=_column_factories(),
+    )
+
+    deployable_weights = np.array([blend.weights[name] for name in _column_factories()])
+    assert deployable_weights == pytest.approx([0.5, 0.5, 0.0], abs=1e-8)
+    deployable_oof_rate = (
+        blend.oof_predictions[["catboost_rate", "lightgbm_rate", "xgboost_rate"]].to_numpy()
+        @ deployable_weights
+    )
+    assert blend.oof_predictions["assessment_fold"].tolist() == [0] * 20 + [1] * 20
+    assert blend.oof_predictions["blend_rate"].to_numpy() == pytest.approx(np.full(row_count, 4.0))
+    assert not np.allclose(blend.oof_predictions["blend_rate"], deployable_oof_rate)
+    blend_metric = blend.metrics.set_index("model").loc["blend"]
+    assert blend_metric["evaluation"] == _EXPLORATORY_BLEND_EVIDENCE
+    assert blend_metric["blend_weight_scope"] == "final_all_complete_oof"
+    assert blend_metric["mean_unit_deviance"] == pytest.approx(2.0 * (4.0 - 1.0 - np.log(4.0)))
+
+
+def test_blend_contract_disclaims_nested_or_unbiased_generalization_evidence():
+    raw_documentation = ScratchBoostedBlend.__doc__
+
+    assert raw_documentation is not None
+    documentation = " ".join(raw_documentation.split())
+    assert "honest OOF" not in documentation
+    assert "global base-OOF matrix" in documentation
+    assert "non-nested" in documentation
+    assert "not an unbiased generalization estimate" in documentation
 
 
 def test_boosted_blend_uses_one_fixed_tweedie_power_for_fit_and_oof_loss():

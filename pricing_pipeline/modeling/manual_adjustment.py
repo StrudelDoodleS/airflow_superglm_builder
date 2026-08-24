@@ -144,10 +144,10 @@ class ManualAdjustmentPolicy:
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _required_text(self.name, "policy name"))
         object.__setattr__(self, "reason", _required_text(self.reason, "policy reason"))
-        if isinstance(self.version, bool) or int(self.version) < 1:
+        if type(self.version) is not int or self.version < 1:
             raise ValueError("policy version must be a positive integer")
-        object.__setattr__(self, "version", int(self.version))
-        object.__setattr__(self, "carry_forward", bool(self.carry_forward))
+        if not isinstance(self.carry_forward, bool):
+            raise TypeError("carry_forward must be a boolean")
         rules = tuple(self.rules)
         if not rules:
             raise ValueError("manual adjustment policy requires at least one rule")
@@ -329,19 +329,7 @@ def apply_manual_adjustment_policy(
         raise TypeError("candidate must come from open_candidate() or open_deployed_candidate()")
     if not isinstance(policy, ManualAdjustmentPolicy):
         raise TypeError("policy must be a ManualAdjustmentPolicy")
-    session = EditorSession.from_model(
-        candidate.bundle.fitted_model,
-        train_data=(
-            candidate.bundle.X,
-            candidate.bundle.y,
-            candidate.bundle.sample_weight,
-            candidate.bundle.offset,
-        ),
-        cv_report=candidate.bundle.cv_report,
-    )
-    for rule in policy.rules:
-        rule.apply(session)
-    edited_model = session.to_model()
+    session, edited_model = replay_manual_adjustment_policy(candidate.bundle, policy)
     return ManualEditReview(
         candidate=candidate,
         policy=policy,
@@ -351,8 +339,60 @@ def apply_manual_adjustment_policy(
     )
 
 
+def replay_manual_adjustment_policy(
+    bundle: Any,
+    policy: ManualAdjustmentPolicy,
+) -> tuple[EditorSession, Any]:
+    """Replay a canonical policy against one freshly verified candidate bundle."""
+    if not isinstance(policy, ManualAdjustmentPolicy):
+        raise TypeError("policy must be a ManualAdjustmentPolicy")
+    session = EditorSession.from_model(
+        bundle.fitted_model,
+        train_data=(
+            bundle.X,
+            bundle.y,
+            bundle.sample_weight,
+            bundle.offset,
+        ),
+        cv_report=bundle.cv_report,
+    )
+    for rule in policy.rules:
+        rule.apply(session)
+    return session, session.to_model()
+
+
+def manual_adjustment_policy_from_metadata(
+    edit_metadata: Mapping[str, Any],
+) -> ManualAdjustmentPolicy:
+    """Validate and recover one canonical manual-adjustment policy payload."""
+    if not isinstance(edit_metadata, Mapping):
+        raise TypeError("manual edit has no structured edit metadata")
+    payload = edit_metadata.get("manual_adjustment_policy")
+    if not isinstance(payload, Mapping):
+        raise TypeError("manual edit has no replayable adjustment policy")
+    try:
+        policy = ManualAdjustmentPolicy.from_payload(payload)
+        supplied_payload_json = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("manual adjustment policy schema is invalid") from exc
+    if supplied_payload_json != policy.canonical_json:
+        raise ValueError("manual adjustment policy payload is not canonical")
+    expected_sha256 = edit_metadata.get("manual_adjustment_policy_sha256")
+    if expected_sha256 != policy.sha256:
+        raise ValueError("manual adjustment policy SHA-256 verification failed")
+    return policy
+
+
 def manual_adjustment_policy_from_candidate(
     candidate: Candidate,
+    *,
+    require_carry_forward: bool = False,
 ) -> ManualAdjustmentPolicy:
     """Recover the replayable policy embedded in a published MANUAL_EDIT package."""
     if not isinstance(candidate, Candidate):
@@ -369,16 +409,12 @@ def manual_adjustment_policy_from_candidate(
         metadata = dict(raw_metadata)
     else:
         raise TypeError("manual edit package has no revision metadata")
-    edit_metadata = metadata.get("edit_metadata")
-    if not isinstance(edit_metadata, Mapping):
-        raise TypeError("manual edit package has no structured edit metadata")
-    payload = edit_metadata.get("manual_adjustment_policy")
-    if not isinstance(payload, Mapping):
-        raise TypeError("manual edit package has no replayable adjustment policy")
-    policy = ManualAdjustmentPolicy.from_payload(payload)
-    expected_sha256 = edit_metadata.get("manual_adjustment_policy_sha256")
-    if expected_sha256 != policy.sha256:
-        raise ValueError("manual adjustment policy SHA-256 verification failed")
+    try:
+        policy = manual_adjustment_policy_from_metadata(metadata.get("edit_metadata"))
+    except TypeError as exc:
+        raise TypeError(str(exc).replace("manual edit", "manual edit package", 1)) from exc
+    if require_carry_forward and not policy.carry_forward:
+        raise ValueError("manual adjustment policy is not approved for carry-forward")
     return policy
 
 
@@ -388,4 +424,6 @@ __all__ = [
     "ManualEditReview",
     "apply_manual_adjustment_policy",
     "manual_adjustment_policy_from_candidate",
+    "manual_adjustment_policy_from_metadata",
+    "replay_manual_adjustment_policy",
 ]

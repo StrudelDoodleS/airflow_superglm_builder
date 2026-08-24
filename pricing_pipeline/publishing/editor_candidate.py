@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import math
 import os
+import pickle
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_poisson_deviance
@@ -19,6 +23,11 @@ from sqlalchemy import text
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.infra.file_lock import exclusive_file_lock
 from pricing_pipeline.infra.schema import schema_names_from_connectable
+from pricing_pipeline.modeling.manual_adjustment import (
+    ManualAdjustmentPolicy,
+    manual_adjustment_policy_from_metadata,
+    replay_manual_adjustment_policy,
+)
 from pricing_pipeline.models.config import ModelBuildConfig
 from pricing_pipeline.models.spec import ApprovedModelBuild
 from pricing_pipeline.publishing.equivalence import (
@@ -34,6 +43,7 @@ from pricing_pipeline.publishing.superglm_metadata import build_superglm_publica
 from pricing_pipeline.publishing.superglm_publication_receipt import (
     OffsetExportContract,
     SuperGLMPublicationReceipt,
+    canonical_receipt_bytes,
     write_publication_receipt,
 )
 from pricing_pipeline.workbench.artifacts import (
@@ -142,6 +152,7 @@ def publish_editor_submission(
         submission_sha256,
         allowed_root=settings.workbench_artifact_root,
     )
+    _manual_policy_for_submission(submission)
     submitted_slot = str(submission.deployment_slot or "").strip().upper()
     configured_slot = str(model_config.deployment_slot or "").strip().upper()
     if not submitted_slot or submitted_slot != configured_slot:
@@ -187,6 +198,108 @@ def _submission_model_kind(submission: EditorSubmission) -> str:
     return str(getattr(submission, "model_kind", "EDITOR_EDIT") or "EDITOR_EDIT").upper()
 
 
+def _manual_policy_for_submission(
+    submission: EditorSubmission,
+) -> ManualAdjustmentPolicy | None:
+    if _submission_model_kind(submission) != "MANUAL_EDIT":
+        return None
+    try:
+        return manual_adjustment_policy_from_metadata(getattr(submission, "edit_metadata", None))
+    except (TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            f"MANUAL_EDIT submission has invalid manual adjustment policy: {exc}"
+        ) from exc
+
+
+def _manual_policy_provenance_identity(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        manual_adjustment_policy_from_metadata(value)
+        return _canonical_json(dict(value))
+    except TypeError, ValueError:
+        return None
+
+
+def _require_matching_manual_policy_lineage(
+    engine,
+    *,
+    submission: EditorSubmission,
+    rate_package_id: int,
+    model_run_id: int,
+) -> None:
+    schemas = schema_names_from_connectable(engine)
+    with engine.connect() as connection:
+        row = (
+            connection.execute(
+                text(
+                    f"""
+                    SELECT
+                        rp.parent_rate_package_id,
+                        mr.parent_model_run_id,
+                        rp.revision_metadata_json
+                    FROM {schemas.pricing}.PRICING_RATE_PACKAGE AS rp
+                    JOIN {schemas.pricing}.MODEL_RUN AS mr
+                      ON mr.rate_package_id = rp.rate_package_id
+                    WHERE rp.rate_package_id = :rate_package_id
+                      AND mr.model_run_id = :model_run_id
+                    """
+                ),
+                {
+                    "rate_package_id": rate_package_id,
+                    "model_run_id": model_run_id,
+                },
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+    mismatches: list[str] = []
+    stored_revision: Mapping[str, Any] | None = None
+    if row is None:
+        mismatches.append("package/run provenance is missing")
+    else:
+        if row.get("parent_rate_package_id") != submission.parent_rate_package_id:
+            mismatches.append("parent_rate_package_id")
+        if row.get("parent_model_run_id") != submission.parent_model_run_id:
+            mismatches.append("parent_model_run_id")
+        raw_revision = row.get("revision_metadata_json")
+        try:
+            decoded_revision = (
+                json.loads(raw_revision) if isinstance(raw_revision, str) else raw_revision
+            )
+        except json.JSONDecodeError:
+            decoded_revision = None
+        if isinstance(decoded_revision, Mapping):
+            stored_revision = decoded_revision
+        else:
+            mismatches.append("revision_metadata_json")
+
+    if stored_revision is not None:
+        if stored_revision.get("kind") != "SUPERGLM_MANUAL_EDIT":
+            mismatches.append("revision kind")
+        if stored_revision.get("parent_rate_package_id") != submission.parent_rate_package_id:
+            mismatches.append("revision parent_rate_package_id")
+        if stored_revision.get("parent_model_run_id") != submission.parent_model_run_id:
+            mismatches.append("revision parent_model_run_id")
+
+        requested_policy_identity = _manual_policy_provenance_identity(
+            getattr(submission, "edit_metadata", None)
+        )
+        stored_policy_identity = _manual_policy_provenance_identity(
+            stored_revision.get("edit_metadata")
+        )
+        if requested_policy_identity is None or stored_policy_identity != requested_policy_identity:
+            mismatches.append("manual adjustment policy metadata")
+
+    if mismatches:
+        raise EditorSubmissionError(
+            "equivalent MANUAL_EDIT package has incompatible immutable policy lineage "
+            f"({', '.join(mismatches)}); the one-package-per-equivalent-model identity "
+            "cannot preserve the requested replay contract"
+        )
+
+
 def _submission_directory(
     submission: EditorSubmission,
     *,
@@ -230,6 +343,67 @@ def _verify_model_frame_sha256(
         )
 
 
+def _require_existing_submission_revision(
+    row: Mapping[str, Any],
+    submission: EditorSubmission,
+) -> None:
+    raw_revision = row.get("revision_metadata_json")
+    try:
+        revision = json.loads(raw_revision) if isinstance(raw_revision, str) else raw_revision
+    except json.JSONDecodeError:
+        revision = None
+    if not isinstance(revision, Mapping):
+        raise EditorSubmissionError(
+            "existing editor publication signed submission metadata does not match: "
+            "revision_metadata_json"
+        )
+
+    expected_kind = (
+        "SUPERGLM_MANUAL_EDIT"
+        if _submission_model_kind(submission) == "MANUAL_EDIT"
+        else "SUPERGLM_EDITOR"
+    )
+    expected = {
+        "kind": expected_kind,
+        "submission_id": submission.submission_id,
+        "submission_path": submission.path,
+        "submission_sha256": submission.sha256,
+        "parent_rate_package_id": submission.parent_rate_package_id,
+        "parent_model_run_id": submission.parent_model_run_id,
+    }
+    mismatches = [
+        field_name
+        for field_name, expected_value in expected.items()
+        if revision.get(field_name) != expected_value
+    ]
+    requested_edit_metadata = getattr(submission, "edit_metadata", None)
+    stored_edit_metadata = revision.get("edit_metadata")
+    try:
+        requested_edit_identity = (
+            None
+            if requested_edit_metadata is None
+            else _canonical_json(dict(requested_edit_metadata))
+        )
+        stored_edit_identity = (
+            None if stored_edit_metadata is None else _canonical_json(dict(stored_edit_metadata))
+        )
+    except TypeError, ValueError:
+        requested_edit_identity = None
+        stored_edit_identity = "invalid"
+    if stored_edit_identity != requested_edit_identity:
+        mismatches.append("edit_metadata")
+    if _submission_model_kind(submission) == "MANUAL_EDIT":
+        requested_policy_identity = _manual_policy_provenance_identity(requested_edit_metadata)
+        stored_policy_identity = _manual_policy_provenance_identity(stored_edit_metadata)
+        if requested_policy_identity is None or stored_policy_identity != requested_policy_identity:
+            mismatches.append("manual adjustment policy lineage")
+    if mismatches:
+        raise EditorSubmissionError(
+            "existing editor publication signed submission metadata does not match: "
+            + ", ".join(mismatches)
+        )
+
+
 def _resolve_existing_editor_publication(
     engine,
     submission: EditorSubmission,
@@ -245,6 +419,7 @@ def _resolve_existing_editor_publication(
             rp.package_version,
             rp.package_status,
             rp.parent_rate_package_id,
+            rp.revision_metadata_json,
             mr.model_run_id,
             mr.parent_model_run_id,
             mr.run_status,
@@ -354,6 +529,7 @@ def _resolve_existing_editor_publication(
             "existing editor publication SQL lineage does not match the submission: "
             + ", ".join(sql_mismatches)
         )
+    _require_existing_submission_revision(row, submission)
     try:
         bundle = load_candidate_bundle(
             row["candidate_artifact_path"],
@@ -704,13 +880,17 @@ def _load_edited_model(
     *,
     allowed_root: str | Path,
 ) -> Any:
+    manual_policy = _manual_policy_for_submission(submission)
     submission_format = getattr(submission, "format", LEGACY_SUBMISSION_FORMAT)
     if submission_format == LEGACY_SUBMISSION_FORMAT:
-        return _replay_legacy_editor_session(
+        edited_model = _replay_legacy_editor_session(
             parent,
             submission,
             allowed_root=allowed_root,
         )
+        if manual_policy is not None:
+            _require_manual_policy_replay(parent, edited_model, manual_policy)
+        return edited_model
     if submission_format != SUBMISSION_FORMAT:
         raise EditorSubmissionError(f"unsupported editor submission format {submission_format!r}")
 
@@ -752,7 +932,77 @@ def _load_edited_model(
             f"parent={sorted(parent_features)!r}, edited={sorted(edited_features)!r}"
         )
     _predict(edited_model, parent.bundle)
+    if manual_policy is not None:
+        _require_manual_policy_replay(parent, edited_model, manual_policy)
     return edited_model
+
+
+def _require_manual_policy_replay(
+    parent: ParentCandidate,
+    edited_model: Any,
+    policy: ManualAdjustmentPolicy,
+) -> None:
+    try:
+        _, trusted_model = replay_manual_adjustment_policy(parent.bundle, policy)
+        expected = _predict(trusted_model, parent.bundle)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            "MANUAL_EDIT policy could not be replayed against the verified parent bundle"
+        ) from exc
+    actual = _predict(edited_model, parent.bundle)
+    if not np.allclose(actual, expected, rtol=1e-10, atol=1e-12):
+        raise EditorSubmissionError(
+            "submitted MANUAL_EDIT model does not match trusted manual adjustment policy "
+            "replay over the full verified parent model frame"
+        )
+    try:
+        receipt_kwargs = {
+            "offset_contract": parent.bundle.offset_contract,
+            "fit_sample_weight_name": parent.bundle.fit_sample_weight_name,
+            "export_weight_name": parent.bundle.export_weight_name,
+        }
+        trusted_receipt = build_superglm_publication_receipt(
+            trusted_model,
+            **receipt_kwargs,
+        )
+        submitted_receipt = build_superglm_publication_receipt(
+            edited_model,
+            **receipt_kwargs,
+        )
+        receipts_match = canonical_receipt_bytes(submitted_receipt) == canonical_receipt_bytes(
+            trusted_receipt
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            "MANUAL_EDIT publication receipt could not be verified against the trusted "
+            "policy replay"
+        ) from exc
+    if not receipts_match:
+        raise EditorSubmissionError(
+            "submitted MANUAL_EDIT publication receipt does not match trusted manual "
+            "adjustment policy replay"
+        )
+    try:
+        submitted_runtime_sha256 = _normalized_fitted_runtime_sha256(edited_model)
+        trusted_runtime_sha256 = _normalized_fitted_runtime_sha256(trusted_model)
+    except (EOFError, OSError, pickle.PickleError, TypeError, ValueError) as exc:
+        raise EditorSubmissionError(
+            "MANUAL_EDIT normalized fitted runtime state could not be verified"
+        ) from exc
+    if submitted_runtime_sha256 != trusted_runtime_sha256:
+        raise EditorSubmissionError(
+            "submitted MANUAL_EDIT normalized fitted runtime state does not match "
+            "trusted manual adjustment policy replay"
+        )
+
+
+def _normalized_fitted_runtime_sha256(model: Any) -> str:
+    artifact = io.BytesIO()
+    joblib.dump(model, artifact, protocol=5)
+    artifact.seek(0)
+    normalized_model = joblib.load(artifact)
+    normalized_pickle = pickle.dumps(normalized_model, protocol=5)
+    return hashlib.sha256(normalized_pickle).hexdigest()
 
 
 def _replay_legacy_editor_session(
@@ -1208,6 +1458,13 @@ def _publish_new_editor_submission(
                 raise EditorSubmissionError(
                     "equivalent editor package has unusable durable lineage"
                 )
+            if build.model_kind.upper() == "MANUAL_EDIT":
+                _require_matching_manual_policy_lineage(
+                    engine,
+                    submission=submission,
+                    rate_package_id=equivalent.rate_package_id,
+                    model_run_id=equivalent.model_run_id,
+                )
             release_unused_model_version_reservation(
                 engine,
                 model_id=build.model_id,
@@ -1301,6 +1558,17 @@ def _publish_new_editor_submission(
             },
         )
         if published.deduplicated:
+            if build.model_kind.upper() == "MANUAL_EDIT":
+                if published.model_run_id is None:
+                    raise EditorSubmissionError(
+                        "equivalent MANUAL_EDIT package has no durable model-run lineage"
+                    )
+                _require_matching_manual_policy_lineage(
+                    engine,
+                    submission=submission,
+                    rate_package_id=published.rate_package_id,
+                    model_run_id=published.model_run_id,
+                )
             schemas = schema_names_from_connectable(engine)
             with engine.connect() as connection:
                 equivalent = (

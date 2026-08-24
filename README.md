@@ -76,6 +76,9 @@ notebook starts with it set to `False`.
 - Every monitoring fit is checked again after fitting. Protected lambdas,
   lambda history, knot locations/boundaries, and model structure must verify
   exactly before SQL persistence is allowed.
+- Persisted monitoring starts from a freshly re-verified deployed candidate and
+  binds the exact observation frame, fit configuration, and complete result
+  evidence; raw fitted objects are simulation-only.
 - Local mode uses persistent SQLite audit databases; editor/manual publication
   and deployment require guarded remote mode.
 - Save notebooks before building: source cells are part of model evidence;

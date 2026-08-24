@@ -28,6 +28,27 @@ EXPECTED_NOTEBOOKS = (
 )
 
 
+def _legacy_deployment_notebook(label: str) -> str:
+    return (
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "cell_type": "markdown",
+                        "metadata": {},
+                        "source": f"# {label}\n",
+                    }
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            },
+            indent=1,
+        )
+        + "\n"
+    )
+
+
 def _notebook(path: Path) -> dict:
     notebook = json.loads(path.read_text(encoding="utf-8"))
     assert notebook["nbformat"] == 4
@@ -125,6 +146,7 @@ def test_scaffold_separates_all_governed_steps_and_scratch(tmp_path):
     assert "ManualAdjustmentPolicy.from_rows(" in manual
     assert "apply_manual_adjustment_policy(" in manual
     assert "manual_adjustment_policy_from_candidate(" in manual
+    assert "require_carry_forward=True" in manual
     assert "publish_manual_adjustment(" in manual
     assert 'SOURCE_SELECTOR = "deployed"' in manual
     assert "CARRY_FORWARD = True" in manual
@@ -324,6 +346,114 @@ def test_scaffold_force_overwrites_all_workflow_files(tmp_path):
         *(package_dir / name for name in EXPECTED_NOTEBOOKS),
     )
     assert training_path.read_text(encoding="utf-8") != "stale"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_scaffold_migrates_legacy_deployment_before_creating_manual_step(tmp_path, force):
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    legacy_path = package_dir / "04_model_deployment.ipynb"
+    legacy_content = _legacy_deployment_notebook("Legacy deployment")
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(legacy_content, encoding="utf-8")
+
+    scaffold_pricing_model(
+        ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=force)
+    )
+
+    assert not legacy_path.exists()
+    assert (package_dir / "05_model_deployment.ipynb").read_text(encoding="utf-8") == legacy_content
+    _notebook(package_dir / "04_manual_adjustment.ipynb")
+    assert sorted(path.name for path in package_dir.glob("*.ipynb")) == sorted(EXPECTED_NOTEBOOKS)
+
+
+def test_scaffold_refuses_legacy_migration_to_a_dangling_symlink(tmp_path):
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    legacy_path = package_dir / "04_model_deployment.ipynb"
+    deployment_path = package_dir / "05_model_deployment.ipynb"
+    legacy_content = _legacy_deployment_notebook("Legacy deployment")
+    package_dir.mkdir(parents=True)
+    legacy_path.write_text(legacy_content, encoding="utf-8")
+    deployment_path.symlink_to(package_dir / "missing-deployment.ipynb")
+
+    with pytest.raises(ValueError, match="05_model_deployment\\.ipynb.*symbolic link"):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=True)
+        )
+
+    assert legacy_path.read_text(encoding="utf-8") == legacy_content
+    assert deployment_path.is_symlink()
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_scaffold_refuses_legacy_deployment_symlinks_without_touching_targets(
+    tmp_path, target_exists
+):
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    legacy_path = package_dir / "04_model_deployment.ipynb"
+    external_path = tmp_path / "external-deployment.ipynb"
+    external_content = "do not modify this notebook\n"
+    package_dir.mkdir(parents=True)
+    if target_exists:
+        external_path.write_text(external_content, encoding="utf-8")
+    legacy_path.symlink_to(external_path)
+
+    with pytest.raises(ValueError, match="04_model_deployment\\.ipynb.*symbolic link"):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=True)
+        )
+
+    assert legacy_path.is_symlink()
+    assert not (package_dir / "__init__.py").exists()
+    if target_exists:
+        assert external_path.read_text(encoding="utf-8") == external_content
+    else:
+        assert not external_path.exists()
+
+
+@pytest.mark.parametrize("output_name", ("__init__.py", *EXPECTED_NOTEBOOKS))
+def test_scaffold_rejects_output_symlinks_before_writing_any_files(tmp_path, output_name):
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    output_path = package_dir / output_name
+    external_path = tmp_path / f"external-{output_name}"
+    external_content = "do not modify this output\n"
+    package_dir.mkdir(parents=True)
+    external_path.write_text(external_content, encoding="utf-8")
+    output_path.symlink_to(external_path)
+
+    with pytest.raises(ValueError, match=rf"{re.escape(output_name)}.*symbolic link"):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=True)
+        )
+
+    assert output_path.is_symlink()
+    assert external_path.read_text(encoding="utf-8") == external_content
+    assert {path.name for path in package_dir.iterdir()} == {output_name}
+
+
+def test_scaffold_refuses_legacy_deployment_migration_when_new_target_exists(tmp_path):
+    package_dir = tmp_path / "pricing_models" / "my_model"
+    legacy_path = package_dir / "04_model_deployment.ipynb"
+    deployment_path = package_dir / "05_model_deployment.ipynb"
+    legacy_content = _legacy_deployment_notebook("Legacy deployment")
+    deployment_content = _legacy_deployment_notebook("Current deployment")
+    package_dir.mkdir(parents=True)
+    legacy_path.write_text(legacy_content, encoding="utf-8")
+    deployment_path.write_text(deployment_content, encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "04_model_deployment\\.ipynb.*05_model_deployment\\.ipynb.*"
+            "Resolve the two deployment notebooks manually"
+        ),
+    ):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=True)
+        )
+
+    assert legacy_path.read_text(encoding="utf-8") == legacy_content
+    assert deployment_path.read_text(encoding="utf-8") == deployment_content
+    assert not (package_dir / "04_manual_adjustment.ipynb").exists()
 
 
 def test_scaffold_accepts_explicit_model_identity(tmp_path):

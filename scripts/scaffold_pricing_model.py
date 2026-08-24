@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import keyword
+import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -31,6 +33,8 @@ _NOTEBOOK_NAMES = (
     "05_model_deployment.ipynb",
     "99_scratch_work.ipynb",
 )
+_LEGACY_DEPLOYMENT_NOTEBOOK = "04_model_deployment.ipynb"
+_DEPLOYMENT_NOTEBOOK = "05_model_deployment.ipynb"
 
 
 @dataclass(frozen=True)
@@ -826,7 +830,10 @@ DEPLOYMENT_REASON = ""
                         model=model,
                         package_version=int(POLICY_SOURCE_PACKAGE_VERSION),
                     )
-                    policy = manual_adjustment_policy_from_candidate(policy_source)
+                    policy = manual_adjustment_policy_from_candidate(
+                        policy_source,
+                        require_carry_forward=True,
+                    )
                 display(policy.table())
                 display({
                     "Policy": policy.name,
@@ -1395,6 +1402,50 @@ def _notebooks(
     return rendered
 
 
+def _migrate_legacy_deployment_notebook(package_dir: Path) -> Path | None:
+    legacy_path = package_dir / _LEGACY_DEPLOYMENT_NOTEBOOK
+    deployment_path = package_dir / _DEPLOYMENT_NOTEBOOK
+    if legacy_path.is_symlink():
+        raise ValueError(
+            f"cannot upgrade legacy notebook {legacy_path.name}: symbolic links are not supported. "
+            "Resolve the legacy path manually, then rerun the scaffold."
+        )
+    if not legacy_path.exists():
+        return None
+    if not legacy_path.is_file():
+        raise ValueError(
+            f"cannot upgrade legacy notebook {legacy_path.name}: expected a regular file. "
+            "Resolve the legacy path manually, then rerun the scaffold."
+        )
+    conflict_message = (
+        f"cannot upgrade legacy notebook {legacy_path.name}: {deployment_path.name} already exists. "
+        "Resolve the two deployment notebooks manually, remove "
+        f"{legacy_path.name}, then rerun the scaffold; --force will not overwrite either notebook."
+    )
+    if deployment_path.exists() or deployment_path.is_symlink():
+        raise ValueError(conflict_message)
+    try:
+        os.link(legacy_path, deployment_path, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ValueError(conflict_message) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"cannot safely upgrade legacy notebook {legacy_path.name} to {deployment_path.name}: {exc}. "
+            "Move the notebook manually, then rerun the scaffold."
+        ) from exc
+    legacy_path.unlink()
+    return deployment_path
+
+
+def _reject_output_symlinks(content: Mapping[Path, str]) -> None:
+    for path in content:
+        if path.is_symlink():
+            raise ValueError(
+                f"cannot write scaffold output {path.name}: symbolic links are not supported. "
+                "Replace the link with a regular file, then rerun the scaffold."
+            )
+
+
 def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
     model_name = _model_name(options.model_name)
     package_name = _package_name(
@@ -1435,8 +1486,12 @@ def scaffold_pricing_model(options: ScaffoldOptions) -> ScaffoldResult:
         package_dir / "__init__.py": f'"""Pricing notebook package for {model_name}."""\n',
         **{package_dir / filename: source for filename, source in notebooks.items()},
     }
+    _reject_output_symlinks(content)
+    migrated_deployment = _migrate_legacy_deployment_notebook(package_dir)
     created = []
     for path, source in content.items():
+        if path == migrated_deployment:
+            continue
         if path.exists() and not options.force:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)

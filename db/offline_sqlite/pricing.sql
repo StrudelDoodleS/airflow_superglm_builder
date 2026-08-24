@@ -260,12 +260,19 @@ INSERT INTO pricing.MODEL_MONITOR_VARIANT (
     ('FROZEN_REFIT', 'Refit coefficients only', 1, 0, 0, 1),
     ('REESTIMATE_LAMBDA', 'Refit coefficients and REML lambdas', 1, 1, 0, 1),
     ('FULL_ADAPTIVE', 'Refit coefficients, lambdas, and data-driven knots', 1, 1, 1, 1)
-ON CONFLICT(variant_code) DO UPDATE SET
-    variant_label = excluded.variant_label,
-    refit_coefficients = excluded.refit_coefficients,
-    reestimate_lambdas = excluded.reestimate_lambdas,
-    reposition_data_driven_knots = excluded.reposition_data_driven_knots,
-    structure_frozen = excluded.structure_frozen;
+ON CONFLICT(variant_code) DO NOTHING;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_VARIANT_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_VARIANT
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring variant policy is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_VARIANT_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_VARIANT
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring variant policy is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS pricing.MODEL_FIT_CONTRACT (
     fit_contract_id TEXT NOT NULL PRIMARY KEY,
@@ -315,6 +322,19 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_RUN (
         CHECK (invariant_status IN ('VERIFIED', 'LEGACY_UNVERIFIED')),
     invariant_evidence_sha256 TEXT,
     invariant_evidence_json TEXT,
+    model_frame_sha256 TEXT NOT NULL
+        CHECK (
+            length(model_frame_sha256) = 64
+            AND model_frame_sha256 = lower(model_frame_sha256)
+            AND model_frame_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+    fit_configuration_json TEXT NOT NULL CHECK (json_valid(fit_configuration_json)),
+    result_evidence_sha256 TEXT NOT NULL
+        CHECK (
+            length(result_evidence_sha256) = 64
+            AND result_evidence_sha256 = lower(result_evidence_sha256)
+            AND result_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
     started_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL,
@@ -335,6 +355,7 @@ CREATE TABLE IF NOT EXISTS pricing.MODEL_MONITOR_RUN (
             AND invariant_evidence_json IS NULL
         )
     ),
+    UNIQUE (baseline_deployment_id, manifest_id, component_role, variant_code),
     FOREIGN KEY (fit_contract_id) REFERENCES MODEL_FIT_CONTRACT(fit_contract_id),
     FOREIGN KEY (baseline_deployment_id)
         REFERENCES PRICING_MODEL_DEPLOYMENT(deployment_id),
@@ -477,6 +498,129 @@ BEGIN
         ABORT,
         'monitoring contract, run, and deployment must identify one model package'
     );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_DEPLOYMENT_MONITORING_LINEAGE_GUARD_UPDATE
+BEFORE UPDATE OF deployment_slot, model_id, rate_package_id, effective_from_ts
+ON PRICING_MODEL_DEPLOYMENT
+WHEN EXISTS (
+    SELECT 1
+    FROM MODEL_MONITOR_RUN AS monitor_run
+    WHERE monitor_run.baseline_deployment_id = OLD.deployment_id
+)
+AND (
+    NEW.deployment_slot IS NOT OLD.deployment_slot
+    OR NEW.model_id IS NOT OLD.model_id
+    OR NEW.rate_package_id IS NOT OLD.rate_package_id
+    OR NEW.effective_from_ts IS NOT OLD.effective_from_ts
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'deployment referenced by monitoring evidence has immutable lineage'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_DEPLOYMENT_MONITORING_LINEAGE_GUARD_DELETE
+BEFORE DELETE ON PRICING_MODEL_DEPLOYMENT
+WHEN EXISTS (
+    SELECT 1
+    FROM MODEL_MONITOR_RUN AS monitor_run
+    WHERE monitor_run.baseline_deployment_id = OLD.deployment_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'deployment referenced by monitoring evidence has immutable lineage'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_DATASET_MANIFEST_MONITORING_LINEAGE_GUARD_UPDATE
+BEFORE UPDATE ON DATASET_MANIFEST
+WHEN EXISTS (
+    SELECT 1
+    FROM MODEL_MONITOR_RUN AS monitor_run
+    WHERE monitor_run.manifest_id = OLD.manifest_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'dataset manifest referenced by monitoring evidence is immutable'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_DATASET_MANIFEST_MONITORING_LINEAGE_GUARD_DELETE
+BEFORE DELETE ON DATASET_MANIFEST
+WHEN EXISTS (
+    SELECT 1
+    FROM MODEL_MONITOR_RUN AS monitor_run
+    WHERE monitor_run.manifest_id = OLD.manifest_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'dataset manifest referenced by monitoring evidence is immutable'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RUN_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_RUN
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RUN_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_RUN
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_TERM_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_TERM
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_TERM_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_TERM
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_LAMBDA_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_LAMBDA
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_LAMBDA_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_LAMBDA
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RELATIVITY_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_RELATIVITY
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_RELATIVITY_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_RELATIVITY
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_METRIC_IMMUTABLE_UPDATE
+BEFORE UPDATE ON MODEL_MONITOR_METRIC
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS pricing.TR_MODEL_MONITOR_METRIC_IMMUTABLE_DELETE
+BEFORE DELETE ON MODEL_MONITOR_METRIC
+BEGIN
+    SELECT RAISE(ABORT, 'monitoring evidence is immutable');
 END;
 
 CREATE TABLE IF NOT EXISTS pricing.PRICING_FEATURE (

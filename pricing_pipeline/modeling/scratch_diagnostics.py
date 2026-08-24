@@ -57,7 +57,7 @@ def weighted_quantile_bins(
     *,
     n_bins: int,
 ) -> np.ndarray:
-    """Assign stable bins with approximately equal total business weight."""
+    """Assign score-tie-safe bins with approximately equal business weight."""
     resolved_values = np.asarray(values, dtype=float)
     resolved_weights = np.asarray(weights, dtype=float)
     if resolved_values.ndim != 1 or resolved_weights.shape != resolved_values.shape:
@@ -68,17 +68,15 @@ def weighted_quantile_bins(
         raise ValueError("weights must contain finite positive values")
     if not isinstance(n_bins, int) or isinstance(n_bins, bool) or n_bins < 2:
         raise ValueError("n_bins must be an integer of at least 2")
-    order = np.argsort(resolved_values, kind="stable")
-    ordered_weights = resolved_weights[order]
-    midpoint = np.cumsum(ordered_weights) - 0.5 * ordered_weights
-    ordered_bins = np.floor(n_bins * midpoint / ordered_weights.sum()).astype(int)
-    ordered_bins = np.clip(ordered_bins, 0, n_bins - 1)
+    _unique_values, inverse = np.unique(resolved_values, return_inverse=True)
+    score_weights = np.bincount(inverse, weights=resolved_weights)
+    midpoint = np.cumsum(score_weights) - 0.5 * score_weights
+    score_bins = np.floor(n_bins * midpoint / score_weights.sum()).astype(int)
+    score_bins = np.clip(score_bins, 0, n_bins - 1)
     # A dominant observation can leave nominal bins empty. Dense numbering keeps
-    # every reported bin contiguous without moving any observation.
-    _, ordered_bins = np.unique(ordered_bins, return_inverse=True)
-    bins = np.empty(len(order), dtype=int)
-    bins[order] = ordered_bins
-    return bins
+    # every reported bin contiguous without splitting equal prediction scores.
+    _, score_bins = np.unique(score_bins, return_inverse=True)
+    return score_bins[inverse]
 
 
 def _validated_analysis_frame(
@@ -164,11 +162,23 @@ def _validated_analysis_frame(
 
 
 def _blend_rate_column(gam_weight: float) -> str:
-    return f"{_PREFIX}blend_{round(100 * gam_weight):03d}_rate"
+    return f"{_PREFIX}{blend_weight_label(gam_weight)}_rate"
 
 
 def _blend_expected_column(gam_weight: float) -> str:
-    return f"{_PREFIX}blend_{round(100 * gam_weight):03d}_expected"
+    return f"{_PREFIX}{blend_weight_label(gam_weight)}_expected"
+
+
+def blend_weight_label(gam_weight: float) -> str:
+    """Return a collision-free column identity for one GAM blend weight."""
+    resolved = float(gam_weight)
+    if not np.isfinite(resolved) or not 0.0 <= resolved <= 1.0:
+        raise ValueError("gam_weight must be finite and between 0 and 1")
+    percentage = round(100.0 * resolved)
+    if resolved == percentage / 100.0:
+        return f"blend_{percentage:03d}"
+    token = repr(resolved).replace(".", "p").replace("+", "").replace("-", "m")
+    return f"blend_w_{token}"
 
 
 def _weighted_average(values: pd.Series, weights: pd.Series) -> float:
@@ -232,7 +242,7 @@ def _aggregate_groups(
         )
         for gam_weight in governed_gam_weights:
             source = _blend_expected_column(float(gam_weight))
-            label = f"blend_{round(100 * gam_weight):03d}"
+            label = blend_weight_label(float(gam_weight))
             prediction_total = float(np.sum(sample_weight * part[source]))
             record[f"{label}_prediction_total"] = prediction_total
             record[f"{label}_response"] = prediction_total / sample_weight.sum()
@@ -344,8 +354,8 @@ def double_lift_table(
         "gam_response": "gam_prediction_total",
         "gbm_response": "gbm_prediction_total",
         **{
-            f"blend_{round(100 * value):03d}_response": (
-                f"blend_{round(100 * value):03d}_prediction_total"
+            f"{blend_weight_label(float(value))}_response": (
+                f"{blend_weight_label(float(value))}_prediction_total"
             )
             for value in governed_gam_weights
         },
@@ -425,7 +435,7 @@ def lorenz_curve_table(
         "GAM": f"{_PREFIX}gam_expected",
         "BOOSTED_BLEND": f"{_PREFIX}gbm_expected",
         **{
-            f"BLEND_{round(100 * value):03d}_GAM": _blend_expected_column(float(value))
+            f"{blend_weight_label(float(value)).upper()}_GAM": _blend_expected_column(float(value))
             for value in governed_gam_weights
         },
     }
@@ -707,6 +717,7 @@ def interaction_failure_tables(
 __all__ = [
     "ScratchDiagnosticError",
     "blend_evaluation_table",
+    "blend_weight_label",
     "double_lift_table",
     "feature_calibration_tables",
     "interaction_failure_tables",

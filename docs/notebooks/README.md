@@ -376,7 +376,7 @@ Import these from `pricing_pipeline.notebook`.
 | `publish_manual_adjustment(...)` | Reapply the canonical policy and publish it | `MANUAL_EDIT` child publication |
 | `deploy_package(...)` | Deploy exactly the reviewed candidate | Deployment record; stale champion fails |
 | `build_model_fit_contract(...)` | Freeze the deployed model's structural and smoothing evidence | Immutable canonical JSON and SHA-256 |
-| `run_monitoring_fit(...)` | Score or refit one controlled monitoring preset | Terms, lambdas, comparable relativities, metrics, hashed invariant evidence |
+| `run_monitoring_fit(...)` | Score or refit one controlled monitoring preset from a verified deployed `Candidate` | Terms, lambdas, comparable relativities, explicitly weighted metrics, frame/config/result digests |
 | `persist_monitoring_fit(...)` | Write a completed observation after lineage checks | Deduplicated monitoring-run receipt |
 
 A monitoring notebook can open the champion once, prepare the new manifest's
@@ -388,14 +388,15 @@ from pricing_pipeline.notebook import MonitoringVariant, run_monitoring_fit
 baseline = open_deployed_candidate(pricing, model=model)
 results = {
     variant: run_monitoring_fit(
-        baseline.bundle.fitted_model,
+        baseline,
         X_new,
         y_new,
         variant=variant,
         sample_weight=weight_new,
         offset=offset_new,
-        offset_contract=baseline.bundle.offset_contract,
-        fit_sample_weight_name=baseline.bundle.fit_sample_weight_name,
+        model_frame=frame_new,
+        target_column=model.spec.target,
+        offset_column=model.spec.offset_column,
     )
     for variant in MonitoringVariant
 }
@@ -406,13 +407,24 @@ Persist only after all requested fits have succeeded. Pass the new snapshot's
 `baseline.technical["current_deployment_id"]`. Exact retries deduplicate; a
 different data-as-at/manifest creates a new observation.
 
-`run_monitoring_fit` verifies the fitted object, not just its input config.
-For protected quantities it requires exact equality: structure and governed
+For persisted evidence, `run_monitoring_fit` accepts the deployed `Candidate`,
+re-queries its current SQL lineage, and reloads the exact artifact from its
+stored path, byte count, runtime metadata, and SHA-256. A raw fitted `SuperGLM`
+is supported only for local simulation and its result cannot be persisted. The
+ordered `model_frame` must hash to the supplied observation manifest at
+persistence time. If the deployed fit contract declares a sample-weight or
+offset input, the new snapshot must supply it; an offset is rejected when the
+deployed model was fitted without one.
+
+The post-fit guard verifies the fitted object, not just its input config. For
+protected quantities it requires exact equality: structure and governed
 level/grouping metadata, knot and boundary arrays, final lambdas, fixed-lambda
 policy, and every fixed-lambda REML history step. `FROZEN_REFIT` also requires
 SuperGLM's `fixed_lambdas` termination reason. A mismatch raises before a
 result can be persisted. SQL stores the canonical evidence JSON and its SHA-256
-with `invariant_status = 'VERIFIED'`.
+with `invariant_status = 'VERIFIED'`, plus the exact ordered-frame, fit-config,
+and complete-result digests. Metric names state their weighting explicitly,
+for example `sample_weighted_mean_prediction`.
 
 To reproduce a synthetic 60% baseline followed by four 10% arrivals, including
 out-of-time scoring and drift figures:
@@ -447,7 +459,10 @@ to the previous `MANUAL_EDIT`, so an uplift does not compound. Current weekly
 monitoring rows are evidence-only and are not automatically adjusted or
 deployable; policy replay matters only when a new candidate is being prepared.
 Set `POLICY_SOURCE_PACKAGE_VERSION` to an earlier `MANUAL_EDIT` package to load
-and verify its policy from SQL rather than typing its rules again.
+and verify its policy from SQL rather than typing its rules again. Replay is
+refused when that policy recorded `carry_forward = false`; the trusted publisher
+also reloads the parent and replays the canonical policy before accepting the
+submitted model.
 
 ## Data-as-at and manifest identity
 

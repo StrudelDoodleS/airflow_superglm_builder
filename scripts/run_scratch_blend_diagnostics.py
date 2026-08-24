@@ -41,6 +41,7 @@ from pricing_pipeline.modeling.scratch_benchmark import (
 )
 from pricing_pipeline.modeling.scratch_diagnostics import (
     blend_evaluation_table,
+    blend_weight_label,
     double_lift_table,
     feature_calibration_tables,
     interaction_failure_tables,
@@ -508,7 +509,7 @@ def _plot_calibration_table(
         label="Boosted blend",
     )
     for index, weight in enumerate(governed_weights):
-        column = f"blend_{round(100 * weight):03d}_response{suffix}"
+        column = f"{blend_weight_label(weight)}_response{suffix}"
         axis.plot(
             x,
             table[column],
@@ -562,7 +563,7 @@ def _plot_feature_table(
     for index, weight in enumerate(governed_weights):
         axis.plot(
             x,
-            table[f"blend_{round(100 * weight):03d}_response"],
+            table[f"{blend_weight_label(weight)}_response"],
             marker="D",
             label=f"{weight:.0%} {gam_label}",
             color=("#9467bd", "#2ca02c", "#8c564b")[index % 3],
@@ -662,6 +663,25 @@ def _observed_levels(series: pd.Series) -> list[str]:
     return sorted(series.astype(str).unique().tolist())
 
 
+def _validate_holdout_categorical_levels(
+    frame: pd.DataFrame,
+    train: np.ndarray,
+    holdout: np.ndarray,
+    *,
+    categorical_features: tuple[str, ...],
+    partition: str,
+) -> None:
+    for feature in categorical_features:
+        training_levels = set(frame.iloc[train][feature].astype("string").fillna("__MISSING__"))
+        holdout_levels = set(frame.iloc[holdout][feature].astype("string").fillna("__MISSING__"))
+        unseen = sorted(holdout_levels - training_levels)
+        if unseen:
+            raise ValueError(
+                f"{partition} partition contains unseen levels for categorical feature "
+                f"{feature!r}: {', '.join(unseen)}"
+            )
+
+
 def _simplified_superglm_features(
     frame: pd.DataFrame,
     *,
@@ -753,7 +773,7 @@ def _fit_superglm(
         max_iter=500,
         convergence="deviance",
         features=dict(features),
-    ).bind_levels(frame, sample_weight=sample_weight)
+    ).bind_levels(frame.iloc[train], sample_weight=sample_weight[train])
     if fixed_lambdas is not None:
         if not has_fit_constraint:
             raise ValueError("fixed_lambdas is reserved for a fit-constrained scratch GAM")
@@ -849,7 +869,7 @@ def _all_model_expected(
         "boosted_ensemble": boosted_expected,
     }
     for weight in governed_weights:
-        predictions[f"blend_{round(100 * weight):03d}_simplified_gam"] = (
+        predictions[f"{blend_weight_label(weight)}_simplified_gam"] = (
             weight * gam_expected + (1.0 - weight) * boosted_expected
         )
     if technical_gam_weight is not None and not any(
@@ -994,7 +1014,7 @@ def _plot_relativity_table(
         headline_axis.plot(x, table[column], color=color, marker=marker, label=label)
     blend_colors = ("#9467bd", "#2ca02c", "#8c564b")
     for index, weight in enumerate(governed_weights):
-        column = f"blend_{round(100 * weight):03d}_simplified_gam"
+        column = f"{blend_weight_label(weight)}_simplified_gam"
         headline_axis.plot(
             x,
             table[column],
@@ -1194,6 +1214,20 @@ def run_diagnostics(config: DiagnosticRunConfig) -> dict[str, Any]:
         random_state=config.random_seed + 1,
         stratify=remainder_stratify,
     )
+    _validate_holdout_categorical_levels(
+        frame,
+        train,
+        validation,
+        categorical_features=config.categorical_features,
+        partition="validation",
+    )
+    _validate_holdout_categorical_levels(
+        frame,
+        train,
+        test,
+        categorical_features=config.categorical_features,
+        partition="test",
+    )
 
     raw_gam_features = unconstrained_superglm_features(
         frame.iloc[train],
@@ -1225,7 +1259,7 @@ def run_diagnostics(config: DiagnosticRunConfig) -> dict[str, Any]:
                 sample_weight,
                 train,
                 features=_simplified_superglm_features(
-                    frame,
+                    frame.iloc[train],
                     config=config,
                     apply_monotone_constraints=False,
                 ),
@@ -1250,7 +1284,7 @@ def run_diagnostics(config: DiagnosticRunConfig) -> dict[str, Any]:
                 sample_weight,
                 train,
                 features=_simplified_superglm_features(
-                    frame,
+                    frame.iloc[train],
                     config=config,
                 ),
                 config=config,
@@ -1278,7 +1312,7 @@ def run_diagnostics(config: DiagnosticRunConfig) -> dict[str, Any]:
                 exposure,
                 sample_weight,
                 train,
-                features=_simplified_superglm_features(frame, config=config),
+                features=_simplified_superglm_features(frame.iloc[train], config=config),
                 config=config,
             )
         if not config.simplified_gam.monotone_increasing_features:

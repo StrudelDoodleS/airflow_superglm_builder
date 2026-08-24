@@ -132,7 +132,31 @@ _OFFLINE_COLUMN_UPGRADES = (
         "invariant_evidence_json",
         "TEXT",
     ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "model_frame_sha256",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "fit_configuration_json",
+        "TEXT",
+    ),
+    (
+        "pricing",
+        "MODEL_MONITOR_RUN",
+        "result_evidence_sha256",
+        "TEXT",
+    ),
 )
+_CANONICAL_MODEL_MONITOR_VARIANTS = {
+    "STATIC_SCORE": ("Deployed model, no refit", 0, 0, 0, 1),
+    "FROZEN_REFIT": ("Refit coefficients only", 1, 0, 0, 1),
+    "REESTIMATE_LAMBDA": ("Refit coefficients and REML lambdas", 1, 1, 0, 1),
+    "FULL_ADAPTIVE": ("Refit coefficients, lambdas, and data-driven knots", 1, 1, 1, 1),
+}
 _OFFLINE_NULLABILITY_UPGRADES = (
     ("pricing", "MODEL_RUN", "effective_from"),
     ("pricing", "PRICING_RATE_PACKAGE", "effective_from_date"),
@@ -183,6 +207,7 @@ def sqlite_engine_with_offline_schemas(
 
     @event.listens_for(engine, "connect")
     def _attach_pricing_schemas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
         dbapi_connection.execute("PRAGMA main.journal_mode=DELETE")
         for schema, path in resolved_paths.items():
             dbapi_connection.execute(
@@ -312,6 +337,33 @@ def _extend_offline_model_kind_check(connection) -> bool:
     return True
 
 
+def _assert_canonical_monitoring_variant_policy(connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT
+            variant_code,
+            variant_label,
+            refit_coefficients,
+            reestimate_lambdas,
+            reposition_data_driven_knots,
+            structure_frozen
+        FROM pricing.MODEL_MONITOR_VARIANT
+        """
+    ).fetchall()
+    actual = {str(row[0]): (str(row[1]), *(int(value) for value in row[2:])) for row in rows}
+    if actual != _CANONICAL_MODEL_MONITOR_VARIANTS:
+        raise RuntimeError(
+            "monitoring variants differ from the canonical monitoring variant policy"
+        )
+
+
+def _assert_offline_foreign_key_integrity(connection) -> None:
+    for schema in SCHEMA_DB_FILES:
+        violations = connection.execute(f"PRAGMA {schema}.foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"offline foreign-key check failed for {schema}: {violations!r}")
+
+
 def apply_offline_ddl(engine: Engine) -> None:
     """Create any missing local tables without deleting existing data."""
     connection = engine.raw_connection()
@@ -319,6 +371,7 @@ def apply_offline_ddl(engine: Engine) -> None:
         for schema in SCHEMA_DB_FILES:
             ddl_path = OFFLINE_DDL_DIR / f"{schema}.sql"
             connection.executescript(ddl_path.read_text(encoding="utf-8"))
+        _assert_canonical_monitoring_variant_policy(connection)
         for schema, table, column, column_type in _OFFLINE_COLUMN_UPGRADES:
             existing_columns = {
                 str(row[1])
@@ -367,6 +420,9 @@ def apply_offline_ddl(engine: Engine) -> None:
             """
         )
         connection.commit()
+        connection.execute("PRAGMA foreign_keys=OFF")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+            raise RuntimeError("cannot disable foreign-key checks for offline table rebuild")
         try:
             connection.execute("BEGIN IMMEDIATE")
             rebuilt_table = _extend_offline_model_kind_check(connection)
@@ -402,14 +458,33 @@ def apply_offline_ddl(engine: Engine) -> None:
                   AND run_status = 'SUCCESS'
                 """
             )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    pricing.UX_MODEL_MONITOR_RUN_OBSERVATION
+                ON MODEL_MONITOR_RUN(
+                    baseline_deployment_id,
+                    manifest_id,
+                    component_role,
+                    variant_code
+                )
+                """
+            )
+            _assert_offline_foreign_key_integrity(connection)
             connection.commit()
         except BaseException:
             connection.rollback()
             raise
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+            if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+                raise RuntimeError("cannot restore foreign-key enforcement after offline rebuild")
         connection.executescript(
             """
             DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_INSERT;
             DROP TRIGGER IF EXISTS pricing.TR_MODEL_RUN_KIND_UPDATE;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_INSERT;
+            DROP TRIGGER IF EXISTS pricing.TR_MODEL_MONITOR_INVARIANT_UPDATE;
             """
         )
         connection.executescript(
@@ -485,6 +560,16 @@ def apply_offline_ddl(engine: Engine) -> None:
               OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
               OR NEW.invariant_evidence_json IS NULL
               OR NOT json_valid(NEW.invariant_evidence_json)
+              OR NEW.model_frame_sha256 IS NULL
+              OR length(NEW.model_frame_sha256) <> 64
+              OR NEW.model_frame_sha256 <> lower(NEW.model_frame_sha256)
+              OR NEW.model_frame_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.fit_configuration_json IS NULL
+              OR NOT json_valid(NEW.fit_configuration_json)
+              OR NEW.result_evidence_sha256 IS NULL
+              OR length(NEW.result_evidence_sha256) <> 64
+              OR NEW.result_evidence_sha256 <> lower(NEW.result_evidence_sha256)
+              OR NEW.result_evidence_sha256 GLOB '*[^0-9a-f]*'
             BEGIN
                 SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
             END;
@@ -502,6 +587,16 @@ def apply_offline_ddl(engine: Engine) -> None:
               OR NEW.invariant_evidence_sha256 GLOB '*[^0-9a-f]*'
               OR NEW.invariant_evidence_json IS NULL
               OR NOT json_valid(NEW.invariant_evidence_json)
+              OR NEW.model_frame_sha256 IS NULL
+              OR length(NEW.model_frame_sha256) <> 64
+              OR NEW.model_frame_sha256 <> lower(NEW.model_frame_sha256)
+              OR NEW.model_frame_sha256 GLOB '*[^0-9a-f]*'
+              OR NEW.fit_configuration_json IS NULL
+              OR NOT json_valid(NEW.fit_configuration_json)
+              OR NEW.result_evidence_sha256 IS NULL
+              OR length(NEW.result_evidence_sha256) <> 64
+              OR NEW.result_evidence_sha256 <> lower(NEW.result_evidence_sha256)
+              OR NEW.result_evidence_sha256 GLOB '*[^0-9a-f]*'
             BEGIN
                 SELECT RAISE(ABORT, 'monitoring run requires verified invariant evidence');
             END;

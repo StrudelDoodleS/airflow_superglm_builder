@@ -440,6 +440,315 @@ def test_offline_pricing_views_remain_valid_when_database_is_opened_directly(tmp
     }
 
 
+def test_offline_monitoring_evidence_freezes_deployment_lineage(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_MODEL (
+                    model_id, model_name, model_label, target_name,
+                    model_type, model_status, created_by
+                ) VALUES
+                    (17, 'HOME_FREQ', 'Home frequency', 'claim_count',
+                     'superglm_poisson', 'ACTIVE', 'pytest'),
+                    (18, 'HOME_FREQ_V2', 'Home frequency v2', 'claim_count',
+                     'superglm_poisson', 'ACTIVE', 'pytest')
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.DATASET_MANIFEST (
+                    manifest_id, manifest_signature_sha256, dataset_name,
+                    source_system, data_as_of_date, row_count, pk_columns_json,
+                    target_column, model_frame_sha256, frame_hash_metadata_json,
+                    created_by
+                ) VALUES (
+                    'manifest-1', :manifest_signature, 'home_frame',
+                    'pricing_sql', '2026-06-30', 20, '["policy_id"]',
+                    'claim_count', :frame_sha, :frame_metadata,
+                    'pytest'
+                )
+                """
+            ),
+            {
+                "manifest_signature": "a" * 64,
+                "frame_sha": "b" * 64,
+                "frame_metadata": '{"frame_hash":{"format_version":1}}',
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.DATASET_MANIFEST (
+                    manifest_id, manifest_signature_sha256, dataset_name,
+                    source_system, data_as_of_date, row_count, pk_columns_json,
+                    target_column, model_frame_sha256, frame_hash_metadata_json,
+                    created_by
+                ) VALUES (
+                    'manifest-unreferenced', :manifest_signature, 'home_frame_v2',
+                    'pricing_sql', '2026-07-01', 20, '["policy_id"]',
+                    'claim_count', :frame_sha, :frame_metadata, 'pytest'
+                )
+                """
+            ),
+            {
+                "manifest_signature": "3" * 64,
+                "frame_sha": "4" * 64,
+                "frame_metadata": '{"frame_hash":{"format_version":1}}',
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                    rate_package_id, model_id, model_name, model_version,
+                    package_version, base_rate, package_status, created_by
+                ) VALUES
+                    (71, 17, 'HOME_FREQ', 'v1', 1, 0.12, 'PUBLISHED', 'pytest'),
+                    (72, 18, 'HOME_FREQ_V2', 'v2', 1, 0.12, 'PUBLISHED', 'pytest')
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.MODEL_RUN (
+                    model_run_id, model_id, model_version, export_id, model_kind,
+                    manifest_id, rate_package_id, model_name, rating_workbook_path,
+                    rating_workbook_sha256, run_status, created_by
+                ) VALUES (
+                    'run-1', 17, 'v1', 'export-1', 'RAW', 'manifest-1', 71,
+                    'HOME_FREQ', '/tmp/rating.xlsx', :workbook_sha, 'SUCCESS', 'pytest'
+                )
+                """
+            ),
+            {"workbook_sha": "c" * 64},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT (
+                    deployment_id, model_id, rate_package_id, deployment_slot,
+                    effective_from_ts, deployed_by
+                ) VALUES
+                    (701, 17, 71, 'HOME_FREQ_PROD', '2026-07-01 08:00:00', 'pytest'),
+                    (702, 17, 71, 'HOME_FREQ_UAT', '2026-07-01 08:00:00', 'pytest')
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.MODEL_FIT_CONTRACT (
+                    fit_contract_id, baseline_model_run_id, model_id,
+                    rate_package_id, contract_schema_version, contract_sha256,
+                    structure_sha256, contract_json, superglm_version, created_by
+                ) VALUES (
+                    'contract-1', 'run-1', 17, 71, 1, :contract_sha,
+                    :structure_sha, '{}', '0.26.0', 'pytest'
+                )
+                """
+            ),
+            {"contract_sha": "d" * 64, "structure_sha": "e" * 64},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.MODEL_MONITOR_RUN (
+                    monitor_run_id, fit_contract_id, baseline_deployment_id,
+                    model_id, rate_package_id, manifest_id, component_role,
+                    variant_code, run_signature_sha256, run_status,
+                    invariant_status, invariant_evidence_sha256,
+                    invariant_evidence_json, model_frame_sha256,
+                    fit_configuration_json, result_evidence_sha256, created_by
+                ) VALUES (
+                    'monitor-1', 'contract-1', 701, 17, 71, 'manifest-1',
+                    'FREQUENCY', 'STATIC_SCORE', :signature_sha, 'SUCCESS',
+                    'VERIFIED', :invariant_sha, :invariant_json,
+                    :frame_sha, '{}', :result_sha, 'pytest'
+                )
+                """
+            ),
+            {
+                "signature_sha": "f" * 64,
+                "invariant_sha": "1" * 64,
+                "invariant_json": '{"status":"VERIFIED"}',
+                "frame_sha": "b" * 64,
+                "result_sha": "2" * 64,
+            },
+        )
+
+    for statement in (
+        (
+            "UPDATE pricing.PRICING_MODEL_DEPLOYMENT "
+            "SET deployment_slot = 'RELABELLED' WHERE deployment_id = 701"
+        ),
+        (
+            "UPDATE pricing.PRICING_MODEL_DEPLOYMENT "
+            "SET model_id = 18, rate_package_id = 72 WHERE deployment_id = 701"
+        ),
+        (
+            "UPDATE pricing.PRICING_MODEL_DEPLOYMENT "
+            "SET effective_from_ts = '2026-07-02 08:00:00' WHERE deployment_id = 701"
+        ),
+        "DELETE FROM pricing.PRICING_MODEL_DEPLOYMENT WHERE deployment_id = 701",
+        (
+            "UPDATE pricing.DATASET_MANIFEST "
+            "SET dataset_name = 'RELABELLED' WHERE manifest_id = 'manifest-1'"
+        ),
+        "DELETE FROM pricing.DATASET_MANIFEST WHERE manifest_id = 'manifest-1'",
+    ):
+        with (
+            pytest.raises(IntegrityError, match="monitoring evidence"),
+            engine.begin() as connection,
+        ):
+            connection.execute(text(statement))
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.PRICING_MODEL_DEPLOYMENT
+                SET effective_to_ts = '2026-07-03 08:00:00'
+                WHERE deployment_id = 701
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.PRICING_MODEL_DEPLOYMENT
+                SET model_id = 18, rate_package_id = 72, deployment_slot = 'HOME_FREQ_V2_UAT'
+                WHERE deployment_id = 702
+                """
+            )
+        )
+        connection.execute(
+            text("DELETE FROM pricing.PRICING_MODEL_DEPLOYMENT WHERE deployment_id = 702")
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE pricing.DATASET_MANIFEST
+                SET dataset_name = 'home_frame_v2_renamed'
+                WHERE manifest_id = 'manifest-unreferenced'
+                """
+            )
+        )
+        connection.execute(
+            text("DELETE FROM pricing.DATASET_MANIFEST WHERE manifest_id = 'manifest-unreferenced'")
+        )
+
+    with engine.connect() as connection:
+        assert (
+            connection.execute(
+                text(
+                    "SELECT effective_to_ts FROM pricing.PRICING_MODEL_DEPLOYMENT "
+                    "WHERE deployment_id = 701"
+                )
+            ).scalar_one()
+            == "2026-07-03 08:00:00"
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM pricing.PRICING_MODEL_DEPLOYMENT "
+                    "WHERE deployment_id = 702"
+                )
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM pricing.DATASET_MANIFEST "
+                    "WHERE manifest_id = 'manifest-unreferenced'"
+                )
+            ).scalar_one()
+            == 0
+        )
+
+
+def test_offline_sqlite_enforces_declared_foreign_keys(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.MODEL_MONITOR_TERM (
+                    monitor_run_id, term_name, term_kind, sequence_no,
+                    term_structure_sha256, term_metadata_json
+                ) VALUES (
+                    'missing-run', 'x', 'numeric', 1, :digest, '{}'
+                )
+                """
+            ),
+            {"digest": "a" * 64},
+        )
+
+
+def test_offline_sqlite_freezes_canonical_monitoring_variants(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+
+    for statement in (
+        (
+            "UPDATE pricing.MODEL_MONITOR_VARIANT "
+            "SET variant_label = 'Drifted label' WHERE variant_code = 'STATIC_SCORE'"
+        ),
+        "DELETE FROM pricing.MODEL_MONITOR_VARIANT WHERE variant_code = 'STATIC_SCORE'",
+    ):
+        with (
+            pytest.raises(IntegrityError, match="monitoring variant policy is immutable"),
+            engine.begin() as connection,
+        ):
+            connection.execute(text(statement))
+
+    raw_connection = engine.raw_connection()
+    try:
+        raw_connection.execute(
+            "DROP TRIGGER IF EXISTS pricing.TR_MODEL_MONITOR_VARIANT_IMMUTABLE_UPDATE"
+        )
+        raw_connection.execute(
+            "UPDATE pricing.MODEL_MONITOR_VARIANT "
+            "SET variant_label = 'Drifted label' WHERE variant_code = 'STATIC_SCORE'"
+        )
+        raw_connection.commit()
+    finally:
+        raw_connection.close()
+
+    with pytest.raises(RuntimeError, match="canonical monitoring variant policy"):
+        apply_offline_ddl(engine)
+
+
 def test_offline_upgrade_adds_dataset_manifest_frame_evidence_columns(tmp_path):
     engine = sqlite_engine_with_offline_schemas(
         {
@@ -502,6 +811,86 @@ def test_offline_upgrade_extends_existing_model_kind_check_for_manual_edits(tmp_
     raw_connection = engine.raw_connection()
     try:
         raw_connection.executescript(legacy_pricing_sql)
+        raw_connection.executescript(
+            """
+            INSERT INTO pricing.PRICING_MODEL (
+                model_id, model_name, model_label, target_name,
+                model_type, model_status, created_by
+            ) VALUES (
+                17, 'TEST_MODEL', 'Test model', 'claim_count',
+                'superglm_poisson', 'ACTIVE', 'pytest'
+            );
+
+            INSERT INTO pricing.DATASET_MANIFEST (
+                manifest_id, manifest_signature_sha256, dataset_name,
+                source_system, data_as_of_date, row_count, pk_columns_json,
+                target_column, model_frame_sha256, frame_hash_metadata_json,
+                created_by
+            ) VALUES (
+                'manifest-1', replace(printf('%064x', 0), '0', 'a'), 'test_frame',
+                'pytest', '2026-07-01', 1, '["policy_id"]', 'claim_count',
+                replace(printf('%064x', 0), '0', 'b'), '{"frame_hash":{"format_version":1}}',
+                'pytest'
+            );
+
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                rate_package_id, model_id, model_name, model_version,
+                package_version, base_rate, package_status, created_by
+            ) VALUES
+                (71, 17, 'TEST_MODEL', 'v1', 1, 1.0, 'PUBLISHED', 'pytest'),
+                (72, 17, 'TEST_MODEL', 'v2', 2, 1.0, 'PUBLISHED', 'pytest');
+
+            INSERT INTO pricing.MODEL_RUN (
+                model_run_id, model_id, model_version, model_kind, export_id,
+                manifest_id, rate_package_id, model_name, rating_workbook_path,
+                rating_workbook_sha256, run_status, created_by
+            ) VALUES (
+                'legacy-run', 17, 'v1', 'RAW', 'legacy-export', 'manifest-1', 71,
+                'TEST_MODEL', '/tmp/legacy.xlsx',
+                replace(printf('%064x', 0), '0', 'c'), 'SUCCESS', 'pytest'
+            );
+
+            INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT (
+                deployment_id, model_id, rate_package_id, deployment_slot,
+                effective_from_ts, deployed_by
+            ) VALUES (701, 17, 71, 'TEST_PROD', '2026-07-01 00:00:00', 'pytest');
+
+            INSERT INTO pricing.MODEL_FIT_CONTRACT (
+                fit_contract_id, baseline_model_run_id, model_id,
+                rate_package_id, contract_schema_version, contract_sha256,
+                structure_sha256, contract_json, superglm_version, created_by
+            ) VALUES (
+                'contract-1', 'legacy-run', 17, 71, 1,
+                replace(printf('%064x', 0), '0', 'd'),
+                replace(printf('%064x', 0), '0', 'e'),
+                '{}', '0.26.0', 'pytest'
+            );
+
+            INSERT INTO pricing.MODEL_MONITOR_RUN (
+                monitor_run_id, fit_contract_id, baseline_deployment_id,
+                model_id, rate_package_id, manifest_id, component_role,
+                variant_code, run_signature_sha256, run_status,
+                invariant_status, invariant_evidence_sha256,
+                invariant_evidence_json, model_frame_sha256,
+                fit_configuration_json, result_evidence_sha256, created_by
+            ) VALUES (
+                'monitor-1', 'contract-1', 701, 17, 71, 'manifest-1',
+                'FREQUENCY', 'STATIC_SCORE',
+                replace(printf('%064x', 0), '0', 'f'), 'SUCCESS', 'VERIFIED',
+                replace(printf('%064x', 0), '0', '1'), '{"status":"VERIFIED"}',
+                replace(printf('%064x', 0), '0', 'b'), '{}',
+                replace(printf('%064x', 0), '0', '2'), 'pytest'
+            );
+
+            INSERT INTO pricing.MODEL_MONITOR_TERM (
+                monitor_run_id, term_name, term_kind, sequence_no,
+                term_structure_sha256, term_metadata_json
+            ) VALUES (
+                'monitor-1', 'area', 'categorical', 1,
+                replace(printf('%064x', 0), '0', '3'), '{}'
+            );
+            """
+        )
         raw_connection.commit()
     finally:
         raw_connection.close()
@@ -525,8 +914,8 @@ def test_offline_upgrade_extends_existing_model_kind_check_for_manual_edits(tmp_
                     rating_workbook_path, rating_workbook_sha256,
                     run_status, created_by
                 ) VALUES (
-                    'manual-run', 17, 'v1', 'MANUAL_EDIT',
-                    'manual-export', 'manifest-1', 71, 'TEST_MODEL',
+                    'manual-run', 17, 'v2', 'MANUAL_EDIT',
+                    'manual-export', 'manifest-1', 72, 'TEST_MODEL',
                     '/tmp/manual.xlsx', :workbook_sha,
                     'SUCCESS', 'pytest'
                 )
@@ -534,8 +923,192 @@ def test_offline_upgrade_extends_existing_model_kind_check_for_manual_edits(tmp_
             ),
             {"workbook_sha": "a" * 64},
         )
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        assert connection.exec_driver_sql("PRAGMA pricing.foreign_key_check").all() == []
+        assert (
+            connection.execute(
+                text("SELECT model_run_id FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'")
+            ).scalar_one()
+            == "legacy-run"
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT baseline_model_run_id FROM pricing.MODEL_FIT_CONTRACT "
+                    "WHERE fit_contract_id = 'contract-1'"
+                )
+            ).scalar_one()
+            == "legacy-run"
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT monitor_run_id FROM pricing.MODEL_MONITOR_RUN "
+                    "WHERE monitor_run_id = 'monitor-1'"
+                )
+            ).scalar_one()
+            == "monitor-1"
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT monitor_run_id FROM pricing.MODEL_MONITOR_TERM "
+                    "WHERE monitor_run_id = 'monitor-1'"
+                )
+            ).scalar_one()
+            == "monitor-1"
+        )
 
     assert "MANUAL_EDIT" in stored_sql
+
+
+def test_offline_upgrade_rolls_back_legacy_orphan_before_model_run_rebuild(tmp_path):
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    legacy_pricing_sql = (
+        Path("db/offline_sqlite/pricing.sql")
+        .read_text(encoding="utf-8")
+        .replace(", 'MANUAL_EDIT'", "")
+    )
+    raw_connection = engine.raw_connection()
+    try:
+        raw_connection.executescript(legacy_pricing_sql)
+        raw_connection.executescript(
+            """
+            INSERT INTO pricing.PRICING_MODEL (
+                model_id, model_name, model_label, target_name,
+                model_type, model_status, created_by
+            ) VALUES (
+                17, 'TEST_MODEL', 'Test model', 'claim_count',
+                'superglm_poisson', 'ACTIVE', 'pytest'
+            );
+
+            INSERT INTO pricing.DATASET_MANIFEST (
+                manifest_id, manifest_signature_sha256, dataset_name,
+                source_system, data_as_of_date, row_count, pk_columns_json,
+                target_column, model_frame_sha256, frame_hash_metadata_json,
+                created_by
+            ) VALUES (
+                'manifest-1', replace(printf('%064x', 0), '0', 'a'), 'test_frame',
+                'pytest', '2026-07-01', 1, '["policy_id"]', 'claim_count',
+                replace(printf('%064x', 0), '0', 'b'), '{"frame_hash":{"format_version":1}}',
+                'pytest'
+            );
+
+            INSERT INTO pricing.PRICING_RATE_PACKAGE (
+                rate_package_id, model_id, model_name, model_version,
+                package_version, base_rate, package_status, created_by
+            ) VALUES (71, 17, 'TEST_MODEL', 'v1', 1, 1.0, 'PUBLISHED', 'pytest');
+
+            INSERT INTO pricing.MODEL_RUN (
+                model_run_id, model_id, model_version, model_kind, export_id,
+                manifest_id, rate_package_id, model_name, rating_workbook_path,
+                rating_workbook_sha256, run_status, created_by
+            ) VALUES (
+                'legacy-run', 17, 'v1', 'RAW', 'legacy-export', 'manifest-1', 71,
+                'TEST_MODEL', '/tmp/legacy.xlsx',
+                replace(printf('%064x', 0), '0', 'c'), 'SUCCESS', 'pytest'
+            );
+
+            INSERT INTO pricing.PRICING_MODEL_DEPLOYMENT (
+                deployment_id, model_id, rate_package_id, deployment_slot,
+                effective_from_ts, deployed_by
+            ) VALUES (701, 17, 71, 'TEST_PROD', '2026-07-01 00:00:00', 'pytest');
+
+            INSERT INTO pricing.MODEL_FIT_CONTRACT (
+                fit_contract_id, baseline_model_run_id, model_id,
+                rate_package_id, contract_schema_version, contract_sha256,
+                structure_sha256, contract_json, superglm_version, created_by
+            ) VALUES (
+                'contract-1', 'legacy-run', 17, 71, 1,
+                replace(printf('%064x', 0), '0', 'd'),
+                replace(printf('%064x', 0), '0', 'e'),
+                '{}', '0.26.0', 'pytest'
+            );
+
+            INSERT INTO pricing.MODEL_MONITOR_RUN (
+                monitor_run_id, fit_contract_id, baseline_deployment_id,
+                model_id, rate_package_id, manifest_id, component_role,
+                variant_code, run_signature_sha256, run_status,
+                invariant_status, invariant_evidence_sha256,
+                invariant_evidence_json, model_frame_sha256,
+                fit_configuration_json, result_evidence_sha256, created_by
+            ) VALUES (
+                'monitor-1', 'contract-1', 701, 17, 71, 'manifest-1',
+                'FREQUENCY', 'STATIC_SCORE',
+                replace(printf('%064x', 0), '0', 'f'), 'SUCCESS', 'VERIFIED',
+                replace(printf('%064x', 0), '0', '1'), '{"status":"VERIFIED"}',
+                replace(printf('%064x', 0), '0', 'b'), '{}',
+                replace(printf('%064x', 0), '0', '2'), 'pytest'
+            );
+
+            INSERT INTO pricing.MODEL_MONITOR_TERM (
+                monitor_run_id, term_name, term_kind, sequence_no,
+                term_structure_sha256, term_metadata_json
+            ) VALUES (
+                'monitor-1', 'area', 'categorical', 1,
+                replace(printf('%064x', 0), '0', '3'), '{}'
+            );
+            """
+        )
+        legacy_model_run_sql = raw_connection.execute(
+            """
+            SELECT sql
+            FROM pricing.sqlite_master
+            WHERE type = 'table' AND name = 'MODEL_RUN'
+            """
+        ).fetchone()[0]
+        raw_connection.commit()
+        raw_connection.execute("PRAGMA foreign_keys=OFF")
+        raw_connection.execute("DELETE FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'")
+        raw_connection.commit()
+        raw_connection.execute("PRAGMA foreign_keys=ON")
+    finally:
+        raw_connection.close()
+
+    with pytest.raises(RuntimeError, match="offline foreign-key check failed"):
+        apply_offline_ddl(engine)
+
+    with engine.connect() as connection:
+        stored_sql = connection.exec_driver_sql(
+            """
+            SELECT sql
+            FROM pricing.sqlite_master
+            WHERE type = 'table' AND name = 'MODEL_RUN'
+            """
+        ).scalar_one()
+        assert stored_sql == legacy_model_run_sql
+        assert "MANUAL_EDIT" not in stored_sql
+        assert (
+            connection.execute(
+                text("SELECT COUNT(*) FROM pricing.MODEL_RUN WHERE model_run_id = 'legacy-run'")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT baseline_model_run_id FROM pricing.MODEL_FIT_CONTRACT "
+                    "WHERE fit_contract_id = 'contract-1'"
+                )
+            ).scalar_one()
+            == "legacy-run"
+        )
+        assert (
+            connection.execute(
+                text(
+                    "SELECT monitor_run_id FROM pricing.MODEL_MONITOR_RUN WHERE monitor_run_id = 'monitor-1'"
+                )
+            ).scalar_one()
+            == "monitor-1"
+        )
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        assert connection.exec_driver_sql("PRAGMA pricing.foreign_key_check").all()
 
 
 def test_fresh_offline_dataset_manifest_requires_frame_evidence(tmp_path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from enum import IntEnum
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,6 +138,55 @@ def test_policy_payload_is_canonical_replayable_and_rejects_overlap():
         )
 
 
+@pytest.mark.parametrize("version", [1.9, "1"])
+def test_policy_rejects_non_integer_versions(version):
+    with pytest.raises(ValueError, match="policy version must be a positive integer"):
+        ManualAdjustmentPolicy(
+            name="market adjustment",
+            version=version,
+            reason="Approved market response",
+            rules=_policy().rules,
+        )
+
+
+def test_policy_rejects_an_integer_subclass_version():
+    class PolicyVersion(IntEnum):
+        FIRST = 1
+
+    with pytest.raises(ValueError, match="policy version must be a positive integer"):
+        ManualAdjustmentPolicy(
+            name="market adjustment",
+            version=PolicyVersion.FIRST,
+            reason="Approved market response",
+            rules=_policy().rules,
+        )
+
+
+def test_policy_from_rows_rejects_a_numeric_string_version():
+    with pytest.raises(ValueError, match="policy version must be a positive integer"):
+        ManualAdjustmentPolicy.from_rows(
+            name="market adjustment",
+            version="1",
+            reason="Approved market response",
+            rows=(
+                {
+                    "feature": "segment",
+                    "levels": ["B"],
+                    "factor": 1.05,
+                    "reason": "Selected segment uplift",
+                },
+            ),
+        )
+
+
+def test_policy_from_payload_rejects_a_string_carry_forward_value():
+    payload = _policy().to_payload()
+    payload["carry_forward"] = "false"
+
+    with pytest.raises(TypeError, match="carry_forward must be a boolean"):
+        ManualAdjustmentPolicy.from_payload(payload)
+
+
 def test_policy_refuses_missing_levels_instead_of_silently_skipping(tmp_path):
     candidate = _candidate(tmp_path)
     policy = ManualAdjustmentPolicy(
@@ -176,6 +226,34 @@ def test_policy_round_trips_through_published_revision_metadata(tmp_path):
     candidate.technical["revision_metadata_json"] = json.dumps(metadata)
     with pytest.raises(ValueError, match="SHA-256"):
         manual_adjustment_policy_from_candidate(candidate)
+
+
+def test_non_carry_forward_policy_cannot_be_replayed_from_a_prior_package(tmp_path):
+    candidate = _candidate(tmp_path)
+    policy = ManualAdjustmentPolicy(
+        name="one-off adjustment",
+        version=1,
+        reason="Applies only to the reviewed package",
+        carry_forward=False,
+        rules=_policy().rules,
+    )
+    candidate.technical.update(
+        model_kind="MANUAL_EDIT",
+        revision_metadata_json=json.dumps(
+            {
+                "edit_metadata": {
+                    "manual_adjustment_policy": policy.to_payload(),
+                    "manual_adjustment_policy_sha256": policy.sha256,
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not approved for carry-forward"):
+        manual_adjustment_policy_from_candidate(
+            candidate,
+            require_carry_forward=True,
+        )
 
 
 def test_notebook_publication_marks_manual_kind_and_embeds_policy(monkeypatch, tmp_path):

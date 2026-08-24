@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM, collapse_levels
 from superglm.editor import EditorSession
 from superglm.features import Constraint
 from superglm.types import LambdaPolicy
 
+from pricing_pipeline.data.manifest import model_frame_evidence
 from pricing_pipeline.infra.offline_sqlite import (
     apply_offline_ddl,
     sqlite_engine_with_offline_schemas,
@@ -25,6 +32,13 @@ from pricing_pipeline.modeling.monitoring import (
     persist_monitoring_fit,
     run_monitoring_fit,
 )
+from pricing_pipeline.publishing.superglm_metadata import build_superglm_publication_receipt
+from pricing_pipeline.publishing.superglm_publication_receipt import (
+    OffsetExportContract,
+    canonical_receipt_bytes,
+)
+from pricing_pipeline.workbench.artifacts import CandidateBundle, save_candidate_bundle
+from pricing_pipeline.workbench.core import Candidate
 
 
 @pytest.fixture(scope="module")
@@ -184,6 +198,361 @@ def test_all_monitoring_presets_share_points_and_frozen_refit_reuses_lambdas(
     assert invariant["lambdas"]["termination_reason"] == "fixed_lambdas"
 
 
+def test_monitoring_metrics_use_declared_sample_weights(monitoring_case):
+    model, X, y = monitoring_case
+    evaluation_X = X.iloc[:8].reset_index(drop=True)
+    evaluation_y = np.asarray(y[:8], dtype=float)
+    weights = np.array([1.0, 1.0, 1.0, 1.0, 10.0, 1.0, 5.0, 1.0])
+
+    result = run_monitoring_fit(
+        model,
+        evaluation_X,
+        evaluation_y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        sample_weight=weights,
+        fit_sample_weight_name="exposure",
+        continuous_points=11,
+    )
+
+    predictions = np.asarray(model.predict(evaluation_X), dtype=float)
+    expected_prediction_sum = float(np.dot(weights, predictions))
+    assert result.metrics["sample_weight_sum"] == pytest.approx(21.0)
+    assert result.metrics["sample_weighted_sum_observed"] == pytest.approx(25.0)
+    assert result.metrics["sample_weighted_mean_observed"] == pytest.approx(25.0 / 21.0)
+    assert result.metrics["sample_weighted_sum_prediction"] == pytest.approx(
+        expected_prediction_sum
+    )
+    assert result.metrics["sample_weighted_mean_prediction"] == pytest.approx(
+        expected_prediction_sum / 21.0
+    )
+    assert "mean_observed" not in result.metrics
+    assert "mean_prediction" not in result.metrics
+    assert "sum_prediction" not in result.metrics
+
+
+def _monitoring_candidate(
+    tmp_path,
+    model,
+    X,
+    y,
+    *,
+    offset_contract: OffsetExportContract | None = None,
+    sample_weight=None,
+    fit_sample_weight_name: str | None = None,
+    offset=None,
+    offset_source=None,
+    offset_source_name: str | None = None,
+    export_weight=None,
+    export_weight_name: str | None = None,
+) -> Candidate:
+    model_frame_sha256 = model_frame_evidence(X.assign(target=y))[0]
+    resolved_offset_contract = offset_contract or OffsetExportContract(handling="NONE")
+    bundle = CandidateBundle(
+        fitted_model=copy.deepcopy(model),
+        X=X,
+        y=np.asarray(y),
+        sample_weight=sample_weight,
+        offset=offset,
+        export_weight=export_weight,
+        cv_report={},
+        model_name="SYNTHETIC_TARGET",
+        model_version="v1",
+        export_id="baseline-export-1",
+        manifest_id="baseline-manifest-1",
+        split_set_id=None,
+        pk_columns=("PolicyID",),
+        row_order_sha256="a" * 64,
+        model_source_sha256="b" * 64,
+        offset_contract=resolved_offset_contract,
+        offset_source=offset_source,
+        fit_sample_weight_name=fit_sample_weight_name,
+        offset_source_name=offset_source_name,
+        export_weight_name=export_weight_name,
+        model_frame_sha256=model_frame_sha256,
+    )
+    artifact = save_candidate_bundle(bundle, tmp_path / "candidate.joblib")
+    publication_receipt = build_superglm_publication_receipt(
+        model,
+        offset_contract=resolved_offset_contract,
+        fit_sample_weight_name=fit_sample_weight_name,
+        export_weight_name=export_weight_name,
+    )
+    publication_receipt_sha256 = hashlib.sha256(
+        canonical_receipt_bytes(publication_receipt)
+    ).hexdigest()
+    workbench = SimpleNamespace(
+        settings=SimpleNamespace(workbench_artifact_root=tmp_path),
+        model_config=SimpleNamespace(deployment_slot="SYNTHETIC_PROD"),
+    )
+    technical = {
+        "model_id": 91,
+        "model_name": "SYNTHETIC_TARGET",
+        "model_version": "v1",
+        "model_equivalence_sha256": "c" * 64,
+        "export_id": "baseline-export-1",
+        "package_version": 1,
+        "package_status": "PUBLISHED",
+        "rate_package_id": 92,
+        "model_run_id": "baseline-run-1",
+        "run_status": "SUCCESS",
+        "manifest_id": "baseline-manifest-1",
+        "split_set_id": None,
+        "candidate_artifact_path": artifact.path,
+        "candidate_artifact_sha256": artifact.sha256,
+        "candidate_artifact_format": artifact.format,
+        "candidate_artifact_size_bytes": artifact.size_bytes,
+        "candidate_python_version": artifact.python_version,
+        "candidate_superglm_version": artifact.superglm_version,
+        "model_source_sha256": "b" * 64,
+        "model_frame_sha256": model_frame_sha256,
+        "publication_receipt_sha256": publication_receipt_sha256,
+        "package_publication_receipt_sha256": publication_receipt_sha256,
+        "data_as_of_date": "2026-04-22",
+        "current_deployment_id": 93,
+        "current_rate_package_id": 92,
+    }
+    candidate = Candidate(
+        workbench=workbench,
+        model_name="SYNTHETIC_TARGET",
+        package_version=1,
+        rate_package_id=92,
+        parent_rate_package_id=None,
+        model_run_id="baseline-run-1",
+        bundle=bundle,
+        technical=dict(technical),
+    )
+    refreshed = replace(candidate, technical=dict(technical))
+    workbench.open = lambda model_name, package_version: refreshed
+    return candidate
+
+
+def _monitoring_candidate_with_bundle(
+    tmp_path,
+    candidate: Candidate,
+    bundle: CandidateBundle,
+    *,
+    artifact_name: str,
+    preserve_publication_receipt: bool = False,
+) -> Candidate:
+    artifact = save_candidate_bundle(bundle, tmp_path / artifact_name)
+    publication_receipt_sha256 = candidate.technical["publication_receipt_sha256"]
+    if not preserve_publication_receipt:
+        receipt = build_superglm_publication_receipt(
+            bundle.fitted_model,
+            offset_contract=bundle.offset_contract,
+            fit_sample_weight_name=bundle.fit_sample_weight_name,
+            export_weight_name=bundle.export_weight_name,
+        )
+        publication_receipt_sha256 = hashlib.sha256(canonical_receipt_bytes(receipt)).hexdigest()
+    technical = {
+        **candidate.technical,
+        "candidate_artifact_path": artifact.path,
+        "candidate_artifact_sha256": artifact.sha256,
+        "candidate_artifact_format": artifact.format,
+        "candidate_artifact_size_bytes": artifact.size_bytes,
+        "candidate_python_version": artifact.python_version,
+        "candidate_superglm_version": artifact.superglm_version,
+        "publication_receipt_sha256": publication_receipt_sha256,
+        "package_publication_receipt_sha256": publication_receipt_sha256,
+    }
+    updated = replace(candidate, bundle=bundle, technical=technical)
+    updated.workbench.open = lambda model_name, package_version: replace(
+        updated,
+        technical=dict(technical),
+    )
+    return updated
+
+
+def test_monitoring_reloads_and_binds_the_deployed_candidate_artifact(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    candidate.bundle.fitted_model._specs["x"].constraint_kind = "decreasing"
+    trusted_artifact_sha256 = candidate.technical["candidate_artifact_sha256"]
+    candidate.technical["candidate_artifact_sha256"] = "0" * 64
+
+    result = run_monitoring_fit(
+        candidate,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        continuous_points=11,
+    )
+
+    assert result.fitted_model is not candidate.bundle.fitted_model
+    assert (
+        result.contract.payload()["structure"]["term_metadata"]["x"]["declared"]["constraint_kind"]
+        == "increasing"
+    )
+    baseline = json.loads(result.fit_configuration_json)["baseline"]
+    assert baseline == {
+        "candidate_artifact_format": candidate.technical["candidate_artifact_format"],
+        "candidate_artifact_sha256": trusted_artifact_sha256,
+        "candidate_artifact_size_bytes": candidate.technical["candidate_artifact_size_bytes"],
+        "candidate_python_version": candidate.technical["candidate_python_version"],
+        "candidate_superglm_version": candidate.technical["candidate_superglm_version"],
+        "data_as_of_date": "2026-04-22",
+        "deployment_id": 93,
+        "deployment_slot": "SYNTHETIC_PROD",
+        "export_id": "baseline-export-1",
+        "manifest_id": "baseline-manifest-1",
+        "model_equivalence_sha256": "c" * 64,
+        "model_frame_sha256": candidate.bundle.model_frame_sha256,
+        "model_id": 91,
+        "model_run_id": "baseline-run-1",
+        "model_source_sha256": "b" * 64,
+        "model_version": "v1",
+        "package_version": 1,
+        "package_publication_receipt_sha256": candidate.technical[
+            "package_publication_receipt_sha256"
+        ],
+        "publication_receipt_sha256": candidate.technical["publication_receipt_sha256"],
+        "rate_package_id": 92,
+        "row_order_sha256": "a" * 64,
+        "split_set_id": None,
+    }
+
+    with pytest.raises(MonitoringError, match="fit_sample_weight_name"):
+        run_monitoring_fit(
+            candidate,
+            X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            fit_sample_weight_name="tampered_weight",
+            continuous_points=11,
+        )
+
+
+def test_monitoring_requires_the_deployed_fit_weight_contract(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    weighted_bundle = replace(
+        candidate.bundle,
+        sample_weight=pd.Series(np.ones(len(X)), name="exposure"),
+        fit_sample_weight_name="exposure",
+    )
+    weighted_candidate = _monitoring_candidate_with_bundle(
+        tmp_path,
+        candidate,
+        weighted_bundle,
+        artifact_name="weighted-candidate.joblib",
+    )
+
+    with pytest.raises(MonitoringError, match="sample_weight is required"):
+        run_monitoring_fit(
+            weighted_candidate,
+            X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            continuous_points=11,
+        )
+
+
+def test_monitoring_requires_the_deployed_offset_contract(
+    tmp_path,
+):
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 80)})
+    offset = np.log(np.linspace(1.0, 2.0, len(X)))
+    y = np.random.default_rng(417).poisson(np.exp(-0.4 + 0.3 * X["x"] + offset))
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(X, y, offset=offset)
+    offset_contract = OffsetExportContract(
+        handling="EXPORTED_FACTOR",
+        source_factor_name="exposure",
+        published_factor_name="exposure",
+        source_name="exposure",
+        label="log exposure",
+    )
+    candidate = _monitoring_candidate(
+        tmp_path,
+        model,
+        X,
+        y,
+        offset_contract=offset_contract,
+        offset=offset,
+        offset_source=np.exp(offset),
+        offset_source_name="exposure",
+    )
+    offset_bundle = replace(
+        candidate.bundle,
+        offset=offset,
+        offset_source=np.exp(offset),
+        offset_source_name="exposure",
+        offset_contract=offset_contract,
+    )
+    offset_candidate = _monitoring_candidate_with_bundle(
+        tmp_path,
+        candidate,
+        offset_bundle,
+        artifact_name="offset-candidate.joblib",
+    )
+
+    with pytest.raises(MonitoringError, match="offset is required"):
+        run_monitoring_fit(
+            offset_candidate,
+            X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            continuous_points=11,
+        )
+
+
+def test_monitoring_rejects_an_undeclared_candidate_offset(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+
+    with pytest.raises(MonitoringError, match="offset was not used"):
+        run_monitoring_fit(
+            candidate,
+            X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            offset=np.zeros(len(X)),
+            continuous_points=11,
+        )
+
+
+def test_monitoring_fit_binds_the_exact_ordered_model_frame(monitoring_case):
+    model, X, y = monitoring_case
+    model_frame = X.assign(target=y)
+
+    result = run_monitoring_fit(
+        model,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
+    )
+
+    assert result.model_frame_sha256 == model_frame_evidence(model_frame)[0]
+    assert json.loads(result.fit_configuration_json)["target_column"] == "target"
+    assert len(result.result_evidence_sha256) == 64
+
+    changed_X = X.copy()
+    changed_X.loc[0, "x"] += 0.01
+    with pytest.raises(MonitoringError, match="X does not match the ordered model frame"):
+        run_monitoring_fit(
+            model,
+            changed_X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            model_frame=model_frame,
+            target_column="target",
+        )
+
+
 def test_postfit_guard_rejects_a_silent_fixed_lambda_change(
     monitoring_case,
     monkeypatch,
@@ -284,7 +653,20 @@ def test_frozen_refit_retains_a_baseline_level_missing_from_the_new_snapshot(
     assert "D" in category_levels
 
 
-def _seed_monitoring_lineage(engine) -> None:
+def _seed_monitoring_lineage(
+    engine,
+    *,
+    model_frame_sha256: str,
+    candidate: Candidate | None = None,
+    monitor_row_count: int = 360,
+    weight_column: str | None = None,
+    offset_column: str | None = None,
+    offset_source_column: str | None = None,
+    offset_label: str | None = None,
+    export_weight_column: str | None = None,
+) -> None:
+    technical = {} if candidate is None else candidate.technical
+    baseline_frame_sha256 = str(technical.get("model_frame_sha256") or model_frame_sha256)
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -308,43 +690,102 @@ def _seed_monitoring_lineage(engine) -> None:
                     row_count, pk_columns_json, target_column,
                     model_frame_sha256, frame_hash_metadata_json, created_by
                 ) VALUES (
-                    'manifest-monitor-1', :manifest_sha, 'synthetic_frame',
+                    'baseline-manifest-1', :manifest_sha, 'synthetic_baseline_frame',
                     'pricing_sql', '2026-04-22', 'AsAt',
-                    360, '["PolicyID"]', 'target_value',
+                    360, '["PolicyID"]', 'target',
                     :frame_sha, '{}', 'pytest'
                 )
                 """
             ),
-            {"manifest_sha": "a" * 64, "frame_sha": "b" * 64},
+            {"manifest_sha": "a" * 64, "frame_sha": baseline_frame_sha256},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO pricing.DATASET_MANIFEST (
+                    manifest_id, manifest_signature_sha256, dataset_name,
+                    source_system, data_as_of_date, data_as_of_column,
+                    row_count, pk_columns_json, target_column, weight_column,
+                    offset_column, offset_source_column, offset_label,
+                    export_weight_column,
+                    model_frame_sha256, frame_hash_metadata_json, created_by
+                ) VALUES (
+                    'manifest-monitor-1', :manifest_sha, 'synthetic_monitor_frame',
+                    'pricing_sql', '2026-04-29', 'AsAt',
+                    :row_count, '["PolicyID"]', 'target', :weight_column,
+                    :offset_column, :offset_source_column, :offset_label,
+                    :export_weight_column,
+                    :frame_sha, '{}', 'pytest'
+                )
+                """
+            ),
+            {
+                "manifest_sha": "e" * 64,
+                "frame_sha": model_frame_sha256,
+                "row_count": monitor_row_count,
+                "weight_column": weight_column,
+                "offset_column": offset_column,
+                "offset_source_column": offset_source_column,
+                "offset_label": offset_label,
+                "export_weight_column": export_weight_column,
+            },
         )
         connection.execute(
             text(
                 """
                 INSERT INTO pricing.PRICING_RATE_PACKAGE (
                     rate_package_id, model_id, model_name, model_version,
-                    package_version, base_rate, package_status, created_by
+                    package_version, base_rate, package_status,
+                    publication_receipt_sha256, created_by
                 ) VALUES (
-                    92, 91, 'SYNTHETIC_TARGET', 'v1', 1, 1.0, 'PUBLISHED', 'pytest'
+                    92, 91, 'SYNTHETIC_TARGET', 'v1', 1, 1.0, 'PUBLISHED',
+                    :receipt_sha, 'pytest'
                 )
                 """
-            )
+            ),
+            {"receipt_sha": technical.get("publication_receipt_sha256") or "d" * 64},
         )
         connection.execute(
             text(
                 """
                 INSERT INTO pricing.MODEL_RUN (
                     model_run_id, model_id, model_version, export_id,
-                    model_kind, manifest_id, rate_package_id, model_name,
+                    model_kind, model_equivalence_sha256, manifest_id,
+                    rate_package_id, model_name,
                     rating_workbook_path, rating_workbook_sha256,
+                    publication_receipt_path, publication_receipt_sha256,
+                    candidate_artifact_path, candidate_artifact_sha256,
+                    candidate_artifact_format, candidate_artifact_size_bytes,
+                    candidate_python_version, candidate_superglm_version,
+                    model_source_sha256,
                     run_status, created_by
                 ) VALUES (
                     'baseline-run-1', 91, 'v1', 'baseline-export-1',
-                    'ROUTINE_EDIT', 'manifest-monitor-1', 92, 'SYNTHETIC_TARGET',
-                    '/tmp/rating.xlsx', :workbook_sha, 'SUCCESS', 'pytest'
+                    'ROUTINE_EDIT', :equivalence_sha, 'baseline-manifest-1',
+                    92, 'SYNTHETIC_TARGET',
+                    '/tmp/rating.xlsx', :workbook_sha,
+                    '/tmp/publication_receipt.json', :receipt_sha,
+                    :artifact_path, :artifact_sha, :artifact_format,
+                    :artifact_size, :python_version, :superglm_version,
+                    :model_source_sha,
+                    'SUCCESS', 'pytest'
                 )
                 """
             ),
-            {"workbook_sha": "c" * 64},
+            {
+                "workbook_sha": "f" * 64,
+                "equivalence_sha": technical.get("model_equivalence_sha256") or "c" * 64,
+                "receipt_sha": technical.get("publication_receipt_sha256") or "d" * 64,
+                "artifact_path": technical.get("candidate_artifact_path")
+                or "/tmp/candidate.joblib",
+                "artifact_sha": technical.get("candidate_artifact_sha256") or "1" * 64,
+                "artifact_format": technical.get("candidate_artifact_format")
+                or "superglm-candidate-joblib-v2",
+                "artifact_size": technical.get("candidate_artifact_size_bytes") or 1,
+                "python_version": technical.get("candidate_python_version") or "3.14.0",
+                "superglm_version": technical.get("candidate_superglm_version") or "0.26.0",
+                "model_source_sha": technical.get("model_source_sha256") or "b" * 64,
+            },
         )
         connection.execute(
             text(
@@ -361,17 +802,173 @@ def _seed_monitoring_lineage(engine) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("offset_contract", "manifest_offset_source"),
+    [
+        pytest.param(
+            OffsetExportContract(
+                handling="EXPORTED_FACTOR",
+                source_factor_name="exposure",
+                published_factor_name="exposure",
+                source_name="exposure",
+                label="log exposure",
+            ),
+            "exposure",
+            id="exported-factor",
+        ),
+        pytest.param(
+            OffsetExportContract(
+                handling="ALREADY_APPLIED_SQL_EXPOSURE",
+                source_name="exposure",
+                label="log exposure",
+            ),
+            None,
+            id="already-applied-sql-exposure",
+        ),
+    ],
+)
+def test_candidate_monitoring_persistence_binds_manifest_fit_and_export_roles(
+    tmp_path,
+    offset_contract,
+    manifest_offset_source,
+):
+    X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 80)})
+    exposure = np.linspace(1.0, 2.0, len(X))
+    offset = np.log(exposure)
+    fit_weight = np.linspace(0.5, 1.5, len(X))
+    export_weight = np.linspace(10.0, 20.0, len(X))
+    y = np.random.default_rng(824).poisson(np.exp(-0.4 + 0.3 * X["x"] + offset))
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(X, y, sample_weight=fit_weight, offset=offset)
+    candidate = _monitoring_candidate(
+        tmp_path,
+        model,
+        X,
+        y,
+        offset_contract=offset_contract,
+        sample_weight=fit_weight,
+        fit_sample_weight_name="fit_weight",
+        offset=offset,
+        offset_source=exposure if offset_contract.handling == "EXPORTED_FACTOR" else None,
+        offset_source_name=("exposure" if offset_contract.handling == "EXPORTED_FACTOR" else None),
+        export_weight=export_weight,
+        export_weight_name="rating_weight",
+    )
+    model_frame = X.assign(
+        target=y,
+        fit_weight=fit_weight,
+        log_exposure=offset,
+        exposure=exposure,
+        rating_weight=export_weight,
+    )
+    result = run_monitoring_fit(
+        candidate,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        sample_weight=fit_weight,
+        offset=offset,
+        continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
+        offset_column="log_exposure",
+    )
+    manifest_contract = {
+        "weight_column": "fit_weight",
+        "offset_column": "log_exposure",
+        "offset_source_column": manifest_offset_source,
+        "offset_label": "log exposure",
+        "export_weight_column": "rating_weight",
+    }
+
+    def seeded_engine(case_name, manifest_values):
+        case_dir = tmp_path / offset_contract.handling.lower() / case_name
+        engine = sqlite_engine_with_offline_schemas(
+            {
+                "pricing": case_dir / "pricing.sqlite",
+                "pricing_stg": case_dir / "pricing_stg.sqlite",
+                "mlops": case_dir / "mlops.sqlite",
+            }
+        )
+        apply_offline_ddl(engine)
+        _seed_monitoring_lineage(
+            engine,
+            model_frame_sha256=model_frame_evidence(model_frame)[0],
+            candidate=candidate,
+            monitor_row_count=len(model_frame),
+            **manifest_values,
+        )
+        return engine
+
+    engine = seeded_engine("matching", manifest_contract)
+    persisted = persist_monitoring_fit(
+        engine,
+        result,
+        baseline_model_run_id="baseline-run-1",
+        baseline_deployment_id=93,
+        manifest_id="manifest-monitor-1",
+        created_by="pytest",
+    )
+    assert persisted.deduplicated is False
+
+    for field_name, expected in manifest_contract.items():
+        mismatch = "unexpected_role" if expected is None else None
+        mismatched_contract = {**manifest_contract, field_name: mismatch}
+        mismatch_engine = seeded_engine(field_name, mismatched_contract)
+        with pytest.raises(MonitoringError, match=field_name):
+            persist_monitoring_fit(
+                mismatch_engine,
+                result,
+                baseline_model_run_id="baseline-run-1",
+                baseline_deployment_id=93,
+                manifest_id="manifest-monitor-1",
+                created_by="pytest",
+            )
+
+
+def test_monitoring_rejects_a_sha_valid_candidate_with_receipt_metadata_drift(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    changed_model = copy.deepcopy(candidate.bundle.fitted_model)
+    changed_model._specs["x"].constraint_kind = "decreasing"
+    changed_candidate = _monitoring_candidate_with_bundle(
+        tmp_path,
+        candidate,
+        replace(candidate.bundle, fitted_model=changed_model),
+        artifact_name="receipt-drift-candidate.joblib",
+        preserve_publication_receipt=True,
+    )
+
+    with pytest.raises(MonitoringError, match="publication receipt"):
+        run_monitoring_fit(
+            changed_candidate,
+            X,
+            y,
+            variant=MonitoringVariant.STATIC_SCORE,
+            continuous_points=11,
+        )
+
+
 def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
     tmp_path,
     monitoring_case,
 ):
     model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    model_frame = X.assign(target=y)
     result = run_monitoring_fit(
-        model,
+        candidate,
         X,
         y,
         variant=MonitoringVariant.STATIC_SCORE,
         continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
     )
     paths = {
         "pricing": tmp_path / "pricing.sqlite",
@@ -380,7 +977,11 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
     }
     engine = sqlite_engine_with_offline_schemas(paths)
     apply_offline_ddl(engine)
-    _seed_monitoring_lineage(engine)
+    _seed_monitoring_lineage(
+        engine,
+        model_frame_sha256=model_frame_evidence(model_frame)[0],
+        candidate=candidate,
+    )
 
     persisted = persist_monitoring_fit(
         engine,
@@ -403,9 +1004,27 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
     assert retry.monitor_run_id == persisted.monitor_run_id
     assert retry.deduplicated is True
 
+    frequency = persist_monitoring_fit(
+        engine,
+        result,
+        baseline_model_run_id="baseline-run-1",
+        baseline_deployment_id=93,
+        manifest_id="manifest-monitor-1",
+        created_by="pytest",
+        component_role="FREQUENCY",
+    )
+    assert frequency.monitor_run_id != persisted.monitor_run_id
+    assert frequency.deduplicated is False
+
     with engine.connect() as connection:
         run = (
-            connection.execute(text("SELECT * FROM pricing.V_MODEL_MONITORING_RUN"))
+            connection.execute(
+                text(
+                    "SELECT * FROM pricing.V_MODEL_MONITORING_RUN "
+                    "WHERE monitor_run_id = :monitor_run_id"
+                ),
+                {"monitor_run_id": persisted.monitor_run_id},
+            )
             .mappings()
             .one()
         )
@@ -415,9 +1034,11 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
                     """
                     SELECT component_name, lambda_mode, data_as_of_date
                     FROM pricing.V_MODEL_MONITORING_LAMBDA
+                    WHERE monitor_run_id = :monitor_run_id
                     ORDER BY component_name
                     """
-                )
+                ),
+                {"monitor_run_id": persisted.monitor_run_id},
             )
             .mappings()
             .all()
@@ -425,11 +1046,13 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
         ordered_metadata = connection.execute(
             text(
                 """
-                SELECT term_metadata_json
-                FROM pricing.MODEL_MONITOR_TERM
-                WHERE term_name = 'ordered'
-                """
-            )
+                    SELECT term_metadata_json
+                    FROM pricing.MODEL_MONITOR_TERM
+                    WHERE monitor_run_id = :monitor_run_id
+                      AND term_name = 'ordered'
+                    """
+            ),
+            {"monitor_run_id": persisted.monitor_run_id},
         ).scalar_one()
 
     assert run["variant_code"] == "STATIC_SCORE"
@@ -437,18 +1060,37 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
     assert run["invariant_status"] == "VERIFIED"
     assert run["invariant_evidence_sha256"] == result.invariant_evidence.evidence_sha256
     assert json.loads(run["invariant_evidence_json"])["status"] == "VERIFIED"
-    assert run["data_as_of_date"] == "2026-04-22"
+    assert run["data_as_of_date"] == "2026-04-29"
     assert run["data_as_of_column"] == "AsAt"
     assert run["baseline_model_run_id"] == "baseline-run-1"
     assert {row["lambda_mode"] for row in lambda_rows} == {"BASELINE"}
-    assert {row["data_as_of_date"] for row in lambda_rows} == {"2026-04-22"}
+    assert {row["data_as_of_date"] for row in lambda_rows} == {"2026-04-29"}
     assert json.loads(ordered_metadata)["declared"]["specials"] == ["MISSING"]
+
+    immutable_writes = (
+        "UPDATE pricing.MODEL_MONITOR_RUN SET created_by = 'tampered'",
+        "UPDATE pricing.MODEL_MONITOR_TERM SET term_kind = 'tampered'",
+        "UPDATE pricing.MODEL_MONITOR_LAMBDA SET lambda_value = lambda_value + 1",
+        "UPDATE pricing.MODEL_MONITOR_RELATIVITY SET relativity = relativity * 1.01",
+        "UPDATE pricing.MODEL_MONITOR_METRIC SET metric_value = metric_value + 1",
+        "DELETE FROM pricing.MODEL_MONITOR_RUN",
+        "DELETE FROM pricing.MODEL_MONITOR_TERM",
+        "DELETE FROM pricing.MODEL_MONITOR_LAMBDA",
+        "DELETE FROM pricing.MODEL_MONITOR_RELATIVITY",
+        "DELETE FROM pricing.MODEL_MONITOR_METRIC",
+    )
+    for statement in immutable_writes:
+        with (
+            pytest.raises(IntegrityError, match="monitoring evidence is immutable"),
+            engine.begin() as connection,
+        ):
+            connection.execute(text(statement))
 
     with sqlite3.connect(paths["pricing"]) as standalone:
         standalone_run = standalone.execute(
             "SELECT data_as_of_date, baseline_deployment_slot FROM V_MODEL_MONITORING_RUN"
         ).fetchone()
-    assert standalone_run == ("2026-04-22", "SYNTHETIC_PROD")
+    assert standalone_run == ("2026-04-29", "SYNTHETIC_PROD")
 
     with (
         pytest.raises(IntegrityError, match="model fit contracts are immutable"),
@@ -515,6 +1157,265 @@ def test_monitoring_result_persists_and_is_queryable_in_standalone_sqlite(
                 """
             ),
             {"contract_sha": "e" * 64, "structure_sha": "f" * 64},
+        )
+
+
+def test_monitoring_persistence_rejects_a_simulation_only_baseline(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    model_frame = X.assign(target=y)
+    result = run_monitoring_fit(
+        model,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
+    )
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    _seed_monitoring_lineage(
+        engine,
+        model_frame_sha256=model_frame_evidence(model_frame)[0],
+    )
+
+    with pytest.raises(MonitoringError, match="verified deployed candidate artifact"):
+        persist_monitoring_fit(
+            engine,
+            result,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
+        )
+
+
+def test_concurrent_exact_monitoring_retries_resolve_one_observation(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    model_frame = X.assign(target=y)
+    result = run_monitoring_fit(
+        candidate,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
+    )
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    _seed_monitoring_lineage(
+        engine,
+        model_frame_sha256=model_frame_evidence(model_frame)[0],
+        candidate=candidate,
+    )
+    persist_monitoring_fit(
+        engine,
+        result,
+        baseline_model_run_id="baseline-run-1",
+        baseline_deployment_id=93,
+        manifest_id="manifest-monitor-1",
+        created_by="pytest",
+        component_role="FREQUENCY",
+    )
+
+    select_gate = threading.Barrier(2)
+    gate_lock = threading.Lock()
+    gated_selects = 0
+
+    def synchronize_missing_observation_select(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        nonlocal gated_selects
+        if "FROM pricing.MODEL_MONITOR_RUN" not in statement:
+            return
+        with gate_lock:
+            if gated_selects >= 2:
+                return
+            gated_selects += 1
+        select_gate.wait(timeout=5)
+
+    event.listen(engine, "before_cursor_execute", synchronize_missing_observation_select)
+    try:
+
+        def persist_exact_retry():
+            return persist_monitoring_fit(
+                engine,
+                result,
+                baseline_model_run_id="baseline-run-1",
+                baseline_deployment_id=93,
+                manifest_id="manifest-monitor-1",
+                created_by="pytest",
+                component_role="SEVERITY",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(lambda _index: persist_exact_retry(), range(2)))
+    finally:
+        event.remove(engine, "before_cursor_execute", synchronize_missing_observation_select)
+
+    assert receipts[0].monitor_run_id == receipts[1].monitor_run_id
+    assert sorted(receipt.deduplicated for receipt in receipts) == [False, True]
+
+
+def test_monitoring_persistence_rejects_frame_and_result_evidence_mismatch(
+    tmp_path,
+    monitoring_case,
+):
+    model, X, y = monitoring_case
+    candidate = _monitoring_candidate(tmp_path, model, X, y)
+    model_frame = X.assign(target=y)
+    result = run_monitoring_fit(
+        candidate,
+        X,
+        y,
+        variant=MonitoringVariant.STATIC_SCORE,
+        continuous_points=11,
+        model_frame=model_frame,
+        target_column="target",
+    )
+    engine = sqlite_engine_with_offline_schemas(
+        {
+            "pricing": tmp_path / "pricing.sqlite",
+            "pricing_stg": tmp_path / "pricing_stg.sqlite",
+            "mlops": tmp_path / "mlops.sqlite",
+        }
+    )
+    apply_offline_ddl(engine)
+    _seed_monitoring_lineage(
+        engine,
+        model_frame_sha256="f" * 64,
+        candidate=candidate,
+    )
+
+    with pytest.raises(MonitoringError, match="model frame does not match manifest"):
+        persist_monitoring_fit(
+            engine,
+            result,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
+        )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE pricing.DATASET_MANIFEST SET model_frame_sha256 = :digest "
+                "WHERE manifest_id = 'manifest-monitor-1'"
+            ),
+            {"digest": result.model_frame_sha256},
+        )
+        connection.execute(
+            text(
+                "UPDATE pricing.MODEL_RUN SET candidate_artifact_sha256 = :digest "
+                "WHERE model_run_id = 'baseline-run-1'"
+            ),
+            {"digest": "9" * 64},
+        )
+    with pytest.raises(MonitoringError, match="candidate_artifact_sha256"):
+        persist_monitoring_fit(
+            engine,
+            result,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
+        )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE pricing.MODEL_RUN SET candidate_artifact_sha256 = :digest "
+                "WHERE model_run_id = 'baseline-run-1'"
+            ),
+            {"digest": candidate.technical["candidate_artifact_sha256"]},
+        )
+        connection.execute(
+            text(
+                "UPDATE pricing.PRICING_RATE_PACKAGE "
+                "SET publication_receipt_sha256 = :digest "
+                "WHERE rate_package_id = 92"
+            ),
+            {"digest": "8" * 64},
+        )
+    with pytest.raises(MonitoringError, match="package_publication_receipt_sha256"):
+        persist_monitoring_fit(
+            engine,
+            result,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
+        )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE pricing.PRICING_RATE_PACKAGE "
+                "SET publication_receipt_sha256 = :digest "
+                "WHERE rate_package_id = 92"
+            ),
+            {"digest": candidate.technical["publication_receipt_sha256"]},
+        )
+        connection.execute(
+            text(
+                "UPDATE pricing.MODEL_RUN SET model_source_sha256 = :digest "
+                "WHERE model_run_id = 'baseline-run-1'"
+            ),
+            {"digest": "7" * 64},
+        )
+    with pytest.raises(MonitoringError, match="model_source_sha256"):
+        persist_monitoring_fit(
+            engine,
+            result,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
+        )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE pricing.MODEL_RUN SET model_source_sha256 = :digest "
+                "WHERE model_run_id = 'baseline-run-1'"
+            ),
+            {"digest": candidate.technical["model_source_sha256"]},
+        )
+    tampered = replace(result, metrics={**result.metrics, "mean_prediction": 999.0})
+    with pytest.raises(MonitoringError, match="result evidence digest"):
+        persist_monitoring_fit(
+            engine,
+            tampered,
+            baseline_model_run_id="baseline-run-1",
+            baseline_deployment_id=93,
+            manifest_id="manifest-monitor-1",
+            created_by="pytest",
         )
 
 

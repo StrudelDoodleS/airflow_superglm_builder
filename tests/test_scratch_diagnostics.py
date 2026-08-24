@@ -7,6 +7,7 @@ from sklearn.metrics import mean_tweedie_deviance
 
 from pricing_pipeline.modeling.scratch_diagnostics import (
     blend_evaluation_table,
+    blend_weight_label,
     double_lift_table,
     feature_calibration_tables,
     interaction_failure_tables,
@@ -61,6 +62,25 @@ def test_weighted_quantile_bins_follow_score_and_balance_business_weight():
     assert totals.max() - totals.min() < weights.max() * 2
 
 
+def test_weighted_quantile_bins_keep_equal_scores_together_independent_of_row_order():
+    values = np.repeat([0.0, 1.0, 2.0, 3.0], 4)
+    weights = np.array([1.0, 3.0, 2.0, 4.0] * 4)
+
+    bins = weighted_quantile_bins(values, weights, n_bins=5)
+    permutation = np.array([15, 0, 8, 3, 12, 5, 10, 1, 14, 7, 4, 9, 2, 13, 6, 11])
+    permuted_bins = weighted_quantile_bins(
+        values[permutation],
+        weights[permutation],
+        n_bins=5,
+    )
+    restored = np.empty_like(permuted_bins)
+    restored[permutation] = permuted_bins
+
+    for score in np.unique(values):
+        assert np.unique(bins[values == score]).size == 1
+    assert restored.tolist() == bins.tolist()
+
+
 def test_double_lift_is_weight_balanced_and_ordered_by_gbm_over_gam():
     features, response, exposure, weight, gam_rate, gbm_rate = _diagnostic_case()
 
@@ -75,9 +95,11 @@ def test_double_lift_is_weight_balanced_and_ordered_by_gbm_over_gam():
         n_bins=6,
     )
 
-    assert table["double_lift_bin"].tolist() == list(range(1, 7))
+    # This fixture has only two unique GBM/GAM ratios. Tie-safe binning must not
+    # manufacture six bins by splitting either score on row order.
+    assert table["double_lift_bin"].tolist() == [1, 2]
     assert table["geometric_mean_gbm_to_gam"].is_monotonic_increasing
-    assert table["sample_weight"].max() - table["sample_weight"].min() < weight.max() * 2
+    assert table["sample_weight"].sum() == pytest.approx(weight.sum())
     for column in (
         "actual_response_index",
         "gam_response_index",
@@ -88,6 +110,38 @@ def test_double_lift_is_weight_balanced_and_ordered_by_gbm_over_gam():
         assert np.average(table[column], weights=table["sample_weight"]) == pytest.approx(1.0)
     assert table.iloc[-1]["gbm_minus_gam_mean_deviance"] > 0
     assert table.iloc[-1]["gbm_observed_to_predicted"] < 1
+
+
+def test_distinct_blend_weights_have_collision_free_diagnostic_columns():
+    features, response, exposure, weight, gam_rate, gbm_rate = _diagnostic_case()
+
+    table = double_lift_table(
+        features,
+        response,
+        offset_exposure=exposure,
+        sample_weight=weight,
+        gam_rate=gam_rate,
+        gbm_rate=gbm_rate,
+        power=1.5,
+        n_bins=4,
+        governed_gam_weights=(0.4, 0.403),
+    )
+
+    assert "blend_040_response" in table
+    assert "blend_w_0p403_response" in table
+    assert not np.allclose(table["blend_040_response"], table["blend_w_0p403_response"])
+
+
+def test_adjacent_float_does_not_share_governed_percentage_column_identity():
+    governed_weight = 0.4
+    adjacent_weight = float(np.nextafter(governed_weight, 0.0))
+
+    governed_label = blend_weight_label(governed_weight)
+    adjacent_label = blend_weight_label(adjacent_weight)
+
+    assert governed_label == "blend_040"
+    assert adjacent_label != governed_label
+    assert blend_weight_label(float.fromhex(adjacent_weight.hex())) == adjacent_label
 
 
 def test_fixed_blend_table_keeps_offset_and_credibility_weight_distinct():

@@ -80,7 +80,7 @@ erDiagram
 |---|---|
 | `mlops.MODEL_MONITOR_VARIANT` | The four interpretable presets: static, coefficient-only frozen, fixed-knot lambda refit, and full adaptive refit |
 | `mlops.MODEL_FIT_CONTRACT` | One immutable canonical contract per baseline run, including exact SuperGLM structure, fitted geometry, lambdas, and comparison grids |
-| `mlops.MODEL_MONITOR_RUN` | One variant observed against one baseline deployment and one dated dataset manifest, with canonical post-fit invariant evidence |
+| `mlops.MODEL_MONITOR_RUN` | One component/variant observed against one baseline deployment and one dated dataset manifest, bound to the exact ordered frame, fit configuration, and complete result digest |
 | `mlops.MODEL_MONITOR_TERM` | Per-run feature kind, order, structural digest, and JSON metadata |
 | `mlops.MODEL_MONITOR_LAMBDA` | Smoothing component value and whether it was baseline, fixed, or estimated |
 | `mlops.MODEL_MONITOR_RELATIVITY` | Relativities on stable categorical levels or the baseline continuous grid |
@@ -92,10 +92,12 @@ and monotonic/shape constraints. Only the switches declared by the variant may
 move. Python refuses persistence unless its post-fit guard verifies protected
 lambdas and every fixed-lambda history step exactly, verifies protected knot
 and boundary arrays exactly, and hashes an exact structural match. The run row
-stores `invariant_status`, `invariant_evidence_sha256`, and the canonical
-`invariant_evidence_json`. The run signature deduplicates an exact retry of
-`deployment + manifest + variant + contract`; a new data-as-at manifest remains
-a new observation.
+stores the canonical invariant evidence, ordered-frame digest, fit configuration,
+and a digest over every term, lambda, relativity, metric, and invariant result.
+Only one observation may exist for
+`deployment + manifest + component + variant`; an exact concurrent retry
+deduplicates, while different evidence for that same observation is rejected. A
+new data-as-at manifest remains a new observation.
 
 For frequency and severity components, four variants across 52 weekly
 snapshots means at most 416 small evidence runs per year. The heavier rows are
@@ -199,9 +201,16 @@ concurrency backstop:
 | `TR_PRICING_COMPILED_RATE_CELL_IMMUTABLE_WRITE` | Protects compiled cells. |
 | `TR_PRICING_COMPILED_1D_RATE_BAND_IMMUTABLE_WRITE` | Protects compiled 1D bands. |
 | `TR_PRICING_MODEL_DEPLOYMENT_PACKAGE_GUARD` | Deployment package must be `PUBLISHED` and belong to the same model. |
+| `TR_PRICING_MODEL_DEPLOYMENT_MONITORING_LINEAGE_GUARD` | A deployment referenced by monitoring may be closed normally, but its model, package, slot, start time, and identity cannot be changed or deleted. |
+| `TR_DATASET_MANIFEST_MONITORING_LINEAGE_GUARD` | A dataset manifest referenced by monitoring evidence cannot be changed or deleted. |
 | `mlops.TR_MODEL_FIT_CONTRACT_IMMUTABLE` | A baseline fit contract cannot be changed or deleted. |
 | `mlops.TR_MODEL_FIT_CONTRACT_LINEAGE_GUARD` | A contract must identify one successful run and its published package. |
 | `mlops.TR_MODEL_MONITOR_RUN_LINEAGE_GUARD` | Contract, deployed package, model run, and monitoring row must identify one baseline. |
+| `mlops.TR_MODEL_MONITOR_RUN_IMMUTABLE` | A completed monitoring run is append-only. |
+| `mlops.TR_MODEL_MONITOR_TERM_IMMUTABLE` | Per-term monitoring evidence is append-only. |
+| `mlops.TR_MODEL_MONITOR_LAMBDA_IMMUTABLE` | Monitoring lambda evidence is append-only. |
+| `mlops.TR_MODEL_MONITOR_RELATIVITY_IMMUTABLE` | Monitoring relativity evidence is append-only. |
+| `mlops.TR_MODEL_MONITOR_METRIC_IMMUTABLE` | Monitoring metric evidence is append-only. |
 
 ```mermaid
 ---

@@ -116,6 +116,80 @@ def test_cli_requires_explicit_local_input_acknowledgement(tmp_path):
         diagnostic_script.main(["--config", str(tmp_path / "missing.toml")])
 
 
+def test_fit_superglm_binds_levels_from_training_partition_only(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class RecordingGam:
+        def bind_levels(self, frame, *, sample_weight):
+            captured["frame"] = frame.copy(deep=True)
+            captured["weight"] = np.asarray(sample_weight).copy()
+            return self
+
+        def fit_reml(self, *_args, **_kwargs):
+            return self
+
+    monkeypatch.setattr(diagnostic_script, "SuperGLM", lambda **_kwargs: RecordingGam())
+    frame = pd.DataFrame(
+        {
+            "category": ["train-a", "holdout-only", "train-b", "test-only"],
+            "x": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    target = np.array([0.2, 0.4, 0.6, 0.8])
+    exposure = np.ones(4)
+    weight = np.array([1.0, 10.0, 2.0, 20.0])
+
+    diagnostic_script._fit_superglm(
+        frame,
+        target,
+        exposure,
+        weight,
+        np.array([0, 2]),
+        features={},
+        config=_config(data_path=tmp_path / "unused.parquet", output_dir=tmp_path),
+    )
+
+    assert captured["frame"]["category"].tolist() == ["train-a", "train-b"]
+    assert np.asarray(captured["weight"]).tolist() == [1.0, 2.0]
+
+
+def test_runner_rejects_unseen_validation_levels_before_model_fit(tmp_path, monkeypatch):
+    row_count = 30
+    frame = pd.DataFrame(
+        {
+            "response": np.resize([0.0, 1.0], row_count),
+            "term": np.full(row_count, 12.0),
+            "credibility": np.ones(row_count),
+            "x": np.arange(row_count, dtype=float),
+            "category": ["A"] * 18 + ["B"] * 12,
+            "period": np.resize([2023, 2024, 2025], row_count),
+        }
+    )
+    data_path = tmp_path / "unseen.parquet"
+    frame.to_parquet(data_path, index=False)
+    splits = iter(
+        [
+            (np.arange(18), np.arange(18, 30)),
+            (np.arange(18, 24), np.arange(24, 30)),
+        ]
+    )
+    monkeypatch.setattr(
+        diagnostic_script,
+        "train_test_split",
+        lambda *_args, **_kwargs: next(splits),
+    )
+
+    def forbidden_model_fit(**_kwargs):
+        raise AssertionError("holdout levels must be checked before model construction")
+
+    monkeypatch.setattr(diagnostic_script, "SuperGLM", forbidden_model_fit)
+
+    with pytest.raises(ValueError, match=r"validation.*category.*B"):
+        diagnostic_script.run_diagnostics(
+            _config(data_path=data_path, output_dir=tmp_path / "diagnostics")
+        )
+
+
 def test_aggregate_only_runner_writes_failure_evidence_without_row_predictions(
     tmp_path,
     monkeypatch,

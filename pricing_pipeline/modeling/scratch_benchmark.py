@@ -22,11 +22,15 @@ from superglm.features.spline import _SplineBase
 
 _MISSING_CATEGORY = "__SCRATCH_MISSING__"
 _MODEL_NAMES = ("catboost", "lightgbm", "xgboost")
+_EXPLORATORY_BLEND_EVIDENCE = (
+    "exploratory_cross_fitted_meta_over_global_base_oof_"
+    "non_nested_not_unbiased_generalization_estimate"
+)
 EstimatorFactory = Callable[[int], Any]
 
 
 class ScratchBenchmarkError(RuntimeError):
-    """Raised when a disposable benchmark cannot be evaluated honestly."""
+    """Raised when a disposable benchmark cannot produce trustworthy diagnostics."""
 
 
 def _reference_distribution(model: SuperGLM) -> tuple[float | None, str]:
@@ -349,9 +353,50 @@ def _convex_tweedie_weights(
     return weights / weights.sum()
 
 
+def _cross_fitted_blend_predictions(
+    target: np.ndarray,
+    predictions: np.ndarray,
+    sample_weight: np.ndarray,
+    assessment_fold: np.ndarray,
+    *,
+    power: float,
+) -> np.ndarray:
+    folds = np.unique(assessment_fold)
+    if len(folds) < 2:
+        raise ScratchBenchmarkError(
+            "at least two complete OOF assessment folds are required to evaluate blend weights"
+        )
+    blended = np.full(len(target), np.nan, dtype=float)
+    for fold in folds:
+        assessment = assessment_fold == fold
+        meta_train = ~assessment
+        fold_weights = _convex_tweedie_weights(
+            target[meta_train],
+            predictions[meta_train],
+            sample_weight[meta_train],
+            power=power,
+        )
+        blended[assessment] = np.clip(
+            predictions[assessment] @ fold_weights,
+            np.finfo(float).tiny,
+            None,
+        )
+    if not np.isfinite(blended).all():
+        raise ScratchBenchmarkError("cross-fitted blend evaluation is incomplete")
+    return blended
+
+
 @dataclass(frozen=True)
 class ScratchBoostedBlend:
-    """Fitted scratch-only tree ensemble and its honest OOF evidence."""
+    """Fitted scratch-only tree ensemble and its exploratory diagnostics.
+
+    ``weights`` are the final deployable weights fitted on all complete OOF
+    rows. ``oof_predictions['blend_rate']`` instead uses assessment-fold
+    cross-fitted meta-weights over one global base-OOF matrix. This assessment
+    is non-nested because its meta-training features can come from base fits
+    influenced by the assessed outcomes. It is exploratory and not an unbiased
+    generalization estimate.
+    """
 
     models: Mapping[str, Any]
     weights: Mapping[str, float]
@@ -440,6 +485,11 @@ def fit_boosted_blend(
     Prefer ``reference_superglm=fitted_gam``: Poisson/Tweedie and the fitted
     GAM's power are then resolved automatically, and a conflicting explicit
     power is rejected.
+
+    The reported blend deviance cross-fits only the meta weights over one
+    global base-OOF matrix. That evidence is exploratory, non-nested, and not
+    an unbiased generalization estimate. Final deployable weights are fitted
+    separately on all complete OOF rows.
     """
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         raise ValueError("frame must be a non-empty pandas DataFrame")
@@ -556,6 +606,7 @@ def fit_boosted_blend(
 
     oof = np.full((len(frame), len(_MODEL_NAMES)), np.nan, dtype=float)
     validation_count = np.zeros(len(frame), dtype=int)
+    assessment_fold = np.full(len(frame), -1, dtype=int)
     for fold_no, (raw_train, raw_validation) in enumerate(splitter):
         train = np.asarray(raw_train, dtype=int)
         validation = np.asarray(raw_validation, dtype=int)
@@ -564,6 +615,7 @@ def fit_boosted_blend(
         if np.intersect1d(train, validation).size:
             raise ValueError("CV train and validation positions must not overlap")
         validation_count[validation] += 1
+        assessment_fold[validation] = fold_no
         for model_no, name in enumerate(_MODEL_NAMES):
             estimator = factories[name](random_state + fold_no)
             fitted = _fit_estimator(
@@ -589,13 +641,20 @@ def fit_boosted_blend(
     if int(eligible.sum()) < max(20, 3 * len(_MODEL_NAMES)):
         raise ScratchBenchmarkError("too few complete OOF rows to estimate blend weights")
 
+    eligible_folds = assessment_fold[eligible]
+    blended = _cross_fitted_blend_predictions(
+        model_target[eligible],
+        oof[eligible],
+        model_weight[eligible],
+        eligible_folds,
+        power=deviance_power,
+    )
     weights = _convex_tweedie_weights(
         model_target[eligible],
         oof[eligible],
         model_weight[eligible],
         power=deviance_power,
     )
-    blended = np.clip(oof[eligible] @ weights, np.finfo(float).tiny, None)
     fitted_models: dict[str, Any] = {}
     all_positions = np.arange(len(frame), dtype=int)
     for name in _MODEL_NAMES:
@@ -627,7 +686,9 @@ def fit_boosted_blend(
                 "tweedie_power": tweedie_power,
                 "power_source": power_source,
                 "blend_weight": float(weights[model_no]),
+                "blend_weight_scope": "final_all_complete_oof",
                 "oof_rows": int(eligible.sum()),
+                "evaluation": "base_oof",
             }
         )
     metrics.append(
@@ -645,7 +706,9 @@ def fit_boosted_blend(
             "tweedie_power": tweedie_power,
             "power_source": power_source,
             "blend_weight": 1.0,
+            "blend_weight_scope": "final_all_complete_oof",
             "oof_rows": int(eligible.sum()),
+            "evaluation": _EXPLORATORY_BLEND_EVIDENCE,
         }
     )
 
@@ -653,6 +716,7 @@ def fit_boosted_blend(
     oof_frame = pd.DataFrame(
         {
             "row_position": positions,
+            "assessment_fold": eligible_folds,
             "actual": y[eligible],
             "exposure": resolved_exposure[eligible],
             "actual_rate": model_target[eligible],
@@ -663,6 +727,7 @@ def fit_boosted_blend(
             },
             "blend_rate": blended,
             "blend_expected": blended * resolved_exposure[eligible],
+            "blend_evidence": _EXPLORATORY_BLEND_EVIDENCE,
         }
     )
     return ScratchBoostedBlend(

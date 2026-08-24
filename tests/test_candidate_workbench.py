@@ -243,6 +243,8 @@ def test_candidate_history_binds_validation_split_to_current_manifest():
     assert "split_link.dataset_role = 'training'" in statements[0][0]
     assert "mr.model_version" in statements[0][0]
     assert "mr.export_id" in statements[0][0]
+    assert "mr.publication_receipt_sha256" in statements[0][0]
+    assert "rp.publication_receipt_sha256 AS package_publication_receipt_sha256" in statements[0][0]
     assert "manifest.model_frame_sha256" in statements[0][0]
     assert "deployment.deployment_id AS current_deployment_id" in statements[0][0]
     assert "rp.package_status = 'PUBLISHED'" in statements[0][0]

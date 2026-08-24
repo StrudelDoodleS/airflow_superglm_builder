@@ -27,7 +27,7 @@ those stable entry points.
 | Script | Purpose |
 |---|---|
 | `load_fremtpl_raw.py` | Load the freMTPL demo table; `--replace` truncates/reloads it. |
-| `reset_pricing_experiments.py` | Delete local experiment history; requires `--yes`. |
+| `reset_pricing_experiments.py` | Delete experiment history only when no immutable monitoring contract exists; requires `--yes` and otherwise directs you to the guarded full-schema reset. |
 
 ## Monitoring diagnostics
 
