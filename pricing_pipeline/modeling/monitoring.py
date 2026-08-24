@@ -1014,6 +1014,45 @@ def _requested_level_values(
     return rows
 
 
+def _requested_continuous_values(
+    model: SuperGLM,
+    term_name: str,
+    points: list[Any],
+) -> list[tuple[Any, float, float]]:
+    requested_x = np.asarray(points, dtype=float)
+    if requested_x.ndim != 1 or not np.isfinite(requested_x).all():
+        raise MonitoringError(f"term {term_name!r} has an invalid frozen numeric grid")
+    spec = model._specs.get(term_name)
+    feature_groups = [group for group in model._groups if group.feature_name == term_name]
+    if spec is None or not feature_groups:
+        raise MonitoringError(f"term {term_name!r} has no fitted continuous contribution")
+    beta_combined = np.concatenate(
+        [np.asarray(model.result.beta[group.sl], dtype=float).ravel() for group in feature_groups]
+    )
+    transformed = np.asarray(spec.transform(requested_x), dtype=float)
+    expected_shape = (len(requested_x), len(beta_combined))
+    if transformed.shape != expected_shape:
+        raise MonitoringError(
+            f"term {term_name!r} transform returned {transformed.shape}, expected {expected_shape}"
+        )
+    if not np.isfinite(beta_combined).all() or not np.isfinite(transformed).all():
+        raise MonitoringError(f"term {term_name!r} continuous contribution is not finite")
+    requested_log = transformed @ beta_combined
+    with np.errstate(over="ignore", invalid="ignore"):
+        requested_relativity = np.exp(requested_log)
+    if not np.isfinite(requested_log).all() or not np.isfinite(requested_relativity).all():
+        raise MonitoringError(f"term {term_name!r} continuous relativity is not finite")
+    return [
+        (point, float(relativity), float(log_relativity))
+        for point, relativity, log_relativity in zip(
+            points,
+            requested_relativity,
+            requested_log,
+            strict=True,
+        )
+    ]
+
+
 def _result_relativities(
     model: SuperGLM,
     evaluation_grid: Mapping[str, Mapping[str, Any]],
@@ -1036,6 +1075,8 @@ def _result_relativities(
                     )
                 record = indexed.loc[str(point)]
                 values.append((point, float(record["relativity"]), float(record["log_relativity"])))
+        elif kind == "continuous":
+            values = _requested_continuous_values(model, term_name, points)
         else:
             inference = model.term_inference(
                 term_name,
@@ -1043,16 +1084,7 @@ def _result_relativities(
                 n_points=max(501, len(points)),
                 centering="native",
             )
-            if kind == "continuous":
-                source_x = np.asarray(inference.x, dtype=float)
-                source_log = np.asarray(inference.log_relativity, dtype=float)
-                requested_x = np.asarray(points, dtype=float)
-                requested_log = np.interp(requested_x, source_x, source_log)
-                values = [
-                    (point, float(np.exp(log_value)), float(log_value))
-                    for point, log_value in zip(points, requested_log, strict=True)
-                ]
-            elif kind == "categorical":
+            if kind == "categorical":
                 values = _requested_level_values(inference, points)
             elif kind == "numeric":
                 values = [

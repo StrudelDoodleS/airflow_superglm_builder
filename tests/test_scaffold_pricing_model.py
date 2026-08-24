@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.scaffold_pricing_model as scaffold_module
 from scripts.scaffold_pricing_model import (
     _NOTEBOOK_NAMES,
     ScaffoldOptions,
@@ -428,6 +429,70 @@ def test_scaffold_rejects_output_symlinks_before_writing_any_files(tmp_path, out
     assert output_path.is_symlink()
     assert external_path.read_text(encoding="utf-8") == external_content
     assert {path.name for path in package_dir.iterdir()} == {output_name}
+
+
+@pytest.mark.parametrize("linked_component", ("pricing_models", "package_dir"))
+def test_scaffold_rejects_symlinked_managed_ancestors_before_writing(tmp_path, linked_component):
+    root = tmp_path / "root"
+    external_dir = tmp_path / "external"
+    sentinel = external_dir / "sentinel.txt"
+    external_dir.mkdir()
+    sentinel.write_text("do not modify this directory\n", encoding="utf-8")
+    root.mkdir()
+    if linked_component == "pricing_models":
+        (root / "pricing_models").symlink_to(external_dir, target_is_directory=True)
+    else:
+        (root / "pricing_models").mkdir()
+        (root / "pricing_models" / "my_model").symlink_to(external_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=root, force=True)
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "do not modify this directory\n"
+    assert {path.name for path in external_dir.iterdir()} == {"sentinel.txt"}
+
+
+def test_scaffold_allows_a_symlinked_user_root_after_resolving_it(tmp_path):
+    actual_root = tmp_path / "actual-root"
+    linked_root = tmp_path / "linked-root"
+    actual_root.mkdir()
+    linked_root.symlink_to(actual_root, target_is_directory=True)
+
+    scaffold_pricing_model(
+        ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=linked_root, force=True)
+    )
+
+    package_dir = actual_root / "pricing_models" / "my_model"
+    assert sorted(path.name for path in package_dir.glob("*.ipynb")) == sorted(EXPECTED_NOTEBOOKS)
+
+
+def test_scaffold_force_does_not_follow_a_leaf_symlink_swapped_after_preflight(
+    monkeypatch, tmp_path
+):
+    external_path = tmp_path / "external-init.py"
+    external_content = "do not modify this file\n"
+    external_path.write_text(external_content, encoding="utf-8")
+    original_migration = scaffold_module._migrate_legacy_deployment_notebook
+
+    def swap_leaf_after_preflight(package_dir: Path):
+        package_dir.mkdir(parents=True)
+        (package_dir / "__init__.py").symlink_to(external_path)
+        return original_migration(package_dir)
+
+    monkeypatch.setattr(
+        scaffold_module,
+        "_migrate_legacy_deployment_notebook",
+        swap_leaf_after_preflight,
+    )
+
+    with pytest.raises(ValueError, match="__init__\\.py.*symbolic link"):
+        scaffold_pricing_model(
+            ScaffoldOptions(model_name="MY_MODEL", target_name="target", root=tmp_path, force=True)
+        )
+
+    assert external_path.read_text(encoding="utf-8") == external_content
 
 
 def test_scaffold_refuses_legacy_deployment_migration_when_new_target_exists(tmp_path):

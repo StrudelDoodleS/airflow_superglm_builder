@@ -14,7 +14,15 @@ import pandas as pd
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
-from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM, collapse_levels
+from superglm import (
+    Categorical,
+    NaturalSpline,
+    Numeric,
+    OrderedCategorical,
+    Spline,
+    SuperGLM,
+    collapse_levels,
+)
 from superglm.editor import EditorSession
 from superglm.features import Constraint
 from superglm.types import LambdaPolicy
@@ -196,6 +204,52 @@ def test_all_monitoring_presets_share_points_and_frozen_refit_reuses_lambdas(
     assert invariant["lambdas"]["baseline"] == invariant["lambdas"]["fitted"]
     assert invariant["lambdas"]["history_exact_for_protected_components"] is True
     assert invariant["lambdas"]["termination_reason"] == "fixed_lambdas"
+
+
+def test_full_adaptive_evaluates_frozen_natural_spline_grid_with_real_extrapolation():
+    baseline_x = np.linspace(0.0, 1.0, 240)
+    baseline_X = pd.DataFrame({"x": baseline_x})
+    mean = np.exp(-0.7 + 0.5 * baseline_x + 1.8 * baseline_x**2)
+    baseline_y = np.random.default_rng(824).poisson(mean)
+    baseline = SuperGLM(
+        family="poisson",
+        features={"x": NaturalSpline(n_knots=6, extrapolation="extend")},
+        selection_penalty=0.0,
+    ).fit_reml(baseline_X, baseline_y, max_reml_iter=5, runtime_validation="skip")
+    adaptive_rows = baseline_X["x"].between(0.25, 0.75).to_numpy()
+    adaptive_X = baseline_X.loc[adaptive_rows].reset_index(drop=True)
+    adaptive_y = baseline_y[adaptive_rows]
+
+    result = run_monitoring_fit(
+        baseline,
+        adaptive_X,
+        adaptive_y,
+        variant=MonitoringVariant.FULL_ADAPTIVE,
+        continuous_points=5,
+        max_reml_iter=5,
+        runtime_validation="skip",
+    )
+
+    stored = {
+        float(row.point_numeric): row.log_relativity
+        for row in result.relativities
+        if row.term_name == "x"
+    }
+    frozen_points = np.asarray(sorted(stored), dtype=float)
+    fitted_prediction = np.asarray(
+        result.fitted_model.predict(pd.DataFrame({"x": frozen_points})),
+        dtype=float,
+    )
+    anchor = 2
+    actual_delta = (
+        np.asarray([stored[point] for point in frozen_points]) - stored[frozen_points[anchor]]
+    )
+    expected_delta = np.log(fitted_prediction) - np.log(fitted_prediction[anchor])
+
+    assert result.fitted_model._specs["x"].fitted_boundary == pytest.approx(
+        (float(adaptive_X["x"].min()), float(adaptive_X["x"].max()))
+    )
+    assert actual_delta == pytest.approx(expected_delta)
 
 
 def test_monitoring_metrics_use_declared_sample_weights(monitoring_case):
