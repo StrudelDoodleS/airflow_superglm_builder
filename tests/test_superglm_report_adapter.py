@@ -390,6 +390,170 @@ def test_superglm_adapter_rejects_supplied_metadata_conflicting_with_fitted_obje
         )
 
 
+def test_superglm_adapter_rejects_fitted_object_for_different_prediction_series():
+    frame = pd.DataFrame(
+        {
+            "x": np.linspace(987654.321, 987655.321, 48),
+            "weight": np.linspace(0.4, 2.2, 48),
+        }
+    )
+    declared_actual = np.resize([0.0, 1.0, 0.0, 2.0], len(frame))
+    stale_actual = np.resize([3.0, 0.0, 2.0, 1.0], len(frame))
+    declared_model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(frame[["x"]], declared_actual, sample_weight=frame["weight"])
+    stale_model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(frame[["x"]], stale_actual, sample_weight=frame["weight"])
+    frame["actual"] = declared_actual
+    context = _context(
+        frame,
+        model_name="Declared",
+        prediction=declared_model.predict(frame[["x"]]),
+        features=("x",),
+        problem_type="frequency",
+        deviance_power=1.0,
+    )
+
+    with pytest.raises(UnderwriterReportError) as exc_info:
+        SuperGLMReportAdapter().collect(
+            model_name="Declared",
+            source=stale_model,
+            context=context,
+        )
+
+    assert str(exc_info.value) == (
+        "fitted SuperGLM object for 'Declared' does not match the supplied prediction series"
+    )
+    assert "987654.321" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("use_offset", [False, True], ids=["weighted", "weighted-offset"])
+def test_superglm_adapter_binds_weighted_fitted_predictions(use_offset: bool):
+    row_count = 60
+    frame = pd.DataFrame(
+        {
+            "x": np.linspace(0.0, 1.0, row_count),
+            "actual": np.resize([0.0, 1.0, 0.0, 2.0, 1.0], row_count),
+            "weight": np.linspace(0.35, 2.15, row_count),
+        }
+    )
+    offset = np.log(np.linspace(0.7, 1.4, row_count)) if use_offset else None
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        frame[["x"]],
+        frame["actual"],
+        sample_weight=frame["weight"],
+        offset=offset,
+    )
+    prediction = model.predict(frame[["x"]], offset=offset)
+    context = _context(
+        frame,
+        model_name="Bound",
+        prediction=prediction,
+        features=("x",),
+        problem_type="frequency",
+        deviance_power=1.0,
+    )
+
+    evidence = SuperGLMReportAdapter().collect(
+        model_name="Bound",
+        source=model,
+        context=context,
+    )
+
+    assert evidence.exact_loss is not None
+    assert evidence.exact_loss.contributions.shape == (row_count,)
+
+
+def test_superglm_adapter_aligns_retained_offset_after_zero_weight_filtering():
+    row_count = 64
+    frame = pd.DataFrame(
+        {
+            "x": np.linspace(0.0, 1.0, row_count),
+            "actual": np.resize([0.0, 1.0, 2.0, 0.0], row_count),
+            "weight": np.linspace(0.4, 2.0, row_count),
+        }
+    )
+    frame.loc[[3, 19, 44], "weight"] = 0.0
+    offset = np.log(np.linspace(0.6, 1.8, row_count))
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        frame[["x"]],
+        frame["actual"],
+        sample_weight=frame["weight"],
+        offset=offset,
+    )
+    prediction = model.predict(frame[["x"]], offset=offset)
+    positive = frame["weight"].gt(0.0).to_numpy()
+    filtered = frame.loc[positive].reset_index(drop=True)
+    context = _context(
+        filtered,
+        model_name="Filtered offset",
+        prediction=prediction[positive],
+        features=("x",),
+        problem_type="frequency",
+        deviance_power=1.0,
+    )
+
+    evidence = SuperGLMReportAdapter().collect(
+        model_name="Filtered offset",
+        source=model,
+        context=context,
+    )
+
+    assert evidence.exact_loss is not None
+    assert evidence.exact_loss.contributions.shape == (int(positive.sum()),)
+
+
+def test_superglm_adapter_fails_closed_without_retained_fitted_offset():
+    row_count = 40
+    frame = pd.DataFrame(
+        {
+            "x": np.linspace(0.0, 1.0, row_count),
+            "actual": np.resize([0.0, 1.0, 2.0, 1.0], row_count),
+            "weight": np.linspace(0.5, 1.5, row_count),
+        }
+    )
+    offset = np.log(np.linspace(0.8, 1.2, row_count))
+    model = SuperGLM(
+        features={"x": Numeric()},
+        selection_penalty=0.0,
+    ).fit(
+        frame[["x"]],
+        frame["actual"],
+        sample_weight=frame["weight"],
+        offset=offset,
+    )
+    prediction = model.predict(frame[["x"]], offset=offset)
+    model._fit_offset = None
+    context = _context(
+        frame,
+        model_name="Missing offset",
+        prediction=prediction,
+        features=("x",),
+        problem_type="frequency",
+        deviance_power=1.0,
+    )
+
+    with pytest.raises(UnderwriterReportError) as exc_info:
+        SuperGLMReportAdapter().collect(
+            model_name="Missing offset",
+            source=model,
+            context=context,
+        )
+
+    assert str(exc_info.value) == (
+        "fitted SuperGLM object for 'Missing offset' does not match the supplied prediction series"
+    )
+
+
 def test_unsupported_superglm_capabilities_have_stable_plain_text_reasons(monkeypatch):
     class UnsupportedModel:
         def term_importance(self, frame, weight):

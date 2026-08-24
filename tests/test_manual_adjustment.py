@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from superglm import Categorical, Numeric, SuperGLM
+from superglm.editor import EditorSession
 
 from pricing_pipeline.infra.config import Settings
 from pricing_pipeline.modeling.manual_adjustment import (
@@ -23,10 +24,14 @@ from pricing_pipeline.workbench.artifacts import CandidateBundle
 from pricing_pipeline.workbench.core import Candidate, Workbench
 
 
-def _candidate(tmp_path: Path) -> Candidate:
+def _candidate(
+    tmp_path: Path,
+    *,
+    segment_levels: tuple[object, object, object] = ("A", "B", "C"),
+) -> Candidate:
     frame = pd.DataFrame(
         {
-            "segment": ["A", "B", "C"] * 20,
+            "segment": list(segment_levels) * 20,
             "x": np.tile([0.0, 1.0, 2.0], 20),
         }
     )
@@ -136,6 +141,145 @@ def test_policy_payload_is_canonical_replayable_and_rejects_overlap():
                 ManualAdjustmentRule.multiply_levels("segment", ["B", "C"], 0.95, reason="Second"),
             ),
         )
+
+
+def test_policy_preserves_numeric_zero_level_for_canonical_replay_and_targeting(tmp_path):
+    candidate = _candidate(tmp_path, segment_levels=(0, 1, 2))
+    policy = ManualAdjustmentPolicy(
+        name="numeric level adjustment",
+        version=1,
+        reason="Approved numeric cohort response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                [0],
+                1.05,
+                reason="Selected zero cohort uplift",
+            ),
+        ),
+    )
+
+    reloaded = ManualAdjustmentPolicy.from_payload(policy.to_payload())
+    review = apply_manual_adjustment_policy(candidate, policy)
+    ratio = review.edited_model.predict(candidate.bundle.X) / candidate.bundle.fitted_model.predict(
+        candidate.bundle.X
+    )
+
+    assert policy.rules[0].levels == (0,)
+    assert reloaded == policy
+    assert reloaded.sha256 == policy.sha256
+    assert ratio[candidate.bundle.X["segment"].eq(0)].tolist() == pytest.approx([1.05] * 20)
+    assert ratio[candidate.bundle.X["segment"].ne(0)].tolist() == pytest.approx([1.0] * 40)
+
+    candidate.technical.update(
+        model_kind="MANUAL_EDIT",
+        revision_metadata_json=json.dumps(
+            {
+                "edit_metadata": {
+                    "manual_adjustment_policy": policy.to_payload(),
+                    "manual_adjustment_policy_sha256": policy.sha256,
+                }
+            }
+        ),
+    )
+    assert manual_adjustment_policy_from_candidate(candidate) == policy
+
+
+def test_policy_refuses_ambiguous_typed_levels_before_editor_selection(tmp_path):
+    candidate = _candidate(tmp_path, segment_levels=(1, "1", 2))
+    policy = ManualAdjustmentPolicy(
+        name="ambiguous level adjustment",
+        version=1,
+        reason="Exercise typed-level validation",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                [1],
+                1.05,
+                reason="Must not select the string cohort",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ambiguous display label"):
+        apply_manual_adjustment_policy(candidate, policy)
+
+
+def test_policy_digest_preserves_integer_and_string_level_identity():
+    integer_policy = ManualAdjustmentPolicy(
+        name="integer level adjustment",
+        version=1,
+        reason="Approved integer cohort response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                [1],
+                1.05,
+                reason="Selected integer cohort uplift",
+            ),
+        ),
+    )
+    string_policy = ManualAdjustmentPolicy(
+        name="integer level adjustment",
+        version=1,
+        reason="Approved integer cohort response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                ["1"],
+                1.05,
+                reason="Selected integer cohort uplift",
+            ),
+        ),
+    )
+
+    assert integer_policy.to_payload()["rules"][0]["levels"] == [1]
+    assert string_policy.to_payload()["rules"][0]["levels"] == ["1"]
+    assert integer_policy.sha256 != string_policy.sha256
+
+
+def test_direct_rule_application_checks_session_training_level_identity(tmp_path):
+    candidate = _candidate(tmp_path, segment_levels=("1", "2", "3"))
+    session = EditorSession.from_model(
+        candidate.bundle.fitted_model,
+        train_data=(candidate.bundle.X, candidate.bundle.y),
+        cv_report={},
+    )
+    rule = ManualAdjustmentRule.multiply_levels(
+        "segment",
+        [1],
+        1.05,
+        reason="Must not target the string cohort",
+    )
+
+    with pytest.raises(KeyError, match="Unknown level"):
+        rule.apply(session)
+
+
+def test_policy_preserves_nonblank_whitespace_level_identity(tmp_path):
+    candidate = _candidate(tmp_path, segment_levels=(" A ", "A", "B"))
+    policy = ManualAdjustmentPolicy(
+        name="whitespace level adjustment",
+        version=1,
+        reason="Approved whitespace cohort response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                [" A "],
+                1.05,
+                reason="Selected whitespace cohort uplift",
+            ),
+        ),
+    )
+
+    review = apply_manual_adjustment_policy(candidate, policy)
+    ratio = review.edited_model.predict(candidate.bundle.X) / candidate.bundle.fitted_model.predict(
+        candidate.bundle.X
+    )
+
+    assert policy.rules[0].levels == (" A ",)
+    assert ratio[candidate.bundle.X["segment"].eq(" A ")].tolist() == pytest.approx([1.05] * 20)
+    assert ratio[candidate.bundle.X["segment"].ne(" A ")].tolist() == pytest.approx([1.0] * 40)
 
 
 @pytest.mark.parametrize("version", [1.9, "1"])

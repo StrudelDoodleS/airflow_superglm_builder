@@ -5,6 +5,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
@@ -14,6 +15,8 @@ from superglm.editor import EditorSession
 from pricing_pipeline.workbench.core import Candidate
 
 _POLICY_FORMAT = "pricing-manual-adjustment-policy-v1"
+
+LevelValue = str | bool | int | float
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -34,6 +37,77 @@ def _factor(value: Any) -> float:
     return resolved
 
 
+def _normalise_level(value: Any, field_name: str = "level") -> LevelValue:
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError(f"{field_name} is required")
+        return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        resolved = float(value)
+        if not math.isfinite(resolved):
+            raise ValueError(f"{field_name} must be finite")
+        return resolved
+    raise TypeError(f"{field_name} must be a string, boolean, integer, or finite number")
+
+
+def _level_identity(value: LevelValue) -> tuple[str, str | bool | int | float]:
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, int):
+        return ("integer", value)
+    return ("number", value)
+
+
+def _level_label(value: LevelValue) -> str:
+    return str(value)
+
+
+def _editor_level_labels(
+    frame: pd.DataFrame,
+    feature: str,
+    levels: tuple[LevelValue, ...],
+) -> list[str]:
+    if feature not in frame.columns:
+        raise KeyError(f"Unknown feature {feature!r} for manual adjustment")
+    labels_to_identities: dict[str, set[tuple[str, str | bool | int | float]]] = {}
+    available_identities: set[tuple[str, str | bool | int | float]] = set()
+    for raw_level in frame[feature].tolist():
+        level = _normalise_level(raw_level, f"model level for {feature!r}")
+        label = _level_label(level)
+        identity = _level_identity(level)
+        labels_to_identities.setdefault(label, set()).add(identity)
+        available_identities.add(identity)
+    ambiguous_labels = sorted(
+        label for label, identities in labels_to_identities.items() if len(identities) > 1
+    )
+    if ambiguous_labels:
+        raise ValueError(
+            f"feature {feature!r} has ambiguous display label(s): {ambiguous_labels!r}; "
+            "manual adjustment requires unambiguous model levels"
+        )
+    missing = [level for level in levels if _level_identity(level) not in available_identities]
+    if missing:
+        raise KeyError(f"Unknown level(s) for feature {feature!r}: {missing!r}")
+    return [_level_label(level) for level in levels]
+
+
+def _session_training_frame(session: EditorSession) -> pd.DataFrame:
+    evaluation_data = getattr(session, "_evaluation_data", None)
+    train_data = evaluation_data.get("train") if isinstance(evaluation_data, Mapping) else None
+    frame = getattr(train_data, "X", None)
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError(
+            "manual adjustment level selection requires the editor session's verified training frame"
+        )
+    return frame
+
+
 @dataclass(frozen=True)
 class ManualAdjustmentRule:
     """One relative business adjustment that can be replayed on a new base model."""
@@ -41,7 +115,7 @@ class ManualAdjustmentRule:
     feature: str
     factor: float
     reason: str
-    levels: tuple[str, ...] | None = None
+    levels: tuple[LevelValue, ...] | None = None
     x_range: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
@@ -51,10 +125,10 @@ class ManualAdjustmentRule:
         if (self.levels is None) == (self.x_range is None):
             raise ValueError("provide exactly one of levels or x_range")
         if self.levels is not None:
-            levels = tuple(_required_text(level, "level") for level in self.levels)
+            levels = tuple(_normalise_level(level) for level in self.levels)
             if not levels:
                 raise ValueError("levels must contain at least one value")
-            if len(levels) != len(set(levels)):
+            if len(levels) != len({_level_identity(level) for level in levels}):
                 raise ValueError("levels must not contain duplicates")
             object.__setattr__(self, "levels", levels)
         if self.x_range is not None:
@@ -69,7 +143,7 @@ class ManualAdjustmentRule:
     def multiply_levels(
         cls,
         feature: str,
-        levels: Iterable[str],
+        levels: Iterable[LevelValue],
         factor: float,
         *,
         reason: str,
@@ -98,9 +172,28 @@ class ManualAdjustmentRule:
             reason=reason,
         )
 
-    def apply(self, session: EditorSession) -> None:
+    def apply(self, session: EditorSession, *, editor_levels: list[str] | None = None) -> None:
         if self.levels is not None:
-            session.select_levels(self.feature, list(self.levels))
+            labels = (
+                _editor_level_labels(
+                    _session_training_frame(session),
+                    self.feature,
+                    self.levels,
+                )
+                if editor_levels is None
+                else editor_levels
+            )
+            term = session.terms.get(self.feature)
+            if term is not None and term.levels is not None:
+                ambiguous_labels = sorted(
+                    {label for label in labels if term.levels.count(label) > 1}
+                )
+                if ambiguous_labels:
+                    raise ValueError(
+                        f"feature {self.feature!r} has ambiguous display label(s): "
+                        f"{ambiguous_labels!r}; manual adjustment requires unambiguous model levels"
+                    )
+            session.select_levels(self.feature, labels)
         else:
             assert self.x_range is not None
             session.select_x(self.feature, *self.x_range)
@@ -224,7 +317,7 @@ class ManualAdjustmentPolicy:
                     "Feature": rule.feature,
                     "Scope": "Levels" if rule.levels is not None else "Range",
                     "Selection": (
-                        ", ".join(rule.levels)
+                        ", ".join(str(level) for level in rule.levels)
                         if rule.levels is not None
                         else f"{rule.x_range[0]:g} to {rule.x_range[1]:g}"
                     ),
@@ -255,7 +348,9 @@ def _reject_overlapping_rules(rules: tuple[ManualAdjustmentRule, ...]) -> None:
             if left.feature != right.feature:
                 continue
             if left.levels is not None and right.levels is not None:
-                overlap = sorted(set(left.levels) & set(right.levels))
+                left_identities = {_level_identity(level) for level in left.levels}
+                right_identities = {_level_identity(level) for level in right.levels}
+                overlap = sorted(left_identities & right_identities)
                 if overlap:
                     raise ValueError(
                         f"manual adjustment rules overlap for {left.feature!r}: {overlap}"
@@ -346,6 +441,11 @@ def replay_manual_adjustment_policy(
     """Replay a canonical policy against one freshly verified candidate bundle."""
     if not isinstance(policy, ManualAdjustmentPolicy):
         raise TypeError("policy must be a ManualAdjustmentPolicy")
+    resolved_level_labels = {
+        id(rule): _editor_level_labels(bundle.X, rule.feature, rule.levels)
+        for rule in policy.rules
+        if rule.levels is not None
+    }
     session = EditorSession.from_model(
         bundle.fitted_model,
         train_data=(
@@ -357,7 +457,7 @@ def replay_manual_adjustment_policy(
         cv_report=bundle.cv_report,
     )
     for rule in policy.rules:
-        rule.apply(session)
+        rule.apply(session, editor_levels=resolved_level_labels.get(id(rule)))
     return session, session.to_model()
 
 

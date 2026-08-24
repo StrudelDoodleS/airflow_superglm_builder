@@ -101,6 +101,18 @@ def _mixed_type_categorical_case(first=1, second="1"):
     return model, X, y
 
 
+def _non_string_base_case(feature):
+    levels = np.tile(np.array([1, 2, 3], dtype=object), 60)
+    X = pd.DataFrame({"level": levels})
+    y = np.tile(np.array([1, 2, 4]), 60)
+    model = SuperGLM(
+        family="poisson",
+        features={"level": feature},
+        selection_penalty=0.0,
+    ).fit_reml(X, y, max_reml_iter=5, runtime_validation="skip")
+    return model, X, y
+
+
 def _expected_categorical_point_key(type_tag, value):
     identity_json = json.dumps(
         {"level": {"type": type_tag, "value": value}},
@@ -110,6 +122,51 @@ def _expected_categorical_point_key(type_tag, value):
         sort_keys=True,
     )
     return "label:" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "feature",
+    [
+        pytest.param(Categorical(levels=[1, 2, 3], base=1), id="categorical"),
+        pytest.param(
+            OrderedCategorical(
+                order=[1, 2, 3],
+                basis=Spline(kind="ps", k=5),
+                base=1,
+            ),
+            id="ordered_categorical",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "variant",
+    [
+        MonitoringVariant.FROZEN_REFIT,
+        MonitoringVariant.REESTIMATE_LAMBDA,
+        MonitoringVariant.FULL_ADAPTIVE,
+    ],
+)
+def test_non_string_fitted_base_round_trips_through_contract_and_refit(feature, variant):
+    model, X, y = _non_string_base_case(copy.deepcopy(feature))
+
+    contract = build_model_fit_contract(model, continuous_points=5)
+    fitted_base = contract.payload()["structure"]["term_metadata"]["level"]["fitted"]["base_level"]
+
+    assert fitted_base == 1
+    assert type(fitted_base) is int
+
+    result = run_monitoring_fit(
+        model,
+        X,
+        y,
+        variant=variant,
+        continuous_points=5,
+        max_reml_iter=5,
+        runtime_validation="skip",
+    )
+    refitted_base = result.fitted_model._specs["level"]._base_level
+    assert refitted_base == 1
+    assert type(refitted_base) is int
 
 
 def test_fit_contract_and_variants_freeze_domain_structure(monitoring_case):

@@ -226,6 +226,11 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
         raise ValueError(f"SuperGLM ordered categorical {name!r} has no fitted coefficients")
     special_width = int(spec._n_special_cols)
 
+    def ordered_level_values(values: Mapping[Any, Any]) -> Mapping[Any, Any] | list[dict[str, Any]]:
+        if all(isinstance(level, str) for level in values):
+            return values
+        return [{"level": level, "value": value} for level, value in values.items()]
+
     metadata = _base_feature_metadata(name, spec, "ordered_categorical")
     metadata.update(
         {
@@ -234,7 +239,9 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
                 "kind": _spline_kind(configured_spline),
                 "base": spec.base,
                 "ordered_levels": spec._ordered_levels,
-                "level_values": spec._original_level_to_value or spec._level_to_value,
+                "level_values": ordered_level_values(
+                    spec._original_level_to_value or spec._level_to_value
+                ),
                 "specials": spec._special_raw,
                 "n_knots_requested": configured_spline.n_knots,
                 "degree": configured_spline.degree,
@@ -248,7 +255,7 @@ def _ordered_categorical_metadata(name: str, spec: OrderedCategorical) -> dict[s
                 "n_knots_effective": spline.n_knots,
                 "n_levels": spec._n_levels,
                 "ordered_levels": spec._ordered_levels,
-                "level_values": spec._level_to_value,
+                "level_values": ordered_level_values(spec._level_to_value),
                 "base_level": spec._base_level,
                 "non_base_levels": spec._non_base,
                 "special_levels": spec._special_display,

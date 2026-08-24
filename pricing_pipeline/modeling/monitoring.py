@@ -774,7 +774,7 @@ def _freeze_categorical(configured: Categorical, fitted: Categorical) -> Categor
         else list(getattr(fitted, "_levels", ()))
     )
     return Categorical(
-        base=str(fitted._base_level),
+        base=copy.deepcopy(fitted._base_level),
         grouping=copy.deepcopy(grouping),
         levels=levels,
         unseen=str(configured.unseen),
@@ -815,7 +815,7 @@ def _freeze_ordered_categorical(
     return OrderedCategorical(
         values=values,
         basis=basis,
-        base=str(fitted._base_level),
+        base=copy.deepcopy(fitted._base_level),
         grouping=copy.deepcopy(getattr(fitted, "_grouping", None)),
         specials=copy.deepcopy(getattr(fitted, "_special_raw", None)),
     )

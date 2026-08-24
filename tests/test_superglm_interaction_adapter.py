@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,10 +25,12 @@ from superglm import (
 )
 
 import pricing_pipeline.reporting.adapters.superglm as superglm_adapter
+from pricing_pipeline.reporting import UnderwriterReportOptions, build_scored_model_report
 from pricing_pipeline.reporting._core import UnderwriterReportError
 from pricing_pipeline.reporting.adapters.superglm import SuperGLMReportAdapter
 from pricing_pipeline.reporting.evidence import (
     EvidenceFact,
+    EvidenceRequest,
     ReportContext,
     normalize_model_evidence,
 )
@@ -96,6 +101,16 @@ def _fit_interaction(
     return model, frame, unit_codes
 
 
+def _embedded_payload(path: Path) -> dict[str, object]:
+    match = re.search(
+        r'<script type="application/json" id="report-data">(.*?)</script>',
+        path.read_text(encoding="utf-8"),
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
 def test_adapter_collects_public_tensor_surface_with_normalized_density_columns():
     model, frame, unit_codes = _fit_interaction(
         {"x": Spline(k=5), "z": Spline(k=5)},
@@ -122,6 +137,64 @@ def test_adapter_collects_public_tensor_surface_with_normalized_density_columns(
     assert len(term.effect) == 32 * 32
     assert term.density is not None
     assert list(term.density.columns) == ["x", "y", "density", "hdr_mass"]
+
+
+def test_adapter_skips_unselected_interaction_parents_before_plotting():
+    frame = pd.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "actual": [0.3, 0.5],
+            "weight": [1.0, 1.0],
+        }
+    )
+    context = _context(
+        frame,
+        model_name="Subset",
+        prediction=np.array([0.4, 0.6]),
+        features=("x",),
+    )
+
+    interactions, unavailable = superglm_adapter._model_interactions(
+        _telemetry_model(
+            _numeric_interaction_telemetry(),
+            plot_data=lambda *args, **kwargs: pytest.fail(
+                "out-of-scope interaction plotting must not run"
+            ),
+        ),
+        context,
+        n_points=8,
+    )
+
+    assert interactions == {}
+    assert unavailable == []
+
+
+def test_subset_report_omits_interactions_with_unselected_parent(tmp_path: Path):
+    model, frame, _unit_codes = _fit_interaction(
+        {"x": Numeric(), "z": Numeric()},
+        _named(NumericInteraction("x", "z")),
+    )
+    frame["prediction"] = model.predict(frame[["x", "z"]])
+
+    result = build_scored_model_report(
+        frame,
+        actual="actual",
+        predictions={"Subset": "prediction"},
+        sample_weight="weight",
+        features=["x"],
+        evidence_requests=(EvidenceRequest("Subset", SuperGLMReportAdapter(), model),),
+        output_path=tmp_path / "subset.html",
+        options=UnderwriterReportOptions(
+            problem_type="frequency",
+            comparison_bootstrap_replicates=0,
+            minimum_cell_size=2,
+        ),
+    )
+
+    assert _embedded_payload(result.output_path)["interactions"] == {
+        "models": {},
+        "unavailable": [],
+    }
 
 
 @pytest.mark.parametrize(

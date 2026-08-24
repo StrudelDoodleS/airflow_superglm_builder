@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln
+from superglm import SuperGLM
 from superglm.distributions import Gamma, Poisson, Tweedie
 from superglm.editor import EditorSession
 from superglm.editor.payloads import session_payload
@@ -38,6 +39,8 @@ _MAIN_EFFECTS_UNAVAILABLE_REASON = "native main effects are not supported"
 _IMPORTANCE_UNAVAILABLE_REASON = "native term importance is not supported"
 _EXACT_LOSS_UNAVAILABLE_REASON = "fitted distribution does not expose a supported exact likelihood"
 _INTERACTIONS_UNAVAILABLE_REASON = "native interaction reporting is not supported"
+_PREDICTION_BINDING_RTOL = 1e-8
+_PREDICTION_BINDING_ATOL = 1e-10
 _PLOT_KINDS = frozenset(
     {
         "surface",
@@ -123,6 +126,7 @@ class SuperGLMReportAdapter:
                     f"supplied likelihood metadata for {model_name!r} does not match "
                     "the fitted SuperGLM object"
                 )
+        _bind_fitted_predictions(model_name, source, context)
 
         unavailable: list[CapabilityUnavailable] = []
         try:
@@ -186,6 +190,66 @@ class SuperGLMReportAdapter:
             warnings=interaction_warnings,
             unavailable=tuple(unavailable),
         )
+
+
+def _bind_fitted_predictions(
+    model_name: str,
+    model: object,
+    context: ReportContext,
+) -> None:
+    if not isinstance(model, SuperGLM) or getattr(model, "_result", None) is None:
+        return
+    message = (
+        f"fitted SuperGLM object for {model_name!r} does not match the supplied prediction series"
+    )
+    try:
+        declared = np.asarray(context.predictions[model_name], dtype=float)
+        offset = _aligned_fitted_offset(model, context)
+        fitted = np.asarray(model.predict(context.frame, offset=offset), dtype=float)
+    except Exception:  # noqa: BLE001 - sanitize the fitted-model adapter boundary
+        raise UnderwriterReportError(message) from None
+    if (
+        declared.ndim != 1
+        or fitted.ndim != 1
+        or declared.shape != fitted.shape
+        or not np.isfinite(declared).all()
+        or not np.isfinite(fitted).all()
+        or not np.allclose(
+            fitted,
+            declared,
+            rtol=_PREDICTION_BINDING_RTOL,
+            atol=_PREDICTION_BINDING_ATOL,
+        )
+    ):
+        raise UnderwriterReportError(message)
+
+
+def _aligned_fitted_offset(model: SuperGLM, context: ReportContext) -> np.ndarray | None:
+    if not bool(getattr(model, "_fit_used_offset", False)):
+        return None
+    offset = np.asarray(getattr(model, "_fit_offset", None), dtype=float)
+    fit_weight = np.asarray(getattr(model, "_fit_weights", None), dtype=float)
+    if (
+        offset.ndim != 1
+        or fit_weight.ndim != 1
+        or offset.shape != fit_weight.shape
+        or not np.isfinite(offset).all()
+        or not np.isfinite(fit_weight).all()
+        or (fit_weight < 0.0).any()
+    ):
+        raise ValueError("retained fitted offset state is unavailable")
+    if len(offset) == len(context.frame):
+        aligned_offset = offset
+        aligned_weight = fit_weight
+    else:
+        positive = fit_weight > 0.0
+        if int(positive.sum()) != len(context.frame):
+            raise ValueError("retained fitted offset state is not row-aligned")
+        aligned_offset = offset[positive]
+        aligned_weight = fit_weight[positive]
+    if not np.array_equal(aligned_weight, np.asarray(context.weight, dtype=float)):
+        raise ValueError("retained fitted offset weights are not row-aligned")
+    return aligned_offset
 
 
 @dataclass(frozen=True)
@@ -318,6 +382,8 @@ def _model_interactions(
     interactions: dict[str, InteractionEvidence] = {}
     unavailable: list[CapabilityUnavailable] = []
     for name, interaction_class, parents, expected_plot_kind in telemetry:
+        if not set(parents).issubset(context.features):
+            continue
         try:
             if interaction_class == "FactorSmooth":
                 term = _factor_smooth_interaction(model, name, parents, context, n_points)

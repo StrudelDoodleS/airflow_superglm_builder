@@ -2057,6 +2057,58 @@ def test_manual_replay_compares_complete_normalized_fitted_runtime_state(mutate_
         )
 
 
+def test_manual_publisher_replay_preserves_numeric_zero_level_targeting():
+    import numpy as np
+    import pandas as pd
+    from superglm import Categorical, SuperGLM
+
+    from pricing_pipeline.modeling.manual_adjustment import (
+        ManualAdjustmentPolicy,
+        ManualAdjustmentRule,
+        replay_manual_adjustment_policy,
+    )
+    from pricing_pipeline.publishing import editor_candidate
+
+    frame = pd.DataFrame({"segment": np.repeat([0, 1, 2], 20)})
+    target = np.tile([1.0, 2.0, 3.0], 20)
+    parent_model = SuperGLM(
+        features={"segment": Categorical(base="first")},
+        selection_penalty=0.0,
+    ).fit(frame, target)
+    bundle = SimpleNamespace(
+        fitted_model=parent_model,
+        X=frame,
+        y=target,
+        sample_weight=None,
+        offset=None,
+        cv_report={},
+        offset_contract=editor_candidate.OffsetExportContract(handling="NONE"),
+        fit_sample_weight_name=None,
+        export_weight_name=None,
+    )
+    policy = ManualAdjustmentPolicy(
+        name="numeric level adjustment",
+        version=1,
+        reason="Approved numeric cohort response",
+        rules=(
+            ManualAdjustmentRule.multiply_levels(
+                "segment",
+                [0],
+                1.05,
+                reason="Selected zero cohort uplift",
+            ),
+        ),
+    )
+
+    _, submitted_model = replay_manual_adjustment_policy(bundle, policy)
+
+    editor_candidate._require_manual_policy_replay(
+        SimpleNamespace(bundle=bundle),
+        submitted_model,
+        policy,
+    )
+
+
 @pytest.mark.parametrize(
     "edited_features",
     [
